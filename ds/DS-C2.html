@@ -1,0 +1,680 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS-C2 — Logging &amp; Checkpointing. Towards Recovery of Distributed Systems</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head><body class="lk">
+
+<header class="lk-header">
+  <div class="lk-kicker">Distributed Systems — Prof. Omicini</div>
+  <h1>Logging &amp; Checkpointing</h1>
+  <div class="lk-meta"><span>DS-C2 — Towards Recovery of Distributed Systems</span><span>Andrea Omicini — DISI, Univ. Bologna</span><span>A.Y. 2025/2026</span></div>
+</header>
+
+<div class="lk-overview">
+  <h2>In this lesson</h2>
+  <ul>
+    <li>Understand how <strong>causality, dependencies, and time</strong> define the recovery problem in distributed systems</li>
+    <li>Learn <strong>checkpointing</strong> as the fundamental technique for saving system state</li>
+    <li>Define <strong>consistent vs. inconsistent global states</strong> and why they determine recoverability</li>
+    <li>Study <strong>coordinated checkpointing protocols</strong>: Tamir &amp; Sequin (blocking) and Chandy &amp; Lamport (non-blocking)</li>
+    <li>Explore <strong>log-based recovery protocols</strong>: pessimistic, optimistic, and causal logging</li>
+    <li>See how <strong>checkpointing + logging</strong> together enable complete rollback recovery</li>
+  </ul>
+</div>
+
+<nav class="lk-toc"><h3>Contents</h3><ol>
+  <li><a href="#s1">Interaction, Dependencies &amp; Causality</a></li>
+  <li><a href="#s2">Causality in Science and Computing</a></li>
+  <li><a href="#s3">Causality, Time, and Distributed Ordering</a></li>
+  <li><a href="#s4">Checkpointing: The Fundamental Dependability Technique</a></li>
+  <li><a href="#s5">Recovery: Why Checkpoints Alone Are Not Enough</a></li>
+  <li><a href="#s6">System Model and Fault Model</a></li>
+  <li><a href="#s7">Process State and Global State</a></li>
+  <li><a href="#s8">Consistent vs. Inconsistent Global States</a></li>
+  <li><a href="#s9">Channel State and the Refined Model</a></li>
+  <li><a href="#s10">The Piecewise Deterministic Assumption</a></li>
+  <li><a href="#s11">Output Commit and Stable Storage</a></li>
+  <li><a href="#s12">Uncoordinated Checkpointing</a></li>
+  <li><a href="#s13">Tamir &amp; Sequin Coordinated Checkpointing</a></li>
+  <li><a href="#s14">Chandy &amp; Lamport Distributed Snapshot</a></li>
+  <li><a href="#s15">Checkpointing Protocols Compared</a></li>
+  <li><a href="#s16">Log-Based Protocols: Pessimistic, Optimistic, Causal</a></li>
+  <li><a href="#s17">Checkpointing + Logging: The Complete Picture</a></li>
+  <li><a href="#s18">Conclusion</a></li>
+  <li><a href="#quiz">Check Your Understanding</a></li>
+</ol></nav>
+
+<section id="s1"><h2>1. Interaction, Dependencies &amp; Causality</h2>
+
+<p>Components of a distributed system play different roles: they have functions to perform, services to provide, tasks to execute, and goals to achieve. But no component works in isolation. Components interact — and through interaction, they <strong>depend on each other</strong>.</p>
+
+<p>Interaction happens across both <strong>time</strong> (in concurrent systems) and <strong>space</strong> (in distributed systems). Two processes on different machines exchange messages; the sender's state before the send and the receiver's state after the receive are causally linked. If the sender crashes before sending, the receiver's subsequent behaviour becomes invalid. This is the core reason why recovery is hard.</p>
+
+<div class="callout idea"><span class="callout-label">Key insight</span><p>Dependencies between components span across process contexts — over time in concurrent systems, over space in distributed systems. Recovery mechanisms must respect these dependencies or risk reconstructing a state that never existed.</p></div>
+
+<p>How do we model dependencies? One (mischievously) simple way is <strong>causality</strong>. Two events are causally related if one could have influenced the other. In distributed systems, causality is the fundamental building block for reasoning about what states are reachable and which checkpoints form a coherent global picture.</p>
+</section>
+
+<section id="s2"><h2>2. Causality in Science and Computing</h2>
+
+<p>The "cause-effect" link is a basic cognitive tool humans use to understand and predict the dynamics of reality. In daily life, we use motivations and goals to explain the course of actions — what is called <strong>mind reading</strong>. But can science — and computer science in particular — adopt a precise, operational notion of cause?</p>
+
+<div class="callout note"><span class="callout-label">Note</span><p>Interestingly, the word "cause" was common in 19th-century physics paper titles but nearly absent in their bodies. Science struggles with causality too — which is why Judea Pearl's <em>Causality: Models, Reasoning, and Inference</em> (2009) is essential reading for understanding the formal foundations.</p></div>
+
+<p>The famous warning "correlation is not causation" reminds us that mere association of effects can be a confounding factor. For example, suppose a carcinogenic genotype leads to both lung cancer and a predisposition to smoke. A strong statistical correlation between smoking and lung cancer would not, by itself, prove a causal link — the tobacco industry famously used this argument. In Pearl's framework, correlation is a <strong>statistical</strong> concept while causation is a <strong>probabilistic</strong> one, precisely defined through causal models and do-calculus.</p>
+
+<p>For distributed systems, we fortunately do not need the full philosophical apparatus. We need a narrower, operational notion: <strong>one event causally precedes another if information flows from the first to the second</strong>. This gives us a practical handle on dependencies between processes.</p>
+</section>
+
+<section id="s3"><h2>3. Causality, Time, and Distributed Ordering</h2>
+
+<p>In distributed systems, a causal link determines a temporal relationship between two events: a cause temporally precedes its effect. This is an oversimplified notion — but it has its use.</p>
+
+<p><strong>Time is an essential issue in distributed systems.</strong> Without a shared clock, we cannot simply assign timestamps and sort events. The fundamental observation is:</p>
+
+<ul>
+  <li>In a <strong>centralized</strong> system, events are totally ordered by a single clock — for any two events A and B, either A happened before B, B before A, or they are simultaneous.</li>
+  <li>In a <strong>distributed</strong> system, events are only <em>partially</em> ordered. Two events on different nodes may be <strong>concurrent</strong> — neither caused the other, and their relative order is undefined.</li>
+</ul>
+
+<p>This loss of total order is the defining technical challenge of distributed system recovery. When reconstructing a global state from individual process checkpoints, we must respect causality: we cannot combine a checkpoint where P<sub>0</sub> has sent message m with a checkpoint where P<sub>1</sub> has received m but P<sub>0</sub> has not. That would produce a state that was never reachable — an <strong>inconsistent global state</strong>.</p>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Explain why a global state constructed from arbitrary per-process checkpoints might be inconsistent. Use causality and the partial order of distributed events in your answer.</p></div>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant P0 as Process P0
+    participant P1 as Process P1
+    participant P2 as Process P2
+    P0->>P1: m0 (causal link)
+    P1->>P2: m1 (causal link)
+    Note over P0,P2: A checkpoint set {C0, C1', C2}<br/>where C0 captures "before m0"<br/>and C1' captures "after receiving m0"<br/>is INCONSISTENT<br/>because C1' depends on information<br/>not present in C0
+</pre>
+</section>
+
+<section id="s4"><h2>4. Checkpointing: The Fundamental Dependability Technique</h2>
+
+<p><strong>Checkpointing</strong> and <strong>logging</strong> are the most fundamental techniques for achieving dependability in distributed systems. They provide a path towards system recovery after failure, offering a form of fault tolerance that is:</p>
+
+<ul>
+  <li>Relatively easy to implement</li>
+  <li>Low in runtime overhead</li>
+  <li>Applicable at all levels of dependability mechanisms</li>
+</ul>
+
+<div class="callout idea"><span class="callout-label">Definition</span><p>A <strong>checkpoint</strong> of a distributed system is a copy of the system state saved to <strong>stable storage</strong> — storage that survives the faults the system is designed to tolerate. If the checkpoint is available after a failure, the system can be recovered to the state captured by that checkpoint.</p></div>
+
+<p>Checkpointing refers to the action of periodically taking a copy of the system state and saving it to stable storage. The frequency and coordination of checkpoints determine both the runtime overhead and the amount of work that may be lost upon failure.</p>
+
+<div class="callout warn"><span class="callout-label">Limitation</span><p>If only checkpointing is used, some information may be lost when a fault occurs. For example, any state changes that happened after the last checkpoint are gone. The recovery time is typically larger than that of more sophisticated approaches. This is why we pair checkpointing with logging.</p></div>
+</section>
+
+<section id="s5"><h2>5. Recovery: Why Checkpoints Alone Are Not Enough</h2>
+
+<p>To recover a system to the state right before it fails, additional recovery information must be logged beyond periodic checkpoints. Specifically:</p>
+
+<ul>
+  <li><strong>All incoming messages</strong> must typically be logged</li>
+  <li><strong>Other non-deterministic events</strong> may also need to be logged to ensure proper recovery</li>
+</ul>
+
+<p>Together, checkpointing and logging provide a form of <strong>rollback recovery</strong>: they restore the system to a state <em>prior</em> to the failure, then replay logged events to reach the pre-failure state.</p>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>Mechanisms for <strong>roll-forward recovery</strong> exist — they reconstruct an <em>alternative</em> correct state rather than rewinding to a previous one. However, they typically incur higher runtime overhead and demand more physical resources, making rollback recovery the more common choice in practice.</p></div>
+
+<pre class="mermaid">
+flowchart LR
+    S[System Running] --> CP[Periodic Checkpointing]
+    CP --> LG[Message Logging]
+    LG --> N[Normal Operation]
+    N --> F[FAILURE]
+    F --> RB[Rollback to Last Checkpoint]
+    RB --> RP[Replay Logged Messages]
+    RP --> S2[System Restored<br/>to Pre-Failure State]
+    S2 --> CP
+    style F fill:#fca5a5,stroke:#991b1b
+    style S2 fill:#86efac,stroke:#065f46
+</pre>
+</section>
+
+<section id="s6"><h2>6. System Model and Fault Model</h2>
+
+<p>Before designing recovery protocols, we must define the system model precisely.</p>
+
+<h3>System Model</h3>
+<ul>
+  <li><var>N</var> processes interacting through message exchange</li>
+  <li>Processes also interact with the outside world via <strong>input</strong> and <strong>output</strong></li>
+  <li>Communication is <strong>reliable</strong> (e.g., TCP) and <strong>FIFO</strong> — message ordering is preserved, and no network partitions occur</li>
+</ul>
+
+<h3>Fault Model</h3>
+<ul>
+  <li>Failures occur in <strong>processes</strong>, not in the network</li>
+  <li><strong>Fail-stop</strong> model: when a process fails, it simply stops executing and loses all volatile state</li>
+  <li>The network itself is assumed reliable — no message loss, no partitions</li>
+</ul>
+
+<div class="callout idea"><span class="callout-label">Key assumption</span><p>The fail-stop model is both realistic (a crashed process does stop) and convenient (we do not need to handle Byzantine behaviour). Under this model, the only loss on failure is the volatile state of the crashed process — messages may still be in transit, and checkpoints on stable storage survive.</p></div>
+
+<p>The figure below illustrates a typical system: four processes P<sub>0</sub> through P<sub>3</sub> exchanging messages, with an input arriving from the outside world and an output emitted as the corresponding response.</p>
+
+<pre class="mermaid">
+flowchart LR
+    subgraph Outside World
+        I[Input] --> P0
+        P3 --> O[Output]
+    end
+    subgraph Distributed System
+        P0 -->|m0| P1
+        P1 -->|m1| P2
+        P2 -->|m2| P3
+        P3 -->|m3| P0
+        P1 -->|m4| P3
+        P0 -->|m5| P2
+    end
+    P0[P0] --- P1[P1]
+    P2[P2] --- P3[P3]
+    P0 --- P3
+    P1 --- P2
+</pre>
+</section>
+
+<section id="s7"><h2>7. Process State and Global State</h2>
+
+<p>The <strong>state of a process</strong> is defined by its entire address space in the operating system. A generic checkpointing library simply saves the entire address space. However, application semantics can often be exploited to define a smaller, more specific notion of process state.</p>
+
+<p>The <strong>global state</strong> of a distributed system includes the state of every process. But aggregation alone is not enough: the states of different processes are related through message exchanges. Information flows between processes, causing state changes — processes <strong>causally depend</strong> on each other. Therefore:</p>
+
+<div class="callout warn"><span class="callout-label">Critical point</span><p><strong>Dependencies cannot be lost in the global state.</strong> A checkpoint set that ignores causal dependencies may be inconsistent and therefore useless for recovery.</p></div>
+
+<p>The table below summarises the components of the system state:</p>
+
+<table>
+  <thead><tr><th>Component</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Process state</td><td>Entire address space of a process (or a semantically-relevant subset)</td></tr>
+    <tr><td>Channel state</td><td>Set of messages in transit along a channel — sent but not yet received</td></tr>
+    <tr><td>Global state</td><td>Set of process states + set of channel states for all channels</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="s8"><h2>8. Consistent vs. Inconsistent Global States</h2>
+
+<p>The slides present three critical scenarios for global states. Understanding the difference between them is essential for designing recovery protocols.</p>
+
+<div id="se-global"></div>
+
+<div class="lk-tabs" data-kit="tabs">
+  <div class="lk-tablist"><button class="lk-tab">Scenario (a) — Inconsistent</button><button class="lk-tab">Scenario (b) — Consistent</button><button class="lk-tab">Scenario (c) — Consistent but Unrecoverable</button></div>
+
+  <div class="lk-tabpanel">
+    <p><strong>Inconsistent global state:</strong> Checkpoints taken by different processes are incompatible — they cannot be used to recover the system.</p>
+    <p>Example: C<sub>1</sub> reflects reception of m<sub>0</sub>, but C<sub>0</sub> does not show m<sub>0</sub> as sent. If P<sub>0</sub> crashes after m<sub>0</sub>, recovery from {C<sub>0</sub>, C<sub>1</sub>} would make $100 appear from nowhere.</p>
+    <p>A global state formed from a wrong set of checkpoints is <strong>not admissible</strong> — it is not reachable from the initial state of the system through any valid execution.</p>
+  </div>
+
+  <div class="lk-tabpanel">
+    <p><strong>Consistent global state:</strong> Checkpoints are compatible and can be used for recovery.</p>
+    <p>Example: C<sub>1</sub> reflects reception of m<sub>0</sub>, and C<sub>0</sub> also records m<sub>0</sub> as sent. If P<sub>0</sub> crashes after C<sub>0</sub> and P<sub>1</sub> after C<sub>1</sub>, recovery from {C<sub>0</sub>, C<sub>1</sub>} correctly moves $100 from A to B. The same holds for C<sub>1</sub>, C<sub>2</sub> and m<sub>1</sub>.</p>
+    <p>Consistency ensures that for every received message, its sending is also recorded — the global state respects causality.</p>
+  </div>
+
+  <div class="lk-tabpanel">
+    <p><strong>Consistent yet unrecoverable:</strong> Checkpoints are compatible (they represent a reachable state) but cannot be used for recovery because messages <em>in transit</em> would be lost.</p>
+    <p>Example: $50 in transit via m<sub>1</sub> would disappear on recovery. The problem is the loss of <strong>channel state</strong>.</p>
+    <p>To solve this, the system model must include channel state — the set of messages in transit. If m<sub>0</sub> is saved in C<sub>0</sub> as channel state and m<sub>1</sub> in C<sub>1</sub> the same way, recovery from {C<sub>0</sub>, C<sub>1</sub>} becomes possible.</p>
+  </div>
+</div>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant P0 as P0 (Account A)
+    participant P1 as P1 (Account B)
+    P0->>P1: m0: $100 deposit
+    Note over P0: Checkpoint C0<br/>(A=$400, m0 sent)
+    Note over P1: Checkpoint C1<br/>(B=$400, m0 received)
+    Note over P0,P1: Consistent: C0 records send, C1 records receive
+    Note over P0,P1: Inconsistent: C0 does NOT record send,<br/>C1 DOES record receive
+</pre>
+</section>
+
+<section id="s9"><h2>9. Channel State and the Refined Model</h2>
+
+<p>To handle scenario (c) — consistent checkpoints with lost messages in transit — we refine the system model:</p>
+
+<ul>
+  <li>A set of <var>N</var> processes, each consisting of a set of states and a set of events</li>
+  <li>One state is the <strong>initial state</strong></li>
+  <li><strong>Events</strong> trigger changes of state</li>
+  <li>A set of <strong>channels</strong> — uni-directional reliable communication links between processes</li>
+  <li>The <strong>state of a channel</strong> is the set of messages in transit (sent but not yet received)</li>
+</ul>
+
+<div class="callout note"><span class="callout-label">Example</span><p>A TCP connection between two processes comprises <strong>two channels</strong> — one in each direction. Each channel has its own state (messages in transit in that direction).</p></div>
+
+<p>With channel state included in the global state, scenario (c) becomes recoverable: if m<sub>0</sub> is saved in C<sub>0</sub>'s channel state (for the channel P<sub>0</sub>→P<sub>1</sub>) and m<sub>1</sub> in C<sub>1</sub>'s channel state (for the channel P<sub>1</sub>→P<sub>2</sub>), then recovery from {C<sub>0</sub>, C<sub>1</sub>} correctly preserves all messages.</p>
+</section>
+
+<section id="s10"><h2>10. The Piecewise Deterministic Assumption</h2>
+
+<p><strong>Checkpoint-based</strong> protocols recover the system up to the most recent consistent global state. All execution <em>after</em> that state is lost. This is a fundamental limitation — no matter how frequently checkpoints are taken, there is always a window of lost computation between the last checkpoint and the failure.</p>
+
+<p><strong>Log-based</strong> protocols overcome this limitation by assuming the <strong>piecewise deterministic (PWD) assumption</strong>:</p>
+
+<div class="callout idea"><span class="callout-label">Piecewise Deterministic (PWD) Assumption</span><p>Each state interval evolves <strong>deterministically</strong> until a <strong>non-deterministic event</strong> occurs (such as message reception). All non-deterministic events can be identified, and enough information about each is logged so that the interval can be deterministically replayed.</p></div>
+
+<p>Under the PWD assumption, the execution of a process is modelled as consecutive <strong>state intervals</strong>. Each interval is initiated by a non-deterministic event and followed by a sequence of deterministic state changes. If the initiating event is logged, the entire interval can be replayed — allowing recovery to a state <em>right before the failure</em>, not just the last checkpoint.</p>
+
+<div class="callout warn"><span class="callout-label">Trade-off</span><p>Checkpoint-based protocols do not need the PWD assumption — they are simpler to implement and less restrictive. But they lose post-checkpoint execution. Log-based protocols recover more precisely but require identifying <em>all</em> non-deterministic events and logging them properly.</p></div>
+</section>
+
+<section id="s11"><h2>11. Output Commit and Stable Storage</h2>
+
+<h3>Output Commit</h3>
+
+<p>A distributed system interacts with the outside world — clients, services, users. Once an <strong>output</strong> is emitted, a portion of the system state becomes observable externally, representing a sort of commitment or achievement. This introduces the <strong>output commit problem</strong>:</p>
+
+<div class="callout idea"><span class="callout-label">Output Commit Problem</span><p>If a failure occurs after an output is emitted, the outside world cannot be relied upon to "un-see" that output. Therefore, observable consistency requires that <strong>enough recovery information is logged before the system commits to an output</strong> — otherwise a rollback would make the output inconsistent with the recovered internal state.</p></div>
+
+<h3>Stable Storage</h3>
+
+<p>All checkpointing and logging protocols require <strong>stable storage</strong> — storage that survives process failures and remains available upon recovery. The choice of stable storage depends on the fault tolerance required:</p>
+
+<table>
+  <thead><tr><th>Failure Type</th><th>Stable Storage</th></tr></thead>
+  <tbody>
+    <tr><td>Process failures only</td><td>Local disks</td></tr>
+    <tr><td>Disk failures</td><td>Redundant disks (RAID-1, RAID-5)</td></tr>
+    <tr><td>Site-wide failures</td><td>Replicated or cloud-based file systems</td></tr>
+  </tbody>
+</table>
+
+<div class="callout note"><span class="callout-label">Note</span><p>Checkpoints and logged messages must always be stored in stable storage. The stability requirement is absolute — if a checkpoint is lost, the entire recovery mechanism fails.</p></div>
+</section>
+
+<section id="s12"><h2>12. Uncoordinated Checkpointing</h2>
+
+<p>In <strong>uncoordinated checkpointing</strong>, each process autonomously decides when to take a checkpoint. The intuition is straightforward: when a failure occurs, the recovery process searches backwards to select the most recent set of consistent checkpoints.</p>
+
+<p>However, this autonomy creates problems:</p>
+
+<ul>
+  <li>Checkpoints taken independently may not allow reconstruction of a <strong>consistent global state</strong></li>
+  <li>To enable selection of a consistent set during recovery, the <strong>dependency between checkpoints</strong> must be determined and recorded with each checkpoint</li>
+  <li>This incurs additional overhead and increases implementation complexity</li>
+  <li>Recovery may require <strong>cascading rollbacks</strong> — rolling back one process forces others to roll back too, potentially creating a domino effect</li>
+</ul>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Explain the <strong>domino effect</strong> in uncoordinated checkpointing: why might rolling back one process force a cascade of rollbacks across other processes? How does coordinated checkpointing prevent this?</p></div>
+</section>
+
+<section id="s13"><h2>13. Tamir &amp; Sequin Coordinated Checkpointing</h2>
+
+<p>The <strong>Tamir and Sequin global checkpointing protocol</strong> (1984) is a <strong>coordinated, blocking</strong> protocol. It solves the consistency problem by having processes coordinate their checkpoints so that they always form a consistent global state.</p>
+
+<h3>Roles</h3>
+<ul>
+  <li><strong>Coordinator</strong>: one designated process that knows all other processes</li>
+  <li><strong>Participants</strong>: all remaining processes</li>
+</ul>
+
+<h3>Control Messages</h3>
+<table>
+  <thead><tr><th>Message</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><strong>CHECKPOINT</strong></td><td>Initiates a global checkpoint round; also used to establish a quiescent point where all processes have stopped normal execution</td></tr>
+    <tr><td><strong>SAVED</strong></td><td>Informs the coordinator that a participant has completed its local checkpoint</td></tr>
+    <tr><td><strong>FAULT</strong></td><td>Signals a timeout — the current round should be aborted</td></tr>
+    <tr><td><strong>RESUME</strong></td><td>Tells participants they can resume normal execution</td></tr>
+  </tbody>
+</table>
+
+<h3>Protocol Phases (Two-Phase Commit Style)</h3>
+<ol>
+  <li><strong>Phase 1 (Quiesce):</strong> The coordinator stops execution and sends CHECKPOINT to all processes. Processes stop, send CHECKPOINT through all outgoing channels, and wait for CHECKPOINT from all incoming channels. This creates a quiescent point.</li>
+  <li><strong>Phase 2 (Commit):</strong> Once the CHECKPOINT certificate is complete, each process takes a local checkpoint and sends SAVED. The coordinator waits for all SAVED messages, then atomically switches to the new checkpoint set and sends RESUME. Processes resume normal execution.</li>
+</ol>
+
+<div class="callout warn"><span class="callout-label">Blocking nature</span><p><strong>Normal execution is suspended</strong> during each round of global checkpointing. This is the protocol's main drawback: it trades availability for consistency. If a participant fails to respond, the entire round is aborted with FAULT messages.</p></div>
+
+<h3>Finite State Machine</h3>
+<p>The coordinator and each participant follow a deterministic FSM during the protocol. Below is the annotated pseudocode for the coordinator:</p>
+
+<div id="ac-coord"></div>
+
+<p>And for the participant:</p>
+
+<div id="ac-participant"></div>
+
+<h3>Interactive Simulation</h3>
+<p>Step through the protocol below to see how the coordinator and participants interact. Click each process to advance it through its state machine.</p>
+
+<div id="step-ts"></div>
+</section>
+
+<section id="s14"><h2>14. Chandy &amp; Lamport Distributed Snapshot</h2>
+
+<p>The <strong>Chandy and Lamport distributed snapshot protocol</strong> (1985) is a <strong>non-blocking</strong> alternative: normal execution is <strong>not interrupted</strong> during global checkpointing. However, it only concerns itself with producing a consistent global snapshot — it prescribes no mechanism for determining the end of the checkpointing round or atomically switching to a new global checkpoint.</p>
+
+<h3>Protocol Description</h3>
+<ul>
+  <li>Processes can be in either <strong>Normal</strong> or <strong>Checkpointing</strong> state</li>
+  <li>Any process can initiate global checkpointing by taking a local checkpoint and sending a <strong>Marker</strong> message on all outgoing channels — its state becomes <em>Checkpointing</em></li>
+  <li>Upon receiving a Marker, a process moves from Normal to Checkpointing, takes a local checkpoint, records the Marker certificate, and sends Marker on all outgoing channels</li>
+  <li>When the Marker certificate is complete (Marker received on all incoming channels), the process returns to Normal state</li>
+  <li>A process receiving a regular message on a channel where it has <strong>not yet received a Marker</strong> appends that message to the <strong>channel state</strong> — this correctly captures in-transit messages</li>
+</ul>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant P0 as P0 (Initiator)
+    participant P1 as P1
+    participant P2 as P2
+    P0->>P0: Take local snapshot
+    P0->>P1: Marker
+    P0->>P2: Marker
+    Note over P1: Record channel state<br/>from P0
+    P1->>P2: Marker
+    Note over P2: Record channel state<br/>from P0 and P1
+    P1-->>P0: (implicit) done
+    P2-->>P1: (implicit) done
+    P1-->>P0: (implicit) done
+    Note over P0: All certificates complete<br/>Global snapshot recorded
+</pre>
+
+<div class="callout idea"><span class="callout-label">Key difference</span><p>The Chandy-Lamport protocol <strong>does not block</strong> normal execution. Processes continue processing messages while the snapshot is being taken. Messages received after a Marker on a given channel are treated as "post-snapshot" and not included in that channel's state.</p></div>
+</section>
+
+<section id="s15"><h2>15. Checkpointing Protocols Compared</h2>
+
+<p>Both protocols share the same system model and use special control messages to propagate and coordinate global checkpointing. They both recognise the need to capture <strong>channel state</strong> to ensure recoverability, and the mechanism for capturing it is virtually identical. Their communication overhead is also the same.</p>
+
+<table>
+  <thead><tr><th>Aspect</th><th>Tamir &amp; Sequin</th><th>Chandy &amp; Lamport</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Execution</strong></td><td>Blocking — processes stop during checkpointing</td><td>Non-blocking — normal execution continues</td></tr>
+    <tr><td><strong>Completeness</strong></td><td>Full: atomic commit/abort of the global checkpoint round</td><td>Partial: only produces the snapshot; no atomic switch mechanism</td></tr>
+    <tr><td><strong>Robustness</strong></td><td>More robust — includes timeout and FAULT handling</td><td>Less robust — no built-in abort mechanism</td></tr>
+    <tr><td><strong>Initiation</strong></td><td>Coordinator-driven (single initiator)</td><td>Any process can initiate (autonomous)</td></tr>
+    <tr><td><strong>Consistency guarantee</strong></td><td>Strong — two-phase commit ensures atomicity</td><td>Strong — Marker protocol ensures consistency, but lacks atomicity</td></tr>
+  </tbody>
+</table>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Compare Tamir &amp; Sequin vs. Chandy &amp; Lamport. When would you choose one over the other? Consider: system availability requirements, the cost of blocking, and the need for atomic commit of checkpoints.</p></div>
+</section>
+
+<section id="s16"><h2>16. Log-Based Protocols: Pessimistic, Optimistic, Causal</h2>
+
+<p>While checkpoint-based protocols save <strong>state</strong>, log-based protocols save <strong>events</strong>. Under the piecewise deterministic assumption, logged events can be replayed to recover the exact pre-failure state. Three approaches exist, differing in <strong>when</strong> and <strong>how</strong> non-deterministic events are logged [Alvisi and Marzullo, 1998].</p>
+
+<div class="lk-tabs" data-kit="tabs">
+  <div class="lk-tablist"><button class="lk-tab">Pessimistic</button><button class="lk-tab">Optimistic</button><button class="lk-tab">Causal</button></div>
+
+  <div class="lk-tabpanel">
+    <p><strong>Pessimistic logging</strong> synchronously logs each received message to stable storage <em>before</em> executing it. This is the safest approach:</p>
+    <ul>
+      <li>Non-deterministic events are logged to stable storage before they affect state</li>
+      <li>On failure, the log contains every event needed for recovery</li>
+      <li>No missing messages — recovery is straightforward and fast</li>
+      <li>However, the synchronous log write adds <strong>latency overhead</strong> to every message processing</li>
+    </ul>
+  </div>
+
+  <div class="lk-tabpanel">
+    <p><strong>Optimistic logging</strong> reduces latency by storing non-deterministic events in <strong>volatile memory</strong> first, then flushing them asynchronously to stable storage:</p>
+    <ul>
+      <li>Lower runtime overhead — no synchronous writes</li>
+      <li>Risk: if a process fails before the log is flushed, some events are permanently lost</li>
+      <li>Forces rollback to a state <em>earlier</em> than the failure point</li>
+      <li>Recovery is more complex — the recovering process must determine which messages are missing</li>
+    </ul>
+  </div>
+
+  <div class="lk-tabpanel">
+    <p><strong>Causal logging</strong> piggybacks non-deterministic event information on each outgoing message:</p>
+    <ul>
+      <li>Instead of writing to stable storage immediately, message logs travel with the messages themselves</li>
+      <li>A process receiving a piggybacked message gains access to all events that causally affect its state</li>
+      <li>Upon failure, a process can reconstruct missing events from its neighbours' message logs</li>
+      <li>Balances latency overhead with recovery completeness</li>
+      <li>However, dependency tracking and piggybacking increase protocol complexity</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout idea"><span class="callout-label">Trade-off summary</span><p>Pessimistic: safest recovery, highest latency overhead. Optimistic: lowest overhead, risk of lost events. Causal: balanced overhead, sophisticated recovery. The choice depends on whether the application <strong>can tolerate lost events</strong> (optimistic) or <strong>must always recover to the exact pre-failure state</strong> (pessimistic).</p></div>
+
+<p>In both optimistic and causal logging, process dependencies must be tracked and sufficient dependency information piggybacked on messages. This increases complexity and can cause <strong>cascading recovery</strong> operations. Pessimistic logging is much simpler in design and implementation, and failure recovery can be made much faster — at the cost of synchronous log writes.</p>
+</section>
+
+<section id="s17"><h2>17. Checkpointing + Logging: The Complete Picture</h2>
+
+<p>For all practical purposes, <strong>logging is always used in conjunction with checkpointing</strong>. The combination gives two essential benefits:</p>
+
+<ol>
+  <li><strong>Limited recovery time:</strong> A process restarts from its <em>last checkpoint</em> (not from its initial state) and replays logged non-deterministic events to reach the pre-failure state. Without checkpoints, the log would have to be replayed from the beginning of time.</li>
+  <li><strong>Limited log size:</strong> By taking a checkpoint periodically, all log entries <em>prior</em> to the checkpoint can be garbage collected — they are no longer needed because the checkpoint captures that state.</li>
+</ol>
+
+<pre class="mermaid">
+flowchart LR
+    subgraph Normal Operation
+        A[Process Running] --> B[Checkpoint Taken]
+        B --> C[Messages Logged<br/>in State Interval]
+        C --> D[Non-deterministic<br/>Event Occurs]
+        D --> E[New State Interval]
+        E --> F[Next Checkpoint]
+        F --> C
+    end
+    subgraph On Failure
+        G[CRASH] --> H[Restart from<br/>Last Checkpoint]
+        H --> I[Replay Logged<br/>Non-deterministic Events]
+        I --> J[Process Restored to<br/>Pre-Failure State]
+    end
+    style G fill:#fca5a5,stroke:#991b1b,color:#1a2233
+    style J fill:#86efac,stroke:#065f46,color:#1a2233
+</pre>
+
+<div class="callout note"><span class="callout-label">Garbage collection</span><p>Checkpoint period determines the balance: a short period means less replay after recovery but higher checkpointing overhead. A long period means less overhead but more replay and larger logs. Most practical systems choose a period that balances these costs based on the failure rate and recovery time objectives.</p></div>
+</section>
+
+<section id="s18"><h2>18. Conclusion</h2>
+
+<div class="callout idea"><span class="callout-label">Lessons Learnt</span><p><strong>Dependability requires a coherent notion of dependencies and causality.</strong> You cannot recover a distributed system to a correct state unless you understand how its components depend on each other through message exchanges. The partial order of events in a distributed system forces us to reason carefully about which combinations of process states are admissible.</p></div>
+
+<p>The key takeaways from this lesson:</p>
+<ul>
+  <li><strong>Causality</strong> is the foundation for reasoning about dependencies and global state consistency</li>
+  <li><strong>Checkpointing</strong> saves system state to stable storage; <strong>logging</strong> records non-deterministic events for replay</li>
+  <li>A global state is <strong>consistent</strong> if it respects causality — every received message corresponds to a sent message in the checkpoint set</li>
+  <li><strong>Coordinated checkpointing</strong> (Tamir &amp; Sequin, Chandy &amp; Lamport) ensures that checkpoints from different processes form a consistent global state</li>
+  <li><strong>Log-based protocols</strong> (pessimistic, optimistic, causal) complement checkpointing by enabling recovery to the exact pre-failure state under the piecewise deterministic assumption</li>
+  <li><strong>Checkpointing + logging</strong> together limit both recovery time and log size, and form the foundation of practical rollback recovery in distributed systems</li>
+</ul>
+
+<p>Simple dependability techniques such as checkpointing and logging can dramatically improve the chances of recovery in case of failures. While they have limitations — checkpoint-only protocols lose post-checkpoint execution; logging protocols require the PWD assumption — they are used at all levels of dependability mechanisms and are the bedrock on which more sophisticated fault tolerance approaches are built.</p>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Explain why checkpointing and logging are described as "the most fundamental techniques" for dependability. What can they achieve together that neither can achieve alone?</p></div>
+</section>
+
+<section id="quiz"><h2>Check Your Understanding</h2>
+<div class="lk-quiz">
+
+<details><summary>Define a consistent global state in a distributed system. Why is an inconsistent global state unusable for recovery?</summary>
+<p>A consistent global state is a set of per-process checkpoints where for every message reception recorded in any checkpoint, the corresponding sending is also recorded in some other checkpoint in the set. It respects causality: the state could have actually been reached through some valid execution of the system. An inconsistent global state, by contrast, is not reachable from the initial state — it represents a "never-existed" configuration. If used for recovery, it could lead to effects without causes (e.g., money appearing from nowhere in a bank transfer scenario).</p></details>
+
+<details><summary>Explain the domino effect in uncoordinated checkpointing. How does coordinated checkpointing avoid it?</summary>
+<p>In uncoordinated checkpointing, each process checkpoints independently. When a crash occurs, the recovery process selects the most recent set of consistent checkpoints. If no consistent set exists near the crash point, processes must roll back further. This can cascade: rolling back process A may invalidate process B's checkpoint (because B's checkpoint had received a message from A that A's rolled-back checkpoint no longer shows as sent), forcing B to roll back too. This chain reaction is the domino effect. Coordinated checkpointing avoids it by ensuring all processes checkpoint at mutually consistent points — every received message in the new checkpoint set has a corresponding send recorded in the same round — so recovery always finds a consistent set at the most recent round.</p></details>
+
+<details><summary>Describe the two phases of the Tamir and Sequin global checkpointing protocol. Why is it called a "blocking" protocol?</summary>
+<p>Phase 1 (Quiesce): The coordinator stops execution and sends CHECKPOINT to all participants. Each participant stops, sends CHECKPOINT on outgoing channels, and collects CHECKPOINT from incoming channels — establishing a quiescent point where the system has no messages in transit. Phase 2 (Commit): Each process takes a local checkpoint and sends SAVED. The coordinator waits for all SAVED messages, then atomically switches to the new checkpoints and sends RESUME. It is blocking because processes <strong>suspend normal execution</strong> during the entire checkpointing round. No application messages are processed while checkpoints are being taken, ensuring consistency but reducing availability.</p></details>
+
+<details><summary>Compare pessimistic, optimistic, and causal logging. Under what conditions would you choose each?</summary>
+<p><strong>Pessimistic logging</strong> writes every non-deterministic event to stable storage synchronously before execution. Recovery is simple and complete, but latency is high. Choose it when correctness is paramount and the system can tolerate the write latency. <strong>Optimistic logging</strong> buffers events in volatile memory and flushes asynchronously — lower overhead, but failure before flush means lost events and rollback. Choose it when failures are rare and occasional loss of recent events is acceptable. <strong>Causal logging</strong> piggybacks event info on messages, avoiding stable storage writes for most events. Recovery uses piggybacked information from neighbours. Choose it when you want a balance of low overhead and minimal event loss.</p></details>
+
+<details><summary>Why is it important to capture channel state in a global checkpoint? Give a concrete example of unrecoverable state without it.</summary>
+<p>Channel state captures messages that are in transit — sent but not yet received. Without it, a consistent checkpoint set could still lose messages. Example: P0 sends $50 to P1, and P1 simultaneously sends $30 to P2. Both processes checkpoint <em>after</em> sending their messages but <em>before</em> receiving. The checkpoints are consistent (no message is received without a corresponding send, because neither has received yet), but the $50 and $30 in transit are lost on recovery. The system would appear to have "lost" money. By recording channel state (the in-transit messages), the checkpoint captures the complete global state including money in transit.</p></details>
+
+<details><summary>Explain the piecewise deterministic (PWD) assumption. Why is it required for log-based recovery but not for checkpoint-based recovery?</summary>
+<p>The PWD assumption states that process execution consists of deterministic intervals separated by non-deterministic events (like message receptions). Each interval's outcome is fully determined by the non-deterministic event that starts it. If that event is logged, the interval can be replayed. Log-based recovery needs this assumption because it replays events from logs — without it, replay would not faithfully reproduce the original execution. Checkpoint-based protocols do not need PWD because they restore state directly from saved checkpoints; they do not replay events at the non-determinism boundary. They simply accept losing any post-checkpoint execution.</p></details>
+
+<details><summary>What is the output commit problem and how does it affect recovery protocol design?</summary>
+<p>The output commit problem arises because once a distributed system emits an output (e.g., a response to a client), the outside world observes it and may act on it. If the system then fails and rolls back, it cannot "un-emit" the output. This means the recovered state must be consistent with all outputs already committed. The solution is to ensure that <strong>enough recovery information is logged before any output is committed</strong> — typically, the system logs all events leading to the output before sending it. This way, if a failure occurs, the system can always recover to a state where that output remains valid.</p></details>
+
+</div>
+</section>
+
+<footer class="lk-foot">Study material generated from the course slides. Not an official source.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+(function() {
+
+/* ---- State Explorer: Consistent vs Inconsistent Global States ---- */
+LessonKit.stateExplorer('#se-global', {
+  start: 'Initial',
+  states: {
+    'Initial': {
+      desc: 'All processes have initial checkpoints. No messages have been exchanged. Accounts: A=$500, B=$300, C=$200.',
+      to: [['P0 sends m0 ($100) to P1', 'After m0 sent']]
+    },
+    'After m0 sent': {
+      desc: 'P0 sent $100 to P1 (message m0). P0\'s checkpoint would record the send. P1 has not yet received m0. m0 is in transit.',
+      to: [['Take checkpoints now', 'Inconsistent (a)'], ['P1 receives m0, then checkpoint', 'After m0 recv + C1']]
+    },
+    'Inconsistent (a)': {
+      desc: 'C1 reflects reception of m0, but C0 does not show m0 as sent. If P0 crashes after m0, recovery from {C0, C1} would make $100 appear from nowhere. This global state is NOT reachable from the initial state.',
+      to: []
+    },
+    'After m0 recv + C1': {
+      desc: 'P1 received m0 (B=$400) and took checkpoint C1. P0 also took a new checkpoint C0 that records m0 as sent. Both checkpoints are compatible.',
+      to: [['P1 sends m1 ($50) to P2', 'After m1 sent'], ['Use these checkpoints', 'Consistent (b)']]
+    },
+    'Consistent (b)': {
+      desc: 'C0 records sending m0. C1 records receiving m0. {C0, C1} is consistent. Recovery correctly preserves the $100 transfer from A to B. A=$400, B=$400.',
+      to: [['P1 sends m1 ($50), P2 checkpoints', 'Unrecoverable (c)']]
+    },
+    'After m1 sent': {
+      desc: 'P1 sent $50 to P2. If P2 checkpoints now (C2) but m1 is still in transit, C2 does not include m1. P1\'s checkpoint does include sending m1.',
+      to: [['P2 checkpoints (m1 still in transit)', 'Unrecoverable (c)']]
+    },
+    'Unrecoverable (c)': {
+      desc: 'Checkpoints {C0, C1, C2} are consistent (no receive without matching send). But m1 ($50) is in transit — it would be lost on recovery. Solution: capture channel state (m1) in the checkpoint.',
+      to: []
+    }
+  }
+});
+
+/* ---- Annotated Code: Coordinator FSM ---- */
+LessonKit.annotatedCode('#ac-coord', {
+  lang: 'text',
+  lines: [
+    ['COORDINATOR state machine (Tamir & Sequin)', 'Finite state machine for the coordinator'],
+    ['Normal → decides to start global checkpoint', 'Coordinator initiates the checkpoint round'],
+    ['→ Stop normal execution', 'Freeze the process; no more application messages'],
+    ['→ Send CHECKPOINT to every process', 'Control message: tells all to stop and prepare'],
+    ['→ Wait for CHECKPOINT from all processes', 'Building the CHECKPOINT certificate; each incoming channel must deliver a CHECKPOINT'],
+    ['[Timeout] → Send FAULT to all; go to Abort', 'If any CHECKPOINT is missing, abort the round'],
+    ['[All CHECKPOINT received] → Take local checkpoint', 'Save own process state to stable storage'],
+    ['→ Wait for SAVED from every participant', 'Phase 2: collecting confirmation of local checkpoints'],
+    ['[Timeout] → Send FAULT; go to Abort', 'If any SAVED is missing, abort and revert'],
+    ['[All SAVED received] → Commit new checkpoint', 'Atomic switch: old checkpoint → new global checkpoint'],
+    ['→ Send RESUME to every process', 'Tell all processes they can resume normal execution'],
+    ['→ Resume normal execution, go to Normal', 'Return to the initial Normal state']
+  ]
+});
+
+/* ---- Annotated Code: Participant FSM ---- */
+LessonKit.annotatedCode('#ac-participant', {
+  lang: 'text',
+  lines: [
+    ['PARTICIPANT state machine (Tamir & Sequin)', 'Finite state machine for a participant process'],
+    ['Normal → Receive CHECKPOINT from coordinator', 'Incoming CHECKPOINT control message arrives'],
+    ['→ Stop normal execution', 'Freeze the process'],
+    ['→ Send CHECKPOINT on all outgoing channels', 'Forward the CHECKPOINT to downstream neighbours'],
+    ['→ Wait for CHECKPOINT from all incoming channels', 'Ensuring all neighbours are also in quiescent state'],
+    ['[Timeout] → Send FAULT; go to Abort', 'If any CHECKPOINT missing, abort the round'],
+    ['[All CHECKPOINT received] → Take local checkpoint', 'Save process state to stable storage'],
+    ['→ Send SAVED to uplink (toward coordinator)', 'Confirm that this process completed its checkpoint'],
+    ['→ Relay SAVED from downstream → uplink', 'Forward confirmations from downstream neighbours'],
+    ['→ Wait for RESUME from uplink', 'Wait for the coordinator to commit the round'],
+    ['[Timeout] → Send FAULT; go to Abort', 'If RESUME is missing, abort'],
+    ['[RESUME received] → Commit checkpoint', 'Accept the new checkpoint as current'],
+    ['→ Send RESUME on outgoing channels (except incoming)', 'Propagate the resume signal downstream'],
+    ['→ Resume normal execution, go to Normal', 'Return to Normal state']
+  ]
+});
+
+/* ---- Stepper: Checkpoint & Rollback Recovery Simulation ---- */
+LessonKit.stepper('#step-ts', {
+  title: 'Checkpoint & Rollback Recovery Simulation',
+  sub: '3 bank accounts (A=$500, B=$300, C=$200). Messages transfer money between accounts. Click each process to advance through checkpointing, a crash, and rollback recovery.',
+  shared: {
+    phase: 'Normal',
+    A: 500, B: 300, C: 200,
+    p0: 'Running', p1: 'Running', p2: 'Running',
+    c0: '-', c1: '-', c2: '-',
+    status: 'System running. All accounts active.'
+  },
+  watch: ['A','B','C','p0','p1','p2','c0','c1','c2','phase'],
+  threads: {
+    P0: {
+      name: 'Account A (P0)',
+      steps: [
+        { label: 'Take checkpoint C0 (A=$500)', run: function(s) { s.c0='C0'; s.status='C0 saved to stable storage.'; }},
+        { label: 'Send m0: $100 from A to B', run: function(s) { s.A=400; s.status='m0 ($100) sent from P0 to P1.'; }},
+        { label: 'Acknowledge coordinated checkpoint round', run: function(s) { s.status='P0 waiting for SAVED from P1,P2...'; }},
+        { label: 'CRASH DETECTED (P1 failed)', run: function(s) { s.phase='Crash'; s.status='P0 notified: P1 has crashed. Recovery initiated.'; }},
+        { label: 'Roll back to checkpoint C0', run: function(s) { s.A=500; s.phase='Recovery'; s.status='P0 rolls back to C0 (A=$500).'; }},
+        { label: 'Replay m0 from message log', run: function(s) { s.A=400; s.status='P0 replays m0: A $500->$400.'; }},
+        { label: 'P0 recovered', run: function(s) { s.p0='Recovered'; s.status='P0 back to consistent state.'; }}
+      ]
+    },
+    P1: {
+      name: 'Account B (P1)',
+      steps: [
+        { label: 'Take checkpoint C1 (B=$300)', run: function(s) { s.c1='C1'; s.status='C1 saved to stable storage.'; }},
+        { label: 'Receive m0: +$100 from A (B=$400)', run: function(s) { s.B=400; s.status='P1 received m0. B=$400.'; }},
+        { label: 'Send m1: $50 from B to C', run: function(s) { s.B=350; s.status='m1 ($50) sent from P1 to P2.'; }},
+        { label: '[CRASH!] P1 fails — volatile state lost', run: function(s) { s.p1='FAILED'; s.phase='Crash'; s.B=0; s.status='P1 has crashed! A=$'+s.A+', B=LOST, C=$'+s.C; }},
+        { label: 'Restart from checkpoint C1 (B=$300)', run: function(s) { s.B=300; s.p1='Restarting'; s.status='P1 restores from C1: B=$300.'; }},
+        { label: 'Replay m0 from log (B=$300->$400)', run: function(s) { s.B=400; s.status='P1 replays m0: B $300->$400.'; }},
+        { label: 'Replay m1 from log (B=$400->$350)', run: function(s) { s.B=350; s.status='P1 replays m1: B $400->$350.'; }},
+        { label: 'P1 recovered', run: function(s) { s.p1='Recovered'; s.status='P1 back to consistent state.'; }}
+      ]
+    },
+    P2: {
+      name: 'Account C (P2)',
+      steps: [
+        { label: 'Take checkpoint C2 (C=$200)', run: function(s) { s.c2='C2'; s.status='C2 saved to stable storage.'; }},
+        { label: 'Receive m1: +$50 from B (C=$250)', run: function(s) { s.C=250; s.status='P2 received m1. C=$250.'; }},
+        { label: 'Detect P1 crash; prepare rollback', run: function(s) { s.phase='Crash'; s.status='P2 detects loss of P1. Preparing recovery.'; }},
+        { label: 'Roll back to checkpoint C2 (C=$200)', run: function(s) { s.C=200; s.phase='Recovery'; s.status='P2 rolls back to C2: C=$200.'; }},
+        { label: 'Replay m1 from log (C=$200->$250)', run: function(s) { s.C=250; s.status='P2 replays m1: C $200->$250.'; }},
+        { label: 'P2 recovered', run: function(s) { s.p2='Recovered'; s.status='System fully recovered!'; }}
+      ]
+    }
+  },
+  verdict: function(s) {
+    if (s.p0==='Recovered' && s.p1==='Recovered' && s.p2==='Recovered') {
+      var ok = (s.A===400 && s.B===350 && s.C===250);
+      return {
+        status: ok ? 'ok' : 'bad',
+        text: ok
+          ? 'System recovered to consistent state: A=$'+s.A+', B=$'+s.B+', C=$'+s.C+'. All transactions preserved via rollback + log replay.'
+          : 'State mismatch: A=$'+s.A+', B=$'+s.B+', C=$'+s.C+'. Expected A=400, B=350, C=250.'
+      };
+    }
+    if (s.phase==='Crash') return { status: 'bad', text: 'P1 has crashed! Continue clicking each process to complete the rollback recovery.' };
+    return { status: '', text: 'Advance each process through the timeline: checkpointing, normal operation, crash, and recovery.' };
+  }
+});
+
+})();
+</script>
+</body></html>

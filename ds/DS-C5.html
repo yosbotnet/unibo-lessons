@@ -1,0 +1,626 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS-C5 — Logical Clocks</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head><body class="lk">
+<header class="lk-header">
+<div class="lk-kicker">Distributed Systems — Prof. Omicini</div>
+<h1>Logical Clocks</h1>
+<div class="lk-meta"><span>DS-C5</span><span>Andrea Omicini — DISI, Univ. Bologna A.Y. 2025/2026</span></div>
+</header>
+
+<div class="lk-overview"><h2>In this lesson</h2><ul>
+<li>How actions and events relate to causality in distributed systems</li>
+<li>The happens-before partial order: Lamport's foundational insight</li>
+<li>Causal paths and causal histories as tools for reasoning about event ordering</li>
+<li>Logical clocks as a causality-aware timekeeping mechanism</li>
+<li>Lamport's scalar time algorithm step by step</li>
+<li>Properties and limitations of scalar clocks</li>
+<li>Vector clocks: capturing full causal dependencies for strong consistency</li>
+<li>Matrix clocks as an extension</li>
+</ul></div>
+
+<nav class="lk-toc"><h3>Contents</h3><ol>
+<li><a href="#s1">Actions, Events, and Causes</a></li>
+<li><a href="#s2">Internal vs External Causality</a></li>
+<li><a href="#s3">The Happens-Before Relation</a></li>
+<li><a href="#s4">Causal Paths and Causal Histories</a></li>
+<li><a href="#s5">Logical Time: From Causality to Clocks</a></li>
+<li><a href="#s6">Logical Clocks: Definition and Consistency</a></li>
+<li><a href="#s7">Implementing Logical Clocks</a></li>
+<li><a href="#s8">Lamport's Algorithm: Scalar Time</a></li>
+<li><a href="#s9">Lamport Clock Interactive Simulator</a></li>
+<li><a href="#s10">Total Ordering via Scalar Clocks</a></li>
+<li><a href="#s11">The Limits of Scalar Time</a></li>
+<li><a href="#s12">Vector Clocks: Motivation and Definition</a></li>
+<li><a href="#s13">Vector Clock Rules</a></li>
+<li><a href="#s14">Vector Clock Ordering and Strong Consistency</a></li>
+<li><a href="#s15">Interactive Vector Clock Explorer</a></li>
+<li><a href="#s16">Matrix Time</a></li>
+<li><a href="#s17">Summary</a></li>
+<li><a href="#quiz">Check Your Understanding</a></li>
+</ol></nav>
+
+<section id="s1"><h2>1. Actions, Events, and Causes</h2>
+
+<p>Any computational system can be modelled as a sequence of executed <strong>actions</strong>. An action is defined by a change in the state of the system — or, more generally, in the world: reading from memory, writing to a file, switching on a lamp. In a <strong>distributed system</strong>, actions execute in multiple locations, and in this context they are often represented as <strong>events</strong>: sending or receiving messages, changing a record in a database.</p>
+
+<p>The physical distribution of events can vary hugely: events may occur on different processes running on the same machine, or be geographically spread across the globe. The key property of a distributed system is that no process has immediate access to the state of another — information spreads only through communication.</p>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p>Events are the observable units of a distributed computation. Understanding how they relate to one another — especially which events <em>could</em> have caused which — is essential to designing correct distributed algorithms.</p></div>
+
+<p>Not all events are related, but some events can <strong>cause or influence</strong> how other events occur. For example, a reply to a received email is influenced by that message — and possibly by other prior messages received. Detecting potential cause-and-effect relations between events is fundamental to the design of distributed algorithms: maintaining consistency in replicated databases, performing garbage collection, building checkpoints, and analysing concurrency.</p>
+
+</section>
+
+<section id="s2"><h2>2. Internal vs External Causality</h2>
+
+<p>To make sense of cause-and-effect relations within a distributed system, we should limit their scope to what can be perceived <em>inside</em> the system itself &mdash; this is <strong>internal causality</strong>. Processes observe events such as message sends and receives, and from these observations they can deduce causal links.</p>
+
+<p>However, a distributed system also interacts with the outside physical world, where other cause-and-effect relations exist at large &mdash; <strong>external causality</strong>. Consider Alice reserving a table for dinner for two and then telling Bob; Bob then reserves two movie tickets for after dinner. Even if the restaurant and cinema booking systems are part of the same distributed system, they know nothing of the external causal relation ("Alice told Bob"). The two reservation systems see concurrent events even though a human observer knows they are causally linked.</p>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>External causality <em>cannot</em> be detected by a distributed system without domain-specific knowledge. The only general approximation available is physical time — if event A happened at 7 PM and event B at 8 PM, A <em>might</em> have caused B — but this is heuristic at best.</p></div>
+
+</section>
+
+<section id="s3"><h2>3. The Happens-Before Relation</h2>
+
+<p>In 1978, Leslie Lamport introduced the <strong>happens-before</strong> relation, denoted with the arrow operator <var>a &rarr; b</var>, meaning "a happens before b" &mdash; all processes agree that a occurs first, then b occurs. This relation is the foundation of all logical clock theory.</p>
+
+<p>The relation is directly observable in two situations:</p>
+<ol>
+<li><strong>Same process:</strong> If a and b are events of the same process, and a comes before b, then <var>a &rarr; b</var>. Local events are ordered by local sequential execution.</li>
+<li><strong>Message propagation:</strong> If a message is sent by an event a (send event) and received by another event b (receive event), then <var>a &rarr; b</var>. A message always takes a finite, positive, non-zero amount of time to propagate.</li>
+</ol>
+
+<p>The relation is <strong>transitive</strong>: if <var>a &rarr; b</var> and <var>b &rarr; c</var>, then <var>a &rarr; c</var>. This gives us a <strong>partial order</strong> over events in the system.</p>
+
+<div class="callout warn"><span class="callout-label">Important</span><p>When neither <var>a &rarr; b</var> nor <var>b &rarr; a</var> can be established, the events are said to be <strong>concurrent</strong>, written <var>a &parallel; b</var>. Concurrency does not mean the events happened at the same physical time; it means we have no way to determine a causal ordering between them.</p></div>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant P1 as Process P1 (Alice)
+    participant P2 as Process P2 (Bob)
+    participant P3 as Process P3 (Chris)
+    Note over P1: a1 → Check fridge
+    P1->>P2: a2: "Dinner?" (ts=C(a2))
+    Note over P2: b1 → Receive msg
+    P2->>P1: b2: "Yes, let's do it" (ts=C(b2))
+    Note over P3: c1 → "Bored..."
+    P3->>P1: c2: "Can I join?" (ts=C(c2))
+    Note over P1: a3 → Receive replies
+</pre>
+
+<p>In this diagram, the arrows represent message sends. The happens-before relation includes: <var>a1 &rarr; a2 &rarr; b1 &rarr; b2 &rarr; a3</var>, and also <var>c1 &rarr; c2 &rarr; a3</var>. But <var>c1</var> is concurrent with <var>a1</var> and <var>a2</var> &mdash; no message connects Chris's boredom to Alice's initial check.</p>
+
+</section>
+
+<section id="s4"><h2>4. Causal Paths and Causal Histories</h2>
+
+<p>In a distributed computation, a simple way to check whether an event <var>c</var> could have caused another event <var>e</var> is to find at least one <strong>directed path</strong> from <var>c</var> to <var>e</var> following the happens-before relation. If such a path exists, then <var>c &rarr; e</var> and <var>c</var> is a <strong>possible cause</strong> for <var>e</var>.</p>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Given a space-time diagram of a distributed execution, identify which events are causally related and which are concurrent. For any pair of events, determine whether there exists a causal path connecting them.</p></div>
+
+<h3>Causal Histories</h3>
+
+<p>A <strong>causal history</strong> is a richer representation: each process keeps track of the <em>set</em> of all events it knows about. When a message is sent, the sender includes its causal history; the receiver merges the received history with its own. The causal history of an event is the set of all events that happened before it.</p>
+
+<p>For the scenario above:</p>
+<ul>
+<li>After a1: P1's causal history = {a1}</li>
+<li>After a2: P1's history = {a1, a2}</li>
+<li>After b1 (receiving a2): P2's history = {b1, a1, a2}</li>
+<li>After b2: P2's history = {b1, b2, a1, a2}</li>
+<li>After a3 (receiving b2): P1's history = {a1, a2, a3, b1, b2}</li>
+</ul>
+
+<p>Causal histories grow without bound, which makes them impractical as a data structure. However, the <em>idea</em> of tracking what each process knows about every other process directly motivates vector clocks.</p>
+
+</section>
+
+<section id="s5"><h2>5. Logical Time: From Causality to Clocks</h2>
+
+<p>Physical time could serve as an approximation for causality: something happening before in time might be the cause of something happening after. However, this approach loses track of explicit connections between events across processes &mdash; a message takes an unknown amount of time, and clocks on different machines drift.</p>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p>A <strong>logical notion of time</strong> can capture causality without requiring synchronised physical clocks. Logical clocks assign a time value to each event such that the ordering of time values respects the happens-before relation.</p></div>
+
+<p>The core insight is that we do not need to know <em>when</em> an event happened in physical time &mdash; we only need to know whether it could have <em>caused</em> another event. A logical clock suffices for this purpose.</p>
+
+</section>
+
+<section id="s6"><h2>6. Logical Clocks: Definition and Consistency</h2>
+
+<p>Let <var>H</var> be the domain of events and <var>T</var> the domain of (logical) time values. A <strong>logical clock</strong> is a function <var>C: H &rarr; T</var> assigning a time value to each event, such that all processes agree on the value assigned to each event.</p>
+
+<p>The fundamental property that every logical clock must satisfy is the <strong>clock consistency condition</strong> (monotonicity):</p>
+
+<p style="text-align:center;font-size:1.2rem;font-weight:600;margin:1rem 0;"><var>&forall; a, b &isin; H, a &rarr; b &rArr; C(a) &lt; C(b)</var></p>
+
+<p>This ensures that if a causally precedes b, the logical clock reflects this by giving a a smaller timestamp. However, the converse does not necessarily hold: <var>C(a) &lt; C(b)</var> does <em>not</em> imply <var>a &rarr; b</var>, because unrelated events can still receive ordered timestamps.</p>
+
+<p>If the system additionally satisfies:</p>
+
+<p style="text-align:center;font-size:1.2rem;font-weight:600;margin:1rem 0;"><var>&forall; a, b &isin; H, a &rarr; b &hArr; C(a) &lt; C(b)</var></p>
+
+<p>...then the clock system is said to be <strong>strongly consistent</strong>. Scalar (Lamport) clocks are not strongly consistent; vector clocks are.</p>
+
+</section>
+
+<section id="s7"><h2>7. Implementing Logical Clocks</h2>
+
+<p>Implementing logical clocks requires addressing two issues:</p>
+<ol>
+<li>Each process needs <strong>local data structures</strong> to represent logical time.</li>
+<li>A <strong>shared protocol</strong> defines how processes update these structures to ensure consistency.</li>
+</ol>
+
+<p>Every process <var>p_i</var> maintains two conceptual views of time:</p>
+<ul>
+<li>A <strong>local logical clock</strong> representing the process's own progress over time.</li>
+<li>A <strong>global logical clock</strong> representing the process's view of the global time across the system.</li>
+</ul>
+
+<p>Different logical clock systems (scalar, vector, matrix) differ in their representation and their update protocol, but all implement the same two rules &mdash; one for updating the local clock, one for incorporating information from received messages &mdash; and all ensure the fundamental monotonicity property.</p>
+
+</section>
+
+<section id="s8"><h2>8. Lamport's Algorithm: Scalar Time</h2>
+
+<p>Lamport's logical clock algorithm is the simplest form of logical time. Each process <var>p_i</var> maintains a single integer <var>lc_i</var> (its local scalar clock) and a local increment <var>&delta;_i</var> (typically 1).</p>
+
+<div id="lamport-code"></div>
+
+<p>The algorithm's beauty is its minimalism: a single integer per process, with three straightforward rules. Despite its simplicity, it guarantees the clock consistency condition.</p>
+
+<p>Because <var>lc_i</var> acts as both the local clock and the global timestamp, every event at <var>p_i</var> gets <var>C(a) = lc_i(a)</var>. This merging of local and global time is what makes the system efficient but also what limits it &mdash; as we will see.</p>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p>The <code>max</code> operation on receive is what propagates causal information. When P2 receives a message with timestamp 3 but its own clock is only at 2, the <code>max</code> operation pulls the clock forward to 3, acknowledging that the sender had seen more events.</p></div>
+
+</section>
+
+<section id="s9"><h2>9. Lamport Clock Interactive Simulator</h2>
+
+<p>Step through a three-process distributed execution and watch the Lamport clocks evolve. Click a process button to advance its next event. If a receive step tries to consume a message that hasn't been sent yet, it will <strong>block</strong> (highlighted in amber) — demonstrating that happens-before imposes a real ordering constraint.</p>
+
+<div id="lamport-stepper"></div>
+
+</section>
+
+<section id="s10"><h2>10. Total Ordering via Scalar Clocks</h2>
+
+<p>Scalar clocks can be used to establish a <strong>total order</strong> among all events in the system, even concurrent ones, by introducing a <strong>tie-breaking mechanism</strong>. When two events <var>a, b</var> have equal timestamps (<var>C(a) = C(b)</var>), we break ties using the process identifiers (which are linearly ordered).</p>
+
+<p>This is crucial for <strong>liveness properties</strong>. Many distributed algorithms rely on totally ordered event queues: they need to decide which event to process next even when events are concurrent. Since concurrent events are causally independent, no causality relation is violated by ordering them arbitrarily.</p>
+
+<p>For example, in Figure 1 of the slide reference, the third event of <var>p_1</var> has the same timestamp (3) as the second event of <var>p_2</var>. With tie-breaking by process ID (assuming <var>p_1 &lt; p_2</var>), the total order places <var>p_1</var>'s event first.</p>
+
+</section>
+
+<section id="s11"><h2>11. The Limits of Scalar Time</h2>
+
+<p>Although scalar clocks satisfy <var>a &rarr; b &rArr; C(a) &lt; C(b)</var>, the converse is <strong>false</strong>:</p>
+
+<p style="text-align:center;font-size:1.1rem;font-weight:600;margin:1rem 0;"><var>C(a) &lt; C(b) &nbsp;&#x2718;&rArr;&nbsp; a &rarr; b</var></p>
+
+<p>Scalar clocks are <strong>not strongly consistent</strong>. This is because each process squashes its local logical clock and its view of the global clock into a single integer. When process <var>p_2</var> receives a message from <var>p_1</var> with timestamp 2, it updates its clock to <code>max(lc2, 2) = 2</code> — but it "forgets" that this value of 2 came from <var>p_1</var>'s event, not from its own execution. Causal dependency information among events at different processes is lost.</p>
+
+<h3>Example</h3>
+<p>Consider three processes. <var>p_1</var>'s third event has a scalar timestamp of 3, while <var>p_3</var>'s fourth event has a timestamp of 4. Despite <var>3 &lt; 4</var>, the events may be concurrent &mdash; no message path connects them. The scalar clock gives the illusion of ordering where none exists causally.</p>
+
+<p>This limitation motivates the need for a richer structure: <strong>vector clocks</strong>.</p>
+
+</section>
+
+<section id="s12"><h2>12. Vector Clocks: Motivation and Definition</h2>
+
+<p>In essence, with scalar clocks <var>a &rarr; b</var> implies <var>C(a) &lt; C(b)</var>, but <var>C(a) &lt; C(b)</var> does <em>not</em> imply <var>a &rarr; b</var>. This means time values can be totally ordered when events are not — comparing scalar timestamps of concurrent events is meaningless.</p>
+
+<p>What we need is a clock system that can answer two questions for any pair of events <var>a, b</var>:</p>
+<ol>
+<li>Does <var>a</var> causally precede <var>b</var>?</li>
+<li>Are <var>a</var> and <var>b</var> concurrent?</li>
+</ol>
+
+<p>A <strong>vector clock</strong> for a system of <var>n</var> processes is an array (vector) of <var>n</var> logical clocks, one for each process. Each process <var>p_i</var> maintains a vector <var>vc_i</var> where:</p>
+<ul>
+<li><var>vc_i[i]</var> is the number of events that have occurred so far at <var>p_i</var> &mdash; essentially <var>p_i</var>'s own scalar clock.</li>
+<li><var>vc_i[j] = k</var> means that <var>p_i</var> <em>knows</em> that at least <var>k</var> events have occurred at process <var>p_j</var>.</li>
+</ul>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>The hypothesis is that the number of processes <var>n</var> is known and fixed. We could use smaller vectors for subsets of processes, but all correctness properties are proven when every process maintains an <var>n</var>-element vector.</p></div>
+
+</section>
+
+<section id="s13"><h2>13. Vector Clock Rules</h2>
+
+<p>The protocol for managing vector clocks follows the same structure as scalar clocks but operates on entire vectors:</p>
+
+<div id="vc-code"></div>
+
+<p>The critical difference from scalar clocks is on receive: the <strong>element-wise max</strong> operation merges the sender's entire knowledge into the receiver's vector. This preserves causal dependency information: after receiving, <var>p_j</var> knows not just the sender's latest event count, but also what the sender knew about all other processes.</p>
+
+<h3>Evolution of Vector Time</h3>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant P1 as p₁
+    participant P2 as p₂
+    participant P3 as p₃
+    Note over P1: vc₁=[1,0,0]
+    Note over P1: vc₁=[2,0,0]
+    P1->>P2: msg with ts=[2,0,0]
+    Note over P2: vc₂=[2,1,0] after receive
+    Note over P2: vc₂=[2,2,0]
+    P2->>P3: msg with ts=[2,2,0]
+    Note over P3: vc₃=[2,2,1] after receive
+</pre>
+
+<p>Notice how the vector preserves the chain: <var>p_3</var> ends up knowing that <var>p_1</var> has had 2 events and <var>p_2</var> has had 2 events. With a scalar clock, <var>p_3</var> would have a single number (say, 5) and could not distinguish which process contributed which events.</p>
+
+</section>
+
+<section id="s14"><h2>14. Vector Clock Ordering and Strong Consistency</h2>
+
+<p>Vector timestamps are compared component-wise. For two vector timestamps <var>vh</var> and <var>vk</var>:</p>
+
+<p style="text-align:center;font-size:1.1rem;font-weight:600;margin:1rem 0;">
+<var>vh &lt; vk &hArr; (&forall;i, vh_i &le; vk_i) &and; (&exist;i', vh_{i'} &lt; vk_{i'})</var>
+</p>
+
+<p>This ordering is <strong>antisymmetric</strong> and <strong>transitive</strong>. But most importantly, it captures causality exactly:</p>
+
+<p style="text-align:center;font-size:1.15rem;font-weight:600;margin:1rem 0;color:var(--lk-ac);">
+<var>vc(m1) &lt; vc(m2) &hArr; m1 &rarr; m2</var>
+</p>
+
+<p>Vector clocks provide <strong>strong consistency</strong> &mdash; the bidirectional implication that scalar clocks lack. If two vector timestamps are incomparable (neither &lt; nor &gt; nor =), the corresponding events are concurrent.</p>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Given two vector timestamps, determine the causal relationship between their events. For example, <var>[2,1,0]</var> and <var>[2,2,0]</var>: is the first event earlier, later, or concurrent with the second?</p></div>
+
+<table>
+<thead><tr><th>Property</th><th>Scalar (Lamport)</th><th>Vector</th></tr></thead>
+<tbody>
+<tr><td>Data per process</td><td>1 integer</td><td><var>n</var> integers</td></tr>
+<tr><td>Message overhead</td><td>1 integer</td><td><var>n</var> integers</td></tr>
+<tr><td>Consistency</td><td>Weak: a→b ⇒ C(a)&lt;C(b)</td><td>Strong: a→b ⇔ vc(a)&lt;vc(b)</td></tr>
+<tr><td>Concurrency detection</td><td>Not possible</td><td>Incomparable ⇒ concurrent</td></tr>
+</tbody>
+</table>
+
+</section>
+
+<section id="s15"><h2>15. Interactive Vector Clock Explorer</h2>
+
+<p>Fire events across three processes and watch the vector clock matrix update in real time. Each process shows its current vector; the matrix below gives the full picture. The event log tracks every action and its causal effect.</p>
+
+<div id="vc-widget">
+<style>
+#vc-widget { border:1px solid var(--lk-bd); border-radius:.7rem; padding:1rem; margin:1.4rem 0; background:#fff; font-family:var(--lk-font); }
+#vc-widget .vc-panels { display:grid; grid-template-columns:repeat(3,1fr); gap:.6rem; margin-bottom:.8rem; }
+#vc-widget .vc-panel { border:1px solid var(--lk-bd); border-radius:.5rem; padding:.5rem; background:var(--lk-soft); }
+#vc-widget .vc-panel h5 { margin:0 0 .3rem; font-size:.9rem; text-align:center; color:var(--lk-ac); }
+#vc-widget .vc-vec { font-family:var(--lk-mono); font-size:.8rem; text-align:center; padding:.25rem; background:#fff; border-radius:.3rem; margin-bottom:.3rem; border:1px solid var(--lk-bd); }
+#vc-widget .vc-vec span { display:inline-block; margin:0 .15rem; padding:.05rem .25rem; border-radius:.2rem; }
+#vc-widget .vc-vec .vc-self { background:var(--lk-hl); font-weight:600; }
+#vc-widget .vc-events { min-height:2rem; margin:.3rem 0; }
+#vc-widget .vc-ev { font-size:.7rem; font-family:var(--lk-mono); background:#fff; border-radius:.3rem; border:1px solid var(--lk-bd); padding:.1rem .3rem; margin:.1rem 0; }
+#vc-widget .vc-btns { display:flex; flex-wrap:wrap; gap:.25rem; margin-top:.3rem; }
+#vc-widget .vc-btns button { font:inherit; font-size:.72rem; cursor:pointer; padding:.15rem .4rem; border-radius:.3rem; border:1px solid var(--lk-ac); background:#fff; color:var(--lk-ac); }
+#vc-widget .vc-btns button:hover { background:var(--lk-hl); }
+#vc-widget .vc-btns button.vc-send { border-color:#7c3aed; color:#7c3aed; }
+#vc-widget .vc-btns button.vc-send:hover { background:#f3e8ff; }
+#vc-widget .vc-btns button.vc-recv { border-color:#d97706; color:#d97706; }
+#vc-widget .vc-btns button.vc-recv:hover { background:#fffbeb; }
+#vc-widget .vc-btns button:disabled { opacity:.4; cursor:not-allowed; }
+#vc-widget .vc-matrix { margin:.6rem 0; }
+#vc-widget .vc-matrix table { font-family:var(--lk-mono); font-size:.8rem; width:100%; border-collapse:collapse; }
+#vc-widget .vc-matrix th, #vc-widget .vc-matrix td { border:1px solid var(--lk-bd); padding:.25rem .4rem; text-align:center; }
+#vc-widget .vc-matrix th { background:var(--lk-code); font-weight:600; }
+#vc-widget .vc-matrix .vc-diag { background:var(--lk-hl); font-weight:600; }
+#vc-widget .vc-log { border:1px solid var(--lk-bd); border-radius:.4rem; padding:.4rem; max-height:8rem; overflow-y:auto; font-size:.78rem; background:var(--lk-soft); }
+#vc-widget .vc-log p { margin:.1rem 0; font-family:var(--lk-mono); }
+#vc-widget .vc-log .vc-new { font-weight:600; color:var(--lk-ac); }
+#vc-widget .vc-actions { text-align:center; margin-top:.4rem; }
+#vc-widget .vc-actions button { font:inherit; cursor:pointer; padding:.25rem .7rem; border-radius:.4rem; border:1px solid #9ca3af; background:#fff; color:var(--lk-muted); }
+#vc-widget .vc-actions button:hover { background:var(--lk-soft); }
+#vc-widget .vc-concurrent { text-align:center; font-size:.8rem; color:var(--lk-muted); margin:.3rem 0; }
+</style>
+
+<div class="vc-panels" id="vc-panels">
+  <div class="vc-panel" data-p="0"><h5>P1</h5><div class="vc-vec" id="vc-vec-0"></div><div class="vc-events" id="vc-evts-0"></div><div class="vc-btns" id="vc-btns-0"></div></div>
+  <div class="vc-panel" data-p="1"><h5>P2</h5><div class="vc-vec" id="vc-vec-1"></div><div class="vc-events" id="vc-evts-1"></div><div class="vc-btns" id="vc-btns-1"></div></div>
+  <div class="vc-panel" data-p="2"><h5>P3</h5><div class="vc-vec" id="vc-vec-2"></div><div class="vc-events" id="vc-evts-2"></div><div class="vc-btns" id="vc-btns-2"></div></div>
+</div>
+
+<div class="vc-concurrent" id="vc-concurrent"></div>
+
+<div class="vc-matrix" id="vc-matrix-area"></div>
+
+<div class="vc-log" id="vc-log"></div>
+
+<div class="vc-actions"><button id="vc-reset">Reset All</button></div>
+
+<script>
+(function(){
+  var N = 3;
+  var vc = [[0,0,0],[0,0,0],[0,0,0]];
+  var evts = [[],[],[]];
+  var pending = {}; // pending messages: "from->to" = [vc_copy]
+  var logEl = document.getElementById('vc-log');
+  var concurrentEl = document.getElementById('vc-concurrent');
+
+  function label(v) { return '[' + v.join(',') + ']'; }
+  function formatVec(v, selfIdx) {
+    return v.map(function(c,i){ return i===selfIdx ? '<span class="vc-self">'+c+'</span>' : '<span>'+c+'</span>'; }).join('');
+  }
+
+  function render() {
+    for (var pid = 0; pid < N; pid++) {
+      document.getElementById('vc-vec-' + pid).innerHTML = formatVec(vc[pid], pid);
+      var evtList = document.getElementById('vc-evts-' + pid);
+      evtList.innerHTML = '';
+      evts[pid].forEach(function(e,i){
+        var d = document.createElement('div');
+        d.className = 'vc-ev';
+        d.textContent = 'e' + (i+1) + ' ' + label(e.vc);
+        evtList.appendChild(d);
+      });
+      var btns = document.getElementById('vc-btns-' + pid);
+      btns.innerHTML = '';
+      var intBtn = document.createElement('button');
+      intBtn.textContent = 'Internal';
+      intBtn.addEventListener('click', function(p){ return function(){ fireEvent(p,'internal',-1); }; }(pid));
+      btns.appendChild(intBtn);
+      for (var t = 0; t < N; t++) {
+        if (t === pid) continue;
+        var sBtn = document.createElement('button');
+        sBtn.textContent = 'Send to P' + (t+1);
+        sBtn.className = 'vc-send';
+        sBtn.addEventListener('click', function(p,dest){ return function(){ fireEvent(p,'send',dest); }; }(pid,t));
+        btns.appendChild(sBtn);
+      }
+      for (var src = 0; src < N; src++) {
+        if (src === pid) continue;
+        var key = src + '->' + pid;
+        var rBtn = document.createElement('button');
+        rBtn.textContent = 'Recv from P' + (src+1);
+        rBtn.className = 'vc-recv';
+        rBtn.disabled = !pending[key];
+        rBtn.addEventListener('click', function(p,s){ return function(){ fireEvent(p,'recv',s); }; }(pid,src));
+        btns.appendChild(rBtn);
+      }
+    }
+    // Matrix
+    var ma = document.getElementById('vc-matrix-area');
+    var h = '<table><tr><th></th>';
+    for (var i = 0; i < N; i++) h += '<th>P' + (i+1) + '</th>';
+    h += '</tr>';
+    for (var r = 0; r < N; r++) {
+      h += '<tr><th>P' + (r+1) + '</th>';
+      for (var c = 0; c < N; c++) {
+        h += '<td' + (r===c?' class="vc-diag"':'') + '>' + vc[r][c] + '</td>';
+      }
+      h += '</tr>';
+    }
+    h += '</table>';
+    ma.innerHTML = h;
+
+    // Concurrent detection: show pairs of process vectors that are incomparable
+    var concPairs = [];
+    for (var i = 0; i < N; i++) {
+      for (var j = i+1; j < N; j++) {
+        var vi = vc[i], vj = vc[j];
+        var leAll = true, geAll = true;
+        for (var k = 0; k < N; k++) {
+          if (vi[k] > vj[k]) leAll = false;
+          if (vi[k] < vj[k]) geAll = false;
+        }
+        if (!leAll && !geAll) concPairs.push('P'+(i+1)+' ∥ P'+(j+1));
+      }
+    }
+    concurrentEl.textContent = concPairs.length ? 'Concurrent: ' + concPairs.join(', ') : 'All vectors are comparable.';
+  }
+
+  function fireEvent(pid, type, arg) {
+    if (type === 'internal') {
+      vc[pid][pid]++;
+      evts[pid].push({ type: 'int', vc: vc[pid].slice() });
+      log('P' + (pid+1) + ': Internal → ' + label(vc[pid]));
+    } else if (type === 'send') {
+      vc[pid][pid]++;
+      var ts = vc[pid].slice();
+      var key = pid + '->' + arg;
+      pending[key] = ts;
+      evts[pid].push({ type: 'send', vc: ts, dest: arg });
+      log('P' + (pid+1) + ': Send to P' + (arg+1) + ' ts=' + label(ts));
+    } else if (type === 'recv') {
+      var key = arg + '->' + pid;
+      if (!pending[key]) { log('⚠ No message from P' + (arg+1) + ' to P' + (pid+1) + ' pending.'); render(); return; }
+      var ts = pending[key];
+      delete pending[key];
+      vc[pid][pid]++; // increment own clock for the receive event
+      var old = vc[pid].slice();
+      for (var k = 0; k < N; k++) {
+        vc[pid][k] = Math.max(vc[pid][k], ts[k]);
+      }
+      evts[pid].push({ type: 'recv', vc: vc[pid].slice(), from: arg, msgTs: ts });
+      log('P' + (pid+1) + ': Recv from P' + (arg+1) + ' ts=' + label(ts) + ' → ' + label(vc[pid]));
+    }
+    render();
+  }
+
+  function log(msg) {
+    var p = document.createElement('p');
+    p.textContent = '▸ ' + msg;
+    logEl.insertBefore(p, logEl.firstChild);
+    while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
+  }
+
+  function reset() {
+    vc = [[0,0,0],[0,0,0],[0,0,0]];
+    evts = [[],[],[]];
+    pending = {};
+    logEl.innerHTML = '<p style="color:var(--lk-muted)">▸ Reset. Fire events to begin.</p>';
+    render();
+  }
+
+  document.getElementById('vc-reset').addEventListener('click', reset);
+
+  // Initialise
+  logEl.innerHTML = '<p style="color:var(--lk-muted)">▸ Fire events to see vector clocks evolve.</p>';
+  render();
+})();
+</script>
+</div>
+
+<p>Try this: fire <strong>P1 Internal</strong> (vc1 becomes [1,0,0]), then <strong>P1 Send to P2</strong> (ts=[2,0,0]), then <strong>P2 Recv from P1</strong> (vc2 becomes [2,1,0]). The vector preserves the knowledge that P2 knows about P1's two events. Now fire <strong>P3 Internal</strong> a few times (vc3 becomes [0,0,1], [0,0,2]) — P3's vector is incomparable with P1's. They are concurrent.</p>
+
+</section>
+
+<section id="s16"><h2>16. Matrix Time</h2>
+
+<p>Even in vector clocks, some "squashing" of information still occurs: each process knows about the event counts of other processes but not about their <em>knowledge</em> of third processes. <strong>Matrix clocks</strong> extend the idea one more level: each process maintains an <var>n &times; n</var> matrix where entry <var>M_i[j][k]</var> represents <var>p_i</var>'s knowledge of what <var>p_j</var> knows about <var>p_k</var>.</p>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>Matrix clocks provide strictly more information than vector clocks, but at the cost of <var>O(n^2)</var> storage and message overhead per process. For most practical purposes, vector clocks are sufficient. The slide deck mentions matrix clocks as a natural extension but declares "we stop here."</p></div>
+
+</section>
+
+<section id="s17"><h2>17. Summary</h2>
+
+<ol class="lk-timeline">
+<li><span class="lk-tl-when">Actions and Events</span> — Distributed computations are sequences of events across multiple processes.</li>
+<li><span class="lk-tl-when">Happens-Before</span> — Lamport's <var>&rarr;</var> relation defines a partial order: same-process ordering plus message propagation, transitively closed.</li>
+<li><span class="lk-tl-when">Causal Paths</span> — A directed path through the happen-before graph identifies possible causality between events.</li>
+<li><span class="lk-tl-when">Logical Clocks</span> — Functions <var>C: H &rarr; T</var> satisfying <var>a &rarr; b &rArr; C(a) &lt; C(b)</var>.</li>
+<li><span class="lk-tl-when">Scalar (Lamport) Clocks</span> — Each process maintains one integer; increments before each event; piggybacks on sends; takes max on receives. Weakly consistent.</li>
+<li><span class="lk-tl-when">Vector Clocks</span> — Each process maintains an <var>n</var>-element vector; preserves causal dependencies; strongly consistent: <var>vc(a) &lt; vc(b) &hArr; a &rarr; b</var>.</li>
+<li><span class="lk-tl-when">Matrix Clocks</span> — An <var>n &times; n</var> matrix per process capturing knowledge about other processes' knowledge.</li>
+</ol>
+
+</section>
+
+<section id="quiz"><h2>Check Your Understanding</h2>
+<div class="lk-quiz">
+
+<details><summary>Explain the happens-before relation. What are the two ways to directly observe a → b?</summary>
+<p>The happens-before relation (a → b) means all processes agree that event a occurs before event b. It is directly observed in two situations: (1) a and b are events in the same process, and a comes before b in that process's sequential execution; (2) a is the sending of a message and b is the reception of that same message, since messages take finite positive time to propagate. The relation is transitive: a → b and b → c implies a → c.</p></details>
+
+<details><summary>What does it mean for two events to be concurrent (a ∥ b) in the context of happens-before?</summary>
+<p>Two events a and b are concurrent (a ∥ b) when neither a → b nor b → a can be established. This does NOT mean they happened at the same physical time. It means that there is no causal path connecting them in either direction: no chain of same-process ordering and message propagation links one to the other. They are causally independent.</p></details>
+
+<details><summary>State the clock consistency condition. Why is it called a "weak" condition?</summary>
+<p>The clock consistency condition is: a → b ⇒ C(a) &lt; C(b). It is called "weak" because the implication goes only one way. If C(a) &lt; C(b), we cannot conclude that a → b — the timestamps may be ordered while the events are actually concurrent. This is the case with scalar (Lamport) clocks, which are weakly consistent but not strongly consistent.</p></details>
+
+<details><summary>Describe the three rules of Lamport's logical clock algorithm.</summary>
+<p>(1) Before executing any local event (internal, send, or receive), process p_i increments its local clock lc_i by δ_i (typically 1). (2) When sending a message m, p_i piggybacks the current value of lc_i on the message as its timestamp. (3) Upon receiving a message m with timestamp ts, p_j adjusts its clock: lc_j ← max(lc_j, ts). This ensures the clock always moves forward to reflect observed causal information.</p></details>
+
+<details><summary>Why are scalar clocks NOT strongly consistent? Give a concrete example.</summary>
+<p>Scalar clocks merge the local clock and the view of global time into a single integer. When p₂ receives a message from p₁ with timestamp 3, it sets lc₂ = max(lc₂, 3) = 3, but "forgets" that this 3 represents p₁'s events, not p₂'s own. Later, p₁'s fourth event might get timestamp 4 and p₂'s third event also gets 4. Even if 4 = 4, the events might be concurrent — we cannot recover the causal relationship. More generally, C(a) &lt; C(b) does not imply a → b because unrelated events can receive ordered timestamps.</p></details>
+
+<details><summary>How does a vector clock fix the strong consistency problem?</summary>
+<p>A vector clock maintains one counter per process (n counters for n processes). Instead of squashing all information into a single integer, the receive operation applies element-wise max: ∀k, vc_j[k] ← max(vc_j[k], ts(m)[k]). This preserves what p_j knows about every process after incorporating the sender's knowledge. The ordering vc(a) &lt; vc(b) is defined component-wise and holds if and only if a → b, giving strong consistency. If two vectors are incomparable, the events are concurrent.</p></details>
+
+<details><summary>Prove that if a → b, then for vector clocks, vc(a) &lt; vc(b).</summary>
+<p>By induction on the definition of a → b. Base cases: (1) Same process: a occurs before b at p_i. Each event increments vc_i[i], so vc(a)_i &lt; vc(b)_i and all other components are ≥ (they may have been updated in between). Thus vc(a) &lt; vc(b). (2) Message send/receive: a sends a message with timestamp ts = vc(a). Upon receive at b, p_j sets vc(b)[k] ← max(vc(b)[k], ts[k]) for all k, and also increments its own counter. So vc(b) ≥ ts = vc(a) element-wise, and at least one component (p_j's own) strictly increased. Thus vc(a) &lt; vc(b). Transitive closure follows from transitivity of the &lt; relation on vectors.</p></details>
+
+<details><summary>What is the practical implication of the trade-off between scalar and vector clocks?</summary>
+<p>Scalar clocks use O(1) space per process and O(1) message overhead but cannot detect concurrency. Vector clocks use O(n) space and O(n) message overhead but can detect concurrency and provide strong consistency. In systems with many processes, the O(n) overhead of vector clocks can be significant, so some practical systems use scalar clocks with additional mechanisms (like version vectors in CRDTs) or hybrid approaches.</p></details>
+
+<details><summary>Explain the concept of event height with scalar clocks when δ = 1.</summary>
+<p>When the increment δ is always 1, the scalar timestamp h of an event a has the property that h − 1 represents the minimum logical duration in terms of number of events — the number of events that causally precede a along the longest causal path ending at a. This is called the height of the event. For example, if an event has timestamp 5, at least 4 other events must have occurred sequentially before it, regardless of which processes produced them.</p></details>
+
+<details><summary>How could you use total ordering of scalar timestamps for liveness in a distributed algorithm?</summary>
+<p>Many distributed algorithms (e.g., distributed mutual exclusion, totally ordered multicast) rely on processing events in a consistent global order. Scalar timestamps with tie-breaking by process ID provide a total order. Since concurrent events are causally independent, ordering them arbitrarily does not violate causality. This total order ensures liveness: processes can always decide which event to handle next, even when events occur concurrently at different processes.</p></details>
+
+</div></section>
+
+<footer class="lk-foot">Study material generated from the course slides by Andrea Omicini (DISI, Univ. Bologna). Not an official source.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+(function(){
+  // ---- Annotated Code: Lamport's Algorithm ----
+  LessonKit.annotatedCode('#lamport-code', {
+    lang: 'text',
+    lines: [
+      ['Initialise:', 'Each process p_i keeps a local integer lc_i (initially 0) and a fixed increment δ_i (typically 1). There is no shared global clock.'],
+      ['Rule 1: Increment before events', 'Before executing any event (internal, send, or receive), p_i increments lc_i: lc_i ← lc_i + δ_i. This ensures every event has a unique local timestamp that advances monotonically.'],
+      ['Rule 2: Piggyback on send', 'When p_i sends a message m, after incrementing lc_i, it attaches the current value lc_i to the message. This timestamp tells the receiver how many events the sender has observed.'],
+      ['Rule 3: Take max on receive', 'Upon receiving m with timestamp ts, process p_j sets lc_j ← max(lc_j, ts). This pulls p_j\'s clock forward to at least match the sender\'s knowledge, incorporating causal information from the sender.'],
+      ['Assign timestamps', 'For any event a at process p_i, the logical global timestamp is C(a) = lc_i(a). All processes agree on this timestamp because it derives from an agreed-upon protocol.'],
+      ['Consistency achieved', 'By construction, a → b ⇒ C(a) < C(b). The max operation on receive ensures that causal chains produce strictly increasing timestamps along the happens-before relation.']
+    ]
+  });
+
+  // ---- Annotated Code: Vector Clock Rules ----
+  LessonKit.annotatedCode('#vc-code', {
+    lang: 'text',
+    lines: [
+      ['Data structure:', 'Each process p_i maintains a vector vc_i of length n (one entry per process), initially all zeros. vc_i[i] tracks p_i\'s own events; vc_i[j] tracks p_i\'s knowledge of events at p_j.'],
+      ['Increment before action:', 'Before any action at p_i: vc_i[i] ← vc_i[i] + 1. This is the same as the scalar rule, but only increments the process\'s OWN component of the vector.'],
+      ['Piggyback on send:', 'When p_i sends a message m, the timestamp is the entire vector: ts(m) ← vc_i. The receiver gets the sender\'s full knowledge of all processes.'],
+      ['Element-wise max on receive:', 'When p_j receives m from p_i with timestamp ts: ∀k, vc_j[k] ← max(vc_j[k], ts[k]). This merges the sender\'s knowledge into the receiver\'s vector, component by component.'],
+      ['Example:', 'p1 with vc₁=[2,0,0] sends to p2. p2 has vc₂=[0,1,0]. After receive: vc₂ = max([0,1,0], [2,0,0]) = [2,1,0] but then vc₂[1]++ for the receive event itself → [2,2,0]. Wait — the increment happens BEFORE the action, so: first vc₂[1]++ gives [0,2,0], then max with [2,0,0] gives [2,2,0].'],
+      ['Strong consistency:', 'The element-wise max preserves causal information: after receiving, p_j knows not just that p_i had 2 events, but also what p_i knew about p_k. This enables the bidirectional implication vc(a) < vc(b) ⇔ a → b.']
+    ]
+  });
+
+  // ---- Lamport Clock Stepper ----
+  LessonKit.stepper('#lamport-stepper', {
+    title: 'Lamport Clock — Distributed Dinner Coordination',
+    sub: 'Advance each process in any order. Receive steps block if the message has not been sent yet.',
+    shared: { lc1: 0, lc2: 0, lc3: 0, msg12: null, msg23: null, msg31: null, eventCount: 0 },
+    watch: ['lc1', 'lc2', 'lc3'],
+    threads: {
+      P1: {
+        name: 'P1 (Alice)',
+        steps: [
+          { label: 'Check fridge (internal)', run: function(s){ s.lc1++; s.eventCount++; } },
+          { label: 'Send "Dinner?" to P2', run: function(s){ s.lc1++; s.msg12 = s.lc1; s.eventCount++; } },
+          { label: 'Recv "Yes" from P2', run: function(s){
+            if (!s.msg21) return 'block';
+            s.lc1++; s.lc1 = Math.max(s.lc1, s.msg21); s.msg21 = null; s.eventCount++;
+          }},
+          { label: 'Recv "Can I join?" from P3', run: function(s){
+            if (!s.msg31) return 'block';
+            s.lc1++; s.lc1 = Math.max(s.lc1, s.msg31); s.msg31 = null; s.eventCount++;
+          }}
+        ]
+      },
+      P2: {
+        name: 'P2 (Bob)',
+        steps: [
+          { label: 'Recv "Dinner?" from P1', run: function(s){
+            if (!s.msg12) return 'block';
+            s.lc2++; s.lc2 = Math.max(s.lc2, s.msg12); s.msg12 = null; s.eventCount++;
+          }},
+          { label: 'Send "Yes" to P1', run: function(s){ s.lc2++; s.msg21 = s.lc2; s.eventCount++; } },
+          { label: 'Tell Chris (internal msg)', run: function(s){ s.lc2++; s.msg23 = s.lc2; s.eventCount++; } }
+        ]
+      },
+      P3: {
+        name: 'P3 (Chris)',
+        steps: [
+          { label: '"Bored..." (internal)', run: function(s){ s.lc3++; s.eventCount++; } },
+          { label: 'Send "Can I join?" to P1', run: function(s){ s.lc3++; s.msg31 = s.lc3; s.eventCount++; } },
+          { label: 'Recv message from P2', run: function(s){
+            if (!s.msg23) return 'block';
+            s.lc3++; s.lc3 = Math.max(s.lc3, s.msg23); s.msg23 = null; s.eventCount++;
+          }}
+        ]
+      }
+    },
+    verdict: function(s, done){
+      if (!done) return { status: '', text: 'Advance each process by clicking its button. Watch how the Lamport clocks update on sends and receives.' };
+      var ok = s.lc1 >= 3 && s.lc2 >= 3 && s.lc3 >= 2 && s.eventCount >= 9;
+      return { status: ok ? 'ok' : 'bad', text: ok
+        ? 'All events executed. Lamport clocks satisfy a → b ⇒ C(a) < C(b). P1='+s.lc1+', P2='+s.lc2+', P3='+s.lc3
+        : 'Not all events completed. Try running every step in each process.' };
+    }
+  });
+})();
+</script>
+</body></html>

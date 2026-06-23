@@ -1,0 +1,827 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS-CX</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head><body class="lk">
+
+<header class="lk-header">
+  <div class="lk-kicker">Distributed Systems — Prof. Omicini</div>
+  <h1>Addressing production-ready distributed systems through Kubernetes</h1>
+  <div class="lk-meta"><span>DS-CX — A practical overview</span><span>Guest lecture by Mattia Matteini — Univ. Bologna, Oct 2025</span></div>
+</header>
+
+<div class="lk-overview">
+  <h2>In this lesson</h2>
+  <ul>
+    <li>Understand <strong>why container orchestration</strong> is essential for production-grade distributed systems</li>
+    <li>Learn <strong>Kubernetes cluster architecture</strong>: control plane, worker nodes, and their components</li>
+    <li>Explore <strong>Kubernetes objects</strong> (Pods, Deployments, Services, ReplicaSets, HPAs) and their declarative model</li>
+    <li>Compare Kubernetes with <strong>Docker Swarm</strong> and understand when each makes sense</li>
+    <li>Walk through a <strong>practical migration</strong> from Docker Compose to Kubernetes with autoscaling</li>
+    <li>See how <strong>self-healing, immutability, and observability</strong> contribute to production reliability</li>
+  </ul>
+</div>
+
+<nav class="lk-toc"><h3>Contents</h3><ol>
+  <li><a href="#s1">Motivations: Why Container Orchestration Matters</a></li>
+  <li><a href="#s2">Premises: Containerization as the Foundation</a></li>
+  <li><a href="#s3">What Kubernetes Is (and What It Is Not)</a></li>
+  <li><a href="#s4">Kubernetes vs. Docker Swarm</a></li>
+  <li><a href="#s5">Key Features: Immutability and Declarative Configuration</a></li>
+  <li><a href="#s6">Key Features: Autoscaling, Self-Healing, and CRI</a></li>
+  <li><a href="#s7">Cluster Architecture: Control Plane and Worker Nodes</a></li>
+  <li><a href="#s8">Objects: The Building Blocks of Kubernetes</a></li>
+  <li><a href="#s9">Pods: The Smallest Deployable Unit</a></li>
+  <li><a href="#s10">ReplicaSets, Deployments, and Workload Controllers</a></li>
+  <li><a href="#s11">Services: Stable Endpoints for Ephemeral Pods</a></li>
+  <li><a href="#s12">The Pod Lifecycle</a></li>
+  <li><a href="#s13">Practical Example: From Docker Compose to Kubernetes</a></li>
+  <li><a href="#s14">Horizontal Pod Autoscaling and Stress Testing</a></li>
+  <li><a href="#s15">System Monitoring: Prometheus and Grafana</a></li>
+  <li><a href="#s16">Kompose and Migration Tooling</a></li>
+  <li><a href="#s17">Putting It All Together: A Production-Ready Deployment</a></li>
+  <li><a href="#quiz">Check Your Understanding</a></li>
+</ol></nav>
+
+<!-- ====================== S1 ====================== -->
+<section id="s1"><h2>1. Motivations: Why Container Orchestration Matters</h2>
+
+<p>Most software systems deployed today are <strong>distributed</strong>. They span multiple processes, multiple machines, and often multiple data centres. Containerization frameworks such as Docker opened the door to packaging and shipping these systems in a portable, reproducible way — but they did not solve the <strong>operational</strong> problem: once you have dozens or hundreds of containers, how do you keep them running?</p>
+
+<div class="callout idea"><span class="callout-label">The gap containers created</span><p>Docker gave us a uniform packaging format. What it did <em>not</em> give us was a way to schedule containers across a fleet of machines, restart them when they fail, route traffic to healthy instances, scale them under load, or roll out updates without downtime. That is the job of a <strong>container orchestrator</strong> — and Kubernetes is now the <em>de facto</em> standard for that job.</p></div>
+
+<p>Non-functional requirements — availability, scalability, reliability, recoverability, observability — acquire even more importance when a system is distributed. A single-container application that crashes is an annoyance. A hundred-container application where 5% of containers crash every hour is a disaster without automation. Kubernetes encodes these quality attributes directly into its architecture, providing declarative controls for all of them.</p>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Why did the industry need a container orchestrator on top of container runtimes? Explain the specific operational gaps that Docker alone does not address and how Kubernetes fills them with concrete mechanisms.</p></div>
+</section>
+
+<!-- ====================== S2 ====================== -->
+<section id="s2"><h2>2. Premises: Containerization as the Foundation</h2>
+
+<p>Before Kubernetes, there were virtual machines — and before VMs became the dominant deployment model, there were containers. Containers offer a <strong>lightweight form of virtualization</strong> that shares the host operating system kernel while providing process and filesystem isolation through Linux kernel features such as namespaces and cgroups.</p>
+
+<div class="callout note"><span class="callout-label">Background</span><p>The VM era taught us that full OS-level virtualization carries heavy overhead: every VM runs its own kernel, consumes gigabytes of RAM, and boots slowly. Containers flip this model: they share the kernel but isolate user-space, achieving near-native performance with millisecond startup times. For a deeper treatment of Linux isolation primitives, see Giovanni Ciatto's lecture on Virtuale.</p></div>
+
+<p>Docker became the most popular containerization platform, providing a user-friendly CLI, a layered image format, and a registry (Docker Hub) for distributing images. The key insight is that a container image is an <strong>immutable snapshot</strong> of an application and all its dependencies — the same image runs identically on a developer's laptop, a CI server, and a production cluster. This reproducibility is the precondition for everything Kubernetes builds on top.</p>
+
+<div class="lk-tabs" data-kit="tabs">
+  <div class="lk-tablist">
+    <button class="lk-tab">Virtual Machines</button>
+    <button class="lk-tab">Containers</button>
+  </div>
+  <div class="lk-tabpanel">
+    <ul>
+      <li>Each VM has its own guest OS kernel</li>
+      <li>Heavyweight: GB of RAM, minutes to boot</li>
+      <li>Strong isolation at the hypervisor level</li>
+      <li>Good for multi-tenant, mixed-OS environments</li>
+    </ul>
+  </div>
+  <div class="lk-tabpanel">
+    <ul>
+      <li>Containers share the host kernel</li>
+      <li>Lightweight: MB of RAM, milliseconds to start</li>
+      <li>Isolation via Linux namespaces and cgroups</li>
+      <li>Ideal for microservices and dense packing</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ====================== S3 ====================== -->
+<section id="s3"><h2>3. What Kubernetes Is (and What It Is Not)</h2>
+
+<p>Kubernetes describes itself as <em>"a portable, extensible, open source platform for managing containerized workloads and services."</em> The emphasis on <strong>platform</strong> is deliberate: Kubernetes is not a single tool but an ecosystem that provides primitives (scheduling, service discovery, scaling, self-healing) that other tools compose into complete solutions.</p>
+
+<p>Equally important is understanding the boundaries. Kubernetes is <strong>not</strong>:</p>
+
+<table>
+  <tr><th>Kubernetes is not...</th><th>What fills that gap</th></tr>
+  <tr><td>A containerization platform</td><td>Docker, containerd, CRI-O (any CRI runtime)</td></tr>
+  <tr><td>A PaaS (Platform as a Service)</td><td>It provides lower-level primitives; PaaS layers like OpenShift build on top</td></tr>
+  <tr><td>A cloud provider</td><td>Kubernetes runs on AWS, GCP, Azure, on-premises — it is cloud-agnostic</td></tr>
+  <tr><td>A CI/CD deployment tool</td><td>CI/CD pipelines (GitHub Actions, Jenkins, ArgoCD) push to Kubernetes</td></tr>
+  <tr><td>A logging or monitoring tool</td><td>It offers integrations and APIs; tools like Prometheus, Grafana, and the EFK stack handle observability</td></tr>
+</table>
+
+<p>The separation of concerns is important. Kubernetes manages the <strong>runtime plane</strong> — keeping your containers running, healthy, and reachable. It deliberately leaves the development pipeline, logging storage, and monitoring dashboards to other tools in the cloud-native ecosystem. This modularity is a strength, not a limitation.</p>
+
+<div class="callout idea"><span class="callout-label">Mental model</span><p>Think of Kubernetes as the distributed-system kernel of your production environment. It provides scheduling (like a process scheduler), networking (like a virtual network stack), and storage (like a volume manager) — but for containers spread across a cluster of machines rather than processes on a single host.</p></div>
+</section>
+
+<!-- ====================== S4 ====================== -->
+<section id="s4"><h2>4. Kubernetes vs. Docker Swarm</h2>
+
+<p>Docker Swarm is the native clustering and orchestration tool bundled with Docker. It is simpler to set up and operates within the familiar Docker ecosystem — the <code>docker-compose.yml</code> file is its primary configuration interface. For small clusters and less complex applications, Swarm can be a pragmatic choice.</p>
+
+<p>Kubernetes, by contrast, is a full-featured orchestration platform. The trade-off is real: more complexity at setup time, but dramatically more automation at runtime.</p>
+
+<div class="lk-tabs" data-kit="tabs">
+  <div class="lk-tablist">
+    <button class="lk-tab">Docker Swarm</button>
+    <button class="lk-tab">Kubernetes</button>
+  </div>
+  <div class="lk-tabpanel">
+    <ul>
+      <li>Native clustering for Docker — simple setup</li>
+      <li>Suitable for <strong>smaller clusters</strong> and less complex applications</li>
+      <li>Users manually handle resource allocation and scaling</li>
+      <li>Configuration via <code>docker-compose.yml</code></li>
+      <li>Simple access control based on TLS</li>
+      <li>Limited ecosystem and community momentum</li>
+    </ul>
+  </div>
+  <div class="lk-tabpanel">
+    <ul>
+      <li>Open-source orchestration platform — richer but more complex</li>
+      <li>Ideal for <strong>larger clusters</strong> and more complex applications</li>
+      <li>Automatically handles scaling, load balancing, and failover</li>
+      <li>Configuration via declarative YAML (or JSON) manifests</li>
+      <li>Advanced access control with <strong>Role-Based Access Control (RBAC)</strong></li>
+      <li>Massive cloud-native ecosystem (Helm, Istio, Prometheus, ArgoCD, etc.)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Compare Kubernetes and Docker Swarm along the axes of complexity, automation, scaling, and access control. In what scenarios would Swarm still be a reasonable choice, and at what point does the complexity investment in Kubernetes pay off?</p></div>
+</section>
+
+<!-- ====================== S5 ====================== -->
+<section id="s5"><h2>5. Key Features: Immutability and Declarative Configuration</h2>
+
+<p>Two philosophical pillars distinguish Kubernetes from imperative orchestration tools: <strong>immutability</strong> and <strong>declarative configuration</strong>.</p>
+
+<h3>Immutability</h3>
+<p>In Kubernetes, resources are not meant to be mutated in-place after creation. If a change is needed, the resource is deleted and a new one is created. Containers themselves are designed to be <strong>ephemeral and stateless</strong>: deleting and recreating containers is a standard part of their lifecycle, not an exceptional event. This principle ensures consistency and reliability — the cluster always converges toward the declared desired state rather than accumulating drift from ad-hoc patches.</p>
+
+<h3>Declarative Configuration</h3>
+<p>Kubernetes adheres to the principle <strong>"everything is an object."</strong> Many kinds of objects — Pods, Deployments, Services, ConfigMaps, Secrets, and dozens more — are available to shape the production environment. Configuration files are written in YAML (or JSON), and an external tool named <code>kubectl</code> manages the environment by applying these files:</p>
+
+<pre><code class="language-text">kubectl create -f configuration-file.yaml</code></pre>
+
+<p>The declarative model works as follows: you describe the <strong>desired state</strong> in a manifest file, and Kubernetes continuously reconciles the actual state to match it. If a Pod crashes, Kubernetes notices and creates a replacement — not because you told it to, but because the desired state says "there should be N replicas" and the actual state is "there are N-1." This control loop is the engine of Kubernetes' automation.</p>
+
+<div class="callout idea"><span class="callout-label">Why declarative wins</span><p>Imperative systems (like shell scripts or Ansible playbooks) describe <em>how</em> to reach a state. Declarative systems describe <em>what</em> state you want. The difference matters at scale: when a declarative system encounters an unexpected condition, it keeps trying to converge. An imperative script just stops where it was written to stop. Declarative configuration directly improves configurability and maintainability.</p></div>
+</section>
+
+<!-- ====================== S6 ====================== -->
+<section id="s6"><h2>6. Key Features: Autoscaling, Self-Healing, and CRI</h2>
+
+<h3>Autoscaling</h3>
+<p>Kubernetes supports automatic scaling based on resource usage or custom metrics, with two dimensions:</p>
+
+<table>
+  <tr><th>Type</th><th>Mechanism</th><th>What it scales</th></tr>
+  <tr><td><strong>Horizontal Scaling</strong></td><td>Horizontal Pod Autoscaler (HPA)</td><td>Number of Pod replicas (up and down)</td></tr>
+  <tr><td><strong>Vertical Scaling</strong></td><td>Vertical Pod Autoscaler (VPA)</td><td>CPU and memory resources available to a container</td></tr>
+</table>
+
+<p>Autoscaling directly improves <strong>availability</strong> (more replicas handle more traffic) and <strong>scalability</strong> while optimizing resource usage — you do not provision for peak load 24/7.</p>
+
+<h3>Self-Healing</h3>
+<p>Kubernetes continuously monitors the health of containers and nodes, and takes corrective action automatically:</p>
+<ul>
+  <li>Failed containers are <strong>automatically replaced</strong></li>
+  <li>If a <strong>node fails</strong>, Kubernetes can reattach its volumes to a new instance on a different node</li>
+  <li>If a container behind a Service fails, Kubernetes <strong>removes its route</strong> and redirects traffic to other healthy instances of the same Service</li>
+</ul>
+<p>These behaviours directly improve <strong>recoverability</strong> and <strong>reliability</strong> without operator intervention.</p>
+
+<h3>Container Runtime Interface (CRI)</h3>
+<p>The CRI is a <strong>plugin interface</strong> that decouples Kubernetes from any specific container runtime. A CRI-compliant runtime must be running on each cluster node. Supported runtimes include containerd, CRI-O, and Mirantis Container Runtime — meaning Kubernetes is <strong>not tied to Docker only</strong>. This decoupling was a key architectural decision that allowed the ecosystem to evolve beyond Docker after Docker's own deprecation of dockershim.</p>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Explain self-healing in Kubernetes with concrete examples. How does it differ from simply having a process supervisor like systemd at the node level? Why is the CRI abstraction important for the long-term health of the Kubernetes project?</p></div>
+</section>
+
+<!-- ====================== S7 ====================== -->
+<section id="s7"><h2>7. Cluster Architecture: Control Plane and Worker Nodes</h2>
+
+<p>A Kubernetes cluster is composed of a <strong>control plane</strong> plus a set of <strong>worker machines</strong> called nodes. This is a classic master-worker architecture, but with an important twist: every component on the control plane is itself designed for high availability and can be replicated.</p>
+
+<pre class="mermaid">
+graph TB
+  subgraph "Control Plane"
+    API[kube-apiserver]
+    ETCD[(etcd)]
+    SCHED[kube-scheduler]
+    CM[kube-controller-manager]
+    CCM[cloud-controller-manager]
+  end
+  subgraph "Worker Node 1"
+    K1[kubelet]
+    KP1[kube-proxy]
+    CR1[container runtime]
+  end
+  subgraph "Worker Node 2"
+    K2[kubelet]
+    KP2[kube-proxy]
+    CR2[container runtime]
+  end
+  subgraph "Worker Node N"
+    K3[kubelet]
+    KP3[kube-proxy]
+    CR3[container runtime]
+  end
+  API --- ETCD
+  API --- SCHED
+  API --- CM
+  API --- CCM
+  API --- K1
+  API --- K2
+  API --- K3
+</pre>
+
+<h3>Control Plane Components</h3>
+<table>
+  <tr><th>Component</th><th>Role</th></tr>
+  <tr><td><strong>kube-apiserver</strong></td><td>Exposes the Kubernetes HTTP API. Every interaction with the cluster — from kubectl commands to internal component communication — goes through the API server. It is the front door.</td></tr>
+  <tr><td><strong>etcd</strong></td><td>A distributed key-value database that stores all cluster metadata and state. It is the <em>source of truth</em> for the entire cluster.</td></tr>
+  <tr><td><strong>kube-scheduler</strong></td><td>Watches for newly created Pods with no assigned node and selects a node for them to run on, based on resource availability, affinity rules, and policies.</td></tr>
+  <tr><td><strong>kube-controller-manager</strong></td><td>Runs controller processes — each controller is a control loop that watches the shared state through the API server and makes changes to move the current state toward the desired state.</td></tr>
+  <tr><td><strong>cloud-controller-manager</strong></td><td>Embeds cloud-specific control logic, allowing the core Kubernetes code to remain cloud-agnostic.</td></tr>
+</table>
+
+<h3>Worker Node Components</h3>
+<table>
+  <tr><th>Component</th><th>Role</th></tr>
+  <tr><td><strong>kubelet</strong></td><td>The agent that runs on every node. It ensures that containers described in PodSpecs are running and healthy.</td></tr>
+  <tr><td><strong>kube-proxy</strong></td><td>A network proxy that maintains network rules on nodes, implementing the Service abstraction through iptables or IPVS rules.</td></tr>
+  <tr><td><strong>container runtime</strong></td><td>The software responsible for running containers (e.g., containerd, CRI-O). Must implement the Container Runtime Interface.</td></tr>
+</table>
+
+<div class="callout idea"><span class="callout-label">Architecture insight</span><p>The only component that talks directly to etcd is the API server. All other components read and write cluster state through the API server. This centralised data path is not a bottleneck — it is a design choice that enforces consistency, enables authentication and authorization at a single choke point, and makes the system auditable.</p></div>
+</section>
+
+<!-- ====================== S8 ====================== -->
+<section id="s8"><h2>8. Objects: The Building Blocks of Kubernetes</h2>
+
+<p>Objects are <strong>persistent entities</strong> in the Kubernetes system. They represent the state of the cluster: what containerized applications are running and on which nodes, the resources available to those applications, and the policies that govern their behaviour (restarts, upgrades, fault tolerance).</p>
+
+<div class="callout idea"><span class="callout-label">Record of intent</span><p>A Kubernetes object is a <strong>"record of intent."</strong> Once you create an object, the Kubernetes system will constantly work to ensure that the object exists — matching the actual state to the desired state you declared. This is the core reconciliation loop.</p></div>
+
+<h3>Object Structure</h3>
+<p>Every Kubernetes object includes two nested object fields that govern its behaviour:</p>
+<ul>
+  <li><strong>Spec</strong>: provides a description of the characteristics you want the resource to have — the <em>desired state</em></li>
+  <li><strong>Status</strong>: describes the <em>current state</em> of the object, supplied and updated by the Kubernetes system and its components</li>
+</ul>
+<p>The control plane continually manages every object's actual state to match the desired state supplied in the spec. This control loop is at the heart of Kubernetes' automation.</p>
+
+<h3>Required Manifest Fields</h3>
+<p>When creating an object via a manifest file (conventionally YAML), four fields are required:</p>
+
+<table>
+  <tr><th>Field</th><th>Purpose</th></tr>
+  <tr><td><code>apiVersion</code></td><td>The version of the Kubernetes API to use (e.g., <code>v1</code>, <code>apps/v1</code>)</td></tr>
+  <tr><td><code>kind</code></td><td>The type of object being created (e.g., <code>Pod</code>, <code>Deployment</code>, <code>Service</code>)</td></tr>
+  <tr><td><code>metadata</code></td><td>Data that uniquely identifies the object: name, namespace, UID, labels, annotations</td></tr>
+  <tr><td><code>spec</code></td><td>The desired state of the object — the format varies per kind and contains nested fields specific to that object</td></tr>
+</table>
+
+<p>Here is a minimal manifest that creates a Pod running nginx:</p>
+
+<pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.14.2
+    ports:
+    - containerPort: 80</code></pre>
+
+<p>Applied with: <code>kubectl apply -f manifest.yaml</code></p>
+</section>
+
+<!-- ====================== S9 ====================== -->
+<section id="s9"><h2>9. Pods: The Smallest Deployable Unit</h2>
+
+<p>A Pod is the <strong>smallest deployable unit</strong> in Kubernetes. It represents a group of one or more containers with shared storage and network resources, and a specification for how to run them. The shared context of a Pod is a set of Linux namespaces, cgroups, and potentially other facets of isolation — exactly the same primitives that containers themselves use, but now shared among a co-located group of containers.</p>
+
+<h3>Shared Context Within a Pod</h3>
+<p>Containers within the same Pod share:</p>
+<ul>
+  <li><strong>IP address and ports</strong> — they share the same network namespace</li>
+  <li><strong>Hostname</strong> — the Pod's hostname</li>
+  <li><strong>Storage volumes</strong> — any volumes mounted in the Pod are accessible to all its containers</li>
+  <li><strong>Process identifiers (PIDs)</strong> — they may share the PID namespace</li>
+</ul>
+
+<h3>Two Usage Patterns</h3>
+<ol>
+  <li><strong>Single container per Pod</strong> (most common): the Pod is simply a wrapper around a single container. Kubernetes manages Pods, not containers directly, so this is the standard pattern.</li>
+  <li><strong>Multiple containers per Pod</strong> (advanced): used to encapsulate an application composed of tightly coupled containers that need to share resources. Common patterns include Sidecar (helper container alongside the main application), Ambassador (proxy that abstracts external service access), and Adapter (transforms application output for external consumers).</li>
+</ol>
+
+<div class="callout note"><span class="callout-label">Design decision</span><p>Why not manage containers directly? The Pod abstraction gives Kubernetes a uniform unit of scheduling and lifecycle management, regardless of whether the container runtime uses Docker, containerd, or CRI-O. It also enables advanced patterns (sidecars, init containers) without changing the scheduler.</p></div>
+
+<pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata:
+  name: node-app
+  labels:
+    app: node
+spec:
+  containers:
+  - name: node-container
+    image: node:18
+    command: ["node", "-e", "console.log('Hello World!')"]
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "500m"
+    ports:
+    - containerPort: 3000
+      protocol: TCP</code></pre>
+
+<p>Key resource fields:</p>
+<ul>
+  <li><strong>requests</strong>: the amount of CPU/memory that Kubernetes <em>guarantees</em> to the container — used by the scheduler for placement decisions</li>
+  <li><strong>limits</strong>: the maximum amount of CPU/memory the container is <em>allowed</em> to use — exceeding CPU limits causes throttling; exceeding memory limits causes OOM kill</li>
+  <li>CPU is expressed in <strong>millicpu</strong> units: <code>100m</code> = 0.1 CPU core = 10% of a core</li>
+  <li>Memory is expressed in bytes: <code>128Mi</code> = 128 mebibytes</li>
+</ul>
+</section>
+
+<!-- ====================== S10 ====================== -->
+<section id="s10"><h2>10. ReplicaSets, Deployments, and Workload Controllers</h2>
+
+<h3>ReplicaSet</h3>
+<p>A ReplicaSet's purpose is to <strong>maintain a stable set of replica Pods running at any given time</strong>. It guarantees the availability of a specified number of identical Pods. When a ReplicaSet needs to create new Pods, it uses its Pod template. However, ReplicaSets are <strong>usually not directly managed by the user</strong> — they are controlled by a higher-level object called a Deployment.</p>
+
+<h3>Deployment</h3>
+<p>A Deployment manages a set of Pods to run an application workload. It provides <strong>declarative updates</strong> for Pods and ReplicaSets, enabling:</p>
+<ul>
+  <li><strong>Rollout</strong>: transitioning from the current state to the desired state (e.g., changing the container image version)</li>
+  <li><strong>Rollback</strong>: reverting to a previous revision if something goes wrong</li>
+  <li><strong>Zero-downtime updates</strong>: through rolling update strategies that gradually replace old Pods with new ones</li>
+</ul>
+
+<pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+        ports:
+        - containerPort: 80</code></pre>
+
+<p>The <code>replicas</code> field specifies the desired number of Pods. The <code>selector</code> tells the Deployment which Pods to manage (via label matching). The <code>template</code> contains the Pod specification used to create new Pods.</p>
+
+<h3>Other Workload Controllers</h3>
+<p>Deployments are not the only solution for managing workloads. Kubernetes provides specialised controllers for different use cases:</p>
+
+<div class="lk-tabs" data-kit="tabs">
+  <div class="lk-tablist">
+    <button class="lk-tab">Job</button>
+    <button class="lk-tab">CronJob</button>
+    <button class="lk-tab">StatefulSet</button>
+    <button class="lk-tab">DaemonSet</button>
+  </div>
+  <div class="lk-tabpanel">
+    <p>For running short-lived, one-off tasks. A Job creates one or more Pods and ensures that a specified number of them successfully terminate. Ideal for batch processing, data migration, or any finite-duration computation.</p>
+  </div>
+  <div class="lk-tabpanel">
+    <p>For regularly scheduled actions such as backups, report generation, log rotation, or periodic cleanup. A CronJob creates Jobs on a repeating schedule defined using cron syntax.</p>
+  </div>
+  <div class="lk-tabpanel">
+    <p>Manages Pods like a Deployment but <strong>maintains a sticky identity</strong> for each Pod. Pods are created from the same spec but are not interchangeable: each has a persistent identifier and stable network identity. Essential for stateful applications like databases (MySQL, PostgreSQL, MongoDB) where each instance has unique data.</p>
+  </div>
+  <div class="lk-tabpanel">
+    <p>Ensures that all (or some) Nodes run a copy of a Pod. As nodes are added to the cluster, Pods are added to them; as nodes are removed, those Pods are garbage collected. Common use cases: log collection daemons (Fluentd, Filebeat), monitoring agents (Node Exporter), and storage daemons.</p>
+  </div>
+</div>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>When would you use a StatefulSet instead of a Deployment? Explain the concept of "sticky identity" and why stateless and stateful workloads require different controllers in Kubernetes.</p></div>
+</section>
+
+<!-- ====================== S11 ====================== -->
+<section id="s11"><h2>11. Services: Stable Endpoints for Ephemeral Pods</h2>
+
+<p>Pods are ephemeral — they can be created, destroyed, and moved between nodes, which means their IP addresses are subject to change. A <strong>Service</strong> provides a stable endpoint (a fixed IP address and DNS name) to access a set of Pods, using <strong>label selectors</strong> to identify the target Pods.</p>
+
+<p>A Service is the <strong>entry point</strong> of the application. It defines a logical set of Pods and a policy by which to access them, redirecting requests to the appropriate Pods regardless of where they are running in the cluster.</p>
+
+<table>
+  <tr><th>Service Type</th><th>Behaviour</th></tr>
+  <tr><td><strong>ClusterIP</strong> (default)</td><td>Exposes the Service on a cluster-internal IP. Only reachable from within the cluster. Suitable for internal communication between microservices.</td></tr>
+  <tr><td><strong>NodePort</strong></td><td>Exposes the Service on each Node's IP at a static port (range 30000-32767). Accessible from outside the cluster via <code>&lt;NodeIP&gt;:&lt;NodePort&gt;</code>.</td></tr>
+  <tr><td><strong>LoadBalancer</strong></td><td>Exposes the Service externally using a cloud provider's load balancer (or MetalLB for on-premises deployments). Creates a NodePort and ClusterIP Service automatically, then provisions an external load balancer that forwards to the NodePort.</td></tr>
+</table>
+
+<pre><code class="language-yaml">apiVersion: v1
+kind: Service
+metadata:
+  name: node-service
+  labels:
+    app: node
+spec:
+  selector:
+    app: node
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+  type: ClusterIP</code></pre>
+
+<p>The <code>port</code> is the Service port (client-facing); the <code>targetPort</code> is the container port inside the Pod. The <code>selector</code> must match the labels on the target Pods — this is how the Service discovers its backends dynamically as Pods come and go.</p>
+
+<div class="callout idea"><span class="callout-label">Separation of concerns</span><p>Services decouple <em>who</em> needs to be reached (the application) from <em>where</em> it currently runs (the Pod IPs). This is exactly the same pattern as DNS for physical machines: a hostname stays constant even when the underlying IP changes. In Kubernetes, a Service provides a virtual IP and DNS name that survive individual Pod restarts and rescheduling.</p></div>
+</section>
+
+<!-- ====================== S12 ====================== -->
+<section id="s12"><h2>12. The Pod Lifecycle</h2>
+
+<p>Understanding the Pod lifecycle is essential for debugging and for designing applications that gracefully handle Kubernetes' operational model. A Pod traverses several phases from creation to termination, and the transitions are driven by the kubelet on the node where the Pod is scheduled.</p>
+
+<div id="pod-lifecycle-explorer"></div>
+
+<div class="callout warn"><span class="callout-label">Ephemeral by design</span><p>Pods are never "repaired" in place. If a container crashes, the kubelet restarts it (subject to the restart policy), but if a node fails entirely, Pods are rescheduled on a different node as <em>new</em> Pods with new IPs. Applications must be designed to tolerate this: store state externally (in a volume or database), use Services for discovery, and never assume a fixed IP or hostname survives a rescheduling event.</p></div>
+
+<p>The lifecycle phases are:</p>
+
+<ol class="lk-timeline">
+  <li><strong>Pending</strong> — The Pod has been accepted by the cluster but one or more containers are not yet running. This includes time spent waiting for the scheduler to assign a node, and time spent pulling container images.</li>
+  <li><strong>Running</strong> — The Pod is bound to a node, all containers have been created, and at least one container is still running or is in the process of starting or restarting.</li>
+  <li><strong>Succeeded</strong> — All containers in the Pod have terminated successfully and will not be restarted. Applicable to Jobs and one-off workloads.</li>
+  <li><strong>Failed</strong> — All containers in the Pod have terminated, and at least one container has terminated in failure (non-zero exit or system kill).</li>
+  <li><strong>Unknown</strong> — The state of the Pod could not be obtained, typically due to a communication error with the node where the Pod should be running.</li>
+</ol>
+</section>
+
+<!-- ====================== S13 ====================== -->
+<section id="s13"><h2>13. Practical Example: From Docker Compose to Kubernetes</h2>
+
+<p>The lecture presents a concrete migration of a simple web application — a <strong>visit counter</strong> composed of a Flask backend and a Redis in-memory store. The full source is available at <a href="https://github.com/Mala1180/kubernetes-hpa-example" target="_blank" rel="noopener">github.com/Mala1180/kubernetes-hpa-example</a>.</p>
+
+<h3>Phase 1: Development with Docker Compose</h3>
+
+<p>The application is minimal: a <code>GET /</code> endpoint increments a hit counter in Redis and returns the count along with the serving Pod's hostname. A <code>GET /busy-wait</code> endpoint performs a CPU-intensive operation for stress testing. The Docker Compose file defines two services — backend and redis — with the backend depending on Redis:</p>
+
+<pre><code class="language-yaml">services:
+  backend:
+    image: username/kubernetes-example-backend:latest
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine</code></pre>
+
+<div class="callout note"><span class="callout-label">Development workflow</span><p>The application is developed locally using Docker Compose. The <code>depends_on</code> directive ensures Redis starts before the backend, and environment variables wire the components together. The backend connects to Redis at <code>redis:6379</code> — the Compose DNS resolves <code>redis</code> to the Redis container's IP.</p></div>
+
+<h3>Phase 2: Migration to Kubernetes</h3>
+
+<p>Each Compose service is mapped to two Kubernetes objects: a Deployment and a Service. An additional Horizontal Pod Autoscaler object is defined for the backend.</p>
+
+<p><strong>Backend Deployment</strong> — defines replicas, the container image (pushed to Docker Hub), environment variables for Redis connectivity, and resource requests/limits:</p>
+
+<pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: mala1180/kubernetes-example-backend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"</code></pre>
+
+<p><strong>Backend Service</strong> — exposes the backend externally via NodePort:</p>
+
+<pre><code class="language-yaml">apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  type: NodePort
+  ports:
+  - port: 3000
+    targetPort: 3000
+    protocol: TCP
+  selector:
+    app: backend</code></pre>
+
+<p>The Redis service follows an analogous pattern (Deployment + Service with ClusterIP type, since Redis should not be exposed externally).</p>
+</section>
+
+<!-- ====================== S14 ====================== -->
+<section id="s14"><h2>14. Horizontal Pod Autoscaling and Stress Testing</h2>
+
+<p>The Horizontal Pod Autoscaler (HPA) automatically adjusts the number of Pod replicas in a Deployment based on observed resource utilisation or custom metrics. In the example, the HPA is configured to trigger when CPU usage exceeds <strong>50%</strong> or memory usage exceeds <strong>70%</strong>, scaling between 1 and 10 replicas:</p>
+
+<pre><code class="language-yaml">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70</code></pre>
+
+<h3>Deployment and Scaling Stepper</h3>
+<p>The following interactive stepper simulates the sequence of operations from initial deployment through scaling under load. Step through each action to see how the cluster state evolves:</p>
+
+<div id="deploy-scale-stepper"></div>
+
+<h3>Stress Testing Workflow</h3>
+<p>To validate the autoscaling, a stress-test script generates load on the backend:</p>
+<ol>
+  <li>Run the stress-test script — the web page becomes <strong>unresponsive</strong> due to the high load of requests</li>
+  <li>Within seconds, the HPA detects CPU/memory thresholds are exceeded and <strong>starts new Pod replicas</strong></li>
+  <li>After a while, the web page becomes <strong>responsive again</strong>, now showing different Pod IDs on each request — confirming that multiple Pods are serving traffic</li>
+</ol>
+
+<p>The practical workflow for a local deployment (using Minikube):</p>
+<pre><code class="language-text"># Start a local Kubernetes cluster
+minikube start
+
+# Enable the metrics server (required for HPA)
+minikube addons enable metrics-server
+
+# Apply all manifests
+kubectl apply -f k8s/
+
+# Access the application
+minikube service backend
+# or: kubectl port-forward svc/backend 8080:3000
+
+# Open the monitoring dashboard
+minikube dashboard</code></pre>
+
+<div class="callout exam"><span class="callout-label">The examiner will ask</span><p>Walk through what happens when a stress-test script hits a Kubernetes-deployed application behind an HPA. Describe the sequence of events from initial overload to recovery, naming each Kubernetes component involved and the data it observes or acts upon.</p></div>
+</section>
+
+<!-- ====================== S15 ====================== -->
+<section id="s15"><h2>15. System Monitoring: Observability in Production</h2>
+
+<p>So far we have focused on scalability, availability, and reliability — but another critical quality attribute is <strong>observability</strong>. A production system will eventually go down for some reason; an observable system allows operators to understand <em>what happened and what is happening</em>.</p>
+
+<h3>Monitoring Stack</h3>
+<p>The standard monitoring stack for Kubernetes combines two open-source tools:</p>
+
+<table>
+  <tr><th>Tool</th><th>Role</th></tr>
+  <tr><td><strong>Prometheus</strong></td><td>Open-source systems monitoring and alerting toolkit. It scrapes metrics from instrumented applications and Kubernetes components, stores them as time-series data, and provides a powerful query language (PromQL). It can also fire alerts based on threshold conditions.</td></tr>
+  <tr><td><strong>Grafana</strong></td><td>Open-source web interface for analytics and monitoring. It connects to Prometheus (and many other data sources) to visualise time-series data through dashboards, allowing operators to see CPU usage, memory consumption, request rates, error counts, and HPA activity at a glance.</td></tr>
+</table>
+
+<div class="callout idea"><span class="callout-label">Observability triad</span><p>The cloud-native observability stack is often described through three pillars: <strong>metrics</strong> (Prometheus — quantitative data over time), <strong>logs</strong> (Elasticsearch/Fluentd/Kibana or Loki — structured event records), and <strong>traces</strong> (Jaeger or OpenTelemetry — end-to-end request flows across services). Kubernetes integrates with all three but does not mandate any specific tool — the CRI and the metrics API provide the integration points.</p></div>
+
+<p>During the stress test, the Grafana dashboard visualises metrics collected by Prometheus, showing the spike in CPU/memory that triggers the HPA, the creation of new Pods, and the eventual stabilisation as load is distributed across replicas.</p>
+</section>
+
+<!-- ====================== S16 ====================== -->
+<section id="s16"><h2>16. Kompose and Migration Tooling</h2>
+
+<p><strong>Kompose</strong> is a conversion tool that automates the translation of Docker Compose files into Kubernetes manifests, saving time during migration. It supports Kompose-specific labels within the <code>compose.yml</code> file to explicitly control how resources are generated:</p>
+
+<pre><code class="language-yaml">services:
+  backend:
+    ...
+    labels:
+      kompose.service.type: nodeport
+      kompose.controller.type: deployment
+      kompose.image-pull-policy: always</code></pre>
+
+<p>The conversion is a single command:</p>
+<pre><code class="language-text">kompose convert -f docker-compose.yml -o k8s/</code></pre>
+
+<p>Kompose generates Deployment, Service, and other object manifests in the output directory. While automated conversion is a useful starting point, production Kubernetes manifests typically require manual refinement: resource requests and limits, health checks (liveness/readiness probes), security contexts, ConfigMaps for configuration, and Secrets for sensitive data are all Kubernetes-native concepts with no direct Docker Compose equivalent.</p>
+
+<div class="callout note"><span class="callout-label">Limitations</span><p>Kompose handles the mechanical translation of Compose syntax to Kubernetes syntax, but it does not add Kubernetes-specific best practices. A generated manifest lacks probes, resource tuning, pod disruption budgets, affinity rules, and network policies. Treat Kompose output as a starting template, not a production-ready configuration.</p></div>
+</section>
+
+<!-- ====================== S17 ====================== -->
+<section id="s17"><h2>17. Putting It All Together: A Production-Ready Deployment</h2>
+
+<p>Let's synthesise the complete picture. Moving a distributed application from development to production on Kubernetes involves a deliberate pipeline that maps architectural concerns to Kubernetes abstractions:</p>
+
+<ol class="lk-timeline">
+  <li><strong>Containerize</strong> each service with a Dockerfile — produce immutable images pushed to a registry</li>
+  <li><strong>Define Deployments</strong> for each service — specify replicas, resource requests/limits, environment variables, and image pull policy</li>
+  <li><strong>Define Services</strong> for each Deployment — choose the appropriate Service type (ClusterIP for internal, NodePort/LoadBalancer for external)</li>
+  <li><strong>Configure autoscaling</strong> via HPAs — set minimum and maximum replicas, and define metric thresholds that trigger scaling</li>
+  <li><strong>Apply manifests</strong> with kubectl — the control plane's reconciliation loop converges the cluster to the declared desired state</li>
+  <li><strong>Observe</strong> via Prometheus and Grafana — collect metrics, build dashboards, and configure alerts</li>
+</ol>
+
+<p>The result is a system that is:</p>
+
+<table>
+  <tr><th>Quality Attribute</th><th>Kubernetes Mechanism</th></tr>
+  <tr><td>Availability</td><td>ReplicaSets ensure multiple Pod instances; Services route around failed instances</td></tr>
+  <tr><td>Scalability</td><td>Horizontal Pod Autoscaler adjusts replica count based on real metrics</td></tr>
+  <tr><td>Reliability</td><td>Self-healing replaces failed containers and reschedules Pods from failed nodes</td></tr>
+  <tr><td>Recoverability</td><td>Declarative desired state + reconciliation loop = automatic recovery from failures</td></tr>
+  <tr><td>Observability</td><td>Prometheus metrics scraping + Grafana dashboards + alerting rules</td></tr>
+  <tr><td>Maintainability</td><td>Declarative YAML manifests under version control; rollout/rollback for zero-downtime updates</td></tr>
+</table>
+
+<div class="callout idea"><span class="callout-label">The distributed-system kernel</span><p>Kubernetes is best understood as a <strong>distributed-system kernel</strong> — it provides process scheduling (Pods on nodes), inter-process communication (Services + DNS), storage (PersistentVolumes), and resource isolation (namespaces, cgroups, RBAC) across a cluster of machines. The difference from a traditional OS kernel is that the "processes" are containers, the "machines" are nodes, and failure is treated as a normal condition rather than an exceptional one.</p></div>
+</section>
+
+<!-- ====================== QUIZ ====================== -->
+<section id="quiz"><h2>Check Your Understanding</h2>
+
+<div class="lk-quiz">
+
+<details><summary>1. What does Kubernetes provide that Docker alone does not? Give at least three concrete mechanisms.</summary>
+<p>Docker alone provides container packaging, running, and basic networking. Kubernetes adds: (1) <strong>automated scheduling</strong> — deciding which node runs which Pod based on resource availability and constraints; (2) <strong>self-healing</strong> — continuously replacing failed containers and rescheduling Pods from failed nodes to healthy ones; (3) <strong>declarative autoscaling</strong> — automatically adjusting the number of replicas based on CPU, memory, or custom metrics via the HPA; (4) <strong>service discovery and load balancing</strong> — providing stable IPs/DNS names for ephemeral Pods through Services; (5) <strong>rolling updates and rollbacks</strong> — deploying new versions with zero downtime and the ability to revert.</p>
+</details>
+
+<details><summary>2. Explain the difference between the Spec and Status fields of a Kubernetes object. Why is this distinction fundamental?</summary>
+<p>The <strong>Spec</strong> is the user-declared desired state. The <strong>Status</strong> is the current observed state, continuously updated by Kubernetes components. The distinction is fundamental because it enables the <strong>reconciliation loop</strong>: Kubernetes controllers continuously compare Status to Spec and take actions to close the gap. This is what makes Kubernetes self-healing and declarative — the user does not write imperative scripts; they declare intent, and the system works to make it true. Without this split, Kubernetes would be a static deployment tool rather than a continuously operating control system.</p>
+</details>
+
+<details><summary>3. Why does Kubernetes use label selectors to connect Services to Pods rather than IP addresses?</summary>
+<p>Pods are ephemeral — their IP addresses change every time they are recreated or rescheduled. Hard-coding IPs would break every time a Pod restarts. Label selectors provide an <strong>indirection layer</strong>: a Service targets "all Pods with label <code>app=backend</code>" rather than "Pod at 10.244.1.5." The Service controller dynamically updates the list of backend endpoints as Pods matching the selector are created and destroyed, ensuring the Service always routes to healthy, current Pods. This is the same pattern as DNS for physical hosts: a name stays constant while the underlying address changes.</p>
+</details>
+
+<details><summary>4. Describe the step-by-step sequence from "user submits a Deployment manifest" to "Pods are running." Name every component involved.</summary>
+<p>1. User runs <code>kubectl apply -f deployment.yaml</code>, which sends the manifest to <strong>kube-apiserver</strong>. 2. The API server validates the request and writes the Deployment object to <strong>etcd</strong>. 3. The <strong>Deployment controller</strong> (part of kube-controller-manager) observes the new Deployment, creates a ReplicaSet object, and updates etcd. 4. The <strong>ReplicaSet controller</strong> observes the new ReplicaSet, creates Pod objects (with no assigned node), and updates etcd. 5. The <strong>kube-scheduler</strong> watches for unassigned Pods, selects a suitable worker node for each based on resource availability and constraints, and updates the Pod's node assignment in etcd. 6. The <strong>kubelet</strong> on the assigned node observes that a Pod has been scheduled to its node, instructs the <strong>container runtime</strong> (via CRI) to pull the image and start the container. 7. The kubelet reports the Pod's status back to the API server, which updates the Status field in etcd.</p>
+</details>
+
+<details><summary>5. When is a StatefulSet the right choice over a Deployment? Explain with a concrete example.</summary>
+<p>A StatefulSet is the right choice when Pods need <strong>stable, unique identities</strong> that persist across rescheduling. Concretely: a three-node PostgreSQL cluster where each instance stores a different partition of data. With a Deployment, if a Pod dies, the replacement gets a new name and IP — but the data on the old Pod's volume must be reattached to the correct role (primary or replica). A StatefulSet assigns each Pod a stable ordinal name (<code>postgres-0</code>, <code>postgres-1</code>, <code>postgres-2</code>), stable network identities, and stable storage — when <code>postgres-1</code> dies, its replacement is also named <code>postgres-1</code> and gets the same PersistentVolume. Deployments treat all Pods as interchangeable; StatefulSets preserve identity.</p>
+</details>
+
+<details><summary>6. A Deployment has <code>replicas: 3</code>. One worker node crashes entirely. Describe what Kubernetes does, step by step, and why.</summary>
+<p>1. The kubelet on the crashed node stops sending heartbeats to the API server. After a timeout (default ~40 seconds), the node controller marks the node as <strong>NotReady</strong>. 2. The Pods on that node are marked as <strong>Terminating</strong> (or Unknown). 3. After a further grace period, the node controller evicts the Pods. 4. The ReplicaSet controller observes that the actual number of healthy Pods (0, since they were evicted) is less than the desired number (3 from the Deployment spec). 5. The ReplicaSet controller creates three new Pod objects. 6. The scheduler assigns them to healthy nodes (assuming sufficient capacity). 7. The kubelet on the target nodes starts the new containers. The system converges back to 3 replicas. If a Service is fronting these Pods, kube-proxy updates the endpoint list to include the new Pods and remove the dead ones, maintaining continuous availability for the surviving 2/3 of capacity during the transition.</p>
+</details>
+
+<details><summary>7. What is the role of the Container Runtime Interface (CRI), and why was it important for Kubernetes to define it?</summary>
+<p>The CRI is a plugin interface that decouples Kubernetes from any specific container runtime. Before CRI, Kubernetes was tightly coupled to Docker via an internal component called dockershim. The CRI allows any runtime that implements the interface — containerd, CRI-O, Mirantis Container Runtime — to be used interchangeably. This was important for three reasons: (1) it prevented vendor lock-in to Docker; (2) it allowed the community to develop purpose-built runtimes optimized for Kubernetes (like CRI-O); (3) when Docker deprecated dockershim in Kubernetes 1.20, the ecosystem could transition smoothly because all major runtimes already supported CRI.</p>
+</details>
+
+<details><summary>8. What happens during a rolling update of a Deployment from <code>nginx:1.14</code> to <code>nginx:1.16</code>? How does Kubernetes prevent downtime?</summary>
+<p>The Deployment controller creates a new ReplicaSet for the updated Pod template. It then gradually scales up the new ReplicaSet while scaling down the old one, respecting the <code>maxSurge</code> and <code>maxUnavailable</code> parameters. Typically: one new Pod is created; once it is healthy and ready, one old Pod is terminated; this repeats until all Pods are from the new ReplicaSet. The Service continues routing traffic to both old and new Pods during the transition, and because at least the desired number of Pods are always available (thanks to maxUnavailable=0 or 1), there is no downtime. If the new Pods fail health checks, the rollout can be automatically rolled back.</p>
+</details>
+
+<details><summary>9. Why are Kompose-generated Kubernetes manifests not production-ready? List at least four missing concerns.</summary>
+<p>Kompose performs a <strong>mechanical syntax translation</strong> from Compose to Kubernetes. It typically misses: (1) <strong>liveness and readiness probes</strong> — without them, Kubernetes cannot detect hung vs. healthy containers; (2) <strong>resource requests and limits</strong> — without them, the scheduler cannot make informed placement decisions; (3) <strong>security contexts</strong> — Compose has no concept of PodSecurityContext, non-root users, or read-only root filesystems; (4) <strong>Pod disruption budgets</strong> — to protect availability during voluntary disruptions like node drains; (5) <strong>ConfigMaps and Secrets</strong> — Compose uses environment variables or files; Kubernetes has first-class objects for configuration and secrets management; (6) <strong>network policies</strong> — Compose networks are permissive by default; production Kubernetes should restrict inter-service communication.</p>
+</details>
+
+<details><summary>10. Explain the three pillars of observability (metrics, logs, traces) and map each to the tools discussed in the lecture.</summary>
+<p><strong>Metrics</strong>: quantitative data over time (CPU usage, request rate, error count). Collected by <strong>Prometheus</strong>, which scrapes endpoints and stores time-series data. Visualised in <strong>Grafana</strong> dashboards. <strong>Logs</strong>: structured or semi-structured event records emitted by applications and system components. The lecture references monitoring integration points; the standard Kubernetes logging stack includes Fluentd (collection) + Elasticsearch (storage) + Kibana (visualisation) — the EFK stack — though not covered in detail in this lecture. <strong>Traces</strong>: end-to-end request flows across services. While not covered in the lecture slides, tools like Jaeger or OpenTelemetry integrate with Kubernetes to provide distributed tracing, showing latency breakdowns per service hop.</p>
+</details>
+
+<details><summary>11. (Oral-style) Prove or argue: "If a Kubernetes Service of type ClusterIP has a selector that matches zero Pods, the Service is useless." Is this always true?</summary>
+<p>Not always. If the selector matches zero Pods, the Service's endpoint list is empty — any request to the ClusterIP will be rejected (connection refused or timeout), so it cannot forward traffic. However, the Service still provides a <strong>stable DNS name</strong> and ClusterIP that <em>can exist before Pods are ready</em>. This is useful for bootstrapping: you can create all Services first, then deploy Pods later. Once Pods matching the selector appear, the Service starts routing to them automatically — no reconfiguration needed. So the Service is not useless; it is an inert name reservation waiting for backends. This is standard practice in GitOps workflows where manifests are applied in dependency order.</p>
+</details>
+
+<details><summary>12. (Oral-style) Describe a scenario where the HPA's CPU threshold is 50% and the maxReplicas is set to 10, but the system still becomes unresponsive under extreme load. What could be limiting the system?</summary>
+<p>Several possibilities: (1) <strong>Downstream bottleneck</strong> — the backend may be waiting on Redis or a database that cannot scale, so adding more backend replicas does not improve throughput; (2) <strong>Node resource exhaustion</strong> — if all nodes in the cluster are at capacity and the cluster autoscaler cannot add new nodes fast enough (or at all), new Pods remain in Pending state; (3) <strong>HPA metric lag</strong> — the metrics server polls every 15-30 seconds, and the HPA has a stabilisation window, so there can be a delay before scaling kicks in; (4) <strong>connection pool saturation</strong> — each Pod may have a limited connection pool to an external resource, and adding Pods saturates the downstream faster; (5) <strong>CPU is not the bottleneck</strong> — the real constraint might be I/O, network bandwidth, or file descriptors, not CPU, and the HPA is watching the wrong metric.</p>
+</details>
+
+</div>
+</section>
+
+<footer class="lk-foot">Study material generated from the course slides. Not an official source.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  /* === Pod Lifecycle State Explorer === */
+  LessonKit.stateExplorer('#pod-lifecycle-explorer', {
+    start: 'Pending',
+    states: {
+      'Pending': {
+        desc: 'The Pod has been accepted by the Kubernetes API server. One or more containers are not yet running. This phase includes time spent waiting for the scheduler to assign a node and time spent downloading container images from the registry.',
+        to: [['Scheduler assigns node + images pulled successfully', 'Running']]
+      },
+      'Running': {
+        desc: 'The Pod is bound to a worker node. All containers have been created, and at least one container is still running or in the process of starting or restarting. This is the normal operating state for long-running workloads.',
+        to: [
+          ['Container process exits with code 0 (Job/one-off workload)', 'Succeeded'],
+          ['Container crashes or is killed (non-zero exit, OOM, or node failure)', 'Failed'],
+          ['kubectl delete pod or Deployment scaled down', 'Terminating']
+        ]
+      },
+      'Terminating': {
+        desc: 'The Pod has been marked for deletion. Kubernetes sends SIGTERM to all containers and waits for the termination grace period (default 30s). After the grace period expires, containers are forcibly killed with SIGKILL. The Pod is then removed from the API server and from Service endpoint lists.',
+        to: [['Grace period expires + Pod removed from etcd', 'Completed']]
+      },
+      'Completed': {
+        desc: 'The Pod and all its resources have been cleaned up. The Pod object is removed from etcd (or retained briefly depending on garbage collection settings). No further state transitions.',
+        to: []
+      },
+      'Succeeded': {
+        desc: 'All containers in the Pod have terminated successfully (exit code 0) and will not be restarted. This is the terminal phase for Job workloads. For Deployments with a restartPolicy of Always, this phase is never reached because the kubelet restarts the container.',
+        to: [['Pod garbage-collected', 'Completed']]
+      },
+      'Failed': {
+        desc: 'All containers in the Pod have terminated, and at least one container has terminated in failure (non-zero exit code) or was killed by the system (OOM). For Deployments, the kubelet will restart the container, potentially transitioning back to Running. For Jobs with a backoff limit, repeated failures eventually mark the Job as failed.',
+        to: [
+          ['RestartPolicy=Always + kubelet restarts container', 'Running'],
+          ['RestartPolicy=Never / backoff limit exceeded', 'Completed']
+        ]
+      }
+    }
+  });
+
+  /* === Deployment and Scaling Interactive Stepper === */
+  LessonKit.stepper('#deploy-scale-stepper', {
+    title: 'Deployment and Scaling Walkthrough',
+    sub: 'Step through the lifecycle: initial deployment, scaling under load, and stabilisation.',
+    shared: { replicas: 0, load: 'idle', cpu: '5%', mem: '40Mi', targetReplicas: 'N/A' },
+    watch: ['replicas', 'load', 'cpu', 'mem', 'targetReplicas'],
+    threads: {
+      U: {
+        name: 'User / Operator',
+        steps: [
+          { label: 'kubectl apply -f k8s/  (Deployment + Service + Redis)', run: function (S) { S.replicas = 1; S.load = 'idle'; S.cpu = '5%'; S.mem = '40Mi'; S.targetReplicas = '1 (unchanged)'; } },
+          { label: 'Verify: the application responds on http://localhost:8080', run: function (S) { } },
+          { label: 'Run stress-test.sh  (simulate heavy load)', run: function (S) { S.load = 'heavy'; } },
+          { label: 'Observe: page becomes unresponsive briefly', run: function (S) { S.cpu = '92%'; S.mem = '210Mi'; S.targetReplicas = 'HPA triggers'; } }
+        ]
+      },
+      K: {
+        name: 'Kubernetes / HPA',
+        steps: [
+          { label: 'Deployment controller creates ReplicaSet and 1 Pod', run: function (S) { } },
+          { label: 'Service routes traffic to the single Pod', run: function (S) { } },
+          { label: 'HPA observes CPU>50% and memory>70%', run: function (S) { } },
+          { label: 'HPA scales to 3 replicas', run: function (S) { S.replicas = 3; } },
+          { label: 'HPA continues: scales to 5 replicas', run: function (S) { S.replicas = 5; S.cpu = '62%'; S.mem = '155Mi'; } },
+          { label: 'HPA stabilises at 6 replicas', run: function (S) { S.replicas = 6; S.cpu = '48%'; S.mem = '130Mi'; S.targetReplicas = '6 (stable)'; } },
+          { label: 'New Pods are healthy; page is responsive with multiple Pod IDs', run: function (S) { S.load = 'distributed'; } }
+        ]
+      }
+    },
+    verdict: function (S, allDone) {
+      if (!allDone) return { status: '', text: 'Click User steps and Kubernetes steps to walk through the deployment and scaling sequence. Run steps in logical order: setup, then load, then observe HPA reaction.' };
+      if (S.replicas >= 3 && S.load === 'distributed') return { status: 'ok', text: 'System successfully scaled! The HPA detected high load, scaled replicas from 1 to 6, and the application stabilised with multiple Pods serving traffic. This is the self-healing + autoscaling loop in action.' };
+      return { status: '', text: 'Sequence complete. Check that the HPA created enough replicas to handle the load.' };
+    }
+  });
+
+})();
+</script>
+</body></html>

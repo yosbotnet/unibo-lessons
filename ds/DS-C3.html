@@ -1,0 +1,728 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS-C3: The Problem of Consensus in Distributed Systems</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head><body class="lk">
+  <header class="lk-header">
+    <div class="lk-kicker">Distributed Systems &mdash; Prof. Omicini</div>
+    <h1>The Problem of Consensus in Distributed Systems</h1>
+    <div class="lk-meta"><span>The Problem of Consensus in Distributed Systems &mdash; A.Y. 2025/2026</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>In this lesson</h2>
+    <ul>
+      <li>What agreement problems are and why they appear everywhere in distributed systems</li>
+      <li>Basic ontology of distributed systems: time models, failure models, process/processor distinction</li>
+      <li>The consensus problem and its variants (single-bit, interactive consistency, generals problem, transaction commit)</li>
+      <li>Why consensus is essential for fault tolerance</li>
+      <li>The FLP impossibility result: why consensus with one faulty process in an asynchronous system cannot be solved</li>
+      <li>The Paxos algorithm: roles, phases (prepare, promise, accept, learn), and correctness guarantees</li>
+      <li>State Machine Replication (SMR) as a framework for fault-tolerant services</li>
+      <li>Multi-Paxos and other Paxos-based algorithms</li>
+    </ul>
+  </div>
+
+  <nav class="lk-toc">
+    <h3>Contents</h3>
+    <ol>
+      <li><a href="#s1">Agreement Problems in Distributed Systems</a></li>
+      <li><a href="#s2">Basic Ontology: Time &amp; Failure Models</a></li>
+      <li><a href="#s3">The Consensus Problem</a></li>
+      <li><a href="#s4">Variants of Consensus</a></li>
+      <li><a href="#s5">Consensus &amp; Fault Tolerance</a></li>
+      <li><a href="#s6">Impossibility Results: FLP</a></li>
+      <li><a href="#s7">Interactive: FLP State Explorer</a></li>
+      <li><a href="#s8">Making Impossible Possible</a></li>
+      <li><a href="#s9">Paxos: Overview &amp; Roles</a></li>
+      <li><a href="#s10">Paxos Phases: Prepare &amp; Promise</a></li>
+      <li><a href="#s11">Paxos Phases: Accept &amp; Learn</a></li>
+      <li><a href="#s12">Interactive: Paxos Consensus Stepper</a></li>
+      <li><a href="#s13">State Machine Replication</a></li>
+      <li><a href="#s14">Multi-Paxos &amp; Beyond</a></li>
+      <li><a href="#s15">Lessons Learnt &amp; Conclusion</a></li>
+      <li><a href="#quiz">Check Your Understanding</a></li>
+    </ol>
+  </nav>
+
+  <section id="s1">
+    <h2>1. Agreement Problems in Distributed Systems</h2>
+    <p>Distributed systems are composed of multiple components that interact to achieve a common goal. However, each component has a <strong>partial and potentially divergent</strong> view of the system state: processes may observe events in different orders, communication delays create uncertainty, and failures introduce conflicting information.</p>
+    <p>The <strong>agreement problem</strong> captures this challenge: when the different components of a system have potentially divergent views over the system state, and about what is happening in the system, a coherent overall system behaviour can be achieved only when all the components come to agree about everything relevant for the system itself &mdash; state, events, and the ordering of events. The key point is that they reach the <strong>very same conclusion</strong>, independently of what that conclusion is about.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Agreement is about convergence to a shared understanding. It does not matter which specific value the system settles on &mdash; what matters is that <strong>all correct processes settle on the same value</strong>.</p>
+    </div>
+
+    <h3>Examples of Agreement Problems</h3>
+    <p>Agreement problems appear in many practical scenarios [Fischer, 1983]:</p>
+    <table>
+      <thead><tr><th>Domain</th><th>Agreement needed</th></tr></thead>
+      <tbody>
+        <tr><td>Distributed databases</td><td>Data managers must agree on whether to commit or abort a distributed transaction</td></tr>
+        <tr><td>Replicated file systems</td><td>Nodes must agree on where file copies reside</td></tr>
+        <tr><td>Flight control systems</td><td>Engine control and flight surface modules must agree on continue/abort for landing</td></tr>
+        <tr><td>Blockchain / ledgers</td><td>Validators must agree on the next block and its ordering</td></tr>
+        <tr><td>Clock synchronisation</td><td>Processes must agree on the current time despite drift</td></tr>
+      </tbody>
+    </table>
+
+    <p>What makes these problems non-trivial is the presence of <strong>faults</strong>: processes may crash, messages may be lost or delayed, and the system may be subject to unpredictable load. An agreement protocol must work correctly <strong>despite</strong> these faults &mdash; this is the essence of fault-tolerant distributed computing.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Basic Ontology: Time &amp; Failure Models</h2>
+    <p>To reason precisely about consensus, we need a shared vocabulary for the key dimensions of distributed systems.</p>
+
+    <h3>Components &amp; Connectors</h3>
+    <p>Non-trivial computational systems are <strong>concurrent</strong> or <strong>distributed</strong> &mdash; systems where more than one computation occurs either logically or physically at the same time. These systems are modelled as collections of computing (<strong>logical processes</strong>) or (<strong>physical processors</strong>) interconnected via communication channels: either <strong>message-passing</strong> (one-to-one direct channels) or <strong>shared-memory</strong> (shared communication channels). The literature often uses processes and processors interchangeably whenever the physical nature does not affect the problem.</p>
+
+    <h3>Time Model</h3>
+    <p>The time model determines what a process can infer about the state of other processes:</p>
+    <table>
+      <thead><tr><th>Model</th><th>Properties</th><th>Implication</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Synchronous</strong></td><td>Bound &Delta; on message delay; bound &Phi; on relative process speed</td><td>Accurate failure detection is possible: if no response within &Delta; + &Phi;, the process has likely crashed</td></tr>
+        <tr><td><strong>Asynchronous</strong></td><td>No bounds on message delays or process speeds</td><td>Impossible to distinguish a crashed process from an extremely slow one</td></tr>
+      </tbody>
+    </table>
+    <p>The asynchronous model is the most general and realistic for Internet-scale systems &mdash; networks can experience congestion, and processes can be slowed by load. However, it is also the model in which consensus becomes impossible (as FLP shows).</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Crucial distinction</span>
+      <p>In an asynchronous system, you can <strong>never be certain</strong> whether a process has crashed or is merely slow. This single fact is the root of the FLP impossibility result.</p>
+    </div>
+
+    <h3>Failure Model</h3>
+    <p>Processes (or processors) may fail in diverse ways, and communication links may fail too. A <strong>fault-tolerant</strong> system is one that keeps working beyond faults of any sort. The key failure types relevant to consensus:</p>
+    <ul>
+      <li><strong>Crash failure</strong>: a process stops permanently (the most common assumption)</li>
+      <li><strong>Omission failure</strong>: a process fails to send or receive messages</li>
+      <li><strong>Byzantine failure</strong>: a process behaves arbitrarily, possibly maliciously</li>
+      <li><strong>Network partition</strong>: communication between groups of processes is lost</li>
+    </ul>
+    <p>Paxos (and most practical consensus algorithms) assumes crash failures only &mdash; Byzantine failures require more heavyweight protocols.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. The Consensus Problem</h2>
+    <p><strong>Consensus</strong> is the process by which we reach agreement over system state between unreliable machines connected by (possibly) asynchronous networks. It is the most fundamental agreement problem in distributed systems.</p>
+
+    <h3>Why Consensus?</h3>
+    <p>When processes fail, the reliable processes need to agree on:</p>
+    <ul>
+      <li><strong>What has happened</strong> till now in the system (current state)</li>
+      <li><strong>What is going to happen</strong> from now on (future evolution)</li>
+    </ul>
+    <p>This ensures that the current system state and its evolution are both <strong>consistent</strong> across all non-faulty replicas. For example, when a crash makes replica synchronisation impossible, a <strong>recovery process</strong> requires consensus among the surviving replicas about the state of each replica and the events handled or still to handle.</p>
+
+    <h3>Formal Requirements</h3>
+    <p>A consensus protocol must satisfy three properties:</p>
+    <table>
+      <thead><tr><th>Property</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Agreement</strong></td><td>All non-faulty processes decide on the same value</td></tr>
+        <tr><td><strong>Validity</strong></td><td>If all non-faulty processes propose the same value v, then any decided value must be v</td></tr>
+        <tr><td><strong>Termination</strong></td><td>Every non-faulty process eventually decides some value</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">The examiner will ask</span>
+      <p>Explain why <strong>termination</strong> is the property that makes consensus hard or even impossible in asynchronous systems. Hint: it requires detecting that other processes have finished, which needs some form of synchrony assumption.</p>
+    </div>
+
+    <h3>Non-triviality</h3>
+    <p>Besides the core properties, we also require <strong>non-triviality</strong>: for both y = 0 and y = 1, there exists some initial configuration and protocol execution that leads to y. This rules out trivial protocols that always decide 0 regardless of input.</p>
+
+    <p>Additional dependency requirements can refine the problem:</p>
+    <ul>
+      <li><strong>Strong unanimity</strong>: if all initial values x<sub>i</sub> are the same, the consensus value y must equal x</li>
+      <li><strong>Weak unanimity</strong>: same as strong, but only required when no runtime failures occur</li>
+    </ul>
+  </section>
+
+  <section id="s4">
+    <h2>4. Variants of Consensus</h2>
+    <p>The consensus problem appears in several forms depending on the specific requirements [Fischer, 1983]. Understanding these variants helps identify which solution applies to a given practical setting.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Single-Bit Consensus</button>
+        <button class="lk-tab">Interactive Consistency</button>
+        <button class="lk-tab">Generals Problem</button>
+        <button class="lk-tab">Transaction Commit</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>The most basic form: achieving consensus on a <strong>single bit</strong>. There are <var>n</var> processors, possibly faulty. Each processor <var>i</var> has an initial bit <var>x<sub>i</sub></var>. The problem is for the non-faulty processes to agree on a bit <var>y</var>, called the <strong>consensus value</strong>. Solvability depends on whether a protocol exists such that all non-faulty processors terminate with the same value <var>y</var>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Analogous to single-bit consensus, except the goal is for non-faulty processes to agree on a <strong>vector</strong> <var>y</var>. The dependency requirements are:</p>
+        <ul>
+          <li><strong>Strong</strong>: for each non-faulty <var>i</var>, <var>y<sub>i</sub></var> = <var>x<sub>i</sub></var></li>
+          <li><strong>Weak</strong>: same, but only if no failures occur during execution</li>
+        </ul>
+        <p>This is consensus about what every processor thinks the initial values are.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Here, one specific processor (the <strong>general</strong>) tries to send its initial bit <var>x</var> to all others. All reliable processes must reach consensus on bit <var>y</var> with:</p>
+        <ul>
+          <li><strong>Strong</strong>: <var>y</var> = <var>x</var> if the general is not faulty</li>
+          <li><strong>Weak</strong>: <var>y</var> = <var>x</var> if no failures occur during execution</li>
+        </ul>
+        <p>This is also known as the <strong>reliable broadcast problem</strong>, where the general is called the <strong>transmitter</strong>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>In distributed databases [Dolev and Strong, 1982], all data manager processes that participated in a given transaction must agree on whether to <strong>install</strong> the transaction's results or to <strong>discard</strong> them. Discarding may be necessary if some data managers were unable to carry out the required processing. Whatever decision is made, <strong>all data managers must make the same decision</strong> to preserve database consistency.</p>
+        <p>This is the classic two-phase commit (2PC) problem &mdash; though 2PC can block under failures, which is why consensus-based approaches like Paxos improve upon it.</p>
+      </div>
+    </div>
+
+    <div class="callout idea">
+      <span class="callout-label">Unifying view</span>
+      <p>Many technical and real-world problems can be reduced to some version of the consensus problem. This abstract representation lets us reason about them in a general, synthetic way and provides general solutions.</p>
+    </div>
+  </section>
+
+  <section id="s5">
+    <h2>5. Consensus &amp; Fault Tolerance</h2>
+    <p>Consensus is particularly important for providing a distributed system with some level of <strong>fault tolerance</strong> because it is essential to ensure the <strong>consistency of replicas</strong>.</p>
+    <p>When a crash makes it impossible to ensure replica synchronisation, a <strong>recovery process</strong> involves consensus among the many replicas about the state of each replica and the events handled or still to handle. In essence:</p>
+    <ul>
+      <li>Replicas must maintain consistent state despite failures</li>
+      <li>Consensus provides the mechanism to agree on the current state and next actions</li>
+      <li>Without consensus, replicas diverge and the system becomes inconsistent</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Fundamental tension</span>
+      <p>Reaching agreement is straightforward if the participating processes and the network are completely reliable. However, real systems face process crashes, network partitioning, lost, distorted, or duplicated messages &mdash; possibly including <strong>Byzantine</strong> failures where faulty processes go completely out of control or behave malevolently.</p>
+    </div>
+
+    <p>Any protocol can be overwhelmed by too frequent or severe faults. The best we can hope for is a protocol tolerant to a <strong>prescribed number</strong> of "expected" faults. Paxos, for example, tolerates up to <var>f</var> crash failures with <var>n</var> &ge; 2<var>f</var> + 1 processes.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. Impossibility Results: FLP</h2>
+    <p>Distributed computing is rich with impossibility results &mdash; "hundreds of impossibility results for distributed computing" [Fich and Ruppert, 2003]. These results are not just academic curiosities: they define the <strong>boundary of what is solvable</strong> and are essential for understanding the inherent difficulty of distributed problems.</p>
+
+    <h3>The FLP Theorem</h3>
+    <p>The most famous impossibility result in distributed computing is the <strong>FLP theorem</strong> (Fischer-Lynch-Paterson, 1985):</p>
+
+    <div class="callout warn">
+      <span class="callout-label">FLP Impossibility</span>
+      <p>In a <strong>fully asynchronous</strong> system, no consensus protocol can tolerate even <strong>one single crash failure</strong> under the mere requirement of non-triviality.</p>
+    </div>
+
+    <p>Let us be precise about what FLP does and does not say:</p>
+    <ul>
+      <li>The message system is assumed to be <strong>reliable</strong> &mdash; it delivers all messages correctly and exactly once</li>
+      <li>No Byzantine failures are considered &mdash; only a clean crash (stop)</li>
+      <li>Yet, even under these best-case assumptions, a single crash at an <strong>inopportune time</strong> can cause any distributed commit protocol to fail to reach agreement</li>
+      <li>The theorem says that <strong>no deterministic protocol</strong> can solve consensus in an asynchronous system with even one crash failure</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">The examiner will ask</span>
+      <p>Explain the role of <strong>asynchrony</strong> in the FLP impossibility. Why does the theorem not apply to synchronous systems? Because in synchronous systems, timeouts allow failure detection, which enables the protocol to make progress despite crashes.</p>
+    </div>
+
+    <h3>Intuition Behind FLP</h3>
+    <p>The core insight is captured by the concept of <strong>bivalence</strong>. A state is <strong>bivalent</strong> if both outcomes (0 and 1) are still possible from that state. A state is <strong>univalent</strong> if only one outcome is possible.</p>
+    <p>FLP proves that:</p>
+    <ol>
+      <li>Any consensus protocol must start in a <strong>bivalent</strong> state (otherwise the protocol would be trivial, always deciding the same value)</li>
+      <li>From any bivalent state, some <strong>step</strong> (receiving a message) leads to another bivalent state</li>
+      <li>If a process crashes, the remaining processes cannot distinguish between "crashed" and "slow" &mdash; so they might block waiting for a message that never arrives</li>
+      <li>This makes it impossible to guarantee <strong>termination</strong> (the third required property of consensus)</li>
+    </ol>
+    <p>In essence: in an asynchronous system, a crashed process looks identical to a very slow one. The system can either wait forever (losing termination) or guess incorrectly (losing agreement). You cannot have both guarantees.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Interactive: FLP State Explorer</h2>
+    <p>Explore the state space of a consensus protocol in an asynchronous system. The FLP theorem shows that once a process crashes, the system either <strong>blocks indefinitely</strong> (cannot tell crash from delay) or must <strong>guess</strong> &mdash; and a wrong guess leads to inconsistency. Click states to explore the transitions.</p>
+
+    <div id="flp-explorer"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>This state explorer abstracts the FLP proof. The key observation is the <strong>CRASH_OCCURS</strong> &rarr; <strong>TIMEOUT_WAIT</strong> transition: once a process is suspected of crashing in an asynchronous system, the remaining processes can never be certain, which forces the protocol into deadlock unless it can fall back on some synchrony assumption.</p>
+    </div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Making Impossible Possible</h2>
+    <p>FLP tells us that consensus is impossible in a fully asynchronous system with even one crash. But real-world distributed systems <strong>do</strong> solve consensus every day. How?</p>
+
+    <h3>Solutions to FLP</h3>
+    <p>In practice, we accept that <strong>sometimes the system will not be available</strong> and mitigate this with timers and backoffs. In theory, we make <strong>weaker assumptions</strong> about synchrony:</p>
+    <ul>
+      <li>Messages will eventually arrive within some (unknown) bound</li>
+      <li>Process speeds have some (unknown) maximum</li>
+      <li>The system is <strong>mostly synchronous</strong> enough for consensus to terminate</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>The FLP impossibility does not mean we should give up. It defines the <strong>boundary</strong> of what is possible: we need to relax either the asynchrony assumption or the fault-tolerance requirement. Practical consensus algorithms like Paxos relax asynchrony by assuming <strong>eventual synchrony</strong> &mdash; the system may be asynchronous for arbitrary periods, but eventually becomes synchronous long enough to reach agreement.</p>
+    </div>
+
+    <p>This is the theme of Howard's (2016) talk "Distributed Consensus: Making Impossible Possible" &mdash; how to construct resilient distributed systems on top of unreliable components, starting from Lamport's work on organising parliament for a Greek island (Paxos), through to today's datacenters powering Google, Amazon, and Microsoft.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Paxos: Overview &amp; Roles</h2>
+    <p><strong>Paxos</strong> [Lamport, 1998] is the most influential consensus algorithm. First presented in 1989 as a technical report by Leslie Lamport, it was recast in a more academically-viable form in 1998. It is used extensively inside Google (Chubby, Google File System, Cloud Bigtable) and many other large-scale systems.</p>
+
+    <h3>Key Features</h3>
+    <table>
+      <thead><tr><th>Feature</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr><td>Fault tolerance</td><td>Tolerates up to <var>f</var> crash failures where <var>n</var> &ge; 2<var>f</var> + 1</td></tr>
+        <tr><td>Network</td><td>Completely connected network of <var>n</var> processes</td></tr>
+        <tr><td>Failure model</td><td>Crash failures and message loss; Byzantine failures excluded</td></tr>
+        <tr><td>Guarantees</td><td>Always ensures <strong>agreement</strong> and <strong>validity</strong></td></tr>
+        <tr><td>Termination</td><td>Ensured only if there is a <strong>sufficiently long interval</strong> with no protocol restarts</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Process Roles</h3>
+    <p>Paxos defines three logical roles that a process may play:</p>
+    <table>
+      <thead><tr><th>Role</th><th>Responsibility</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Proposer</strong></td><td>Submits proposed values on behalf of clients. Initiates the consensus protocol.</td></tr>
+        <tr><td><strong>Acceptor</strong></td><td>Decides the candidate values for the final decision. Acceptors form a <strong>quorum</strong> &mdash; a bare majority must agree for a value to be chosen.</td></tr>
+        <tr><td><strong>Learner</strong></td><td>Collects information from the acceptors and reports the final decision back to the clients.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Why quorum?</span>
+      <p>Using a majority quorum (not all processes) is what gives Paxos its fault tolerance: up to <var>f</var> processes can crash, and the remaining <var>n - f</var> &ge; <var>f</var> + 1 can still form a majority. Any two majorities always <strong>intersect</strong>, ensuring that a value once chosen remains the only possible choice.</p>
+    </div>
+
+    <h3>Basic Idea</h3>
+    <p>Paxos is fundamentally a <strong>two-phase protocol</strong>:</p>
+    <ol>
+      <li><strong>Prepare phase</strong>: figure out whether any value has already been chosen</li>
+      <li><strong>Accept phase</strong>: propose the appropriate value (either a previously chosen one or a new one)</li>
+    </ol>
+    <p>The protocol uses <strong>monotonically increasing sequence numbers</strong> to label proposals, ensuring that later proposals can always override earlier ones if needed.</p>
+  </section>
+
+  <section id="s10">
+    <h2>10. Paxos Phases: Prepare &amp; Promise</h2>
+    <p>A proposal sent by a proposer is a pair <var>(v, n)</var> where <var>v</var> is a value and <var>n</var> is a sequence number. To deal with possible crashes, multiple acceptors are selected for the proposal. The sequence number distinguishes successive attempts to invoke the protocol.</p>
+
+    <h3>Phase 1: Prepare (Preparatory Phase)</h3>
+    <ol>
+      <li>Each proposer sends a proposal <var>(v, n)</var> to each acceptor</li>
+      <li>If <var>n</var> is the largest sequence number received by an acceptor so far, the acceptor sends an acknowledgement <strong>Promise(<var>n</var>, &perp;, &perp;)</strong> back to the proposer</li>
+      <li>This Promise is a commitment: the acceptor will <strong>ignore all proposals numbered lower than <var>n</var></strong></li>
+      <li>If the acceptor has already accepted a proposal with sequence number <var>n'</var> &lt; <var>n</var> and value <var>v</var>, it responds with <strong>Promise(<var>n</var>, <var>v</var>, <var>n'</var>)</strong> &mdash; signalling that the proposer should use <var>v</var> as the proposed value</li>
+    </ol>
+
+    <pre class="mermaid">
+sequenceDiagram
+    participant P as Proposer
+    participant A1 as Acceptor 1
+    participant A2 as Acceptor 2
+    participant A3 as Acceptor 3
+    P->>A1: Prepare(1)
+    P->>A2: Prepare(1)
+    P->>A3: Prepare(1)
+    A1-->>P: Promise(1, null)
+    A2-->>P: Promise(1, null)
+    Note over P: Majority (2 of 3) promises received
+    A3--xP: (crashed - no response)
+    Note over P: Can proceed with 2/3 promises
+    </pre>
+
+    <div class="callout exam">
+      <span class="callout-label">The examiner will ask</span>
+      <p>Why does the acceptor need to report a previously accepted value <var>v</var> when responding to a Prepare? Because if a value <var>v</var> was already accepted by some majority, the new proposal must carry forward <var>v</var> to preserve the agreement guarantee &mdash; otherwise, two different majorities might choose different values.</p>
+    </div>
+  </section>
+
+  <section id="s11">
+    <h2>11. Paxos Phases: Accept &amp; Learn</h2>
+
+    <h3>Phase 2: Accept (Request for Acceptance)</h3>
+    <ol>
+      <li>If a proposer receives Promise(<var>n</var>, &perp;, &perp;) from a <strong>majority of acceptors</strong>, it sends <strong>Accept(<var>v</var>, <var>n</var>)</strong> to all acceptors, asking them to accept this value</li>
+      <li>If, however, an acceptor returned Promise(<var>n</var>, <var>v</var>, <var>n'</var>) in Phase 1 (meaning it already accepted <var>v</var>), then the proposer must include the value <var>v</var> with the <strong>highest sequence number</strong> in its Accept request</li>
+      <li>An acceptor accepts a proposal <var>(v, n)</var> <strong>unless</strong> it has already promised to consider a proposal with sequence number <var>n''</var> &gt; <var>n</var></li>
+    </ol>
+
+    <pre class="mermaid">
+sequenceDiagram
+    participant P as Proposer
+    participant A1 as Acceptor 1
+    participant A2 as Acceptor 2
+    participant A3 as Acceptor 3
+    P->>A1: Accept("X", 1)
+    P->>A2: Accept("X", 1)
+    P->>A3: Accept("X", 1)
+    A1-->>P: Accepted("X", 1)
+    A2-->>P: Accepted("X", 1)
+    Note over P: Majority accepted! Value "X" is chosen.
+    A3--xP: (crashed)
+    </pre>
+
+    <h3>Phase 3: Learn (Final Decision)</h3>
+    <ol>
+      <li>When a <strong>majority of the acceptors</strong> accept a proposed value, it becomes the <strong>final decision value</strong></li>
+      <li>The acceptors <strong>multicast</strong> the accepted value to the learners</li>
+      <li>Learners determine if a proposal has been accepted by a majority</li>
+      <li>Learners convey the decision to the client processes invoking the consensus</li>
+    </ol>
+
+    <pre class="mermaid">
+sequenceDiagram
+    participant A1 as Acceptor 1
+    participant A2 as Acceptor 2
+    participant L1 as Learner 1
+    participant L2 as Learner 2
+    participant C as Client
+    A1->>L1: Accepted("X", 1)
+    A1->>L2: Accepted("X", 1)
+    A2->>L1: Accepted("X", 1)
+    A2->>L2: Accepted("X", 1)
+    Note over L1,L2: Majority detected: value "X"
+    L1->>C: Decision: X
+    L2->>C: Decision: X
+    Note over C: Both learners report same value
+    </pre>
+
+    <h3>Paxos Observations</h3>
+    <ul>
+      <li>An acceptor accepts a proposal <var>(v, n)</var> if it has not sent a Promise for any <var>n'</var> &gt; <var>n</var></li>
+      <li>If a proposer sends Accept(<var>v</var>, <var>n</var>) in Phase 2, then either:
+        <ul>
+          <li>No acceptor in a majority has accepted a proposal with sequence <var>n'</var> &lt; <var>n</var>, or</li>
+          <li><var>v</var> is the value of the highest-numbered proposal among all proposals with <var>n'</var> &lt; <var>n</var> accepted by at least one acceptor in a majority</li>
+        </ul>
+      </li>
+    </ul>
+
+    <div class="callout note">
+      <span class="callout-label">Livelock possibility</span>
+      <p>Theoretically, Paxos may suffer from <strong>livelock</strong>: if two proposers keep issuing Prepare messages with increasing sequence numbers before the other can complete, neither succeeds. In practice, leader election (choosing a single distinguished proposer) prevents this &mdash; this is what Multi-Paxos and Raft do.</p>
+    </div>
+  </section>
+
+  <section id="s12">
+    <h2>12. Interactive: Paxos Consensus Stepper</h2>
+    <p>Step through a complete Paxos consensus round. With 3 acceptors (one simulated as crashed), you'll need at least 2 promises and 2 accepted responses to constitute a majority. Click each process button to advance its step.</p>
+
+    <div id="paxos-stepper"></div>
+  </section>
+
+  <section id="s13">
+    <h2>13. State Machine Replication</h2>
+    <p><strong>State Machine Replication (SMR)</strong> [Schneider, 1990] is the general method for implementing fault-tolerant services in distributed systems. It connects directly to consensus:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key insight</span>
+      <p>Replication relates to consensus because all (distributed) replicas of a resource need to agree on the <strong>same state over time</strong>. SMR shifts the focus from consensus over distributed state to consensus over <strong>distributed actions on state</strong>.</p>
+    </div>
+
+    <h3>How SMR Works</h3>
+    <ol>
+      <li>The same <strong>state machine</strong> (deterministic) is replicated over a distributed system</li>
+      <li>Each replica has a <strong>consensus module</strong></li>
+      <li>Any operation on any replicated machine is performed <strong>only if and when</strong> all machines have agreed on the <strong>same ordering of execution</strong></li>
+      <li>The assumption of <strong>determinism</strong> is critical: given the same initial state and the same sequence of inputs in the same order, each replica produces the same outputs and arrives at the same final state</li>
+    </ol>
+
+    <pre class="mermaid">
+flowchart LR
+    C1[Client 1] -->|Request| SM[State Machine<br/>Replication Layer]
+    C2[Client 2] -->|Request| SM
+    SM -->|Consensus on order| CO[Consensus Module]
+    CO -->|Ordered log| R1[Replica 1<br/>State Machine]
+    CO -->|Ordered log| R2[Replica 2<br/>State Machine]
+    CO -->|Ordered log| R3[Replica 3<br/>State Machine]
+    R1 -->|Same output| C1
+    R2 -->|Same output| C1
+    R3 -->|Same output| C1
+    </pre>
+
+    <p>In SMR, the consensus problem shifts from "what is the current value?" to "in what order should operations be applied?" &mdash; this is called <strong>total order broadcast</strong> or <strong>atomic broadcast</strong>. Once all replicas agree on the order of operations, they produce identical state transitions deterministically.</p>
+  </section>
+
+  <section id="s14">
+    <h2>14. Multi-Paxos &amp; Beyond</h2>
+
+    <h3>Multi-Paxos</h3>
+    <p>Paxos as described so far solves consensus for a <strong>single value</strong>. But SMR needs consensus over an <strong>array of values</strong> &mdash; a log of operations. <strong>Multi-Paxos</strong> [Van Renesse and Altinbuken, 2015] extends basic Paxos in two ways:</p>
+    <ul>
+      <li>One separate Paxos instance (indexed) is used for <strong>each entry</strong> of the array</li>
+      <li>A <strong>leader election</strong> mechanism reduces proposer conflict (dropping off iterations)</li>
+    </ul>
+    <p>With a stable leader, the Prepare phase can be <strong>skipped</strong> for subsequent log entries (the leader is already known and trusted), making Multi-Paxos efficient in the common case &mdash; only the Accept phase runs.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>Multi-Paxos is "not really well-specified overall" [Van Renesse and Altinbuken, 2015]; this fuzziness motivated the development of Raft, which provides a clearer specification with the same guarantees.</p>
+    </div>
+
+    <h3>Other Paxos-Based Algorithms</h3>
+    <table>
+      <thead><tr><th>Algorithm</th><th>Key contribution</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Fast Paxos</strong> [Lamport, 2006]</td><td>Reduces message delay by allowing acceptors to propose values directly</td></tr>
+        <tr><td><strong>ZooKeeper / ZAB</strong> [Reed and Junqueira, 2008]</td><td>ZooKeeper Atomic Broadcast &mdash; used by Apache ZooKeeper for coordination</td></tr>
+        <tr><td><strong>Egalitarian Paxos</strong> [Moraru et al., 2013]</td><td>All nodes are equal (no distinguished leader) for better load distribution</td></tr>
+        <tr><td><strong>Raft</strong> [Ongaro and Ousterhout, 2014]</td><td>Designed for understandability; uses leader election and log replication</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Real-World Example: Chubby</h3>
+    <p>Google's <strong>Chubby</strong> [Burrows, 2006] is a fault-tolerant distributed lock service that uses Paxos internally. It is used extensively inside Google systems as a reliable lock service and nameserver, powering Google File System (GFS), Cloud Bigtable, and other critical infrastructure. The engineering experience of building Chubby taught the industry many practical lessons about running Paxos in production [Chandra et al., 2007].</p>
+  </section>
+
+  <section id="s15">
+    <h2>15. Lessons Learnt &amp; Conclusion</h2>
+
+    <h3>General Lessons</h3>
+    <ul>
+      <li><strong>Impossibility results define the space of solvable problems</strong> &mdash; knowing what cannot be done is as important as knowing what can</li>
+      <li><strong>Formal models are essential</strong> to a sound engineering of distributed systems &mdash; reasoning about the relationship between formal models and practical instances provides the insight for technically-feasible solutions</li>
+      <li>This is not just for complex settings: even seemingly simple problems (single-bit consensus) reveal deep impossibility results</li>
+    </ul>
+
+    <h3>Specific Lessons</h3>
+    <ul>
+      <li><strong>Faults are paradoxical</strong>: they are at the same time the sources of the problems of distributed systems, and the reason we need distributed systems</li>
+      <li><strong>Consensus is a universal modelling tool</strong>: it is one of the most expressive and general ways to model relevant application problems in a distributed setting</li>
+      <li>The complexity of consensus both <strong>defies common sense</strong> and causes <strong>archetypal cases of impossibility</strong> (FLP)</li>
+      <li>Yet, <strong>protocols can be defined</strong> that actually solve the problem in meaningful cases with some relaxation of basic hypotheses &mdash; Paxos and its derivatives are the prime example</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Takeaway</span>
+      <p>Consensus is at the heart of fault-tolerant distributed computing. The FLP impossibility tells us there is no free lunch: any practical solution must relax some assumption (synchrony, determinism, or failure model). Paxos does this by assuming eventual synchrony and tolerating only crash failures, and by guaranteeing safety under all conditions while liveness depends on sufficiently long periods of stability.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check Your Understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Explain the difference between the synchronous and asynchronous time models. Why does this distinction matter for consensus?</summary>
+        <p>In the <strong>synchronous model</strong>, there is a known bound &Delta; on message transmission delay and a known bound &Phi; on relative process speed. This allows accurate failure detection: if no response arrives within &Delta; + &Phi; time, the process can be assumed to have crashed. In the <strong>asynchronous model</strong>, no such bounds exist &mdash; a process can never distinguish between a crashed process and an extremely slow one. This distinction matters because FLP proves that consensus is impossible in the asynchronous model with even one crash failure, whereas synchronous systems can solve consensus (e.g., using timeouts).</p>
+      </details>
+
+      <details>
+        <summary>State the FLP impossibility theorem precisely. What are its assumptions and what does it prove?</summary>
+        <p><strong>FLP Theorem</strong> (Fischer, Lynch, Paterson, 1985): In a fully asynchronous distributed system, no deterministic consensus protocol can tolerate even one crash failure under the non-triviality requirement. Assumptions: reliable message delivery (no loss, no duplication), no Byzantine failures, asynchronous communication (unbounded delays), processes can only fail by crashing. It proves that any protocol that guarantees agreement and validity must violate termination in some execution where a single process crashes at an inopportune moment. The proof uses the concept of bivalent states (where both outcomes are still possible) and shows that from any bivalent state, there is always a sequence of events leading to another bivalent state, preventing the protocol from ever deciding.</p>
+      </details>
+
+      <details>
+        <summary>Describe the three roles in Paxos and their responsibilities. Why are these roles logical rather than physical?</summary>
+        <p>The three logical roles are: <strong>Proposer</strong> &mdash; submits proposed values on behalf of clients, initiates the protocol; <strong>Acceptor</strong> &mdash; decides which values become candidates for the final decision, forms majority quorums; <strong>Learner</strong> &mdash; collects accepted values from acceptors and reports the final decision to clients. These are <strong>logical</strong> roles because a single physical process may play multiple roles simultaneously (e.g., a server might act as both acceptor and learner). This separation of concerns allows each role to be optimised independently and allows the protocol to be deployed flexibly.</p>
+      </details>
+
+      <details>
+        <summary>Why does Paxos require n &ge; 2f + 1 processes to tolerate f crash failures?</summary>
+        <p>Paxos uses <strong>majority quorums</strong>. To tolerate <var>f</var> crash failures, there must be <var>n - f</var> processes still alive. For any two quorums to intersect (which is necessary for correctness &mdash; a value chosen by one quorum must be known to the next), we need <var>2(n - f) &gt; n</var>, which simplifies to <var>n &ge; 2f + 1</var>. Intuitively, each majority quorum has size <var>&lfloor;n/2&rfloor; + 1</var>, and with <var>n &ge; 2f + 1</var>, any two majorities always share at least one non-faulty process.</p>
+      </details>
+
+      <details>
+        <summary>Explain the relationship between consensus and State Machine Replication (SMR).</summary>
+        <p>SMR is a general method for building fault-tolerant services. A deterministic state machine is replicated across multiple servers. The key challenge is ensuring that all replicas process the <strong>same sequence of operations</strong> in the same order. This is precisely where <strong>consensus</strong> comes in: replicas use a consensus protocol to agree on the next operation to execute (or, equivalently, on the ordering of operations in a log). Consensus over single values is generalised to consensus over an ordered log of values via protocols like Multi-Paxos or Raft. Once all replicas agree on the order, determinism ensures they all reach the same final state.</p>
+      </details>
+
+      <details>
+        <summary>What is the difference between basic Paxos and Multi-Paxos? How does leader election help?</summary>
+        <p><strong>Basic Paxos</strong> achieves consensus on a single value. <strong>Multi-Paxos</strong> extends this to an ordered sequence of values (a log) by running one Paxos instance per log entry. Multi-Paxos adds <strong>leader election</strong>: a distinguished proposer is chosen, which eliminates the possibility of conflicting proposals. With a stable leader, the Prepare phase can be skipped for subsequent log entries (since the leader is already known and trusted by a majority), reducing the protocol to a single message round-trip per entry. This makes Multi-Paxos efficient in the common case while preserving the same safety guarantees as basic Paxos.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">Study material generated from the course slides. Not an official source.</footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    (function () {
+
+      /* ---- FLP State Explorer ---- */
+      LessonKit.stateExplorer('#flp-explorer', {
+        start: 'INIT',
+        states: {
+          INIT: {
+            desc: 'All processes start with initial values (0 or 1). The system is bivalent: both outcomes are still possible. No consensus protocol can commit to a fixed value from the start.',
+            to: [['a step occurs', 'BIVALENT'], ['a process crashes silently', 'CRASH_OCCURS']]
+          },
+          BIVALENT: {
+            desc: 'The system remains bivalent (undecided). Both values 0 and 1 are still achievable through some execution. In an asynchronous system, the protocol can stay bivalent indefinitely as messages arrive in unpredictable orders.',
+            to: [['another step occurs', 'BIVALENT'], ['system leans toward 0', '0_UNIVALENT'], ['system leans toward 1', '1_UNIVALENT'], ['a process crashes silently', 'CRASH_OCCURS']]
+          },
+          CRASH_OCCURS: {
+            desc: 'A process has crashed. The remaining processes cannot tell if it crashed or is merely slow (asynchrony). This is the critical moment FLP analyses: the system cannot distinguish crash from delay.',
+            to: [['timeout: suspect crash', 'TIMEOUT_WAIT'], ['late message arrives (process was slow)', 'BIVALENT']]
+          },
+          TIMEOUT_WAIT: {
+            desc: 'The system suspects a crash but cannot be certain. It faces a dilemma: wait further (may never hear) or proceed (may act on incomplete information). FLP shows that no correct deterministic choice exists.',
+            to: [['cannot determine, block forever', 'DEADLOCK'], ['guess the process was slow, continue', 'BIVALENT']]
+          },
+          DEADLOCK: {
+            desc: 'The protocol blocks indefinitely waiting for the suspected process. Since termination cannot be guaranteed, the consensus protocol fails &mdash; demonstrating the FLP impossibility. This is the fundamental dead end for asynchronous consensus.',
+            to: []
+          },
+          '0_UNIVALENT': {
+            desc: 'The system has become 0-univalent: from this state, only outcome 0 is possible. The protocol has effectively committed to 0, but has not yet announced the decision.',
+            to: [['all non-faulty processes agree on 0', 'CONSENSUS_0']]
+          },
+          '1_UNIVALENT': {
+            desc: 'The system has become 1-univalent: only outcome 1 remains possible. The protocol has committed to 1 internally.',
+            to: [['all non-faulty processes agree on 1', 'CONSENSUS_1']]
+          },
+          CONSENSUS_0: {
+            desc: 'Consensus reached on value 0. However, FLP shows there exists at least one execution (the crash scenario) where the protocol would never terminate. This protocol may work in this run but cannot guarantee termination in all runs.',
+            to: []
+          },
+          CONSENSUS_1: {
+            desc: 'Consensus reached on value 1. This is achievable in runs without failures or with lucky timing, but FLP proves no protocol can guarantee this in all asynchronous runs with one crash.',
+            to: []
+          }
+        }
+      });
+
+      /* ---- Paxos Stepper ---- */
+      LessonKit.stepper('#paxos-stepper', {
+        title: 'Paxos Consensus Round',
+        sub: '3 acceptors (A1, A2 respond; A3 has crashed). Majority = 2. Step through the full prepare &rarr; promise &rarr; accept &rarr; learn sequence.',
+        shared: { phase: 'idle', promiseCount: 0, acceptCount: 0, value: null, learned: false },
+        watch: ['phase', 'promiseCount', 'acceptCount', 'value', 'learned'],
+        threads: {
+          proposer: {
+            name: 'Proposer',
+            steps: [
+              {
+                label: 'Send Prepare(n=1) to all acceptors',
+                run: function (s) { s.phase = 'prepare'; s.promiseCount = 0; s.acceptCount = 0; }
+              },
+              {
+                label: 'Wait for Promise from majority (&ge;2)',
+                run: function (s) {
+                  if (s.promiseCount < 2) return 'block';
+                  s.phase = 'promised';
+                }
+              },
+              {
+                label: 'Send Accept("X", 1) to all acceptors',
+                run: function (s) { s.phase = 'accept'; }
+              },
+              {
+                label: 'Wait for Accepted from majority (&ge;2)',
+                run: function (s) {
+                  if (s.acceptCount < 2) return 'block';
+                  s.phase = 'decided';
+                  s.value = 'X';
+                }
+              }
+            ]
+          },
+          acceptor1: {
+            name: 'Acceptor 1',
+            steps: [
+              {
+                label: 'Receive Prepare(1) &rarr; send Promise(1)',
+                run: function (s) {
+                  if (s.phase !== 'prepare') return 'block';
+                  s.promiseCount = (s.promiseCount || 0) + 1;
+                }
+              },
+              {
+                label: 'Receive Accept("X",1) &rarr; send Accepted',
+                run: function (s) {
+                  if (s.phase !== 'accept') return 'block';
+                  s.acceptCount = (s.acceptCount || 0) + 1;
+                }
+              }
+            ]
+          },
+          acceptor2: {
+            name: 'Acceptor 2',
+            steps: [
+              {
+                label: 'Receive Prepare(1) &rarr; send Promise(1)',
+                run: function (s) {
+                  if (s.phase !== 'prepare') return 'block';
+                  s.promiseCount = (s.promiseCount || 0) + 1;
+                }
+              },
+              {
+                label: 'Receive Accept("X",1) &rarr; send Accepted',
+                run: function (s) {
+                  if (s.phase !== 'accept') return 'block';
+                  s.acceptCount = (s.acceptCount || 0) + 1;
+                }
+              }
+            ]
+          },
+          acceptor3: {
+            name: 'Acceptor 3 (crashed)',
+            steps: [
+              {
+                label: 'Crash &mdash; no response to Prepare',
+                run: function () { /* stays silent */ }
+              },
+              {
+                label: 'Still crashed &mdash; no response to Accept',
+                run: function () { /* stays silent */ }
+              }
+            ]
+          },
+          learner: {
+            name: 'Learner',
+            steps: [
+              {
+                label: 'Detect majority Accepted',
+                run: function (s) {
+                  if (s.phase !== 'decided') return 'block';
+                }
+              },
+              {
+                label: 'Report: consensus value = X',
+                run: function (s) { s.learned = true; }
+              }
+            ]
+          }
+        },
+        verdict: function (s, done) {
+          if (s.learned) {
+            return { status: 'ok', text: 'Consensus reached! Value "X" has been learned by the learner despite 1 of 3 acceptors crashing. Paxos tolerates f=1 failure with n=3 &ge; 2f+1.' };
+          }
+          if (s.phase === 'decided') {
+            return { status: '', text: 'Value "X" is decided. Now step the Learner to complete the protocol.' };
+          }
+          if (s.phase === 'accept' && s.acceptCount === 2) {
+            return { status: '', text: 'Majority accepted! Move the Proposer forward to finalize the decision.' };
+          }
+          if (s.phase === 'prepare' && s.promiseCount >= 2) {
+            return { status: '', text: 'Majority promised! Move the Proposer forward to send Accept.' };
+          }
+          if (s.phase === 'prepare' && s.promiseCount < 2) {
+            return { status: '', text: 'Prepare phase: step the acceptors (A1 and A2) to collect promises, then advance the Proposer.' };
+          }
+          if (s.phase === 'promised' && s.promiseCount >= 2) {
+            return { status: '', text: 'Promises collected. Advance the Proposer to send Accept.' };
+          }
+          return { status: '', text: 'Start with the Proposer (Send Prepare), then step the responsive acceptors (A1, A2). A3 is crashed and will never respond.' };
+        }
+      });
+
+    })();
+  </script>
+</body></html>

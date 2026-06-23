@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PCD-2026-04-17 — Message Passing Models & Actors</title>
+  <link rel="stylesheet" href="assets/lesson-kit.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+
+  <header class="lk-header">
+    <div class="lk-kicker">Programmazione Concorrente e Distribuita — Prof. Alessandro Ricci — UNIBO</div>
+    <h1>Message Passing Models &amp; Attori</h1>
+    <div class="lk-meta">
+      <span>2026-04-17</span>
+      <span>113 min</span>
+      <span>Moduli 3.1 + 3.2</span>
+      <span><a href="https://liveunibo.sharepoint.com/sites/ProgrammazioneConcorrenteeDistribuita/_layouts/15/stream.aspx?id=%2Fsites%2FProgrammazioneConcorrenteeDistribuita%2FShared%20Documents%2FGeneral%2FRecordings%2FRiunione%20in%20General-20260417_090356-Registrazione%20della%20riunione.mp4&amp;nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJTdHJlYW1XZWJBcHAiLCJyZWZlcnJhbFZpZXciOiJTaGFyZURpYWxvZy1MaW5rIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXcifX0%3D&amp;nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJTdHJlYW1XZWJBcHAiLCJyZWZlcnJhbFZpZXciOiJTaGFyZURpYWxvZy1MaW5rIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXcifX0=&amp;ga=1" target="_blank" rel="noopener">registrazione originale</a></span>
+    </div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>In questa lezione</h2>
+    <ul>
+      <li>Il modello di comunicazione a scambio di messaggi: primitive send/receive, canali</li>
+      <li>Comunicazione sincrona e asincrona a confronto</li>
+      <li>Schemi di comunicazione: one-to-one, many-to-many, many-one</li>
+      <li>Interazione client-server e monitor attivi</li>
+      <li>Comunicazione guardata (guarded communication) e statement select</li>
+      <li>Il problema dell'exchanging values: soluzioni centralizzata, simmetrica, ad anello</li>
+      <li>Filosofi a cena distribuiti con scambio di messaggi</li>
+      <li>Rendez-vous e Ada</li>
+      <li>Il modello Actor: Hewitt, Agha, attori come oggetti reattivi autonomi</li>
+      <li>Semantiche chiave: macro-step, incapsulamento, fairness</li>
+      <li>Event loop implicito ed esplicito: ActorFoundry, Akka, Erlang</li>
+      <li>Problema dello spaghetti asincrono, futures, stashing, constraint di sincronizzazione</li>
+    </ul>
+  </div>
+
+  <nav class="lk-toc">
+    <h3>Indice</h3>
+    <ol>
+      <li><a href="#s1">Fondamenti del Message Passing</a></li>
+      <li><a href="#s2">Primitive di comunicazione</a></li>
+      <li><a href="#s3">Sincrono vs Asincrono</a></li>
+      <li><a href="#s4">Schemi di comunicazione</a></li>
+      <li><a href="#s5">Client-Server e Monitor Attivi</a></li>
+      <li><a href="#s6">Allocatori di risorse: passivi vs attivi</a></li>
+      <li><a href="#s7">Comunicazione guardata</a></li>
+      <li><a href="#s8">Bounded Buffer Manager</a></li>
+      <li><a href="#s9">Exchanging Values Problem</a></li>
+      <li><a href="#s10">Filosofi a cena distribuiti</a></li>
+      <li><a href="#s11">Rendez-vous e Ada</a></li>
+      <li><a href="#s12">Introduzione agli Attori</a></li>
+      <li><a href="#s13">Semantiche chiave degli attori</a></li>
+      <li><a href="#s14">Event Loop e macro-step</a></li>
+      <li><a href="#s15">Attori in pratica: ActorFoundry e Akka</a></li>
+      <li><a href="#s16">Spaghetti asincrono e soluzioni</a></li>
+      <li><a href="#s17">Attori in Erlang</a></li>
+      <li><a href="#s18">Pattern e idiomi negli attori</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </nav>
+
+  <!-- ================================================================ -->
+  <section id="s1">
+    <h2>1. Fondamenti del Message Passing</h2>
+    <p>Finora abbiamo studiato modelli di programmazione concorrente basati su <strong>memoria condivisa</strong>: semafori, monitor, variabili condition, lock. In tutti questi modelli i thread/processi interagiscono leggendo e scrivendo variabili in uno spazio di indirizzamento comune, protetto da meccanismi di mutua esclusione e sincronizzazione.</p>
+    <p>Il <strong>message passing</strong> capovolge completamente questo paradigma: l'unico modo per due processi di interagire e scambiarsi messaggi esplicitamente attraverso primitive di <code>send</code> e <code>receive</code>. Non esistono oggetti condivisi, monitor, lock o semafori. Questa filosofia, come sottolinea il Prof. Ricci, e alla base della programmazione distribuita ma sta guadagnando terreno anche nella programmazione concorrente tradizionale, perche elimina alla radice intere categorie di bug (data race, deadlock da lock dimenticati, etc.).</p>
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il message passing non e un'idea nuova: Brinch-Hansen la introdusse nel 1970 per i sistemi operativi del computer RC4000. Bob Balzer introdusse il concetto di <em>port</em> nel 1971. La comunicazione sincrona fu formalizzata da Hoare nel 1978 con il CSP (Communicating Sequential Processes). Carl Hewitt e Gul Agha svilupparono il modello Actor a partire dal 1973. Oggi queste idee vivono in Go (goroutine + canali), Erlang/Elixir, Akka, Dart isolates, Web Workers, e molti altri.</p>
+    </div>
+    <p>Il messaggio non e solo un dato: e l'<strong>unita atomica di interazione</strong>. Un processo invia un messaggio su un canale; un altro processo lo riceve dallo stesso canale. Non c'e accoppiamento forte come nella chiamata di procedura — i due processi possono essere su core diversi, macchine diverse, continenti diversi.</p>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>"Do not communicate by sharing memory; instead, share memory by communicating." — Questo principio, reso famoso da Go (Rob Pike), cattura l'essenza: invece di proteggere l'accesso a dati condivisi con lock, i processi si scambiano dati per valore attraverso canali, ciascuno restando padrone del proprio stato locale.</p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s2">
+    <h2>2. Primitive di comunicazione</h2>
+    <p>Il modello introduce un nuovo tipo di dato astratto: il <strong>canale</strong>. Un canale e dichiarato globalmente ai processi e specifica la struttura dei messaggi che puo trasportare.</p>
+    <h3>Dichiarazione di un canale</h3>
+    <pre><code class="language-java">chan ch(type id1, ..., type idn)</code></pre>
+    <p>Ad esempio: <code>chan request(int value)</code> definisce un canale chiamato <code>request</code> che trasporta messaggi contenenti un singolo intero.</p>
+    <h3>Primitive</h3>
+    <ul>
+      <li><code>send ch(expr1, expr2, ...)</code> — invia un messaggio composto dalle espressioni sul canale <code>ch</code>. I tipi delle espressioni devono coincidere con quelli dichiarati.</li>
+      <li><code>receive ch(var1, var2, ...)</code> — riceve un messaggio dal canale <code>ch</code> depositando i valori nelle variabili specificate.</li>
+    </ul>
+    <h3>Atomicita</h3>
+    <p>L'accesso al contenuto del canale e <strong>atomico</strong>: quando un processo esegue una send (o una receive), quell'operazione non puo essere interrotta da un altro processo sul medesimo canale. Questo garantisce che non ci siano race condition a livello del canale stesso.</p>
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Ricordate che l'atomicita riguarda l'accesso al canale, non l'intera sezione di codice. I canali sono dichiarati globali ai processi, proprio come le variabili condivise, ma il meccanismo di accesso e radicalmente diverso.</p>
+    </div>
+    <div id="ac-basic"></div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s3">
+    <h2>3. Comunicazione sincrona vs asincrona</h2>
+    <p>La distinzione fondamentale nel message passing e tra comunicazione <strong>sincrona</strong> e <strong>asincrona</strong>. Il Prof. Ricci dedica molta attenzione a questo punto, perche determina le proprieta di sincronizzazione, l'accoppiamento temporale, e la complessita dei sistemi.</p>
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Comunicazione Sincrona</button>
+        <button class="lk-tab">Comunicazione Asincrona</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Nella comunicazione <strong>sincrona</strong>, la <code>send</code> si blocca finche il messaggio non viene ricevuto sul canale. La <code>receive</code> si blocca finche un messaggio non e disponibile.</p>
+        <ul>
+          <li>Non servono buffer: il trasferimento avviene solo quando mittente e destinatario sono entrambi pronti (<em>rendez-vous</em>).</li>
+          <li>La comunicazione e un'azione atomica: i puntatori di controllo di entrambi i processi devono trovarsi sulla send e sulla receive.</li>
+          <li>Modello piu primitivo, usato negli algebre di processi (CSP, CCS).</li>
+          <li>Garantisce che quando la send sblocca, il messaggio e stato effettivamente recapitato.</li>
+        </ul>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Nella comunicazione <strong>asincrona</strong>, la <code>send</code> non si blocca: il messaggio viene accodato in un buffer FIFO associato al canale. La <code>receive</code> si blocca se il buffer e vuoto.</p>
+        <ul>
+          <li>I canali hanno un buffer (in alcuni modelli detti <em>port</em>).</li>
+          <li>Disaccoppiamento temporale: mittente e destinatario non devono sincronizzarsi.</li>
+          <li>Modello piu flessibile e naturale per sistemi distribuiti.</li>
+          <li>Non fornisce garanzie di ricezione immediata: dopo una send, il mittente non sa se/quando il messaggio sara ricevuto.</li>
+        </ul>
+      </div>
+    </div>
+    <h3>Step simulator: confronto sincrono/asincrono</h3>
+    <p>Il simulatore seguente mostra la differenza tra una send sincrona e una asincrona in un semplice schema produttore-consumatore. Clicca "Avanza" per eseguire un passo per volta.</p>
+    <div id="step-sync-async"></div>
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Nel caso sincrono, la stampa di "done" sul produttore avviene <strong>sempre dopo</strong> che il consumatore ha eseguito la receive. Nel caso asincrono, il produttore puo stampare "done" molto prima che il consumatore riceva il messaggio — o addirittura, in linea di principio, prima che il consumatore abbia ancora iniziato la receive. Questo disaccoppiamento e potente ma richiede attenzione nella progettazione.</p>
+    </div>
+    <h3>Sintassi alternativa (notazione algebrica)</h3>
+    <pre><code class="language-java">send ch(msg):   ch ! msg
+receive ch(msg): ch ? msg</code></pre>
+    <p>Questa notazione e usata frequentemente nella letteratura sugli algebre di processi (CSP, CCS) e in linguaggi come Go per i canali.</p>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s4">
+    <h2>4. Schemi di comunicazione</h2>
+    <p>Il Prof. Ricci distingue tre schemi fondamentali di comunicazione basati sul numero di mittenti e destinatari per un dato canale:</p>
+    <table>
+      <thead>
+        <tr><th>Schema</th><th>Mittenti</th><th>Destinatari</th><th>Proprieta</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>One-to-one</strong></td><td>1</td><td>1</td><td>Canale dedicato a una coppia di processi. Tipico della comunicazione sincrona (es. Occam, Transputer).</td></tr>
+        <tr><td><strong>Many-to-many</strong></td><td>N</td><td>M</td><td>Piu mittenti e piu destinatari condividono lo stesso canale. C'e <strong>competizione</strong> in ricezione e <strong>non-determinismo</strong>.</td></tr>
+        <tr><td><strong>Many-one</strong></td><td>N</td><td>1</td><td>Un singolo destinatario (tipicamente un server), piu mittenti (client). Usato con i port.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>La competizione nello schema many-to-many significa che quando piu processi fanno receive sullo stesso canale, uno solo otterra il messaggio. L'ordine di arrivo determina chi vince, ma non c'e garanzia di fairness intrinseca. Il non-determinismo e una caratteristica del modello, non un bug.</p>
+    </div>
+    <h3>Esempio: produttore-consumatore semplice</h3>
+    <pre><code class="language-java">chan buf(int);
+process Producer {
+  integer x
+  loop forever:
+    p1: x &lt;- produce
+    p2: send buf(x)
+}
+process Consumer {
+  integer y
+  loop forever:
+    q1: receive buf(y)
+    q2: consume(y)
+}</code></pre>
+    <h3>Pipeline: CharToLine</h3>
+    <pre><code class="language-java">chan input(char), output(char[MAXLINE]);
+process CharToLine {
+  char line[MAXLINE+1];
+  int i = 0;
+  while (true) {
+    receive input(line[i]);
+    while (line[i] != CR and i &lt; MAXLINE) {
+      i = i + 1;
+      receive input(line[i]);
+    }
+    line[i] = EOL;
+    send output(line);
+    i = 0;
+  }
+}</code></pre>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s5">
+    <h2>5. Client-Server e Monitor Attivi</h2>
+    <pre><code class="language-java">chan request(int, kind, arg_type);
+chan[NCLIENTS] reply(arg_result);
+process Client[i = 0 to N-1] {
+  arg_type myargs;
+  res_type myres;
+  &lt;init args&gt;
+  send request(i, opXXX, myargs);
+  receive reply[i](myres);
+}</code></pre>
+    <p><strong>Nota importante:</strong> ogni client ha un <strong>canale di reply dedicato</strong> (<code>reply[i]</code>). Il server usa l'ID del client (passato come primo campo della richiesta) per sapere su quale canale inviare la risposta.</p>
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Perche non si puo usare un unico canale di reply condiviso da tutti i client? Perche la <code>receive</code> base non permette di specificare un pattern — prende il primo messaggio disponibile. Se ci fosse un unico canale, un client potrebbe ricevere la risposta destinata a un altro. La competizione sul canale di reply romperebbe la corrispondenza richiesta-risposta. Ogni client deve avere il proprio canale (o si deve usare una primitiva con pattern matching, come il <code>receive</code> di Erlang).</p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s6">
+    <h2>6. Allocatori di risorse: passivi vs attivi</h2>
+    <p>Il Prof. Ricci dedica una parte importante della lezione al confronto tra allocatori di risorse con <strong>monitor passivi</strong> (memoria condivisa) e <strong>processi attivi</strong> (message passing). La tabella seguente riassume la corrispondenza:</p>
+    <table>
+      <thead>
+        <tr><th>Monitor-Based (passivo)</th><th>Process-Based (attivo)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Variabili permanenti</td><td>Variabili locali del server</td></tr>
+        <tr><td>Identificatori di procedura</td><td>Canale request e tipi di operazione (kind)</td></tr>
+        <tr><td>Chiamata di procedura</td><td><code>send request(...)</code> + <code>receive reply(...)</code></td></tr>
+        <tr><td>Entrata nel monitor</td><td><code>receive request(...)</code></td></tr>
+        <tr><td>Ritorno dalla procedura</td><td><code>send reply(...)</code></td></tr>
+        <tr><td><code>wait(cv)</code></td><td>Salva richieste in una coda (pending queue)</td></tr>
+        <tr><td><code>signal(cv)</code></td><td>Recupera e processa richieste in sospeso</td></tr>
+        <tr><td>Corpo della procedura</td><td>Casi in uno switch sull'operazione (kind)</td></tr>
+      </tbody>
+    </table>
+    <p>L'idea centrale: le <strong>condition variable</strong> nei monitor servono a bloccare un thread finche una condizione non e soddisfatta. Con i messaggi, lo stesso effetto si ottiene <strong>parcheggiando la richiesta</strong> in una coda interna e rimandando la risposta a quando la risorsa sara disponibile.</p>
+    <h3>State Explorer: allocatore attivo</h3>
+    <p>Esplora i possibili stati del processo allocatore attivo mentre gestisce richieste di ACQUIRE e RELEASE:</p>
+    <div id="se-allocator"></div>
+    <h3>Codice dell'allocatore attivo</h3>
+    <pre><code class="language-java">chan request(int clientID, int type);
+chan[N] reply(res_id id);
+process ResAllocator {
+  int clientID;
+  int avail = MAXUNITS;
+  queue pending;
+  set units = &lt;valore iniziale&gt;;
+  op_kind kind; res_id id;
+  while (true) {
+    receive request(clientID, kind);
+    if (kind == ACQUIRE) {
+      if (avail > 0) {
+        avail = avail - 1;
+        id = remove(units);
+        send reply[clientID](id);
+      } else { insert(pending, clientID); }
+    } else if (kind == RELEASE) {
+      insert(units, id);
+      if (empty(pending)) { avail = avail + 1; }
+      else { remove(pending, clientID); send reply[clientID](id); }
+    }
+  }
+}</code></pre>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s7">
+    <h2>7. Comunicazione guardata</h2>
+    <p>Un problema fondamentale: come ricevere messaggi che possono arrivare su <strong>multipli canali</strong> contemporaneamente? La soluzione classica, introdotta da <strong>Dijkstra nel 1974</strong>, e la <strong>comunicazione guardata</strong> (<em>guarded communication</em>).</p>
+    <h3>Statement di comunicazione guardata</h3>
+    <pre><code class="language-java">// Forma generale
+B ; C → S</code></pre>
+    <ul>
+      <li><code>B</code> e una guardia booleana (se omessa, vale <code>true</code>).</li>
+      <li><code>C</code> e uno statement di comunicazione (tipicamente una receive).</li>
+      <li><code>S</code> e il blocco di statement da eseguire.</li>
+    </ul>
+    <p>La guardia <strong>ha successo</strong> se <code>B</code> e vera e <code>C</code> puo essere eseguito senza bloccarsi. <strong>Fallisce</strong> se <code>B</code> e falsa. Si <strong>blocca</strong> se <code>B</code> e vera ma <code>C</code> non puo ancora essere eseguito.</p>
+    <h3>If con guarded communication</h3>
+    <pre><code class="language-java">if B1; C1 → S1;
+[] B2; C2 → S2;
+[] B3; C3 → S3;
+fi</code></pre>
+    <p>Semantica:</p>
+    <ol>
+      <li>Valuta tutte le espressioni booleane nelle guardie.</li>
+      <li>Se tutte falliscono, l'if termina senza effetto.</li>
+      <li>Se almeno una ha successo, ne sceglie una non-deterministicamente.</li>
+      <li>Se tutte si bloccano, aspetta finche una guardia ha successo.</li>
+      <li>Esegue <code>C</code> per la guardia scelta, poi <code>S</code>.</li>
+    </ol>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Il non-determinismo nella scelta tra guardie che hanno successo e una caratteristica fondamentale: permette di scrivere codice che non dipende dall'ordine di arrivo dei messaggi, delegando al runtime la decisione. Questo semplifica il ragionamento sulla correttezza.</p>
+    </div>
+    <h3>Loop con guarded communication</h3>
+    <pre><code class="language-java">do B1; C1 → S1;
+[] B2; C2 → S2;
+[] B3; C3 → S3;
+od</code></pre>
+    <p>Esempio — processo <code>Copy</code> che trasferisce caratteri usando un buffer circolare:</p>
+    <pre><code class="language-java">process Copy(chan in(char), chan out(char)) {
+  char buffer[10];
+  int front = 0, rear = 0, count = 0;
+  do count &lt; 10; receive in(buffer[rear])
+     → count++; rear = (rear + 1) % 10;
+  [] count > 0; send out(buffer[front])
+     → count--; front = (front + 1) % 10;
+  od
+}</code></pre>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s8">
+    <h2>8. Bounded Buffer Manager</h2>
+    <pre><code class="language-java">process BoundedBufferManager {
+  int nItems = 0;
+  int maxElems = ...;
+  Queue&lt;ItemType&gt; queue = ...;
+  ItemType item;
+  boolean ack = true;
+  chan replyChan;
+  do nItems &lt; maxElems; receive put(item, replyChan)
+     → queue.add(item); nItems++; send replyChan(ack);
+  [] nItems > 0; receive get(replyChan)
+     → ItemType el = queue.remove(); nItems--; send replyChan(el);
+  od
+}
+process Producer(chan myChan) {
+  boolean ack;
+  loop { ItemType el = produce(); send put(el, myChan); receive myChan(ack); }
+}
+process Consumer(chan myChan) {
+  loop { ItemType el; send get(myChan); receive myChan(el); consume(el); }
+}</code></pre>
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Confrontate questa soluzione con il bounded buffer realizzato con monitor e condition variable. Nel monitor, i thread si bloccano su <code>wait()</code> in attesa di spazio/dati. Qui, il manager <em>parcheggia</em> le richieste nella guarded communication. L'effetto e simile, ma il meccanismo e completamente diverso: non ci sono lock, non c'e memoria condivisa.</p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s9">
+    <h2>9. Exchanging Values Problem</h2>
+    <p>Il Prof. Ricci introduce un problema classico per illustrare come <strong>topologie diverse</strong> portino a soluzioni con proprieta diverse: abbiamo N processi, ognuno con un valore locale <code>v</code>. Vogliamo che tutti conoscano il valore <strong>minimo</strong> e <strong>massimo</strong> tra tutti i valori. Tre soluzioni, tre topologie.</p>
+    <pre class="mermaid">
+flowchart TB
+    subgraph Centralizzato
+        C0((P0)) ---|coordinator| C1((P1)) &amp; C2((P2)) &amp; C3((P3))
+    end
+    subgraph Simmetrico
+        S0((P0)) --- S1((P1))
+        S0 --- S2((P2))
+        S0 --- S3((P3))
+        S1 --- S2
+        S1 --- S3
+        S2 --- S3
+    end
+    subgraph Anello
+        direction LR
+        R0((P0)) --> R1((P1)) --> R2((P2)) --> R3((P3)) --> R0
+    end
+    </pre>
+    <h3>Soluzione centralizzata</h3>
+    <pre><code class="language-java">chan values(int), results[n](int smallest, int largest);
+process P[0] {
+  int v = ....;
+  int new, smallest = v, largest = v;
+  for i in [1...n-1] {
+    receive values(new);
+    if (new &lt; smallest) smallest = new;
+    if (new > largest)  largest = new;
+  }
+  for i in [1...n-1] { send results[i](smallest, largest); }
+}
+process P[i] {
+  int v = ..., smallest, largest;
+  send values(v);
+  receive results[i](smallest, largest);
+}</code></pre>
+    <ul>
+      <li><strong>Vantaggio:</strong> pochi messaggi (<em>2(n-1)</em>).</li>
+      <li><strong>Svantaggio:</strong> bottleneck sul coordinatore; single point of failure.</li>
+    </ul>
+    <h3>Soluzione simmetrica</h3>
+    <pre><code class="language-java">chan values[n](int);
+process P[i = 0 to n-1] {
+  int v = ....;
+  int new, smallest = v, largest = v;
+  for j in [0...n-1], j != i { send values[j](v); }
+  for k in [1...n-1] {
+    receive values[i](new);
+    if (new &lt; smallest) smallest = new;
+    if (new > largest)  largest = new;
+  }
+}</code></pre>
+    <ul>
+      <li><strong>Vantaggio:</strong> massima distribuzione e parallelismo.</li>
+      <li><strong>Svantaggio:</strong> numero di messaggi <em>N*(N-1)</em> — quadratico.</li>
+    </ul>
+    <h3>Soluzione ad anello</h3>
+    <pre><code class="language-java">process P[0] {
+  int v = ....;
+  int new, smallest = v, largest = v;
+  send values[1](smallest, largest);
+  receive values[0](smallest, largest);
+  send values[1](smallest, largest);
+}
+process P[i = 1 to n-1] {
+  int v = ..., smallest, largest;
+  receive values[i](smallest, largest);
+  if (v &lt; smallest) smallest = v;
+  if (v > largest)  largest = v;
+  send values[(i+1)%n](smallest, largest);
+  receive values[i](smallest, largest);
+  send values[(i+1)%n](smallest, largest);
+}</code></pre>
+    <ul>
+      <li><strong>Vantaggio:</strong> pochi messaggi (<em>2n</em>).</li>
+      <li><strong>Svantaggio:</strong> parallelismo limitato (serializzazione nell'anello).</li>
+    </ul>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Queste tre soluzioni mostrano un trade-off fondamentale: <strong>parallelismo vs. numero di messaggi</strong>. La soluzione simmetrica massimizza il parallelismo ma costa O(N^2) messaggi. La soluzione ad anello minimizza i messaggi (O(N)) ma serializza la computazione. La centralizzata e un punto intermedio.</p>
+    </div>
+    <div id="se-topologies"></div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s10">
+    <h2>10. Filosofi a cena distribuiti</h2>
+    <p>Il problema dei filosofi a cena puo essere ripensato in termini di <strong>scambio di messaggi</strong>. Il Prof. Ricci osserva: "I canali diventano le forchette."</p>
+    <h3>Soluzione centralizzata (con cameriere)</h3>
+    <pre class="mermaid">
+flowchart LR
+    W[Waiter] --- Ph0[Ph 0] &amp; Ph1[Ph 1] &amp; Ph2[Ph 2] &amp; Ph3[Ph 3] &amp; Ph4[Ph 4]
+    </pre>
+    <pre><code class="language-java">chan getForks(int, int, chan);
+chan releaseForks(int, int, chan);
+process Waiter[i:0..N-1] {
+  List&lt;Request&gt; pending = ...;
+  boolean availForks[0..N-1] = {false, ...};
+  do receive getForks(fork1, fork2, ReplyChanID)
+     → if availForks[fork1] &amp;&amp; availForks[fork2] {
+         availForks[fork1] = false; availForks[fork2] = false;
+         send ReplyChanID(fork1, fork2);
+       } else { pending.add(new Request(Reply, fork1, fork2)); }
+  [] receive releaseForks(fork1, fork2)
+     → availForks[fork1] = true; availForks[fork2] = true;
+       for each Request r in pending {
+         if (availForks[r.fork1] &amp;&amp; availForks[r.fork2]) {
+           pending.remove(r);
+           availForks[r.fork1] = false; availForks[r.fork2] = false;
+           send req.ReplyChanID(req.fork1, req.fork2);
+         }
+       }
+  od
+}</code></pre>
+    <h3>Soluzione distribuita (un cameriere per forchetta)</h3>
+    <pre class="mermaid">
+flowchart LR
+    W0[W 0] --- Ph0[Ph 0] &amp; Ph1[Ph 1]
+    W1[W 1] --- Ph1 &amp; Ph2[Ph 2]
+    W2[W 2] --- Ph2 &amp; Ph3[Ph 3]
+    W3[W 3] --- Ph3 &amp; Ph4[Ph 4]
+    W4[W 4] --- Ph4 &amp; Ph0
+    </pre>
+    <pre><code class="language-java">process Waiter[i:0..N-1] {
+  loop {
+    receive getFork[i]();
+    send getForkReply[i]();
+    receive releaseFork[i]();
+    send releaseForkReply[i]();
+  }
+}
+process Philosopher[i:0..N-1] {
+  int first = i; int second = (i+1) % N;
+  if (second &lt; first) { first = second; second = i; }
+  loop {
+    think();
+    send getFork[first](); receive getForkReply[first]();
+    send getFork[second](); receive getForkReply[second]();
+    eat();
+    send releaseFork[first](); receive releaseForkReply[first]();
+    send releaseFork[second](); receive releaseForkReply[second]();
+  }
+}</code></pre>
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Nella soluzione distribuita, l'uso della <strong>resource hierarchy</strong> (prendere sempre la forchetta con indice minore prima) e fondamentale per evitare il deadlock. La gerarchia rompe la circular wait.</p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s11">
+    <h2>11. Rendez-vous e Ada</h2>
+    <p>Il <strong>rendez-vous</strong> e un'estensione della comunicazione sincrona in cui il mittente non solo aspetta che il ricevente accetti il messaggio, ma attende anche la <strong>risposta</strong>.</p>
+    <pre><code class="language-ada">-- Call e Accept in Ada
+task T;
+entry E(formals);
+...
+T.E(actuals);  -- chiama l'entry
+
+accept E(formals) do
+  -- corpo del rendez-vous
+end accept;</code></pre>
+    <pre><code class="language-ada">with Ada.Text_IO; use Ada.Text_IO;
+procedure HotDog is
+  task Gourmet is
+    entry Make_A_Hot_Dog;
+  end Gourmet;
+  task body Gourmet is
+  begin
+    Put_Line("I am ready to make a hot dog for you");
+    for Index in 1..4 loop
+      accept Make_A_Hot_Dog do
+        delay 0.8;
+        Put("Put hot dog in bun "); Put_Line("and add mustard");
+      end Make_A_Hot_Dog;
+    end loop;
+    Put_Line("I am out of hot dogs");
+  end Gourmet;
+begin
+  for Index in 1..4 loop
+    Gourmet.Make_A_Hot_Dog;
+    delay 0.1;
+    Put_Line("Eat the resulting hot dog"); New_Line;
+  end loop;
+  Put_Line("I am not hungry any longer");
+end HotDog;</code></pre>
+    <table>
+      <thead>
+        <tr><th>Caratteristica</th><th>Send sincrona</th><th>Rendez-vous (call/accept)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Blocco della send</td><td>Finche il msg e ricevuto</td><td>Finche il servizio e completato</td></tr>
+        <tr><td>Il mittente conosce il destinatario</td><td>Si (canale)</td><td>Si (nome dell'entry)</td></tr>
+        <tr><td>Il destinatario conosce il mittente</td><td>No (anonimo)</td><td>No (non necessariamente)</td></tr>
+        <tr><td>Scambio dati</td><td>Solo messaggio</td><td>Parametri + risultati</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s12">
+    <h2>12. Introduzione agli Attori</h2>
+    <p>Con la seconda parte della lezione, il Prof. Ricci introduce il modello <strong>Actor</strong>, sviluppato originariamente da Carl Hewitt al MIT negli anni Settanta nel contesto dell'intelligenza artificiale, e successivamente approfondito da Gul Agha come unificazione tra OOP e concorrenza.</p>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>La vera essenza della programmazione orientata agli oggetti, secondo Alan Kay, non erano le classi o l'ereditarieta, ma il <strong>message passing</strong>. Gli attori realizzano questa visione originale: tutto e un attore, l'unica comunicazione e lo scambio asincrono di messaggi.</p>
+    </div>
+    <p>Un <strong>attore</strong> e un'entita computazionale che incapsula stato, comportamento e un flusso di controllo logico. A differenza degli oggetti classici, gli attori sono <strong>autonomi</strong> e <strong>reattivi</strong>: lavorano solo quando ricevono un messaggio.</p>
+    <h3>Le tre primitive fondamentali</h3>
+    <ol>
+      <li><strong>send</strong> — invia un messaggio asincrono a un attore (identificato dal suo ID).</li>
+      <li><strong>create</strong> — crea un nuovo attore con un comportamento specificato.</li>
+      <li><strong>become</strong> — specifica un nuovo comportamento che l'attore usera per il messaggio successivo (history-sensitive).</li>
+    </ol>
+    <pre class="mermaid">
+flowchart LR
+    subgraph A1 [Attore A]
+        S1[(Stato)] &amp; C1[Comportamento] &amp; ID1[ID]
+    end
+    subgraph A2 [Attore B]
+        S2[(Stato)] &amp; C2[Comportamento] &amp; ID2[ID]
+    end
+    A1 -->|messaggio asincrono| A2
+    A2 -->|messaggio asincrono| A1
+    </pre>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s13">
+    <h2>13. Semantiche chiave degli attori</h2>
+    <table>
+      <thead>
+        <tr><th>Principio</th><th>Descrizione</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Comportamento puramente reattivo</strong></td><td>Un attore lavora solo quando riceve un messaggio. Nessun messaggio = bloccato.</td></tr>
+        <tr><td><strong>Incapsulamento dello stato</strong></td><td>Un attore non puo accedere direttamente allo stato interno di un altro attore.</td></tr>
+        <tr><td><strong>Macro-step semantics</strong></td><td>Una volta ricevuto un messaggio, la computazione viene eseguita <em>completamente</em> prima di servire un altro messaggio (run-to-completion).</td></tr>
+        <tr><td><strong>Fairness</strong></td><td>Un messaggio inviato a un attore viene prima o poi recapitato e processato.</td></tr>
+        <tr><td><strong>Location transparency</strong></td><td>Per inviare un messaggio a un attore basta conoscere la sua identita, non la sua locazione fisica.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>La <strong>macro-step semantics</strong> e cruciale: evita le race condition perche l'handler viene eseguito atomicamente rispetto agli altri messaggi. Tuttavia, complica la programmazione perche un handler non puo bloccarsi in attesa di un altro messaggio — bloccherebbe tutto l'attore.</p>
+    </div>
+    <h3>State Explorer: ciclo di vita di un attore</h3>
+    <div id="se-actor-lifecycle"></div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s14">
+    <h2>14. Event Loop e macro-step</h2>
+    <p>L'implementazione pratica del modello attore si basa su un <strong>event loop</strong> implicito o esplicito.</p>
+    <h3>Event loop implicito</h3>
+    <pre><code class="language-java">loop {
+  msg &lt;- waitForMsg()
+  handler &lt;- selectHandler(msg)
+  execute(handler)
+}</code></pre>
+    <p>Esempi: ActorFoundry, Akka, Vert.x, Web Workers.</p>
+    <h3>Event loop esplicito</h3>
+    <p>Il programmatore scrive il loop di ricezione e usa pattern matching. Esempio: Erlang.</p>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>La macro-step semantics e condivisa da entrambi gli approcci: un handler viene eseguito completamente prima di ricevere il messaggio successivo. L'unico punto di blocco e la receive. Questo implica che gli handler devono avere un comportamento <strong>non bloccante</strong>.</p>
+    </div>
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Vantaggi</button>
+        <button class="lk-tab">Svantaggi</button>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li>Niente race condition (grazie alla macro-step semantics).</li>
+          <li>Ragionamento semplificato sul programma.</li>
+          <li>Disaccoppiamento tra concorrenza logica (N attori) e fisica (M thread OS).</li>
+          <li>Migliaia/centinaia di migliaia di attori possono coexistire su pochi thread.</li>
+        </ul>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li>Problema dello <strong>"spaghetti asincrono"</strong>.</li>
+          <li>Difficolta a esprimere comportamenti pro-attivi.</li>
+          <li>Complesso coordinare attori che devono attendersi prima di procedere.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s15">
+    <h2>15. Attori in pratica: ActorFoundry e Akka</h2>
+    <h3>ActorFoundry (Java)</h3>
+    <pre><code class="language-java">public class PingActor extends Actor {
+  ActorName otherPinger;
+  @message
+  public void start(ActorName other) {
+    otherPinger = other;
+    send(otherPinger, "ping", self(), Id.stamp()+"called from "+self());
+  }
+  @message
+  public void ping(ActorName caller, String msg) {
+    send(stdout, "println", Id.stamp()+"Received ping ("+msg+") from "+caller+"...");
+    send(caller, "alive", Id.stamp()+self().toString()+" is alive");
+  }
+  @message
+  public void alive(String reply) {
+    send(stdout, "println", Id.stamp()+"Received "+reply+" from pinged actor");
+  }
+}</code></pre>
+    <h3>Akka (Java — Untyped Actor)</h3>
+    <pre><code class="language-java">import akka.actor.UntypedActor;
+import akka.event.Logging;
+import akka.event.LoggingAdapter;
+public class MyUntypedActor extends UntypedActor {
+  LoggingAdapter log = Logging.getLogger(getContext().system(), this);
+  public void onReceive(Object message) throws Exception {
+    if (message instanceof String) {
+      log.info("Received String message: {}", message);
+      getSender().tell("received");
+    } else unhandled(message);
+  }
+}</code></pre>
+    <h3>Akka (Scala — Typed Actor)</h3>
+    <pre><code class="language-scala">import akka.actor.Actor
+import akka.actor.Props
+import akka.event.Logging
+class MyActor extends Actor {
+  val log = Logging(context.system, this)
+  def receive = {
+    case "test" => log.info("received test")
+    case _      => log.info("received unknown message")
+  }
+}</code></pre>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s16">
+    <h2>16. Spaghetti asincrono e soluzioni</h2>
+    <p>Il <strong>"asynchronous spaghetti"</strong>: la logica applicativa viene frammentata in un insieme non strutturato di handler/callback, ciascuno dei quali reagisce a un evento specifico. Quando un flusso di lavoro richiede una sequenza di passi, ogni passo diventa un handler separato.</p>
+    <h3>Esempio: sin(x) * cos(y)</h3>
+    <p>Supponiamo di voler calcolare <code>sin(x) * cos(y)</code> usando attori separati per sin e cos. Con l'approccio a handler: invia x a Sin, invia y a Cos, attendi entrambe le risposte, poi moltiplica. Ogni risposta richiede un handler diverso, e bisogna tracciare lo stato per sapere se l'altra risposta e gia arrivata.</p>
+    <h3>Soluzioni proposte</h3>
+    <ul>
+      <li><strong>Futures/Promises</strong>: oggetti proxy per un risultato non ancora disponibile.</li>
+      <li><strong>Promise pipelines</strong>: compongono future in sequenza.</li>
+      <li><strong>Stashing</strong> (Akka): mettere da parte i messaggi che non possono essere processati ora.</li>
+      <li><strong>Local Synchronization Constraints</strong> (ActorFoundry): condizioni booleane che abilitano/disabilitano la ricezione di messaggi.</li>
+    </ul>
+    <h4>Stashing in Akka</h4>
+    <pre><code class="language-scala">import akka.actor.Stash
+class ActorWithProtocol extends Actor with Stash {
+  def receive = {
+    case "open" => unstashAll(); context.become({
+      case "write" => // do writing...
+      case "close" => unstashAll(); context.unbecome()
+      case msg => stash()
+    }, discardOld = false)
+    case msg => stash()
+  }
+}</code></pre>
+    <h4>LSC in ActorFoundry</h4>
+    <pre><code class="language-java">@Disable(messageName = "put")
+public Boolean disablePut(Integer x) {
+  if (bufferReady) { return (tail == bufferSize); }
+  else return true;
+}</code></pre>
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Le LSC (Local Synchronization Constraints) separano il <em>quando</em> un messaggio viene processato dal <em>come</em>. Un messaggio disabilitato viene messo in una <code>save queue</code> per essere processato in seguito.</p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s17">
+    <h2>17. Attori in Erlang</h2>
+    <p>Erlang e il linguaggio che ha portato il modello attore nella produzione industriale. Sviluppato da Ericsson dal 1987 per telecomunicazioni.</p>
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Joe Armstrong, il creatore di Erlang, ha definito il linguaggio come "il miglior modo per scrivere sistemi concorrenti, distribuiti e fault-tolerant". La BEAM supporta centinaia di migliaia di processi con costo di creazione di pochi microsecondi.</p>
+    </div>
+    <pre><code class="language-erlang">% Creazione processo
+Pid = spawn(math, fact, [999]).
+% Invio messaggio
+Pid ! Message.
+% Ricezione con pattern matching
+receive
+  Pattern1 [when Guard1] -> Expression1;
+  Pattern2 [when Guard2] -> Expression2;
+  ...
+end</code></pre>
+    <h3>Counter in Erlang</h3>
+    <pre><code class="language-erlang">-module(counter).
+-export([start/0]).
+start() -> loop(0).
+loop(Sum) ->
+  receive
+    {inc} -> loop(Sum + 1);
+    {getValue, Pid} -> Pid ! {count_value, Sum}, loop(Sum)
+  end.</code></pre>
+    <h3>Account bancario</h3>
+    <pre><code class="language-erlang">account(Balance) ->
+  receive
+    {deposit, Amount, Whom} -> Whom ! {deposit_receipt, Amount},
+                               account(Balance + Amount);
+    {balance, Whom} -> Whom ! {balance, Balance},
+                       account(Balance);
+    {withdrawal, Amount, Whom} when Amount > Balance ->
+                               Whom ! overdraft, account(Balance);
+    {withdrawal, Amount, Whom} -> Whom ! {withdrawal_receipt, Amount},
+                               account(Balance - Amount)
+  end.</code></pre>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="s18">
+    <h2>18. Pattern e idiomi negli attori</h2>
+    <h3>Pro-activity Problem</h3>
+    <p>Gli attori sono entita <strong>puramente reattive</strong>. Come modellare un comportamento pro-attivo? Soluzioni: splitting in sotto-attori, self-sending di messaggi.</p>
+    <h3>Futures</h3>
+    <p>Un <strong>future</strong> e un attore proxy per un risultato non ancora disponibile. Tre stati: iniziale (nessun valore, nessun cliente), attesa (clienti accodati), risolto (clienti notificati, valore immutabile). Il future puo essere passato ad altri attori prima di essere risolto.</p>
+    <h3>Actor Idioms (Schumacher, AGERE! 2012)</h3>
+    <ul>
+      <li><strong>Serializer</strong>: attore che serializza l'accesso a una risorsa.</li>
+      <li><strong>Fork-Join</strong>: attore che distribuisce lavoro e raccoglie risultati.</li>
+      <li><strong>Scheduler</strong>: attore che gestisce il passaggio del testimone.</li>
+    </ul>
+    <h3>Messaging Patterns (V. Vernon)</h3>
+    <ul>
+      <li><strong>Messaging Channels</strong>: Point-to-Point, Publish-Subscribe, Dead Letter, Message Bus.</li>
+      <li><strong>Message Construction</strong>: Command, Document, Event, Request-Reply, Correlation Identifier.</li>
+      <li><strong>Message Routing</strong>: Content-based Filter, Message Filter, Process Manager, Message Broker.</li>
+      <li><strong>Message Transformation</strong>: Envelope Wrapper, Content Enricher, Content Filter.</li>
+    </ul>
+    <h3>Timeline storica</h3>
+    <ol class="lk-timeline">
+      <li><span class="lk-tl-when">1970</span> — Brinch-Hansen introduce l'async message passing per l'RC4000.</li>
+      <li><span class="lk-tl-when">1971</span> — Bob Balzer introduce il concetto di communication port.</li>
+      <li><span class="lk-tl-when">1973</span> — Carl Hewitt introduce il modello Actor all'MIT.</li>
+      <li><span class="lk-tl-when">1974</span> — Dijkstra introduce le guarded commands.</li>
+      <li><span class="lk-tl-when">1978</span> — Hoare formalizza CSP (Communicating Sequential Processes).</li>
+      <li><span class="lk-tl-when">1986</span> — Gul Agha pubblica "Actors: A Model of Concurrent Computation".</li>
+      <li><span class="lk-tl-when">1987</span> — Ericsson sviluppa Erlang per telecomunicazioni.</li>
+      <li><span class="lk-tl-when">2007</span> — Go language (Google): goroutine, canali, select.</li>
+      <li><span class="lk-tl-when">Oggi</span> — Akka, Dart isolates, Web Workers, attori mainstream.</li>
+    </ol>
+  </section>
+
+  <!-- ================================================================ -->
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Qual e la differenza fondamentale tra comunicazione sincrona e asincrona nel message passing?</summary>
+        <p>Nella comunicazione <strong>sincrona</strong>, la send si blocca finche il messaggio non viene ricevuto (non serve buffer). Nella comunicazione <strong>asincrona</strong>, la send non si blocca: il messaggio viene accodato in un buffer FIFO. La sincrona garantisce che dopo la send il messaggio sia stato recapitato; l'asincrona disaccoppia temporalmente mittente e destinatario.</p>
+      </details>
+      <details>
+        <summary>Perche nello schema client-server con message passing ogni client deve avere un proprio canale di reply?</summary>
+        <p>Perche la receive base non permette di specificare un pattern (filtro sul mittente). Se tutti i client condividessero un unico canale di reply, la receive prenderebbe il primo messaggio disponibile — che potrebbe essere la risposta destinata a un altro client.</p>
+      </details>
+      <details>
+        <summary>Cosa sono le guarded communication e quando si usano?</summary>
+        <p>Introdotte da Dijkstra nel 1974, permettono di ricevere messaggi da piu canali contemporaneamente. Una guardia e composta da: condizione booleana (B), comunicazione (C), e blocco di codice (S). Si usano con i costrutti <code>if...fi</code> e <code>do...od</code>.</p>
+      </details>
+      <details>
+        <summary>Nel problema dell'exchanging values, quali sono i trade-off tra le tre soluzioni?</summary>
+        <p><strong>Centralizzata</strong>: pochi messaggi (2(n-1)), ma bottleneck. <strong>Simmetrica</strong>: massimo parallelismo, ma N*(N-1) messaggi. <strong>Ad anello</strong>: pochi messaggi (2n), ma parallelismo limitato.</p>
+      </details>
+      <details>
+        <summary>Cosa si intende per "macro-step semantics" nel modello attore?</summary>
+        <p>L'handler corrispondente a un messaggio viene eseguito completamente prima che l'attore possa servire un altro messaggio (run-to-completion). Questo evita race condition ma implica che gli handler non possano bloccarsi.</p>
+      </details>
+      <details>
+        <summary>Qual e il problema dello "spaghetti asincrono" e come si affronta?</summary>
+        <p>La logica applicativa viene frammentata in una moltitudine di handler non strutturati. Si affronta con: Futures/Promises, promise pipelines, stashing, e local synchronization constraints.</p>
+      </details>
+      <details>
+        <summary>Quali sono le tre primitive fondamentali del modello attore?</summary>
+        <p><strong>Send</strong>: invio asincrono di un messaggio. <strong>Create</strong>: creazione di un nuovo attore. <strong>Become</strong>: cambio del comportamento per il prossimo messaggio.</p>
+      </details>
+      <details>
+        <summary>Come si evita il deadlock nella soluzione distribuita dei filosofi a cena?</summary>
+        <p>Usando la <strong>resource hierarchy</strong>: ogni filosofo prende prima la forchetta con indice minore, poi quella con indice maggiore. Questo rompe la circular wait.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    Materiale di studio generato da trascrizione + slide del 2026-04-17 (Moduli 3.1 e 3.2).<br>
+    Programmazione Concorrente e Distribuita — Prof. Alessandro Ricci — UNIBO. Non e una fonte ufficiale.
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'base', themeVariables: { primaryColor: '#2563eb', primaryTextColor: '#fff', lineColor: '#94a3b8', fontSize: '14px' } });
+
+    LessonKit.annotatedCode('#ac-basic', { lang: 'java', lines: [
+      ['chan ch(int value);', 'Dichiarazione canale globale. Trasporta messaggi con un campo intero.'],
+      ['', ''],
+      ['process P {', 'Processo mittente.'],
+      ['  int x = 42;', 'Il dato da comunicare.'],
+      ['  send ch(x);', 'Invia x su ch. Con semantica sincrona si blocca finche Q non esegue receive.'],
+      ['}', ''],
+      ['process Q {', 'Processo destinatario.'],
+      ['  int y;', 'Variabile dove depositare il valore ricevuto.'],
+      ['  receive ch(y);', 'Bloccato finche un messaggio non arriva su ch. Poi y = x.'],
+      ['  print(y);', 'Ora y contiene il valore inviato da P.'],
+      ['}', '']
+    ]});
+
+    LessonKit.stepper('#step-sync-async', {
+      title: 'Confronto Send Sincrona vs Asincrona',
+      sub: 'Avanza un passo per vedere la sequenza degli eventi.',
+      shared: { mode: 'sync', pPos: 'produce', qPos: 'wait', pDone: false, qDone: false, buffered: 0 },
+      watch: ['mode', 'pPos', 'qPos', 'buffered'],
+      threads: {
+        P: { name: 'Produttore', steps: [
+          { label: 'produce()', run: function(s) { s.pPos = 'producing'; } },
+          { label: 'send ch(x)', run: function(s) {
+              if (s.mode === 'sync') { if (s.qPos !== 'receive') return 'block'; s.pPos = 'sent'; s.buffered = 0; s.pDone = true; }
+              else { s.pPos = 'sent'; s.buffered = 1; s.pDone = true; }
+          }},
+          { label: 'print("done")', run: function(s) { s.pPos = 'done'; } }
+        ]},
+        Q: { name: 'Consumatore', steps: [
+          { label: 'wait()', run: function(s) { s.qPos = 'waiting'; } },
+          { label: 'receive ch(y)', run: function(s) {
+              if (s.mode === 'sync') { if (s.pPos !== 'sent') return 'block'; s.qPos = 'received'; s.qDone = true; }
+              else { if (s.buffered === 0) return 'block'; s.qPos = 'received'; s.buffered = 0; s.qDone = true; }
+          }},
+          { label: 'consume(y)', run: function(s) { s.qPos = 'consumed'; } }
+        ]}
+      },
+      verdict: function(s, done) {
+        if (s.mode === 'sync') {
+          if (s.pDone && s.qDone) return { status: 'ok', text: 'Sincrono: produttore ha atteso receive. Done stampato DOPO receive.' };
+          return { status: '', text: 'Modalita sincrona. Avanza per procedere.' };
+        } else {
+          if (s.pDone && s.qDone) return { status: 'ok', text: 'Asincrono: produttore ha stampato done prima della receive (buffer).' };
+          return { status: '', text: 'Modalita asincrona. Il buffer disaccoppia i processi.' };
+        }
+      }
+    });
+
+    LessonKit.stateExplorer('#se-allocator', {
+      title: 'Stati del processo allocatore attivo',
+      start: 'IDLE', states: {
+        'IDLE': { desc: 'Server in attesa di una richiesta sul canale request. Nessuna richiesta in sospeso, risorse disponibili.', to: [['Riceve ACQUIRE','HAVING_RES'],['Riceve RELEASE','N/A']] },
+        'HAVING_RES': { desc: 'Richiesta ACQUIRE ricevuta, risorsa disponibile. Rimuove unita dal pool, invia reply.', to: [['Invia reply, torna in attesa','IDLE'],['Invia reply, risorse esaurite','WAIT_PENDING']] },
+        'WAIT_PENDING': { desc: 'Nessuna risorsa disponibile. Accoda la richiesta in pending.', to: [['Riceve RELEASE','PROCESS_PENDING']] },
+        'PROCESS_PENDING': { desc: 'Arrivato RELEASE. Verifica se ci sono pending. Se si, rimuove prima e invia reply. Altrimenti incrementa avail.', to: [['Pending non vuota: invia reply','IDLE'],['Pending vuota: avail++','IDLE']] }
+      }
+    });
+
+    LessonKit.stateExplorer('#se-topologies', {
+      title: 'Confronto topologie: Exchanging Values',
+      start: 'CENTRALIZED', states: {
+        'CENTRALIZED': { desc: 'Coordinatore P[0] raccoglie valori, calcola min/max, distribuisce. Pochi msg (2n-2). Bottleneck, SPOF.', to: [['Simmetrica','SYMMETRIC'],['Anello','RING']] },
+        'SYMMETRIC': { desc: 'Ogni processo invia a tutti N*(N-1) msg. Max parallelismo. Costo quadratico.', to: [['Centralizzata','CENTRALIZED'],['Anello','RING']] },
+        'RING': { desc: 'Anello logico. 2 fasi: determinazione + propagazione. Solo 2n msg. Parallelismo limitato.', to: [['Centralizzata','CENTRALIZED'],['Simmetrica','SYMMETRIC']] }
+      }
+    });
+
+    LessonKit.stateExplorer('#se-actor-lifecycle', {
+      title: 'Ciclo di vita di un attore',
+      start: 'CREATO', states: {
+        'CREATO': { desc: 'Attore creato con create(). ID univoco, mailbox vuota.', to: [['Arriva messaggio','ELABORAZIONE']] },
+        'ELABORAZIONE': { desc: 'Estrae primo msg dalla mailbox, esegue handler (macro-step). Altri msg in coda non processati finche handler non termina.', to: [['Handler ok, mailbox non vuota','ELABORAZIONE'],['Handler ok, mailbox vuota','INATTIVO'],['Handler chiama become()','CAMBIATO']] },
+        'INATTIVO': { desc: 'Handler completati, mailbox vuota. Bloccato in attesa di nuovi messaggi.', to: [['Arriva messaggio','ELABORAZIONE']] },
+        'CAMBIATO': { desc: 'Attore ha invocato become(). Nuovo comportamento pronto.', to: [['Mailbox non vuota: nuovo comportamento','ELABORAZIONE'],['Mailbox vuota: attesa','INATTIVO']] }
+      }
+    });
+
+    document.addEventListener('DOMContentLoaded', function() {
+      document.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });
+    });
+  </script>
+
+</body>
+</html>

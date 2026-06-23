@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PCD-2026-03-30 — Async Programming & Actors</title>
+  <link rel="stylesheet" href="assets/lesson-kit.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+
+  <header class="lk-header">
+    <div class="lk-kicker">Programmazione Concorrente e Distribuita — Prof. Alessandro Ricci, UNIBO</div>
+    <h1>Programmazione Asincrona, Promise, Async/Await e introduzione agli Attori</h1>
+    <div class="lk-meta"><span>2026-03-30</span><span>174 min</span><span>Moduli 2.1 · 3.2 · Lab Executors</span>
+      <span><a href="https://liveunibo.sharepoint.com/sites/ProgrammazioneConcorrenteeDistribuita/_layouts/15/stream.aspx?id=%2Fsites%2FProgrammazioneConcorrenteeDistribuita%2FShared%20Documents%2FGeneral%2FRecordings%2FRiunione%20in%20General-20260330_130309-Registrazione%20della%20riunione.mp4" target="_blank" rel="noopener">registrazione originale</a></span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>In questa lezione</h2>
+    <ul>
+      <li>Programmazione asincrona: event loop, reactor pattern, never-blocking rule</li>
+      <li>Async functions, continuation-passing style e callback hell</li>
+      <li>Promise: stati, API, chaining, <code>all</code>/<code>race</code></li>
+      <li>Async/await e coroutine</li>
+      <li>Task-oriented programming: Executor Framework, <code>Callable</code>, <code>Future</code></li>
+      <li>Virtual Thread e Structured Concurrency in Java</li>
+      <li>Il modello Actor: Hewitt, Agha, primitive, semantiche</li>
+      <li>Esempi concreti: Akka, ActorFoundry, Erlang</li>
+    </ul>
+  </div>
+
+  <nav class="lk-toc"><h3>Indice</h3>
+    <ol>
+      <li><a href="#s1">Asynchronous Programming: inquadramento</a></li>
+      <li><a href="#s2">Panorama dei modelli asincroni</a></li>
+      <li><a href="#s3">Event Loop e Reactor Pattern</a></li>
+      <li><a href="#s4">Never-Blocking Rule e Multiple Event Loops</a></li>
+      <li><a href="#s5">Async Functions e Continuation-Passing Style</a></li>
+      <li><a href="#s6">Callback Hell e Pyramid of Doom</a></li>
+      <li><a href="#s7">Promise: stati e API</a></li>
+      <li><a href="#s8">Promise Chaining e composizione</a></li>
+      <li><a href="#s9">Async/Await: la sintassi sincrona per codice asincrono</a></li>
+      <li><a href="#s10">Coroutine e Fiber: il meccanismo di basso livello</a></li>
+      <li><a href="#s11">Virtual Thread in Java</a></li>
+      <li><a href="#s12">Task-Oriented Programming ed Executors</a></li>
+      <li><a href="#s13">ExecutorService, Callable e Future</a></li>
+      <li><a href="#s14">Cancellazione cooperativa e interruption</a></li>
+      <li><a href="#s15">Fork-Join Framework e Structured Concurrency</a></li>
+      <li><a href="#s16">Attori: teoria del modello</a></li>
+      <li><a href="#s17">Attori: primitive e semantica</a></li>
+      <li><a href="#s18">Implementazioni: Akka, ActorFoundry, Erlang</a></li>
+      <li><a href="#s19">Actor Idioms e pattern di messaggistica</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </nav>
+
+  <!-- ============================================================ -->
+  <section id="s1"><h2>1. Asynchronous Programming: inquadramento</h2>
+
+    <p>La programmazione asincrona &egrave; uno stile di programmazione sempre pi&ugrave; centrale nello sviluppo software moderno. Il suo cuore &egrave; la gestione di computazioni, richieste o processi che vengono eseguiti <strong>in modo non bloccante</strong>, astraendo il pi&ugrave; possibile dai thread fisici del sistema operativo.</p>
+
+    <p>Il professore introduce il tema partendo da un'osservazione pratica: nei laboratori (Lab 6) avete gi&agrave; iniziato a esplorare i <strong>task</strong> come unit&agrave; di lavoro concorrente. L'obiettivo di questa lezione &egrave; chiudere il cerchio su task, executor e virtual thread, per poi affrontare il paradigma della programmazione asincrona pura — event loop, promise, async/await — e infine introdurre il modello a <strong>attori</strong>.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+      <p>Il primo assignment richiede di proporre una soluzione concorrente basata su thread e, come versione successiva, di rivederla usando task ed executor dove ritenuto opportuno. La comprensione della separazione tra <strong>logica</strong> (cosa va eseguito in parallelo) e <strong>fisica</strong> (quanti thread/core sono disponibili) &egrave; un punto centrale della valutazione.</p>
+    </div>
+
+    <p>Storicamente, il dibattito tra <em>eventi</em> e <em>thread</em> attraversa l'intera storia dei sistemi concorrenti. Lavori fondamentali come "Why threads are a bad idea (for most purposes)" di Ousterhout (1996) e "The Problem with Threads" di Edward Lee (2006) hanno mostrato come l'approccio event-driven offra vantaggi in termini di assenza di race condition e deadlock basso livello, mentre i thread rimangono insostituibili per lo sfruttamento del parallelismo hardware. La sfida vera &egrave; metterli insieme.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s2"><h2>2. Panorama dei modelli asincroni</h2>
+
+    <p>Il panorama attuale della programmazione asincrona include quattro grandi famiglie di approcci, spesso combinati tra loro:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Event-Driven</button>
+        <button class="lk-tab">CPS / Callback</button>
+        <button class="lk-tab">Promise</button>
+        <button class="lk-tab">Async/Await</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Architettura a <strong>event loop</strong>: un singolo flusso di controllo attende eventi e dispaccia handler. &Egrave; la base del Reactor Pattern. Esempi: JavaScript nel browser, Node.js, Vert.x, tutte le GUI.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Funzioni asincrone con <strong>continuation-passing style</strong>: la callback &egrave; l'ultimo parametro e viene invocata quando il risultato &egrave; pronto. Soffre del problema della "pyramid of doom" quando si annidano chiamate asincrone.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Oggetti proxy che rappresentano un valore futuro. Permettono di <strong>appiattire</strong> l'annidamento delle callback grazie al chaining (<code>.then()</code>). Una promise pu&ograve; essere risolta o rifiutata una sola volta (immutabile).</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Estensione linguistica che permette di scrivere codice asincrono con sintassi sincrona usando le parole chiave <code>async</code> e <code>await</code>. Sotto il cofano usa le coroutine. Supportata ormai da tutti i linguaggi moderni (JavaScript, Python, C#, Kotlin, Dart, Rust).</p>
+      </div>
+    </div>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>Il professore sottolinea che questi modelli non sono in competizione: gli event loop sono l'architettura di esecuzione, le promise sono il meccanismo di composizione, e async/await &egrave; la sintassi che rende il tutto leggibile. Ciascuno opera a un diverso livello di astrazione.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s3"><h2>3. Event Loop e Reactor Pattern</h2>
+
+    <p>L'architettura a <strong>event loop</strong> &egrave; il cuore pulsante della programmazione asincrona. Il modello astratto &egrave; sorprendentemente semplice:</p>
+
+    <pre><code class="language-java">loop {
+    Event ev = waitForEvent(eventQueue);
+    Handler handler = selectHandler(ev);
+    execute(handler);
+}</code></pre>
+
+    <p>Un unico thread di controllo esegue questo ciclo per tutta la vita del programma. La <em>event queue</em> contiene gli eventi generati dall'ambiente (click, timer, risposte di rete) o dagli stessi event handler. Gli handler vengono eseguiti <strong>atomicamente</strong> rispetto al ciclo: se un evento arriva mentre un handler &egrave; in esecuzione, verr&agrave; servito solo quando l'handler corrente termina.</p>
+
+    <p>Il <strong>Reactor Pattern</strong> (Schmidt et al., 2000) formalizza questa architettura come pattern di progettazione per sistemi concorrenti e distribuiti. I partecipanti principali sono:</p>
+
+    <ul>
+      <li><strong>Handle</strong> — identifica una risorsa (es. una socket TCP "pronta per la lettura");</li>
+      <li><strong>Event Handler</strong> — specifica la reazione a un evento;</li>
+      <li><strong>Initiation Dispatcher</strong> — demultipla gli eventi e chiama l'handler appropriato;</li>
+      <li><strong>Concrete Event Handler</strong> — implementa la logica applicativa specifica.</li>
+    </ul>
+
+    <pre class="mermaid">
+sequenceDiagram
+    participant Client as Client
+    participant ID as Initiation Dispatcher
+    participant EH as Event Handler
+    participant CEH as Concrete EH
+
+    Client->>ID: register handle + handler
+    Client->>ID: event occurs on handle
+    ID->>EH: handle_event(handle)
+    EH->>CEH: perform app logic
+    CEH-->>EH: result
+    EH-->>ID: done
+    </pre>
+
+    <div class="callout note"><span class="callout-label">Nota del redattore</span>
+      <p>Il Reactor Pattern &egrave; la base su cui sono costruiti framework come Node.js, Vert.x, Netty e tutti i server asincroni moderni. La separazione tra dispatcher (infrastruttura) e handler (logica applicativa) &egrave; la chiave della sua flessibilit&agrave;.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s4"><h2>4. Never-Blocking Rule e Multiple Event Loops</h2>
+
+    <p>Dal modello dell'event loop discende una regola fondamentale, che il professore chiama <strong>never-blocking rule</strong>:</p>
+
+    <div class="callout warn"><span class="callout-label">Regola fondamentale</span>
+      <p>Gli event handler <strong>non devono mai bloccarsi</strong> e <strong>devono sempre terminare</strong>. Una chiamata bloccante o un ciclo infinito all'interno di un handler bloccherebbero l'intero event loop, impedendo il processamento di tutti gli eventi successivi nella coda.</p>
+    </div>
+
+    <p>La soluzione &egrave; sostituire ogni operazione potenzialmente bloccante con una richiesta <strong>asincrona</strong>. La richiesta viene servita da altri thread (esterni all'event loop), e quando il risultato &egrave; pronto genera un evento nella coda. Questo &egrave; il meccanismo che permette di fare I/O, accesso a database o computazioni lunghe senza mai bloccare il ciclo principale.</p>
+
+    <p>Un sistema pu&ograve; essere composto da <strong>pi&ugrave; componenti attivi</strong>, ciascuno con il proprio event loop. In questo caso i componenti:</p>
+
+    <ul>
+      <li>non condividono memoria;</li>
+      <li>comunicano generando eventi gli uni per gli altri (tipicamente tramite un <em>event bus</em>).</li>
+    </ul>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>Questa architettura a event loop multipli &egrave; esattamente quella che ritroveremo nel modello Actor e in framework come Vert.x, dove ogni <em>verticle</em> ha il proprio event loop e i verticle comunicano tramite messaggi asincroni sull'event bus.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s5"><h2>5. Async Functions e Continuation-Passing Style</h2>
+
+    <p>Data la never-blocking rule, sorge il problema centrale: <strong>come ottenere il risultato</strong> di una operazione asincrona senza bloccarsi? La risposta &egrave; il modello a <strong>callback</strong>, che in termini di programmazione funzionale si chiama <strong>Continuation-Passing Style (CPS)</strong>.</p>
+
+    <p>Nel CPS, una funzione prende un argomento extra — la <em>continuazione</em> (tipicamente una callback) — e quando ha calcolato il risultato, invece di restituirlo (<code>return</code>), lo passa alla continuazione. Lo stack non viene usato: il controllo passa direttamente alla funzione continuazione.</p>
+
+    <pre><code class="language-java">// CPS in Java (esempio astratto dalle slide)
+void sum(int x, int y, Consumer&lt;Integer&gt; cont) {
+    cont.accept(x + y);
+}
+sum(1, 3, (res) -&gt; { System.out.println(res); });</code></pre>
+
+    <p>Il professore fa un esempio concreto in JavaScript, mostrando come una funzione asincrona come <code>asyncInc</code> prenda un valore e una callback, esegua l'incremento nel ciclo successivo dell'event loop (tramite <code>setTimeout(..., 0)</code>) e chiami la callback con il risultato.</p>
+
+    <p>L'annotated code seguente mostra il flusso:</p>
+
+    <div id="ac-asyncinc"></div>
+
+    <p>La callback (continuazione) viene eseguita dall'event loop nello stesso thread logico che ha innescato la chiamata asincrona — questo &egrave; il punto cruciale che evita le race condition. Il thread fisico che ha eseguito materialmente il task asincrono (es. una lettura di rete) &egrave; diverso, ma la continuazione torna sempre all'event loop.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s6"><h2>6. Callback Hell e Pyramid of Doom</h2>
+
+    <p>Nonostante l'eleganza concettuale, il CPS puro porta a un problema ben noto: il <strong>callback hell</strong> (o <strong>pyramid of doom</strong>). Quando si devono eseguire pi&ugrave; operazioni asincrone in sequenza, l'annidamento delle callback cresce orizzontalmente e verso destra, rendendo il codice illeggibile e difficile da mantenere.</p>
+
+    <pre><code class="language-javascript">// Esempio dalle slide: la "piramide"
+step1(function(result1) {
+    step2(function(result2) {
+        step3(function(result3) {
+            // e cos&igrave; via...
+        });
+    });
+});</code></pre>
+
+    <p>Un esempio concreto mostrato dal professore &egrave; quello del server HTTP in Node.js:</p>
+
+    <pre><code class="language-javascript">http.createServer((request, response) =&gt; {
+    let uri = url.parse(request.url).pathname;
+    let filename = path.join(process.cwd(), uri);
+    path.exists(filename, (exists) =&gt; {
+        if (exists) {
+            fs.readFile(filename, (err, data) =&gt; {
+                response.writeHead(200);
+                response.end(data);
+            });
+        } else {
+            response.writeHead(404);
+            response.end();
+        }
+    });
+}).listen(8080);</code></pre>
+
+    <div class="callout warn"><span class="callout-label">Problema</span>
+      <p>Il codice si sviluppa in orizzontale: per capire il flusso bisogna spostarsi a destra, gi&ugrave;, e poi tornare su. La modularit&agrave; e la riusabilit&agrave; vengono compromesse. Come dice un developer anonimo citato nelle slide: <em>"I love async, but I can't code like this."</em></p>
+    </div>
+
+    <p>I problemi principali del callback hell sono:</p>
+    <ul>
+      <li><strong>Asynchronous spaghetti</strong> — la computazione &egrave; frammentata in handler non strutturati;</li>
+      <li><strong>Scarsa leggibilit&agrave;</strong> — il flusso di controllo &egrave; difficile da seguire;</li>
+      <li><strong>Scarsa riusabilit&agrave;</strong> — le callback annidate sono difficili da estrarre e testare.</li>
+    </ul>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s7"><h2>7. Promise: stati e API</h2>
+
+    <p>Le <strong>Promise</strong> (proposte originariamente da Friedman e Wise nel 1976) sono la risposta al callback hell. Una Promise &egrave; un oggetto proxy che rappresenta il risultato futuro di una operazione asincrona. Le propriet&agrave; fondamentali sono:</p>
+
+    <ul>
+      <li>Pu&ograve; trovarsi in uno di tre stati: <strong>pending</strong> (iniziale), <strong>resolved</strong> (completata con successo) o <strong>rejected</strong> (completata con errore);</li>
+      <li>&Egrave; immutabile una volta risolta: una volta che una promise &egrave; settled (resolved o rejected), il suo stato e il suo valore non cambiano pi&ugrave;;</li>
+      <li>Il metodo <code>.then(onComplete, onError)</code> permette di attaccare callback che verranno chiamate quando la promise viene risolta o rifiutata.</li>
+    </ul>
+
+    <p>Esplora i tre stati con il widget interattivo qui sotto:</p>
+
+    <div id="se-promise"></div>
+
+    <pre><code class="language-javascript">// Creazione di una Promise (esempio dalle slide)
+function delayWithRandom(t, p) {
+    let promise = new Promise((resolve, reject) =&gt; {
+        setTimeout(() =&gt; {
+            let r = Math.random();
+            if (r &gt; p) {
+                resolve(r);   // successo
+            } else {
+                reject(r);    // fallimento
+            }
+        }, t);
+    });
+    return promise;
+}
+
+let promise = delayWithRandom(1000, 0.5);
+promise.then(
+    (r) =&gt; { console.log("successo:", r); },
+    (r) =&gt; { console.log("fallimento:", r); }
+);</code></pre>
+
+    <p>Il costruttore <code>new Promise((resolve, reject) =&gt; { ... })</code> riceve una funzione <em>executor</em> che avvia subito il lavoro asincrono. Le funzioni <code>resolve</code> e <code>reject</code> sono i callback che, quando chiamati, portano la promise nello stato rispettivo.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s8"><h2>8. Promise Chaining e composizione</h2>
+
+    <p>La caratteristica pi&ugrave; potente delle Promise &egrave; che <code>.then()</code> restituisce a sua volta una Promise, permettendo il <strong>chaining</strong>. Questo appiattisce la pyramid of doom in una sequenza lineare di chiamate:</p>
+
+    <pre><code class="language-javascript">// Promise chaining: la piramide diventa sequenza (dalle slide)
+function delayWithRand(t) {
+    return new Promise((resolve) =&gt; {
+        setTimeout(() =&gt; { resolve(Math.random()); }, t);
+    });
+}
+
+let promise = delayWithRand(1000);
+promise
+    .then((r) =&gt; {
+        console.log("successo:", r);
+        return delayWithRand(1500);
+    })
+    .then((r) =&gt; {
+        console.log("successo:", r);
+        return delayWithRand(500);
+    })
+    .then((v) =&gt; {
+        console.log(v);
+    });</code></pre>
+
+    <p>Il professore sottolinea due casi d'uso fondamentali:</p>
+
+    <h3>Sequenza (task1 ; task2)</h3>
+    <pre><code class="language-javascript">asyncFunc1(...)
+    .then((v) =&gt; { return asyncFunc2(...); })
+    .then((v) =&gt; { return asyncFunc3(...); });</code></pre>
+
+    <h3>Parallelo (task1 | task2)</h3>
+    <pre><code class="language-javascript">let myPromise = asyncFunc1(...);
+myPromise.then((v) =&gt; { return asyncFunc2(...); });
+myPromise.then((v) =&gt; { return asyncFunc3(...); });</code></pre>
+
+    <p>Per il parallelismo con JOIN, la Promise API fornisce <code>Promise.all</code>:</p>
+
+    <pre><code class="language-javascript">Promise.all([delayWithRand(1000), delayWithRand(2000)])
+    .then((values) =&gt; {
+        console.log(values[0]); // risultato prima promise
+        console.log(values[1]); // risultato seconda promise
+    });</code></pre>
+
+    <p>Esiste anche <code>Promise.race</code>, che si risolve appena la prima tra le promise si stabilizza (successo o errore).</p>
+
+    <div class="callout warn"><span class="callout-label">Attenzione</span>
+      <p>Le promise sono <strong>eager</strong>: appena costruite iniziano subito il lavoro asincrono. Questo pu&ograve; causare problemi se non si vuole avviare subito la computazione. Inoltre, le promise non sono cancellabili e non funzionano bene con i cicli (<code>for</code> tradizionale): per iterare asincronamente serve ricorrere alla ricorsione o ad async/await.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s9"><h2>9. Async/Await: la sintassi sincrona per codice asincrono</h2>
+
+    <p>L'evoluzione finale della programmazione asincrona &egrave; l'introduzione delle parole chiave <code>async</code> e <code>await</code>, standardizzate in JavaScript con ES2017 e ormai presenti in tutti i linguaggi moderni. L'obiettivo &egrave; permettere di scrivere codice asincrono con uno stile <strong>sincrono</strong>, mantenendo per&ograve; la semantica asincrona.</p>
+
+    <pre><code class="language-javascript">// Stile asincrono con async/await
+async function main() {
+    console.log("before");
+    let r1 = await delayWithRand(1000);
+    console.log("successo:", r1);
+    let r2 = await delayWithRand(1500);
+    console.log("successo:", r2);
+    console.log("after");
+}
+main();</code></pre>
+
+    <p>L'operatore <code>await</code> si applica a una Promise e ne estrae il valore (o lancia un'eccezione se la promise &egrave; rejected). Durante l'attesa, il flusso di controllo viene <strong>ceduto</strong>: l'event loop pu&ograve; servire altri eventi. Quando la promise &egrave; risolta, la funzione async riprende dal punto in cui si era sospesa.</p>
+
+    <p>Il professore mostra due grafici di esecuzione per <code>async</code> chiamata con e senza <code>await</code>:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Senza await</button>
+        <button class="lk-tab">Con await</button>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-javascript">async function pause(t) {
+    console.log("before");
+    let promise = new Promise((resolve) =&gt; {
+        setTimeout(() =&gt; { resolve(); }, t);
+    });
+    await promise;
+    console.log("after"); // eseguito dopo il timer
+}
+console.log("before call");
+pause(1000); // &lt;-- senza await qui
+console.log("after call");
+// Output: before call, before, after call, after</code></pre>
+        <p>La funzione parte, stampa "before", <code>await</code> cede il controllo, e torna subito al chiamante che stampa "after call". Solo dopo il timer, "after" viene stampato.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-javascript">async function main() {
+    console.log("before call");
+    await pause(1000); // &lt;-- con await qui
+    console.log("after call");
+}
+main();
+// Output: before call, before, after, after call</code></pre>
+        <p>Qui <code>await main()</code> aspetta che tutta la funzione <code>main</code> sia completata. "after call" viene stampato solo dopo che <code>pause</code> ha terminato.</p>
+      </div>
+    </div>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+      <p>Un errore comune &egrave; dimenticare di fare <code>await</code> di una funzione async. Senza await, la funzione parte ma il controllo prosegue immediatamente, portando a comportamenti non deterministici. Il professore lo chiama il <strong>"design clash"</strong> tra stile sincrono e asincrono: serve disciplina per non mescolarli in modo scorretto.</p>
+    </div>
+
+    <h3>Limitazioni di async/await</h3>
+    <ul>
+      <li><code>await</code> pu&ograve; essere usato solo dentro funzioni <code>async</code> (non al top-level, serve almeno una funzione wrapper);</li>
+      <li>Una funzione async non pu&ograve; riprendere mentre il thread &egrave; occupato con altri handler (la semantica dell'event loop &egrave; preservata);</li>
+      <li>I blocchi <code>{ ... }</code> non sono pi&ugrave; atomici: l'esecuzione di un singolo blocco pu&ograve; estendersi su pi&ugrave; iterazioni dell'event loop, aprendo potenzialmente a race condition.</li>
+    </ul>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s10"><h2>10. Coroutine e Fiber: il meccanismo di basso livello</h2>
+
+    <p>Sia <code>async</code>/<code>await</code> che i <strong>virtual thread</strong> condividono un meccanismo di base: le <strong>coroutine</strong>. Una coroutine &egrave; una generalizzazione del concetto di sottoprogramma (subroutine) che permette di sospendere e riprendere l'esecuzione in punti specifici, senza perdere lo stato locale.</p>
+
+    <p>Mentre una subroutine tradizionale ha un solo punto di ingresso e un solo punto di uscita (il <code>return</code>), una coroutine pu&ograve; avere pi&ugrave; punti di sospensione (<code>yield</code> o <code>await</code>) e pu&ograve; essere ripresa dal punto in cui si era fermata.</p>
+
+    <pre class="mermaid">
+flowchart LR
+    subgraph Subroutine
+        A[inizio] --> B[esecuzione] --> C[return]
+    end
+    subgraph Coroutine
+        D[inizio] --> E[esecuzione] --> F[yield/await] --> G[sospesa]
+        G --> H[ripresa] --> I[esecuzione] --> J[yield/await]
+        J --> G
+        J --> K[return final]
+    end
+    </pre>
+
+    <p>Le <strong>fiber</strong> sono un concetto affine ma a livello di sistema: sono thread leggeri che usano cooperativa invece che preemptive multitasking. I <strong>virtual thread</strong> di Java (JDK 21+) sono la pi&ugrave; recente incarnazione mainstream delle fiber. La differenza sottile: le coroutine sono un costrutto linguistico (un modo di controllare il flusso), le fiber sono un costrutto di sistema (un thread che non esegue in parallelo).</p>
+
+    <p>Il professore mostra un esempio in Kotlin, dove le coroutine sono parte integrante del linguaggio:</p>
+
+    <pre><code class="language-kotlin">import kotlinx.coroutines.*
+
+suspend fun greetDelayed(delayMillis: Long) {
+    delay(delayMillis)
+    println("Hello, World!")
+}
+
+fun main(args: Array&lt;String&gt;) = runBlocking {
+    println("before async call")
+    val result = async {
+        println("inside the async call")
+        delay(1000)
+        println("exiting the async call")
+        100
+    }
+    println("after the async call, before greet")
+    greetDelayed(200)
+    println("after greet trigger")
+    println("${result.await()}")
+}</code></pre>
+
+    <p>Output (dalle slide): <code>before async call, after the async call, before greet, inside the async call, Hello, World!, after greet trigger, exiting the async call, 100</code></p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s11"><h2>11. Virtual Thread in Java</h2>
+
+    <p>I <strong>Virtual Thread</strong> (introdotti in JDK 21 come funzionalit&agrave; stabile) rappresentano il tentativo di Java di portare le fiber nel mondo mainstream, mantenendo la compatibilit&agrave; con l'API <code>java.lang.Thread</code> esistente.</p>
+
+    <p>L'idea &egrave; quella di disaccoppiare il thread logico (il "filo" di esecuzione) dal thread fisico del sistema operativo. I virtual thread sono gestiti interamente dalla JVM, che li monta e smonta sui thread fisici (detto <em>mounting/unmounting</em>) in modo trasparente. Quando un virtual thread esegue un'operazione bloccante (es. I/O, <code>wait()</code>, <code>join()</code>), la JVM lo sospende e riutilizza il thread fisico per un altro virtual thread.</p>
+
+    <pre><code class="language-java">// Creazione di un Virtual Thread (esempio dalle slide del Lab)
+Thread.ofVirtual()
+    .name("my-virtual-thread")
+    .start(() -&gt; {
+        System.out.println("Ciao da un virtual thread!");
+    });
+
+// Creare 100.000 virtual thread &egrave; possibile e leggero
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (int i = 0; i &lt; 100_000; i++) {
+        executor.submit(() -&gt; {
+            // computazione leggera
+        });
+    }
+}</code></pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>La differenza fondamentale con <code>async</code>/<code>await</code>: con i virtual thread, <strong>non serve marcare esplicitamente i punti di sospensione</strong>. Ogni chiamata bloccante diventa automaticamente un punto di unmounting/remounting. Il codice rimane sincrono tradizionale, ma il thread sottostante non viene mai bloccato. Il professore nota che questo &egrave; simile a quanto fa C# con i suoi task, ma in Java &egrave; pi&ugrave; trasparente: non serve <code>await</code> esplicito.</p>
+    </div>
+
+    <p>Dal punto di vista architetturale, i virtual thread non forniscono un trattamento first-class per eventi e computazioni reattive — questo &egrave; il punto del dibattito tuttora aperto tra virtual thread e async programming (Brian Goetz, 2022). I virtual thread risolvono il problema del costo dei thread, ma non offrono un modello per gestire eventi e reattivit&agrave;.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s12"><h2>12. Task-Oriented Programming ed Executors</h2>
+
+    <p>Prima di immergersi completamente nell'asincrono, il professore dedica una parte importante della lezione al <strong>task-oriented programming</strong> in Java, che fa da ponte tra il mondo dei thread e quello degli event loop.</p>
+
+    <p>Un <strong>task</strong> &egrave; un'unit&agrave; di lavoro astratta, discreta e indipendente, disaccoppiata dal concetto di thread. L'idea &egrave; di adottare una strategia <em>divide-et-impera</em>: identificare i confini dei task (attivit&agrave; indipendenti, che non dipendono dallo stato/risultato di altri task) e scegliere una <em>execution policy</em> adeguata.</p>
+
+    <p>Le tre strategie di esecuzione tradizionali sono:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Strategia</th>
+          <th>Descrizione</th>
+          <th>Pro</th>
+          <th>Contro</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Sequenziale</td>
+          <td>Un singolo thread serve le richieste una dopo l'altra</td>
+          <td>Semplice, nessuna concorrenza</td>
+          <td>Throughput e reattivit&agrave; bassissimi</td>
+        </tr>
+        <tr>
+          <td>Thread-per-task</td>
+          <td>Un nuovo thread per ogni task</td>
+          <td>Semplice, migliora throughput</td>
+          <td>Overhead di creazione, consumo risorse, instabilit&agrave;</td>
+        </tr>
+        <tr>
+          <td>Executor con pool</td>
+          <td>Thread pool dimensionato sulle risorse disponibili</td>
+          <td>Stabile, efficiente, separa logica da fisica</td>
+          <td>Richiede attenzione a deadlock e blocking</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <pre><code class="language-java">// Esempio: TaskExecutionWebServer con FixedThreadPool (dalle slide Lab)
+class TaskExecutionWebServer {
+    private static final int NTHREADS
+        = Runtime.getRuntime().availableProcessors() + 1;
+    private static final Executor exec =
+        Executors.newFixedThreadPool(NTHREADS);
+
+    public static void main(String[] args) throws IOException {
+        ServerSocket socket = new ServerSocket(80);
+        while (true) {
+            Socket connection = socket.accept();
+            exec.execute(() -&gt; {
+                handleRequest(connection);
+            });
+        }
+    }
+}</code></pre>
+
+    <p>Il <strong>thread pool</strong> segue il pattern producer-consumer: i produttori sono le attivit&agrave; che inviano task, i consumatori sono i thread del pool che li eseguono. I thread del pool eseguono un ciclo implicito: prendi il prossimo task dalla coda, eseguilo, torna in attesa.</p>
+
+    <p>Il professore mette in guardia da un pericolo subdolo:</p>
+
+    <div class="callout warn"><span class="callout-label">Attenzione: deadlock con thread pool</span>
+      <p>Se i task all'interno del pool usano una barriera o attendono il completamento di altri task, <strong>e il pool ha un numero limitato di thread</strong>, si pu&ograve; verificare un deadlock: tutti i thread del pool sono bloccati in attesa, e nessuno pu&ograve; eseguire i task che sbloccherebbero la situazione. La soluzione "sbagliata" ma immediata &egrave; creare un pool con tanti thread quanti sono i task. La soluzione corretta &egrave; ripensare la struttura dei task per evitare attese bloccanti all'interno del pool.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s13"><h2>13. ExecutorService, Callable e Future</h2>
+
+    <p>L'interfaccia <code>ExecutorService</code> estende <code>Executor</code> aggiungendo il controllo del ciclo di vita e il supporto per task con risultato. Ecco la gerarchia:</p>
+
+    <pre class="mermaid">
+flowchart BT
+    Exec["&lt;&lt;interface&gt;&gt; Executor\nexecute(Runnable)"] --> ExecService["&lt;&lt;interface&gt;&gt; ExecutorService\nsubmit(Callable&lt;T&gt;): Future&lt;T&gt;\nshutdown(), awaitTermination()"]
+    ExecService --> SchedExec["&lt;&lt;interface&gt;&gt; ScheduledExecutorService\nschedule(), scheduleAtFixedRate()"]
+    ExecFactory["Executors (factory)\nnewFixedThreadPool(), newCachedThreadPool(),\nnewSingleThreadExecutor(), newScheduledThreadPool()"]
+    ExecFactory -.->|crea| ExecService
+    </pre>
+
+    <p>Un task che produce un risultato si definisce tramite l'interfaccia <code>Callable&lt;V&gt;</code> (che ha <code>V call() throws Exception</code> invece di <code>void run()</code>) e viene sottomesso con <code>submit()</code>, che restituisce un oggetto <code>Future&lt;V&gt;</code>.</p>
+
+    <pre><code class="language-java">// Callable + Future pattern
+ExecutorService exec = Executors.newFixedThreadPool(4);
+Future&lt;Integer&gt; future = exec.submit(() -&gt; {
+    // computazione lunga...
+    return 42;
+});
+
+// ... altro lavoro concorrente ...
+
+Integer risultato = future.get(); // bloccante se non ancora pronto</code></pre>
+
+    <p>Il ciclo di vita di un <code>ExecutorService</code> ha tre stati:</p>
+
+    <ul>
+      <li><strong>Running</strong> — appena creato, accetta nuovi task;</li>
+      <li><strong>Shutting down</strong> — dopo la chiamata a <code>shutdown()</code> (non accetta nuovi task ma completa quelli in esecuzione) o <code>shutdownNow()</code> (tenta di cancellare i task in esecuzione);</li>
+      <li><strong>Terminated</strong> — tutti i task sono completati.</li>
+    </ul>
+
+    <p>Per attendere il completamento: <code>awaitTermination(timeout, unit)</code> sospende il chiamante finché tutti i task non sono finiti o scade il timeout.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s14"><h2>14. Cancellazione cooperativa e interruption</h2>
+
+    <p>La cancellazione di un'attivit&agrave; concorrente segue un approccio <strong>cooperativo</strong>, non asincrono/preemptive. In Java, il meccanismo principale &egrave; l'<strong>interruption</strong>:</p>
+
+    <pre><code class="language-java">// Pattern di cancellazione cooperativa (dalle slide)
+public class PrimeGenerator implements Runnable {
+    private volatile boolean cancelled;
+
+    public void run() {
+        BigInteger p = BigInteger.ONE;
+        while (!cancelled) {
+            p = p.nextProbablePrime();
+            // ... elaborazione ...
+        }
+    }
+
+    public void cancel() { cancelled = true; }
+}</code></pre>
+
+    <p>Il flag <code>volatile</code> garantisce che le scritture di <code>cancel()</code> siano visibili immediatamente al thread in esecuzione. Se il thread &egrave; bloccato su una <code>wait()</code>, <code>sleep()</code> o <code>join()</code>, si usa il meccanismo di <code>interrupt()</code> che sblocca questi stati e lancia <code>InterruptedException</code>.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+      <p>La differenza tra <code>shutdown()</code> (graceful: completa i task in coda) e <code>shutdownNow()</code> (abrupt: tenta di cancellare) &egrave; un classico da esame. <code>shutdownNow()</code> restituisce la lista dei task che non sono stati avviati. La <strong>poison pill</strong> &egrave; una tecnica alternativa: si inserisce un oggetto "sentinella" nella coda condivisa che segnala ai consumatori di terminare.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s15"><h2>15. Fork-Join Framework e Structured Concurrency</h2>
+
+    <p>Il <strong>Fork-Join Framework</strong> (Java SE 7) estende il modello degli executor per gestire algoritmi <em>map/reduce</em> e <em>divide-et-impera</em> dove la topologia dei dati non &egrave; nota in anticipo. Le classi principali sono:</p>
+
+    <ul>
+      <li><code>ForkJoinPool</code> — executor specializzato che supporta il <strong>work-stealing</strong>: quando un thread &egrave; in attesa (<code>join()</code>), ruba lavoro dalla coda di un altro thread;</li>
+      <li><code>ForkJoinTask</code> con le sottoclassi <code>RecursiveAction</code> (senza risultato) e <code>RecursiveTask</code> (con risultato);</li>
+      <li>I metodi <code>fork()</code> (lancia un subtask asincrono) e <code>join()</code> (attende il risultato).</li>
+    </ul>
+
+    <pre><code class="language-java">// Schema fork-join: merge sort parallelo (idea dalle slide)
+class MergeSortTask extends RecursiveAction {
+    private int[] array;
+    private int lo, hi;
+
+    protected void compute() {
+        if (hi - lo &lt; THRESHOLD) {
+            Arrays.sort(array, lo, hi);
+        } else {
+            int mid = (lo + hi) / 2;
+            var left = new MergeSortTask(array, lo, mid);
+            var right = new MergeSortTask(array, mid, hi);
+            left.fork();   // fork asincrono
+            right.compute();
+            left.join();   // attendi il risultato
+            merge(array, lo, mid, hi);
+        }
+    }
+}</code></pre>
+
+    <p>Pi&ugrave; recentemente, Java ha introdotto la <strong>Structured Concurrency</strong> (JEP 437, JDK 20+), che estende il modello fork-join con un approccio strutturato: se un task si divide in sottotask concorrenti, questi devono tornare tutti allo stesso blocco di codice (<code>scope</code>) del task padre.</p>
+
+    <pre><code class="language-java">// StructuredTaskScope: esempio dalle slide
+Response handle() throws ExecutionException, InterruptedException {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        Future&lt;String&gt; user = scope.fork(() -&gt; findUser());
+        Future&lt;Integer&gt; order = scope.fork(() -&gt; fetchOrder());
+        scope.join();            // attendi entrambi
+        scope.throwIfFailed();   // propaga errori
+        return new Response(user.resultNow(), order.resultNow());
+    } // tutti i sottotask sono garantiti completati qui
+}</code></pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>La Structured Concurrency risolve un problema di visibilit&agrave;: con i thread tradizionali, un task avviato ma non completato pu&ograve; "fuggire" e rimanere in esecuzione anche dopo che il metodo chiamante &egrave; terminato. Con <code>StructuredTaskScope</code>, la durata dei sottotask &egrave; lessicalmente delimitata dal blocco <code>try-with-resources</code>.</p>
+    </div>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s16"><h2>16. Attori: teoria del modello</h2>
+
+    <p>Il modello <strong>Actor</strong> (o <strong>Attori</strong>) &egrave; stato originariamente introdotto da Carl Hewitt e colleghi al MIT negli anni '70, nel contesto dell'intelligenza artificiale. &Egrave; stato successivamente sviluppato da Gul Agha e Akinori Yonezawa negli anni '80 e '90 come unificazione tra programmazione orientata agli oggetti e concorrenza (Concurrent Object-Oriented Programming).</p>
+
+    <p>Oggi il modello gioca un ruolo centrale nel mainstream, come alternativa al multi-threading tradizionale. Linguaggi e framework come Erlang, Scala/Akka, HTML5 Web Workers e Dart Isolate ne sono esempi concreti.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+      <p>Il modello Actor &egrave; una delle alternative al multi-threading che potete adottare nel secondo assignment. &Egrave; importante capire la differenza fondamentale: mentre nei thread la comunicazione avviene tramite memoria condivisa (con i relativi problemi di race condition e lock), negli attori la comunicazione avviene esclusivamente tramite <strong>messaggi asincroni</strong>.</p>
+    </div>
+
+    <p>L'idea centrale &egrave;: <strong>everything is an actor</strong>. Ogni entit&agrave; computazionale &egrave; un attore, con:</p>
+
+    <ul>
+      <li>un <strong>identificatore unico</strong> (actor reference);</li>
+      <li>uno <strong>stato incapsulato</strong> (non accessibile direttamente dall'esterno);</li>
+      <li>un <strong>comportamento</strong> (la logica di reazione ai messaggi);</li>
+      <li>una <strong>mailbox</strong> (coda di messaggi in ingresso).</li>
+    </ul>
+
+    <p>Il modello &egrave; fortemente legato all'idea originale di Alan Kay di programmazione orientata agli oggetti, dove il punto chiave era il <strong>message passing</strong>, non l'ereditariet&agrave; o il polimorfismo.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s17"><h2>17. Attori: primitive e semantica</h2>
+
+    <p>Il comportamento di un attore si basa su sole <strong>tre primitive</strong> (azioni fondamentali):</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Primitiva</th>
+          <th>Descrizione</th>
+          <th>Analogia sequenziale</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>send</code></td>
+          <td>Inviare un messaggio asincrono a un attore</td>
+          <td>Procedura invocation</td>
+        </tr>
+        <tr>
+          <td><code>create</code></td>
+          <td>Creare un nuovo attore con un dato comportamento</td>
+          <td>Procedura abstraction</td>
+        </tr>
+        <tr>
+          <td><code>become</code></td>
+          <td>Specificare un nuovo comportamento per i messaggi futuri</td>
+          <td>Assegnazione di stato (history-sensitive)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>Il professore sottolinea l'eleganza del modello: con solo tre primitive si pu&ograve; esprimere qualsiasi computazione concorrente. <code>send</code> &egrave; l'equivalente concorrente della chiamata di procedura; <code>create</code> &egrave; l'equivalente della definizione di procedura; <code>become</code> permette la storia (cambio di stato nel tempo).</p>
+    </div>
+
+    <h3>Semantica di esecuzione: macro-step</h3>
+    <p>L'architettura di controllo di un attore &egrave; un <strong>messaggio loop</strong> (implicitamente gestito dal framework):</p>
+
+    <pre><code class="language-java">loop {
+    msg &lt;- waitForMsg();          // attesa bloccante (solo qui)
+    handler &lt;- selectHandler(msg); // dispatch del messaggio
+    execute(handler);              // esecuzione atomica
+}</code></pre>
+
+    <p>La semantica <strong>macro-step</strong> (run-to-completion) garantisce che un handler venga eseguito completamente prima di servire il prossimo messaggio. Questo <strong>elimina le race condition</strong> all'interno di un singolo attore, ma introduce la stessa sfida della never-blocking rule vista per gli event loop: gli handler non devono bloccarsi.</p>
+
+    <p>Il widget seguente mostra il ciclo di vita di un attore:</p>
+
+    <div id="se-actor"></div>
+
+    <p>Le propriet&agrave; semantiche chiave del modello sono:</p>
+    <ul>
+      <li><strong>Reattivit&agrave; pura</strong> — un attore lavora solo quando riceve un messaggio (nessun messaggio = inattivo);</li>
+      <li><strong>Incapsulamento dello stato</strong> — nessun attore pu&ograve; accedere direttamente allo stato interno di un altro;</li>
+      <li><strong>Fairness</strong> — un messaggio inviato viene prima o poi recapitato ed elaborato;</li>
+      <li><strong>Location transparency</strong> — per inviare un messaggio serve solo l'identificatore, non la posizione fisica.</li>
+    </ul>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s18"><h2>18. Implementazioni: Akka, ActorFoundry, Erlang</h2>
+
+    <p>Il modello Actor ha diverse implementazioni, con varianti semantiche significative. Le pi&ugrave; importanti presentate in questa lezione sono:</p>
+
+    <h3>ActorFoundry (ambito accademico)</h3>
+    <p>Framework Java sviluppato dal gruppo di Agha all'UIUC. Usa annotazioni (<code>@message</code>) per marcare i metodi che sono handler di messaggi. Il programmatore estende la classe <code>Actor</code> e definisce i metodi che saranno invocati alla ricezione di un messaggio.</p>
+
+    <pre><code class="language-java">// ActorFoundry: esempio Ping/Pong (dalle slide)
+public class PingActor extends Actor {
+    ActorName otherPinger;
+
+    @message
+    public void start(ActorName other) {
+        otherPinger = other;
+        send(otherPinger, "ping", self(), "called from " + self());
+    }
+
+    @message
+    public void ping(ActorName caller, String msg) {
+        send(stdout, "println", "Received ping (" + msg + ") from " + caller);
+        send(caller, "alive", self().toString() + " is alive");
+    }
+
+    @message
+    public void alive(String reply) {
+        send(stdout, "println", "Received " + reply + " from pinged actor");
+    }
+}</code></pre>
+
+    <h3>Akka (ambito industriale)</h3>
+    <p>Framework maturo per Java e Scala, con supporto a fault tolerance (modello "let it crash" di Erlang), clustering, e pattern di messaggistica avanzati. Supporta sia untyped actors (Java) che typed actors (Scala).</p>
+
+    <pre><code class="language-java">// Akka untyped actor in Java (dalle slide)
+import akka.actor.UntypedActor;
+
+public class MyUntypedActor extends UntypedActor {
+    LoggingAdapter log = Logging.getLogger(getContext().system(), this);
+
+    public void onReceive(Object message) throws Exception {
+        if (message instanceof String) {
+            log.info("Received String message: {}", message);
+            getSender().tell("received", getSelf());
+        } else {
+            unhandled(message);
+        }
+    }
+}</code></pre>
+
+    <h3>Erlang (il pioniere)</h3>
+    <p>Linguaggio funzionale sviluppato in Ericsson dal 1987 per applicazioni di telecomunicazione. Offre un supporto nativo alla concorrenza con processi leggeri (BEAM virtual machine) e comunicazione tramite message passing. I processi Erlang sono concettualmente identici agli attori.</p>
+
+    <pre><code class="language-erlang">% Esempio Erlang: area server (dalle slide)
+-module(area_server0).
+-export([loop/0]).
+
+loop() ->
+    receive
+        {rectangle, Width, Ht} ->
+            io:format("Area of rectangle is ~p~n", [Width * Ht]),
+            loop();
+        {circle, R} ->
+            io:format("Area of circle is ~p~n", [3.14159 * R * R]),
+            loop();
+        Other ->
+            io:format("I don't know what ~p is~n", [Other]),
+            loop()
+    end.
+
+% Nell'interprete:
+% 1> Pid = spawn(fun area_server0:loop/0).
+% 2> Pid ! {rectangle, 3, 4}.
+% Area of rectangle is 12</code></pre>
+
+    <p>Erlang usa <strong>explicit receive</strong>: il programmatore scrive esplicitamente il ciclo di ricezione dei messaggi, con pattern matching e guardie. Questo offre maggiore controllo ma richiede pi&ugrave; disciplina. La differenza fondamentale con l'approccio a event loop implicito (ActorFoundry, Akka) &egrave; chiara: nel primo caso il loop &egrave; embedded nel framework, nel secondo &egrave; esplicito nel codice.</p>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s19"><h2>19. Actor Idioms e pattern di messaggistica</h2>
+
+    <p>Come ogni paradigma, anche il modello Actor ha i suoi <strong>pattern ricorrenti</strong> (Schumacher, AGERE! 2012). I principali sono:</p>
+
+    <h3>Future</h3>
+    <p>Un attore che funge da proxy per un risultato non ancora disponibile. &Egrave; un modo per implementare comunicazione sincrona (RPC-like) all'interno di un modello asincrono, massimizzando la concorrenza: il future pu&ograve; essere passato ad altri attori prima di essere risolto.</p>
+
+    <h3>Serializer</h3>
+    <p>Un attore che serializza l'accesso a una risorsa condivisa, garantendo che le operazioni siano eseguite una alla volta sulla sua mailbox.</p>
+
+    <h3>Fork-Join</h3>
+    <p>Un pattern per dividere un compito in sotto-compiti paralleli e aggregare i risultati, simile all'omonimo pattern nel mondo dei thread ma realizzato interamente via message passing.</p>
+
+    <p>Il professore accenna anche al <strong>problema della pro-attivit&agrave;</strong>: gli attori sono entit&agrave; puramente reattive (lavorano solo quando arriva un messaggio). Come si modella un comportamento pro-attivo, come calcolare e stampare i primi 100 numeri primi fermandosi se arriva un messaggio di stop? Le soluzioni includono:</p>
+
+    <ul>
+      <li>Dividere l'attore in pi&ugrave; attori interagenti;</li>
+      <li>Self-sending di messaggi (l'attore manda un messaggio a se stesso per innescare il passo successivo).</li>
+    </ul>
+
+    <div class="callout note"><span class="callout-label">Nota del redattore</span>
+      <p>Il self-sending di messaggi &egrave; una tecnica potente che ricorda il <code>postMessage</code> degli event loop: l'attore programma la sua prossima attivit&agrave; mandando un messaggio alla propria mailbox. Questo rispetta la natura reattiva (c'&egrave; sempre un messaggio che innesca l'azione) pur ottenendo un comportamento ciclico/pro-attivo.</p>
+    </div>
+
+    <h3>Ordinamento dei messaggi e sincronizzazione</h3>
+    <p>Una delle sfide del modello Actor &egrave; che <strong>non ci sono garanzie sull'ordine</strong> di ricezione dei messaggi — anche quando due messaggi vengono inviati dallo stesso mittente in sequenza. L'ordinamento deve essere ottenuto tramite pattern di scambio messaggi.</p>
+
+    <p>Per gestire la sincronizzazione locale, alcuni framework offrono <strong>vincoli di sincronizzazione locale</strong> (Local Synchronization Constraints), come in ActorFoundry con le annotazioni <code>@Disable</code>, o lo <strong>stashing</strong> di Akka:</p>
+
+    <pre><code class="language-scala">// Akka stashing pattern (dalle slide)
+class ActorWithProtocol extends Actor with Stash {
+    def receive = {
+        case "open" =>
+            unstashAll()
+            context.become({
+                case "write" => // do writing...
+                case "close" => unstashAll(); context.unbecome()
+                case msg => stash()
+            }, discardOld = false)
+        case msg => stash()
+    }
+}</code></pre>
+
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="quiz"><h2>Verifica le tue conoscenze</h2>
+
+    <div class="lk-quiz">
+
+      <details><summary>Qual &egrave; la differenza fondamentale tra thread e attori per la comunicazione?</summary>
+        <p>Nei thread la comunicazione avviene tramite memoria condivisa (con variabili mutabili, race condition, lock, synchronized). Negli attori la comunicazione avviene esclusivamente tramite <strong>messaggi asincroni</strong> (message passing). Lo stato di un attore non &egrave; mai accessibile direttamente da un altro attore.</p>
+      </details>
+
+      <details><summary>Cosa stabilisce la "never-blocking rule" nell'event loop?</summary>
+        <p>Gli event handler non devono mai contenere chiamate bloccanti (I/O, attese) e devono sempre terminare. Una chiamata bloccante blocca l'intero event loop, impedendo il processamento di tutti gli eventi successivi. Le operazioni bloccanti devono essere sostituite da richieste asincrone servite da thread esterni che poi generano un evento nella coda.</p>
+      </details>
+
+      <details><summary>Qual &egrave; il problema principale delle promise (eager) e come lo risolve async/await?</summary>
+        <p>Le promise sono <strong>eager</strong>: appena costruite iniziano subito il lavoro. Inoltre, con <code>.then()</code> non si possono passare parametri facilmente alle funzioni chiamate. <code>Async/await</code> risolve entrambi i problemi: l'avvio &egrave; controllato dalla chiamata esplicita della funzione async, e i parametri si passano normalmente come in una chiamata sincrona.</p>
+      </details>
+
+      <details><summary>Cosa significa "macro-step semantics" nel modello Actor?</summary>
+        <p>Significa che ogni handler di messaggio viene eseguito <strong>completamente</strong> (run-to-completion) prima che l'attore possa servire il messaggio successivo. Questo evita race condition all'interno dell'attore (lo stato non viene mai interrotto a met&agrave; di un handler) ma richiede che gli handler non siano bloccanti, proprio come nell'event loop.</p>
+      </details>
+
+      <details><summary>Come si differenziano i virtual thread dai thread platform tradizionali?</summary>
+        <p>I virtual thread sono gestiti interamente dalla JVM (non dal sistema operativo), sono molto pi&ugrave; leggeri (se ne possono creare centinaia di migliaia), e il loro mounting/unmounting sui thread fisici &egrave; automatico e trasparente. Rispetto ad async/await, non serve marcare esplicitamente i punti di sospensione: ogni operazione bloccante diventa automaticamente un punto di unmounting.</p>
+      </details>
+
+      <details><summary>Qual &egrave; lo scopo di <code>StructuredTaskScope</code> in Java?</summary>
+        <p>Strutturare un task come un nucleo di sottotask concorrenti che devono tutti tornare allo stesso blocco lessicale (il <code>scope</code>). Garantisce che tutti i sottotask siano completati quando il blocco termina (grazie al <code>try-with-resources</code>), eliminando il problema dei thread "fuggiti". Propaga automaticamente le eccezioni dal sottotask al padre.</p>
+      </details>
+
+      <details><summary>Quali sono i tre stati di una Promise?</summary>
+        <p><strong>Pending</strong> — appena creata, il risultato non &egrave; ancora disponibile. <strong>Resolved (fulfilled)</strong> — l'operazione asincrona &egrave; completata con successo, il valore &egrave; disponibile. <strong>Rejected</strong> — l'operazione &egrave; fallita con un errore. Una volta che una promise &egrave; settled (resolved o rejected), il suo stato e valore sono immutabili.</p>
+      </details>
+
+      <details><summary>Cosa sono la "poison pill" e lo "stashing" nel contesto degli attori?</summary>
+        <p>La <strong>poison pill</strong> &egrave; un oggetto sentinella inserito nella coda dei messaggi che segnala a un attore/consumer di terminare. Lo <strong>stashing</strong> (Akka) &egrave; un meccanismo per accodare temporaneamente i messaggi ricevuti quando l'attore non &egrave; nello stato giusto per processarli, per poi riprenderli quando il comportamento cambia (es. con <code>context.become()</code>).</p>
+      </details>
+
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <footer class="lk-foot">
+    Materiale di studio generato da trascrizione + slide del 2026-03-30 (PCD, Prof. Alessandro Ricci, UNIBO). Non &egrave; una fonte ufficiale.
+  </footer>
+
+  <!-- scripts: ORDER MATTERS -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    /* ---- Annotated Code: asyncInc con CPS ---- */
+    LessonKit.annotatedCode('#ac-asyncinc', { lang:'javascript', lines:[
+      ['function asyncInc(x, cont) {', 'Definiamo una funzione asincrona "asyncInc". Prende due parametri: x (il valore da incrementare) e cont (la continuazione/callback da chiamare quando il risultato e pronto).'],
+      ['  setTimeout(() => {', 'setTimeout con ritardo 0: non vuole aspettare, ma solo spostare questa computazione al ciclo successivo dell\'event loop. Questo evita di bloccare il ciclo corrente.'],
+      ['    let res = x + 1;', 'Calcola il risultato: incrementa x di 1. Qui potrebbe esserci una qualsiasi computazione asincrona (lettura di rete, file I/O, ...).'],
+      ['    cont(res);', 'Chiama la continuazione passando il risultato. Invece di fare "return res", chiama la callback. Questo e il cuore del Continuation-Passing Style.'],
+      ['  }, 0);', 'Timeout di 0 millisecondi: la callback verra eseguita al prossimo giro dell\'event loop, non immediatamente.'],
+      ['}', 'Chiusura della funzione.'],
+      ['', ''],
+      ['console.log("prima");', 'Stampa "prima" (eseguito in questo ciclo dell\'event loop).'],
+      ['asyncInc(1, (res) => {', 'Chiama asyncInc con x=1 e una callback come continuazione. La callback ricevera il risultato e lo stampera.'],
+      ['  console.log("risultato:", res);', 'Callback: stampa "risultato: 2". Viene eseguita in un ciclo successivo dell\'event loop.'],
+      ['});', 'Chiusura della chiamata.'],
+      ['console.log("dopo");', 'Stampa "dopo" (eseguito subito dopo la chiamata, prima che asyncInc abbia completato). Output: "prima", "dopo", "risultato: 2".']
+    ]});
+
+    /* ---- State Explorer: Promise lifecycle ---- */
+    LessonKit.stateExplorer('#se-promise', { start:'PENDING', states:{
+      PENDING:{ desc:'Stato iniziale. La Promise e stata creata ma il risultato non e ancora disponibile. Le callback attaccate con .then() sono registrate ma non ancora chiamate.', to:[['resolve()','RESOLVED'],['reject()','REJECTED']] },
+      RESOLVED:{ desc:'La Promise e stata risolta con successo. Il valore e disponibile e immutabile. Le callback di successo attaccate con .then(onComplete) verranno eseguite (o sono gia state eseguite).', to:[] },
+      REJECTED:{ desc:'La Promise e stata rifiutata con un errore. Il motivo del rifiuto e disponibile e immutabile. Le callback di errore attaccate con .then(null, onError) o .catch() verranno eseguite.', to:[] }
+    }});
+
+    /* ---- State Explorer: Actor lifecycle ---- */
+    LessonKit.stateExplorer('#se-actor', { start:'CREATO', states:{
+      CREATO:{ desc:'L\'attore e stato creato (spawn o create) ma non ha ancora ricevuto messaggi. Ha una mailbox vuota e un comportamento iniziale definito.', to:[['arriva messaggio','PRONTO']] },
+      PRONTO:{ desc:'L\'attore ha messaggi nella mailbox. Preleva il primo messaggio e seleziona l\'handler appropriato in base al tipo/intestazione del messaggio.', to:[['seleziona handler','ESECUZIONE']] },
+      ESECUZIONE:{ desc:'L\'handler del messaggio e in esecuzione (macro-step). L\'attore puo: modificare il suo stato, inviare messaggi ad altri attori (send), creare nuovi attori (create), cambiare comportamento (become).', to:[['handler termina','PRONTO'],['send messaggio','ESECUZIONE'],['become','ESECUZIONE']] },
+      BLOCCATO:{ desc:'L\'attore e in attesa (non ha messaggi in mailbox e ha esaurito i messaggi da processare). Rimane in questo stato finche non arriva un nuovo messaggio.', to:[['arriva messaggio','PRONTO']] }
+    }});
+  </script>
+</body>
+</html>

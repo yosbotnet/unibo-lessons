@@ -1,0 +1,593 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS-C6 — Code Mobility</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head><body class="lk">
+<header class="lk-header">
+  <div class="lk-kicker">Distributed Systems — Prof. Omicini</div>
+  <h1>Code Mobility</h1>
+  <div class="lk-meta"><span>DS-C6</span><span>Andrea Omicini — DISI, Univ. Bologna A.Y. 2025/2026</span><span>Based on Fuggetta et al., 1998</span></div>
+</header>
+
+<div class="lk-overview"><h2>In this lesson</h2><ul>
+  <li>Why passing data is sometimes not enough — the case for moving code</li>
+  <li>The three-segment process model: code, execution state, and resources</li>
+  <li>Weak mobility vs strong mobility: what travels with the code</li>
+  <li>Four canonical paradigms: client-server, code-on-demand, remote evaluation, mobile agents</li>
+  <li>Sender-initiated vs receiver-initiated migration and their security implications</li>
+  <li>Cloning as an alternative to migration for strong mobility</li>
+  <li>How resource bindings constrain migration and the actions required at the target</li>
+</ul></div>
+
+<nav class="lk-toc"><h3>Contents</h3><ol>
+  <li><a href="#s1">From Data to Code: Why Mobility Matters</a></li>
+  <li><a href="#s2">Reasons for Migrating Code</a></li>
+  <li><a href="#s3">The Three Segments of a Process</a></li>
+  <li><a href="#s4">Weak Mobility: Transferring the Code Segment</a></li>
+  <li><a href="#s5">Strong Mobility: Moving the Execution Context</a></li>
+  <li><a href="#s6">Mobility Models: The Four Paradigms</a></li>
+  <li><a href="#s7">Interactive Mobility Model Explorer</a></li>
+  <li><a href="#s8">Sender-Initiated vs Receiver-Initiated Migration</a></li>
+  <li><a href="#s9">Separate vs Target Process Execution</a></li>
+  <li><a href="#s10">Cloning as an Alternative to Migration</a></li>
+  <li><a href="#s11">The Resource Segment: Why Resources Resist Movement</a></li>
+  <li><a href="#s12">Process-to-Resource Binding Types</a></li>
+  <li><a href="#s13">Resource-to-Machine Binding Types</a></li>
+  <li><a href="#s14">Migration Patterns: Annotated Code</a></li>
+  <li><a href="#s15">Actions on Resources During Migration</a></li>
+  <li><a href="#s16">Interactive Resource-Action Explorer</a></li>
+  <li><a href="#s17">Summary</a></li>
+  <li><a href="#quiz">Check Your Understanding</a></li>
+</ol></nav>
+
+<section id="s1"><h2>1. From Data to Code: Why Mobility Matters</h2>
+
+<p>In the traditional client-server model of distributed systems, what travels across the network is <strong>data</strong>. A client sends a request; the server processes it and returns a result. The code that performs the computation stays put. For many applications, this paradigm is sufficient and elegant.</p>
+
+<p>But sometimes passing data is not enough. Consider a search engine crawling the web: shipping every page to a central indexer is hopelessly inefficient compared to sending a crawler program to each host and letting it extract and return only the relevant information. Consider a mobile agent that visits multiple marketplaces, negotiates on your behalf, and returns with the best deal — the agent carries both its behaviour and its evolving state as it roams.</p>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p><strong>Code mobility</strong> is the capability to dynamically change the bindings between the components of a distributed system — relocating computations, data, or both — at runtime. When the cost of moving data exceeds the cost of moving code, or when you want to keep data and the code that processes it together, code mobility becomes the right abstraction.</p></div>
+
+<p>Two fundamental motivations drive code mobility:</p>
+<ul>
+  <li><strong>Load distribution:</strong> Move computation to where resources (CPU, memory, specialised hardware) are available.</li>
+  <li><strong>Data locality:</strong> Move the computation close to the data, avoiding expensive network transfers of large datasets.</li>
+</ul>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>The foundational reference for code mobility is <em>Fuggetta, Picco, and Vigna, "Understanding Code Mobility," IEEE TSE 24(5), 1998</em> — the paper that first gave the field a unified conceptual framework. Much of the terminology in this lesson traces back to that work.</p></div>
+
+</section>
+
+<section id="s2"><h2>2. Reasons for Migrating Code</h2>
+
+<p>Process migration — moving a running computation along with its context from one machine to another — is the traditional form of code mobility. The literature on process migration (see Milojicic et al., 2000) identifies several motivations, all of which remain relevant today:</p>
+
+<table>
+<thead><tr><th>Reason</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td><strong>Load balancing</strong></td><td>Redistribute computation across nodes to avoid hotspots and utilise idle resources.</td></tr>
+<tr><td><strong>Minimising communication</strong></td><td>Move computation close to the data it processes, reducing the volume and latency of network traffic.</td></tr>
+<tr><td><strong>Optimising perceived performance</strong></td><td>Place code where it can respond faster to users (e.g., edge computing, CDN edge functions).</td></tr>
+<tr><td><strong>Improving scalability</strong></td><td>Dynamically spawn or relocate components as the system grows, without central bottlenecks.</td></tr>
+<tr><td><strong>Dynamic configurability</strong></td><td>Inject new behaviour into a running system without redeploying the whole application.</td></tr>
+<tr><td><strong>Fault tolerance</strong></td><td>Migrate processes away from failing or soon-to-be-maintained machines.</td></tr>
+</tbody>
+</table>
+
+<div class="callout exam"><span class="callout-label">The examiner may ask</span><p>"Give three concrete scenarios where code mobility is preferable to data mobility, and justify each." Be ready to contrast code mobility with the alternatives — remote procedure calls, message passing, or shipping data — for each scenario.</p></div>
+
+</section>
+
+<section id="s3"><h2>3. The Three Segments of a Process</h2>
+
+<p>To understand what it means to "move code", we need a precise model of what a running process actually consists of. Fuggetta et al. decompose a process into three conceptual <strong>segments</strong>:</p>
+
+<table>
+<thead><tr><th>Segment</th><th>Contains</th><th>Examples</th></tr></thead>
+<tbody>
+<tr><td><strong>Code segment</strong></td><td>The set of executable instructions composing the process — the program text.</td><td>Compiled bytecode, JavaScript source, a WASM binary.</td></tr>
+<tr><td><strong>Execution segment</strong></td><td>The private data, the stack, and the program counter — the current execution state.</td><td>Local variables, call stack frames, the next instruction pointer.</td></tr>
+<tr><td><strong>Resource segment</strong></td><td>References to external resources the process depends on to run.</td><td>File handles, socket connections, printers, database connections, other processes.</td></tr>
+</tbody>
+</table>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p>The kind of code mobility you achieve depends on <strong>which of these three segments</strong> are transferred from the source machine to the target. The code segment alone gives weak mobility; the code plus execution segment gives strong mobility; the resource segment brings the hardest challenges.</p></div>
+
+<p>This decomposition is the conceptual backbone of the entire code mobility taxonomy. Every model we will study is defined by which segments travel, who initiates the transfer, and how the migrated code relates to the target environment.</p>
+
+<pre class="mermaid">
+graph TD
+    P[Process] --> CS[Code Segment<br/>Executable instructions]
+    P --> ES[Execution Segment<br/>Private data, stack, PC]
+    P --> RS[Resource Segment<br/>External references]
+    CS --> |Transfer| WM[Weak Mobility]
+    CS --> |Transfer| SM[Strong Mobility]
+    ES --> |Transfer| SM
+    RS --> |Bindings matter| MIG[Determines migration<br/>actions at target]
+</pre>
+
+</section>
+
+<section id="s4"><h2>4. Weak Mobility: Transferring the Code Segment</h2>
+
+<p><strong>Weak mobility</strong> is the simplest form of code migration: only the <strong>code segment</strong> is transferred, possibly accompanied by some initialisation parameters. The execution state is <em>not</em> carried along — the code starts afresh at the destination, as if invoked for the first time.</p>
+
+<p>The main idea is straightforward: the code can be executed <em>ex novo</em> every time it arrives. There is no need to preserve a pre-existing computational context because either the context is irrelevant or the target machine's context is exactly what we want.</p>
+
+<table>
+<thead><tr><th>Aspect</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><strong>What moves</strong></td><td>Only the code (plus optional initialisation data).</td></tr>
+<tr><td><strong>What stays</strong></td><td>Execution state, resource bindings.</td></tr>
+<tr><td><strong>Requirement</strong></td><td>The target machine must be able to execute the code (compatible runtime).</td></tr>
+<tr><td><strong>Complexity</strong></td><td>Low — no need to capture, serialise, or restore execution state.</td></tr>
+<tr><td><strong>Canonical examples</strong></td><td>Java Applets, JavaScript fetched by a browser, remote evaluation in RPC-based systems.</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn"><span class="callout-label">Trade-off</span><p>Weak mobility is easy to implement but limited in expressiveness. You cannot suspend a computation on machine A and resume it on machine B — the code always restarts. For iterative, stateful computations that need to roam (like a mobile agent bargaining across multiple marketplaces), weak mobility is insufficient.</p></div>
+
+</section>
+
+<section id="s5"><h2>5. Strong Mobility: Moving the Execution Context</h2>
+
+<p><strong>Strong mobility</strong> transfers both the <strong>code segment</strong> and the <strong>execution segment</strong>. A process can be stopped at an arbitrary point, its entire execution state captured (stack, program counter, private data), shipped to another machine, and then <em>resumed exactly where it left off</em>.</p>
+
+<p>The benefit is transformational: a single logical thread of control can physically traverse multiple machines, accumulating state and making decisions along the way, without ever losing its place. This is the foundation of the mobile agent paradigm.</p>
+
+<table>
+<thead><tr><th>Aspect</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><strong>What moves</strong></td><td>Code segment + execution segment (stack, PC, private data).</td></tr>
+<tr><td><strong>What stays</strong></td><td>Resource segment (bindings must be re-established or adapted).</td></tr>
+<tr><td><strong>Requirement</strong></td><td>The middleware or runtime must support capturing and restoring execution state — this is demanding.</td></tr>
+<tr><td><strong>Complexity</strong></td><td>High — requires language-level or VM-level support (e.g., continuations, checkpoint/restart).</td></tr>
+<tr><td><strong>Canonical examples</strong></td><td>Mobile agents (e.g., Aglets, Agent Tcl), process migration in MOSIX, VM live migration.</td></tr>
+</tbody>
+</table>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>Strong mobility is rare in mainstream platforms precisely because of the implementation burden. Languages like Java would need VM support to capture the full stack and heap state. In practice, many systems that claim "agent" capabilities actually implement weak mobility — the agent carries a <em>program counter variable</em> and uses a dispatch loop to simulate resumption, rather than truly capturing the native stack.</p></div>
+
+<div class="callout exam"><span class="callout-label">The examiner may ask</span><p>"Why is strong mobility difficult to implement in practice? What runtime support does it require?" Be prepared to discuss stack capture, serialisation of closures, heterogeneous architectures, and the security implications of accepting foreign execution state.</p></div>
+
+</section>
+
+<section id="s6"><h2>6. Mobility Models: The Four Paradigms</h2>
+
+<p>Based on <strong>who initiates the migration</strong> (sender or receiver) and <strong>what is transferred</strong> (code only, or code plus execution state), we can classify distributed systems into four canonical mobility models. This taxonomy comes from Tanenbaum &amp; van Steen (2017) and is essential for reasoning about any system that involves code movement.</p>
+
+<table>
+<thead><tr><th>Model</th><th>Initiator</th><th>Mobility</th><th>What travels</th><th>Examples</th></tr></thead>
+<tbody>
+<tr><td><strong>Client-Server</strong> (CS)</td><td>N/A</td><td>None</td><td>Data only (requests and replies)</td><td>HTTP, SQL queries, traditional RPC</td></tr>
+<tr><td><strong>Code-on-Demand</strong> (COD)</td><td>Receiver</td><td>Weak</td><td>Code (know-how)</td><td>Java Applets, JavaScript in browsers</td></tr>
+<tr><td><strong>Remote Evaluation</strong> (REV)</td><td>Sender</td><td>Weak</td><td>Code (know-how)</td><td>Stored procedures, serverless functions, eval servers</td></tr>
+<tr><td><strong>Mobile Agents</strong> (MA)</td><td>Sender</td><td>Strong</td><td>Code + execution state</td><td>Aglets, Agent Tcl, Web crawlers with state</td></tr>
+</tbody>
+</table>
+
+<p>The key difference between client-server and the other three is that in CS, the code that executes at the server is already there — only data flows. In COD, REV, and MA, the <em>know-how</em> (the program itself) is transferred across the network.</p>
+
+<p>The difference between COD and REV is direction: COD is <strong>pulled</strong> by the receiver ("give me the code to execute"), while REV is <strong>pushed</strong> by the sender ("here, execute this code for me"). MA adds the execution segment on top of REV's push model.</p>
+
+</section>
+
+<section id="s7"><h2>7. Interactive Mobility Model Explorer</h2>
+
+<p>Explore the four canonical mobility models. Each state represents a paradigm; transitions show how adding mobility (weak or strong) and changing the initiator (sender vs receiver) moves you from one model to the next.</p>
+
+<div id="mobility-explorer"></div>
+
+</section>
+
+<section id="s8"><h2>8. Sender-Initiated vs Receiver-Initiated Migration</h2>
+
+<p>The <strong>initiator</strong> of code migration has profound implications for the interaction model, the security requirements, and the complexity of the overall system.</p>
+
+<div class="lk-tabs" data-kit="tabs">
+<div class="lk-tablist">
+  <button class="lk-tab">Sender-Initiated</button>
+  <button class="lk-tab">Receiver-Initiated</button>
+</div>
+<div class="lk-tabpanel">
+
+<h3>Sender-Initiated Migration</h3>
+
+<p>Migration is triggered by the machine where the code <em>currently resides or executes</em>. The sender pushes code (and possibly execution state) to a target machine.</p>
+
+<ul>
+  <li><strong>Examples:</strong> Search bots, mobile agents, remote evaluation (REV).</li>
+  <li><strong>Security burden:</strong> The <em>target</em> must protect its resources from potentially malicious incoming code. Servers need to authenticate senders and sandbox the executing code.</li>
+  <li><strong>Complexity:</strong> Higher — the interaction scheme is more involved because the sender must know about the receiver (its address, its capabilities, its interface).</li>
+  <li><strong>Use when:</strong> You want to proactively distribute computation, explore remote resources, or execute a task across multiple sites sequentially.</li>
+</ul>
+
+</div>
+<div class="lk-tabpanel">
+
+<h3>Receiver-Initiated Migration</h3>
+
+<p>Migration is triggered by the target machine, which <em>requests</em> new behaviour from a code source (typically a server). The receiver pulls code toward itself.</p>
+
+<ul>
+  <li><strong>Examples:</strong> Java Applets, JavaScript chunks loaded by a browser.</li>
+  <li><strong>Security burden:</strong> The <em>client</em> (receiver) needs to protect itself, but the attack surface is limited — only a few client-side resources are exposed. The server side is largely unaffected.</li>
+  <li><strong>Complexity:</strong> Lower — clients may be anonymous; the server does not need to track them. The interaction is typically a simple request-response for code.</li>
+  <li><strong>Use when:</strong> You want to enrich a client with capabilities that the server defines, without the server needing to track individual client state.</li>
+</ul>
+
+</div>
+</div>
+
+<div class="callout exam"><span class="callout-label">The examiner may ask</span><p>"Compare sender-initiated and receiver-initiated migration in terms of security, anonymity, and the complexity of the interaction scheme. Give a concrete example for each."</p></div>
+
+</section>
+
+<section id="s9"><h2>9. Separate vs Target Process Execution</h2>
+
+<p>When weak mobility delivers code to a machine, a design decision must be made: should the incoming code execute in the <strong>same process</strong> as the receiver, or in a <strong>separate, isolated process</strong>?</p>
+
+<table>
+<thead><tr><th>Strategy</th><th>How it works</th><th>Pros</th><th>Cons</th></tr></thead>
+<tbody>
+<tr><td><strong>Target process execution</strong></td><td>The mobile code runs directly in the address space of the receiving process (e.g., a browser's rendering engine running JavaScript).</td><td>No inter-process communication overhead; direct access to the host's data structures; simpler integration.</td><td>Malicious or buggy code can corrupt the host process; a crash in the mobile code can bring down the host.</td></tr>
+<tr><td><strong>Separate process execution</strong></td><td>The mobile code is assigned to a dedicated process with its own address space; communication with the host happens via IPC.</td><td>Strong isolation — a crash or exploit in the mobile code cannot directly compromise the host; resource usage can be capped.</td><td>IPC overhead; more complex to set up and manage; sharing state requires explicit marshalling.</td></tr>
+</tbody>
+</table>
+
+<p>The Java Applet model originally ran in the browser's process (target process), which led to numerous security vulnerabilities. Modern browsers isolate each tab in a separate process and use sandboxing techniques, implementing a hybrid approach: separate-process execution with controlled, mediated access to host resources.</p>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p>The choice between target-process and separate-process execution is fundamentally a trade-off between <strong>performance</strong> and <strong>protection</strong>. It is the same tension that appears in microkernel vs monolithic kernel design, and in container vs VM isolation.</p></div>
+
+</section>
+
+<section id="s10"><h2>10. Cloning as an Alternative to Migration</h2>
+
+<p>Strong mobility can also be supported through <strong>remote cloning</strong>: instead of moving a process, you create an exact copy of it on a remote machine. The original process continues to run on the source machine while the clone executes in parallel on the target.</p>
+
+<p>Cloning differs from migration in several important ways:</p>
+
+<table>
+<thead><tr><th>Aspect</th><th>Migration</th><th>Cloning</th></tr></thead>
+<tbody>
+<tr><td><strong>Original process</strong></td><td>Stops on source; resumes on target.</td><td>Continues running on source.</td></tr>
+<tr><td><strong>Number of instances</strong></td><td>Exactly one at any time.</td><td>Two (or more) running in parallel.</td></tr>
+<tr><td><strong>Distribution transparency</strong></td><td>Partial — process moves, but clients must know where it is.</td><td>Improved — replicated instances can serve requests from multiple locations.</td></tr>
+<tr><td><strong>Classic example</strong></td><td>MOSIX process migration.</td><td>UNIX <code>fork()</code> followed by remote execution of the child.</td></tr>
+</tbody>
+</table>
+
+<div class="callout note"><span class="callout-label">Editor's note</span><p>Cloning improves <strong>distribution transparency</strong> because the replicated processes can appear as a single logical service to clients, with requests routed to the nearest or least-loaded replica. This idea underlies modern patterns like function replication in edge computing and actor-model systems (e.g., Akka cluster sharding).</p></div>
+
+</section>
+
+<section id="s11"><h2>11. The Resource Segment: Why Resources Resist Movement</h2>
+
+<p>So far we have discussed moving the code segment and the execution segment. But a process does not run in a vacuum — it depends on <strong>external resources</strong>: files, databases, printers, network sockets, other processes. These are referenced through the <strong>resource segment</strong>.</p>
+
+<p>Resources pose two fundamental challenges during migration:</p>
+
+<ol>
+  <li><strong>Resources may be impossible to move:</strong> A huge database cannot realistically be shipped across the network. A printer is physically bound to a specific machine. A GPU is not portable. Either references must be updated to point to equivalent resources at the target, or the resource itself must be moved — if that is feasible.</li>
+  <li><strong>References may break:</strong> A file descriptor valid on machine A is meaningless on machine B. A URL pointing to a local service on the source machine will not resolve at the destination. Bindings must be re-established.</li>
+</ol>
+
+<div class="callout idea"><span class="callout-label">Key idea</span><p>The resource segment is the <strong>hardest part</strong> of code mobility. Code and execution state are digital and relatively small; resources are often large, physically constrained, or externally controlled. The taxonomy of resource bindings (next two sections) provides a framework for reasoning about what actions are needed when code moves.</p></div>
+
+</section>
+
+<section id="s12"><h2>12. Process-to-Resource Binding Types</h2>
+
+<p>The first dimension of the resource problem is: <strong>how does the migrating process refer to its resources?</strong> There are three binding types:</p>
+
+<table>
+<thead><tr><th>Binding type</th><th>Meaning</th><th>Example</th><th>Migration implication</th></tr></thead>
+<tbody>
+<tr><td><strong>By identifier</strong></td><td>The process needs a resource with a specific name or address.</td><td>A URL (<code>https://api.example.com/v1</code>), a DNS name, a local file path, a process ID.</td><td>If the identifier is a global name (URL), it may still work at the target. If it is local (PID, local path), it will break and must be rebound.</td></tr>
+<tr><td><strong>By value</strong></td><td>The process needs a resource based on its content, not its identity.</td><td>A specific code library (e.g., "I need NumPy v1.24"), a configuration file with known content.</td><td>The resource can potentially be copied or substituted with an equivalent one at the target, as long as the value matches.</td></tr>
+<tr><td><strong>By type</strong></td><td>The process needs a resource of a given category, any instance will do.</td><td>A printer, a display, a GPU, a network interface.</td><td>The target machine must provide a resource of the same type. The binding can be re-established locally if such a resource exists.</td></tr>
+</tbody>
+</table>
+
+<div class="callout exam"><span class="callout-label">The examiner may ask</span><p>"Given a process that opens a local SQLite database file, downloads a Python library, and renders output to a screen, classify each resource dependency by binding type and explain the migration implications."</p></div>
+
+</section>
+
+<section id="s13"><h2>13. Resource-to-Machine Binding Types</h2>
+
+<p>The second dimension is: <strong>how tightly is the resource bound to the machine that currently hosts it?</strong> This determines whether the resource can be moved at all, and at what cost:</p>
+
+<table>
+<thead><tr><th>Binding type</th><th>Meaning</th><th>Examples</th><th>Can it move?</th></tr></thead>
+<tbody>
+<tr><td><strong>Unattached</strong></td><td>Resources that can be easily moved between machines with minimal cost.</td><td>Files associated with the migrating code (a configuration file, a log file), cached data.</td><td>Yes — they can be transferred along with the code, or fetched on demand.</td></tr>
+<tr><td><strong>Fastened</strong></td><td>Resources that could theoretically be moved, but at a significant cost (size, bandwidth, downtime).</td><td>A local database, a large dataset, a Docker image.</td><td>Possible but expensive — often better to leave it in place and access it remotely, or replicate it lazily.</td></tr>
+<tr><td><strong>Fixed</strong></td><td>Resources intrinsically bound to a specific machine or physical location.</td><td>A monitor, a printer, a specialised hardware device, a GPS receiver.</td><td>No — the resource cannot move. The process must either give it up or rebind to an equivalent at the target.</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn"><span class="callout-label">Important</span><p>The 3x3 matrix formed by process-to-resource binding (identifier/value/type) and resource-to-machine binding (unattached/fastened/fixed) defines, for each combination, the set of actions the migration system must take. This is the subject of the next two sections.</p></div>
+
+</section>
+
+<section id="s14"><h2>14. Migration Patterns: Annotated Code</h2>
+
+<p>The following pseudocode illustrates the four canonical mobility patterns. Click each line to reveal its explanation.</p>
+
+<div class="lk-tabs" data-kit="tabs">
+<div class="lk-tablist">
+  <button class="lk-tab">Client-Server</button>
+  <button class="lk-tab">Code-on-Demand</button>
+  <button class="lk-tab">Remote Evaluation</button>
+  <button class="lk-tab">Mobile Agent</button>
+</div>
+<div class="lk-tabpanel">
+<div id="ac-cs"></div>
+</div>
+<div class="lk-tabpanel">
+<div id="ac-cod"></div>
+</div>
+<div class="lk-tabpanel">
+<div id="ac-rev"></div>
+</div>
+<div class="lk-tabpanel">
+<div id="ac-ma"></div>
+</div>
+</div>
+
+</section>
+
+<section id="s15"><h2>15. Actions on Resources During Migration</h2>
+
+<p>When code migrates to a new machine, the references in its resource segment must be adapted. Tanenbaum &amp; van Steen (2017) identify the actions to be taken for each combination of process-to-resource binding and resource-to-machine binding. The following table summarises the decision matrix:</p>
+
+<table>
+<thead><tr><th>Resource-to-machine<br/>&rarr; Process-to-resource &darr;</th><th>Unattached</th><th>Fastened</th><th>Fixed</th></tr></thead>
+<tbody>
+<tr><td><strong>By identifier</strong></td><td>Move the resource (MV) or rebind to a global reference (GR).</td><td>Rebind to a global reference (GR) — the resource stays but must be reachable via a network identifier.</td><td>Rebind to a local resource of the same type at the target (GR) — or give up the resource.</td></tr>
+<tr><td><strong>By value</strong></td><td>Copy the resource value (CP) to the target.</td><td>Copy the resource (CP) if feasible; otherwise establish a remote reference.</td><td>Copy is meaningless for fixed resources; rebind to an equivalent at the target (GR).</td></tr>
+<tr><td><strong>By type</strong></td><td>Rebind to a resource of the same type at the target (GR).</td><td>Rebind to a local resource of the same type (GR) or access the fastened one remotely.</td><td>Rebind to a local resource of the same type at the target (GR).</td></tr>
+</tbody>
+</table>
+
+<p>The possible actions referenced above:</p>
+<ul>
+  <li><strong>MV (Move):</strong> Transfer the resource from source to target machine.</li>
+  <li><strong>CP (Copy):</strong> Create a copy of the resource's value at the target; the original remains at the source.</li>
+  <li><strong>GR (Global Rebind):</strong> Update the reference to point to a resource accessible from the target machine — either the same resource accessed remotely, or a local equivalent.</li>
+</ul>
+
+</section>
+
+<section id="s16"><h2>16. Interactive Resource-Action Explorer</h2>
+
+<p>Use the explorer below to understand which migration action is appropriate for each combination of binding types. Click any cell in the matrix to see a concrete scenario.</p>
+
+<div id="resource-matrix"></div>
+
+<style>
+#resource-matrix-wrap { margin: 1.4rem 0; border: 1px solid var(--lk-bd); border-radius: .7rem; overflow: hidden; background: #fff; box-shadow: var(--lk-shadow); }
+#resource-matrix-wrap .rm-grid { display: grid; grid-template-columns: 180px repeat(3, 1fr); gap: 0; }
+#resource-matrix-wrap .rm-cell { padding: .6rem .5rem; border: 1px solid var(--lk-bd); font-size: .88rem; display: flex; align-items: center; justify-content: center; text-align: center; min-height: 3.2rem; }
+#resource-matrix-wrap .rm-cell.rm-hdr { background: var(--lk-code); font-weight: 700; font-size: .82rem; }
+#resource-matrix-wrap .rm-cell.rm-rowhdr { background: var(--lk-code); font-weight: 600; font-size: .82rem; }
+#resource-matrix-wrap .rm-cell.rm-data { cursor: pointer; transition: .12s; }
+#resource-matrix-wrap .rm-cell.rm-data:hover { background: var(--lk-hl); }
+#resource-matrix-wrap .rm-cell.rm-data.rm-active { background: #dbeafe; border: 2px solid var(--lk-ac); font-weight: 600; }
+#resource-matrix-wrap .rm-panel { padding: 1rem; border-top: 2px solid var(--lk-ac); background: var(--lk-soft); min-height: 3.5rem; }
+#resource-matrix-wrap .rm-panel h4 { margin: 0 0 .35rem; color: var(--lk-ac); }
+#resource-matrix-wrap .rm-panel p { margin: 0; font-size: .92rem; }
+#resource-matrix-wrap .rm-panel .rm-action { display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-weight: 700; font-family: var(--lk-mono); font-size: .85rem; margin-right: .4rem; background: #dbeafe; color: #1e40af; }
+@media (max-width: 640px) { #resource-matrix-wrap .rm-grid { grid-template-columns: 120px repeat(3, 1fr); } }
+</style>
+
+</section>
+
+<section id="s17"><h2>17. Summary</h2>
+
+<ol class="lk-timeline">
+  <li>
+    <span class="lk-tl-when">1. Motivation</span>
+    <p>Code mobility is needed when passing data is not enough — for load balancing, minimising communication, improving scalability, enabling dynamic reconfiguration, and increasing fault tolerance.</p>
+  </li>
+  <li>
+    <span class="lk-tl-when">2. Three segments</span>
+    <p>A process decomposes into code, execution, and resource segments. Which segments travel determines the class of mobility: weak (code only) or strong (code + execution).</p>
+  </li>
+  <li>
+    <span class="lk-tl-when">3. Weak mobility</span>
+    <p>Only the code segment moves. The program restarts from the beginning at the destination. Simple to implement, sufficient for code-on-demand and remote evaluation.</p>
+  </li>
+  <li>
+    <span class="lk-tl-when">4. Strong mobility</span>
+    <p>Both code and execution state travel. The process suspends, moves, and resumes exactly where it left off. Demanding to implement, but enables mobile agents.</p>
+  </li>
+  <li>
+    <span class="lk-tl-when">5. Four paradigms</span>
+    <p>Client-Server (no mobility), Code-on-Demand (receiver-initiated, weak), Remote Evaluation (sender-initiated, weak), Mobile Agents (sender-initiated, strong).</p>
+  </li>
+  <li>
+    <span class="lk-tl-when">6. Initiation</span>
+    <p>Sender-initiated migration is more complex (targets need heavy security) but enables proactive distribution. Receiver-initiated is simpler (anonymous clients, lightweight security) but the server retains control.</p>
+  </li>
+  <li>
+    <span class="lk-tl-when">7. Resources</span>
+    <p>The resource segment is the hardest challenge — bindings can be by identifier, value, or type; resources can be unattached, fastened, or fixed. The 3x3 matrix determines whether to move, copy, or rebind.</p>
+  </li>
+</ol>
+
+</section>
+
+<section id="quiz"><h2>Check Your Understanding</h2>
+<div class="lk-quiz">
+
+<details><summary>Define weak mobility and strong mobility. What travels with the code in each case?</summary>
+<p><strong>Weak mobility</strong> transfers only the code segment (plus optional initialisation data). The code starts execution from the beginning at the destination. <strong>Strong mobility</strong> transfers both the code segment and the execution segment (private data, stack, program counter), allowing the process to resume exactly where it was suspended. The key distinction is whether the execution state is captured and restored.</p></details>
+
+<details><summary>Classify each scenario into one of the four paradigms (CS, COD, REV, MA): (a) a browser requests a JavaScript file from a server; (b) a user calls a stored procedure on a PostgreSQL database; (c) a web crawler that visits multiple sites, each time carrying its index of already-visited URLs; (d) a traditional HTTP GET request.</summary>
+<p>(a) <strong>Code-on-Demand (COD)</strong> — receiver (browser) pulls code. (b) <strong>Remote Evaluation (REV)</strong> — sender (client) pushes code to be executed remotely. (c) <strong>Mobile Agents (MA)</strong> — the crawler is a sender-initiated agent carrying both code and execution state (the visited-URL index) across sites. (d) <strong>Client-Server (CS)</strong> — no code mobility, only data (the request and the response) flows.</p></details>
+
+<details><summary>Why is receiver-initiated migration generally considered less complex than sender-initiated migration? Discuss security and anonymity.</summary>
+<p>In receiver-initiated migration, the target initiates the transfer — it asks for code and knows what it is getting. Only a few client-side resources need protection (sandboxing the incoming code). Clients can remain anonymous — the server does not need to track who downloaded code. In sender-initiated migration, the target receives code it did not ask for, and must authenticate the sender, verify the code's integrity, and protect its resources from potentially malicious behaviour. The server must know about clients, making the interaction more complex.</p></details>
+
+<details><summary>A process opens a local SQLite file, imports a Python library by name, and writes to a physically connected printer. For each resource, state: (i) process-to-resource binding type; (ii) resource-to-machine binding type; (iii) the likely migration action needed.</summary>
+<p><strong>SQLite file:</strong> (i) Binding by identifier (local file path). (ii) Unattached or fastened depending on size. (iii) If unattached, MV (move the file). If fastened, GR (rebind to a network-accessible copy or copy lazily). <strong>Python library:</strong> (i) Binding by value (the library's content, identified by name and version). (ii) Unattached. (iii) CP (copy/install the library at the target). <strong>Printer:</strong> (i) Binding by type (any printer will do, or by identifier if a specific named printer). (ii) Fixed. (iii) GR (rebind to a printer available at the target machine).</p></details>
+
+<details><summary>Explain why cloning can improve distribution transparency compared to migration.</summary>
+<p>With migration, a single process instance moves from one machine to another; clients must track its current location to reach it. With cloning, multiple replicas of the same process exist simultaneously on different machines. Clients can be routed to the nearest replica, and the system can present a single logical service endpoint. This transparent replication hides the physical distribution from clients — they do not need to know which replica serves their request, and failover to another replica is seamless if one fails.</p></details>
+
+<details><summary>Describe a situation where weak mobility is sufficient and strong mobility would be overkill. Then describe the opposite.</summary>
+<p><strong>Weak mobility sufficient:</strong> A serverless function (e.g., AWS Lambda) — the code is stateless and each invocation is independent; the platform just needs the function code and input parameters. There is no execution state to carry. <strong>Strong mobility necessary:</strong> A negotiation agent that visits multiple e-commerce sites, gathers quotes, and makes a decision based on accumulated information. The agent must remember which sites it visited and what offers it received; suspending and resuming its decision logic across sites requires carrying the execution state.</p></details>
+
+<details><summary>What are the three possible actions (MV, CP, GR) a migration system can take regarding a resource when code moves? Give a concrete example of when each is used.</summary>
+<p><strong>MV (Move):</strong> Transfer the resource itself. Example: a small configuration file specific to the migrating process is sent along with the code to the target. <strong>CP (Copy):</strong> Create a copy of the resource at the target; the original stays. Example: copying a read-only dataset that the process needs at both locations. <strong>GR (Global Rebind):</strong> Update the reference to point to a globally reachable resource or a local equivalent. Example: a process that used a local database on the source machine rebinds to an equivalent database instance accessible at the target site.</p></details>
+
+</div></section>
+
+<footer class="lk-foot">Study material generated from the course slides of Prof. Andrea Omicini, DISI — Universita di Bologna (A.Y. 2025/2026). Based on Fuggetta et al., IEEE TSE 1998. Not an official source.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+/* ===== Mobility Model State Explorer ===== */
+LessonKit.stateExplorer('#mobility-explorer', {
+  title: 'Mobility Models — State Explorer',
+  start: 'CS',
+  states: {
+    'CS': {
+      desc: 'Client-Server: no code mobility. Only data (requests and replies) flows between client and server. The code at the server is pre-installed and static. Examples: HTTP, SQL queries, traditional RPC.',
+      to: [['Add weak mobility (receiver pulls code)', 'COD'], ['Add remote evaluation (sender pushes code)', 'REV']]
+    },
+    'COD': {
+      desc: 'Code-on-Demand: receiver-initiated weak mobility. The target requests and downloads code to execute locally. Only the code segment is transferred; execution starts fresh. Examples: Java Applets, JavaScript in browsers.',
+      to: [['Remove code mobility', 'CS'], ['Add execution state (sender-initiated strong)', 'MA']]
+    },
+    'REV': {
+      desc: 'Remote Evaluation: sender-initiated weak mobility. The sender pushes code to a remote host for execution. Only the code segment travels; the sender retains no execution context at the target. Examples: stored procedures, serverless functions.',
+      to: [['Remove code mobility', 'CS'], ['Add execution state (sender-initiated strong)', 'MA']]
+    },
+    'MA': {
+      desc: 'Mobile Agents: sender-initiated strong mobility. Both code and execution state travel. The agent can suspend, move, and resume on another machine while preserving its state. Examples: Aglets, Agent Tcl, stateful web crawlers.',
+      to: [['Remove execution state (weak mobility, sender)', 'REV'], ['Switch to receiver-initiated', 'COD']]
+    }
+  }
+});
+
+/* ===== Annotated Code: Client-Server ===== */
+LessonKit.annotatedCode('#ac-cs', {
+  lang: 'text',
+  lines: [
+    ['// CLIENT-SERVER: no code mobility', 'Paradigm where code stays put; only data moves.'],
+    ['client.send(request)', 'Client sends a request message (data) to the server.'],
+    ['server.receive(request)', 'Server receives the request. The handler code is already installed.'],
+    ['result = server.process(request)', 'Server executes its own pre-existing code on the data.'],
+    ['server.send(client, result)', 'Server sends the result (data) back to the client.'],
+    ['client.receive(result)', 'Client receives the response. No code ever moved between machines.']
+  ]
+});
+
+/* ===== Annotated Code: Code-on-Demand ===== */
+LessonKit.annotatedCode('#ac-cod', {
+  lang: 'text',
+  lines: [
+    ['// CODE-ON-DEMAND: receiver-initiated, weak mobility', 'The target pulls executable code from a source.'],
+    ['client.requestCode(server, "app.js")', 'Receiver (client) asks the server for a specific code module.'],
+    ['server.sendCode(client, codeSegment)', 'Server sends only the code segment — no execution state.'],
+    ['client.loadAndExecute(codeSegment)', 'Client loads the received code and executes it from scratch.'],
+    ['// Execution starts ex novo at the client', 'Since only the code segment arrived, execution begins at entry point.'],
+    ['// Target process or separate process?', 'Decision: run in client process (browser tab) or isolated process.']
+  ]
+});
+
+/* ===== Annotated Code: Remote Evaluation ===== */
+LessonKit.annotatedCode('#ac-rev', {
+  lang: 'text',
+  lines: [
+    ['// REMOTE EVALUATION: sender-initiated, weak mobility', 'The sender pushes code to be executed remotely.'],
+    ['sender.sendCode(target, codeSegment, initData)', 'Sender pushes code + initialisation parameters to target.'],
+    ['target.receiveCode(codeSegment, initData)', 'Target receives code and optional initialisation data.'],
+    ['result = target.execute(codeSegment, initData)', 'Target runs the code from its entry point with provided parameters.'],
+    ['target.sendResult(sender, result)', 'Target sends only the computed result back to the sender.'],
+    ['// Code runs in target context, benefits from target resources', 'The code has access to target-local data and services.']
+  ]
+});
+
+/* ===== Annotated Code: Mobile Agent ===== */
+LessonKit.annotatedCode('#ac-ma', {
+  lang: 'text',
+  lines: [
+    ['// MOBILE AGENT: sender-initiated, strong mobility', 'Both code and execution state travel together.'],
+    ['agent = new Agent(code, initialState)', 'Agent is created with its code and initial execution state.'],
+    ['agent.migrateTo(host1)', 'Agent suspends: execution state (stack, PC, private data) is captured.'],
+    ['agent.resume()  // continues where it left off', 'On host1, agent resumes from the exact suspension point.'],
+    ['data1 = agent.interact(host1.services)', 'Agent interacts with local resources on host1.'],
+    ['agent.migrateTo(host2)  // carries accumulated state', 'Agent suspends again, now carrying modified state + results.'],
+    ['agent.resume()  // state preserved across hops', 'On host2, agent resumes with all accumulated knowledge.'],
+    ['// The agent makes decisions based on its journey', 'Full mobility: code, state, and decision logic roam together.']
+  ]
+});
+
+/* ===== Bespoke: Resource-Action Decision Matrix ===== */
+(function(){
+  var matrix = [
+    [{r:'Unattached', p:'By identifier'},{r:'Fastened', p:'By identifier'},{r:'Fixed', p:'By identifier'}],
+    [{r:'Unattached', p:'By value'},{r:'Fastened', p:'By value'},{r:'Fixed', p:'By value'}],
+    [{r:'Unattached', p:'By type'},{r:'Fastened', p:'By type'},{r:'Fixed', p:'By type'}]
+  ];
+  var data = {
+    'Unattached|By identifier': { action:'MV', title:'Move the resource', text:'The resource is small and portable (e.g., a config file). Transfer it to the target machine along with the code. Example: a process-specific YAML config file.' },
+    'Fastened|By identifier': { action:'GR', title:'Global rebind', text:'The resource is too large to move (e.g., a database), but it is accessible by a network identifier. Rebind the reference to the same resource via a global URL. Example: rebind from localhost:5432 to db.example.com:5432.' },
+    'Fixed|By identifier': { action:'GR', title:'Rebind to local equivalent', text:'The resource is physically fixed (e.g., a specific printer). Rebind to an equivalent resource available at the target machine. Example: rebind from "Office-Printer-3F" to "Lab-Printer-B1".' },
+    'Unattached|By value': { action:'CP', title:'Copy the resource', text:'The resource can be duplicated cheaply. Copy its value to the target machine. Example: copy a cached machine-learning model file to the target.' },
+    'Fastened|By value': { action:'CP/GR', title:'Copy or remote reference', text:'If the resource can be copied at acceptable cost, copy it (CP). Otherwise, establish a remote reference (GR) to the original. Example: a large code library — install locally if fast, else access via shared filesystem.' },
+    'Fixed|By value': { action:'GR', title:'Rebind to equivalent', text:'Fixed resources cannot be copied meaningfully (you cannot "copy" a printer). Rebind to a resource of matching type and value at the target. Example: GPU-bound computation rebinds to a GPU at the target node.' },
+    'Unattached|By type': { action:'GR', title:'Rebind to local resource of same type', text:'The resource need is generic. Any instance of the required type at the target will do. Example: the process needs "a display" — rebind to the target machine\'s monitor.' },
+    'Fastened|By type': { action:'GR', title:'Rebind or remote access', text:'Bind to a local instance of the type if available; otherwise access the fastened resource remotely. Example: rebind to a local GPU, or if none is available, connect to one via the network.' },
+    'Fixed|By type': { action:'GR', title:'Rebind to local resource of same type', text:'Same as unattached-by-type, but the resource is guaranteed not to move. Always rebind locally at the target. Example: any printer at the target site will do — bind to the first available one.' }
+  };
+
+  var container = document.getElementById('resource-matrix');
+  if (!container) return;
+  var html = '<div id="resource-matrix-wrap"><div class="rm-grid">';
+  html += '<div class="rm-cell rm-hdr">Process-to-resource<br/>&darr; Resource-to-machine &rarr;</div>';
+  html += '<div class="rm-cell rm-hdr">Unattached</div>';
+  html += '<div class="rm-cell rm-hdr">Fastened</div>';
+  html += '<div class="rm-cell rm-hdr">Fixed</div>';
+  var procLabels = ['By identifier', 'By value', 'By type'];
+  for (var i = 0; i < 3; i++) {
+    html += '<div class="rm-cell rm-rowhdr">' + procLabels[i] + '</div>';
+    for (var j = 0; j < 3; j++) {
+      var key = matrix[i][j].r + '|' + matrix[i][j].p;
+      var d = data[key];
+      html += '<div class="rm-cell rm-data" data-rm-key="' + key + '">' + d.action + '</div>';
+    }
+  }
+  html += '</div>';
+  html += '<div class="rm-panel" id="rm-panel"><h4>Click a cell to explore</h4><p>Select any cell in the matrix above to see the migration action, rationale, and a concrete example.</p></div>';
+  html += '</div>';
+  container.innerHTML = html;
+
+  var cells = container.querySelectorAll('.rm-data');
+  var panel = container.querySelector('#rm-panel');
+  cells.forEach(function(cell){
+    cell.addEventListener('click', function(){
+      cells.forEach(function(c){ c.classList.remove('rm-active'); });
+      this.classList.add('rm-active');
+      var key = this.getAttribute('data-rm-key');
+      var d = data[key];
+      if (d) {
+        panel.innerHTML = '<h4><span class="rm-action">' + d.action + '</span> ' + d.title + '</h4><p>' + d.text + '</p>';
+      }
+    });
+  });
+})();
+
+/* ===== Mermaid init ===== */
+mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'loose' });
+
+/* ===== Highlight.js ===== */
+hljs.highlightAll();
+</script>
+</body></html>
