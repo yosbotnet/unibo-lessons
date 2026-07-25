@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 8 — Concorrenza in Java: thread, synchronized, task ed executor · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-07-monitor.html">&larr; Cap. 7 — Monitor e variabili condizione</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-09-verifica.html">Cap. 9 — Verifica formale e model checking &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte I — Concorrenza a memoria condivisa · Capitolo 8</div>
+    <h1>Concorrenza in Java: thread, synchronized, task ed executor</h1>
+    <div class="lk-meta"><span>~45 min di lettura</span><span>8 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Multithreading in Java: Thread e Runnable</a></li>
+      <li><a href="#s2">Sezione critica in Java: synchronized</a></li>
+      <li><a href="#s3">Lost update e race condition</a></li>
+      <li><a href="#s4">Thread safety e metodi synchronized</a></li>
+      <li><a href="#s5">Lock espliciti: ReentrantLock</a></li>
+      <li><a href="#s6">Check-and-act e il BoundedCounter</a></li>
+      <li><a href="#s7">Laboratorio: barriera e latch</a></li>
+      <li><a href="#s8">Dal problema ai task: l'analisi task-oriented</a></li>
+      <li><a href="#s9">Il Java Executor Framework</a></li>
+      <li><a href="#s10">Callable, Future e task con risultato</a></li>
+      <li><a href="#s11">Cancellazione cooperativa e interruption</a></li>
+      <li><a href="#s12">Cronometro MVC: il bug della reattivita</a></li>
+      <li><a href="#s13">Cronometro MVC: la soluzione</a></li>
+      <li><a href="#s14">Sketch2: input asincrono da tastiera</a></li>
+      <li><a href="#s15">Simulazione fisica: palle che rimbalzano</a></li>
+      <li><a href="#s16">Fork-Join, work-stealing e structured concurrency</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="PCD-2026-02-16-2.html#s8">
+    <h2>1. Multithreading in Java: Thread e Runnable</h2>
+        <p>Il professor Ricci introduce la programmazione multi-thread in Java con una precisazione importante: Java adotta un <strong>approccio ibrido</strong>. Da un lato, le classi per i thread sono librerie di base (J2SE, <code>java.util.concurrent</code>), indipendenti dal sistema operativo — a differenza dei PThread in C che sono specifici per sistemi POSIX. Dall'altro, il linguaggio include elementi nativi come la parola chiave <code>synchronized</code> e il fatto che ogni oggetto Java ha nativamente un lock associato.</p>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Java non ha voluto "bucare" il paradigma a oggetti introducendo oggetti attivi come concetto di prima classe. Se lo avesse fatto, si sarebbe aperto un mondo di ricerca (a cui il gruppo di Bologna ha contribuito) su "oggetti che inglobano il flusso di controllo". Ma non sarebbe piu stata programmazione orientata agli oggetti pura. Java ha scelto la via pragmatica: thread come oggetti normali, con il supporto del linguaggio per la sincronizzazione.</p></div>
+
+    <h3>Creazione di thread in Java</h3>
+    <p>Due modi principali per creare thread in Java:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Estendere Thread</button><button class="lk-tab">Implementare Runnable</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Si estende la classe <code>Thread</code> e si sovrascrive il metodo <code>run()</code>:</p>
+        <pre><code class="language-java">class MyThread extends Thread {
+    private int id;
+
+    MyThread(int id) {
+        this.id = id;
+    }
+
+    public void run() {
+        System.out.println("Thread " + id + " avviato");
+        try { Thread.sleep(5000); } catch (InterruptedException e) {}
+        System.out.println("Thread " + id + " done");
+    }
+}
+
+// Uso:
+MyThread t1 = new MyThread(1);
+MyThread t2 = new MyThread(2);
+t1.start();
+t2.start();</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Si implementa l'interfaccia <code>Runnable</code> e si passa l'istanza a un thread:</p>
+        <pre><code class="language-java">class MyRunnable implements Runnable {
+    private String name;
+
+    MyRunnable(String name) {
+        this.name = name;
+    }
+
+    public void run() {
+        System.out.println(name + " avviato");
+    }
+}
+
+// Uso:
+Thread t1 = new Thread(new MyRunnable("Thread-1"));
+Thread t2 = new Thread(new MyRunnable("Thread-2"));
+t1.start();
+t2.start();</code></pre>
+        <p>Questo approccio e preferibile perche disaccoppia il comportamento attivo dalla gerarchia di classi, permettendo alla classe di estendere altre classi se necessario.</p>
+      </div>
+    </div>
+
+    <div id="ac-thread"></div>
+
+    <h3>Il metodo run() non va chiamato direttamente</h3>
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Il metodo <code>run()</code> non va mai chiamato direttamente dal codice applicativo. Quando chiamiamo <code>start()</code>, il sistema (JVM + librerie) crea un nuovo thread del sistema operativo e invoca <code>run()</code> su quel thread. Se chiamiamo <code>run()</code> direttamente, viene eseguito sul thread corrente (quello del main) in modo sequenziale, senza creare un nuovo flusso di controllo. <code>run()</code> e pubblico solo per definizione del contratto dell'interfaccia — idealmente non dovrebbe essere pubblico.</p></div>
+
+    <h3>Comportamento attivo e terminazione</h3>
+    <p>I componenti attivi spesso <strong>non devono terminare</strong>. A differenza di una computazione tradizionale (input, processa, output, termina), i thread tipicamente hanno un comportamento ciclico, persistente. Il metodo <code>run()</code> non restituisce nulla (<code>void</code>) e non viene chiamato da noi: lo chiama la JVM sul nuovo thread.</p>
+
+    <h3>Un esempio: ordinamento parallelo con quicksort</h3>
+    <p>Il professor Ricci anticipa un esempio che sara sviluppato nella prossima lezione. L'idea e ordinare un vettore enorme usando quicksort, ma sfruttando tutti i core del processore. Nel main si genera un array di 400 milioni di elementi, si chiama <code>Arrays.sort()</code> (sequenziale) e si misura il tempo. La sfida e parallelizzare l'ordinamento.</p>
+  
+  </section>
+  <section id="s2" data-src="PCD-2026-03-02.html#s4">
+    <h2>2. Sezione critica in Java: synchronized</h2>
+        <p>Il professore usa l'esempio concreto dal repo <code>labactivity03</code> per mostrare come si realizza una sezione critica in Java con il costrutto <code>synchronized</code>. Due thread, <strong>WorkerA</strong> e <strong>WorkerB</strong>, eseguono azioni cicliche. WorkerA esegue A1, A2, A3; WorkerB esegue B1, B2, B3. L'obiettivo e fare in modo che A2 e A3 (oppure A2 da sola) siano eseguite in mutua esclusione rispetto a B2 e B3.</p>
+
+    <div id="ac-sync-block"></div>
+
+    <p>L'idea base e: un blocco <code>synchronized(lock)</code> crea una regione critica: prima di entrare, il thread cerca di acquisire il <strong>lock intrinseco</strong> dell'oggetto specificato. Se un altro thread lo possiede gia, il thread si blocca (viene messo nell'<code>entry set</code> dell'oggetto). Quando il lock viene rilasciato (usciendo dal blocco), un thread in attesa viene risvegliato e puo acquisirlo.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Il costrutto <code>synchronized</code> implementa automaticamente: (1) <strong>mutua esclusione</strong> sul blocco, (2) <strong>rilascio automatico del lock</strong> anche in caso di eccezione, (3) relazione <strong>happens-before</strong> di memoria. Non e possibile dimenticare di rilasciare il lock, a differenza dei lock espliciti.</p></div>
+
+    <h3>Schema dell'esempio WorkerA/WorkerB</h3>
+    <p>Nel codice mostrato dal professore, i worker estendono una classe base <code>Worker</code> che fornisce metodi di utilita come <code>waitSome()</code> (attesa casuale). La struttura e:</p>
+
+    <pre><code class="language-java">// Idea: sezione critica con blocco synchronized su un oggetto condiviso
+Object lock = new Object();
+
+// Thread A
+synchronized (lock) {
+    // A2: azione in sezione critica
+    // A3: azione in sezione critica
+}
+
+// Thread B
+synchronized (lock) {
+    // B2: azione in sezione critica
+    // B3: azione in sezione critica
+}</code></pre>
+
+    <p>Il professore sottolinea che questo e il modo "piu raw, piu semplice, piu basso livello" per realizzare una sezione critica. Nella pratica si usano astrazioni di piu alto livello, ma comprendere <code>synchronized</code> e fondamentale.</p>
+  
+  </section>
+  <section id="s3" data-src="PCD-2026-03-02.html#s5">
+    <h2>3. Lost update e race condition</h2>
+        <p>Il cuore del laboratorio e l'esempio del <strong>contatore condiviso</strong>. Il professore presenta una classe <code>Counter</code> con un campo <code>int count</code> e un metodo <code>inc()</code>. Due thread incrementano lo stesso contatore. Senza sincronizzazione, l'operazione <code>count++</code> non e atomica: e una sequenza read-modify-write (leggi, incrementa, scrivi).</p>
+
+    <div id="ac-counter"></div>
+
+    <p>Nel codice del professore, questo si manifesta come <strong>lost update</strong>: due thread possono leggere lo stesso valore, incrementarlo ciascuno nella propria variabile locale, e riscriverlo, perdendo uno degli incrementi. Con 100.000 incrementi per thread (totale atteso 200.000), il risultato effettivo sara minore, e diverso a ogni esecuzione.</p>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p><code>count++</code> non e atomico. A livello macchina corrisponde a: (1) carica count in un registro, (2) incrementa il registro, (3) scrivi il registro in count. Un interleaving fra (1) e (3) di due thread produce risultati errati. <code>synchronized</code> rende l'intera sequenza atomica rispetto agli altri thread sincronizzati sullo stesso lock.</p></div>
+
+    <h3>Dimostrazione dell'interleaving</h3>
+    <p>Il professore simula mentalmente lo scenario: se entrambi i thread leggono count=5 prima che uno dei due lo abbia scritto, entrambi scriveranno 6 invece di 7. Ecco un simulatore interattivo per visualizzare il fenomeno:</p>
+
+    <div id="step-lostupdate"></div>
+  
+  </section>
+  <section id="s4" data-src="PCD-2026-03-02.html#s6">
+    <h2>4. Thread safety e metodi synchronized</h2>
+        <p>Il professore introduce la definizione di <strong>thread safety</strong> tratta dal testo "Java Concurrency in Practice": una classe e <strong>thread-safe</strong> se puo essere usata correttamente in qualsiasi contesto, sequenziale o concorrente, senza che chi la usa debba preoccuparsi di sincronizzazione aggiuntiva. Le classi di <code>java.util</code> (es. <code>ArrayList</code>) non sono thread-safe perche la sincronizzazione ha un costo e sarebbe sprecata in contesti sequenziali.</p>
+
+    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>La scelta di non rendere thread-safe le classi della libreria standard per default e una decisione progettuale: il programmatore sceglie quando serve e paga solo quel costo. In contesti concorrenti si usano wrapper sincronizzati (<code>Collections.synchronizedList(...)</code>) o strutture specializzate (<code>ConcurrentHashMap</code>).</p></div>
+
+    <h3>synchronized a livello di metodo</h3>
+    <p>Il professore mostra un'evoluzione: invece di un blocco <code>synchronized</code> esplicito, si puo dichiarare l'intero metodo come <code>synchronized</code>. In Java, scrivere:</p>
+
+    <pre><code class="language-java">public synchronized void inc() {
+    count++;
+}</code></pre>
+
+    <p>equivale a:</p>
+
+    <pre><code class="language-java">public void inc() {
+    synchronized (this) {
+        count++;
+    }
+}</code></pre>
+
+    <p>Il lock viene acquisito sull'oggetto stesso (<code>this</code>) prima di eseguire il corpo del metodo e rilasciato automaticamente all'uscita. Questo pattern si avvicina all'idioma del <strong>monitor</strong>: una classe i cui metodi pubblici sono eseguiti in mutua esclusione per costruzione.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Classe non thread-safe</button>
+        <button class="lk-tab">Classe thread-safe</button>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-java">public class Counter {
+    private int count = 0;
+
+    public void inc() { count++; }
+    public int get() { return count; }
+}
+
+// Uso concorrente: PERICOLOSO!
+// count++ non atomico -> lost update</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-java">public class SafeCounter {
+    private int count = 0;
+
+    public synchronized void inc() { count++; }
+    public synchronized int get() { return count; }
+}
+
+// Uso concorrente: SICURO
+// synchronized rende inc() e get() atomici</code></pre>
+      </div>
+    </div>
+
+    <p>Il professore nota che <code>get()</code> deve essere <code>synchronized</code> anch'esso: altrimenti un thread potrebbe leggere un valore incoerente mentre un altro sta eseguendo <code>inc()</code> (anche se count++ e su una variabile <code>int</code>, la visibilita di memoria non e garantita senza sincronizzazione).</p>
+  
+  </section>
+  <section id="s5" data-src="PCD-2026-03-02.html#s7">
+    <h2>5. Lock espliciti: ReentrantLock</h2>
+        <p>Oltre a <code>synchronized</code>, Java offre lock espliciti nel pacchetto <code>java.util.concurrent.locks</code>. Il professore presenta <code>ReentrantLock</code> e le sue varianti, sottolineando un aspetto critico: <strong>il lock va rilasciato esplicitamente</strong>, e per questo il pattern canonico prevede <code>try/finally</code>.</p>
+
+    <pre><code class="language-java">import java.util.concurrent.locks.ReentrantLock;
+
+ReentrantLock lock = new ReentrantLock();
+
+public void m() {
+    lock.lock();        // acquisisce il lock (si blocca se necessario)
+    try {
+        // sezione critica
+    } finally {
+        lock.unlock();  // rilasciato SEMPRE, anche in caso di eccezione
+    }
+}</code></pre>
+
+    <p>Il professore elenca le varianti offerte da <code>ReentrantLock</code>:</p>
+
+    <table>
+      <thead><tr><th>Metodo</th><th>Comportamento</th></tr></thead>
+      <tbody>
+        <tr><td><code>lock()</code></td><td>Acquisisce il lock, bloccandosi se necessario. Ignora gli interrupt.</td></tr>
+        <tr><td><code>lockInterruptibly()</code></td><td>Come <code>lock()</code> ma risponde all'interrupt: se il thread viene interrotto mentre aspetta, lancia <code>InterruptedException</code> e si sblocca.</td></tr>
+        <tr><td><code>tryLock()</code></td><td>Tenta di acquisire il lock senza bloccarsi: restituisce subito <code>true</code> (lock preso) o <code>false</code> (lock occupato).</td></tr>
+        <tr><td><code>tryLock(time, unit)</code></td><td>Tenta di acquisire il lock aspettando al piu il tempo specificato; restituisce <code>false</code> se scaduto.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>A differenza di <code>synchronized</code>, con <code>ReentrantLock</code> e possibile <strong>dimenticare di rilasciare il lock</strong> (se si omette il <code>finally</code>). Un'eccezione nel corpo del blocco lascerebbe il lock perpetuamente acquisito, bloccando tutti gli altri thread. Il pattern try/finally e <strong>obbligatorio</strong>.</p></div>
+
+    <p>Il professore nota che Java offre anche una sintassi piu moderna con <code>try(var lock = ...)</code> (ARM per lock, introdotta in versioni recenti), ma il pattern classico rimane il piu diffuso.</p>
+  
+  </section>
+  <section id="s6" data-src="PCD-2026-03-02.html#s8">
+    <h2>6. Check-and-act e il BoundedCounter</h2>
+        <p>Il professore introduce un esempio piu complesso che illustra il pattern <strong>check-and-act</strong> e le sue insidie. Un <code>BoundedCounter</code> e un contatore con soglie minime e massime: se si tenta di incrementare oltre il massimo, lancia <code>OverflowException</code>; se si tenta di decrementare sotto il minimo, lancia <code>UnderflowException</code>.</p>
+
+    <div id="ac-bounded"></div>
+
+    <p>Il problema emerge quando due worker operano sullo stesso contatore:</p>
+    <ul>
+      <li><strong>WorkerA</strong>: se il valore e maggiore di 0, lo decrementa.</li>
+      <li><strong>WorkerB</strong>: se il valore e minore di 1 (cioe minore del massimo), lo incrementa.</li>
+    </ul>
+
+    <p>Il pattern <strong>check-and-act</strong> consiste nel controllare una condizione e poi agire di conseguenza. In un contesto concorrente, questo pattern e <strong>intrinsecamente non atomico</strong>: tra la lettura della condizione e l'azione, un altro thread puo modificare lo stato, invalidando la condizione appena letta.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Il pattern check-and-act e una delle cause piu comuni di race condition. La soluzione e <strong>rendere atomico l'intero blocco check+act</strong> usando <code>synchronized</code> o un lock. Il BoundedCounter mostra anche che bisogna sincronizzare <em>tutti</em> i metodi pubblici, non solo quelli che modificano lo stato.</p></div>
+  
+  </section>
+  <section id="s7" data-src="PCD-2026-03-16.html#s15">
+    <h2>7. Laboratorio: barriera e latch</h2>
+      <p>Il professore ha dedicato la parte finale della lezione a mostrare due componenti di coordinazione riutilizzabili implementati come monitor: la <strong>barriera</strong> e il <strong>latch</strong> (countdown).</p>
+
+  <h3>Barriera (Barrier)</h3>
+  <p>Una barriera e un punto di sincronizzazione in cui <var>N</var> thread si incontrano. Ogni thread chiama <code>await()</code> e rimane bloccato finche tutti gli <var>N</var> partecipanti non sono arrivati. L'ultimo thread che arriva sblocca tutti gli altri.</p>
+
+  <p><strong>Implementazione con synchronized:</strong></p>
+
+  <pre><code class="language-java">public class CyclicBarrierMonitor {
+    private int nParticipants;
+    private int nArrived;
+
+    public CyclicBarrierMonitor(int n) {
+        nParticipants = n;
+        nArrived = 0;
+    }
+
+    public synchronized void await() throws InterruptedException {
+        nArrived++;
+        while (nArrived &lt; nParticipants) {
+            wait();        // aspetta che arrivino tutti
+        }
+        notifyAll();       // sblocca tutti
+    }
+}</code></pre>
+
+  <div class="callout exam">
+    <span class="callout-label">Per l'esame</span>
+    <p>Esercizio del professore: pensate a come specificare la correttezza di una barriera in Java usando le proprieta di safety e liveness. La proprieta di safety e: "nessun thread procede oltre la barriera prima che tutti gli N thread siano arrivati". La liveness e: "se tutti gli N thread sono in attesa, qualcuno procede".</p>
+  </div>
+
+  <p><strong>Versione con ReentrantLock + Condition:</strong> nella seconda implementazione, si usa una condition variable <var>allArrived</var> con <code>await()</code> e <code>signalAll()</code>. Attenzione: <code>notifyAll</code> chiamato sulla condition variable non equivale a <code>signalAll</code> — un errore subdolo che il professore ha mostrato in aula.</p>
+
+  <h3>Latch (CountDown)</h3>
+  <p>Un latch permette a thread di attendere (<code>await()</code>) finche non viene raggiunto un conteggio zero tramite chiamate <code>countDown()</code>. A differenza della barriera, non e ciclico e il conteggio e monotono decrescente.</p>
+
+  <pre><code class="language-java">public class CountDownLatchMonitor {
+    private int count;
+
+    public CountDownLatchMonitor(int count) { this.count = count; }
+
+    public synchronized void await() throws InterruptedException {
+        while (count > 0) { wait(); }
+    }
+
+    public synchronized void countDown() {
+        if (count > 0) {
+            count--;
+            if (count == 0) { notifyAll(); }
+        }
+    }
+}</code></pre>
+
+  <div class="callout idea">
+    <span class="callout-label">Differenza chiave</span>
+    <p>Nella barriera, tutti i thread aspettano tutti gli altri — e simmetrica. Nel latch, un thread (o piu) aspettano che un contatore si azzeri — e asimmetrica. Usi tipici del latch: aspettare che un insieme di servizi sia pronto prima di procedere.</p>
+  </div>
+  </section>
+  <section id="s8" data-src="PCD-2026-03-20.html#s1">
+    <h2>8. Dal problema ai task: l'analisi task-oriented</h2>
+        <p>Il professor Ricci apre la lezione introducendo il concetto fondamentale del <strong>design task-oriented</strong>: quando progettiamo un sistema concorrente, dobbiamo iniziare dall'analisi del problema per identificare i <strong>task</strong> — unita di lavoro ben definite, con un inizio e una fine — che compongono il sistema. Questa analisi puo partire dai dati (data-driven) o dalle funzionalita (function-driven).</p>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Un task non e un thread. Un task e un'unita di lavoro logica, astratta, indipendente. Il thread e il veicolo che esegue il task. Separare i due concetti e il primo passo verso un buon design concorrente.</p></div>
+
+    <p>L'analisi procede rispondendo a tre domande fondamentali:</p>
+
+    <ol>
+      <li><strong>Quali sono i task?</strong> — Identificare le attivita concorrenti guardando il problema, non la soluzione.</li>
+      <li><strong>Quali sono le dipendenze tra i task?</strong> — Task completamente indipendenti possono essere assegnati a componenti attivi diversi senza coordinazione. Task con dipendenze richiedono meccanismi di sincronizzazione.</li>
+      <li><strong>Quali sono i confini dei task?</strong> — Definire chiaramente dove un task inizia e dove finisce, per facilitare il recovery da errori e la composizione.</li>
+    </ol>
+
+    <p>Il professore sottolinea l'importanza di adottare un approccio <strong>limpido e lineare</strong>: esplicitare le cose, non nasconderle dietro astrazioni troppo sofisticate. La semplicita nel design paga sempre, soprattutto nei sistemi concorrenti dove la complessita intrinseca e gia elevata.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Sull'Assignment 1: il docente sara disponibile come "coach". Non si tratta di ricevere soluzioni prefabbricate, ma di discutere insieme l'approccio. Se un gruppo arriva dicendo "non riesco a capire come fare una certa cosa", si puo discutere. Il vero obiettivo dell'Assignment e fare qualcosa di concreto, non banale, che permetta di discutere insieme durante il colloquio orale.</p></div>
+
+    <h3>Division of Labor Pattern (Divide-et-Impera)</h3>
+
+    <p>Il pattern <em>Division of Labor</em>, noto anche come strategia del divide-et-impera, consiste nel:</p>
+
+    <ul>
+      <li>Identificare i confini dei task — task come attivita indipendenti</li>
+      <li>Scegliere una politica di esecuzione dei task — in base agli obiettivi di <em>throughput</em>, <em>responsiveness</em> e <em>graceful degradation</em></li>
+      <li>Separare la <em>definizione</em> del task dalla sua <em>esecuzione</em></li>
+    </ul>
+
+    <p>Il risultato di una buona analisi task-oriented e un'organizzazione del programma piu semplice, che facilita il recovery da errori (i task sono confini naturali per le transazioni) e promuove naturalmente la concorrenza.</p>
+  
+  </section>
+  <section id="s9">
+    <h2>9. Il Java Executor Framework</h2>
+    <div data-src="PCD-2026-03-20.html#s2">
+    <p>Il professor Ricci introduce il <strong>Executor Framework</strong> di Java (java.util.concurrent, JDK 5.0) come l'astrazione principale per il task-oriented programming. Il framework disaccoppia la <em>sottomissione</em> di un task dalla sua <em>esecuzione</em>.</p>
+
+    <h3>L'Interfaccia Executor</h3>
+
+    <pre><code class="language-java">public interface Executor {
+    void execute(Runnable task);
+}</code></pre>
+
+    <p>Questa interfaccia semplice e il cuore del framework. Invece di creare un thread per ogni task (one-thread-per-task), si sottomette il task a un <em>executor</em> che decide <em>quando</em>, <em>dove</em> e <em>come</em> eseguirlo secondo una specifica <strong>execution policy</strong>.</p>
+
+    <h3>Le Politiche di Esecuzione</h3>
+
+    <p>Una execution policy specifica:</p>
+    <ul>
+      <li><strong>Quale thread</strong> esegue il task e quando</li>
+      <li><strong>In quale ordine</strong> i task vengono eseguiti (FIFO, LIFO, priorita)</li>
+      <li><strong>Quanti task</strong> possono essere eseguiti concorrentemente</li>
+      <li><strong>Come gestire</strong> il rifiuto di un task in caso di sovraccarico</li>
+    </ul>
+
+    <h3>Gli Executor Predefiniti</h3>
+
+    <p>La classe factory <code>Executors</code> fornisce diverse implementazioni pronte:</p>
+
+    <table>
+      <thead>
+        <tr><th>Metodo factory</th><th>Comportamento</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>newFixedThreadPool(n)</code></td><td>Pool di dimensione fissa: mantiene n thread, li riusa per i task successivi</td></tr>
+        <tr><td><code>newCachedThreadPool()</code></td><td>Pool flessibile: thread inattivi vengono terminati dopo 60s, se ne creano di nuovi se serve</td></tr>
+        <tr><td><code>newSingleThreadExecutor()</code></td><td>Un singolo worker thread, task in coda FIFO</td></tr>
+        <tr><td><code>newScheduledThreadPool(n)</code></td><td>Pool per task con ritardo o periodici</td></tr>
+      </tbody>
+    </table>
+
+    <p>Il docente mostra un esempio concreto di web server che usa un fixed thread pool al posto del pattern one-thread-per-task:</p>
+
+    <pre><code class="language-java">class TaskExecutionWebServer {
+    private static final int NTHREADS
+        = Runtime.getRuntime().availableProcessors() + 1;
+    private static final Executor exec =
+        Executors.newFixedThreadPool(NTHREADS);
+
+    public static void main(String[] args) throws IOException {
+        ServerSocket socket = new ServerSocket(80);
+        while (true) {
+            Socket connection = socket.accept();
+            exec.execute(() -> {
+                handleRequest(connection);
+            });
+        }
+    }
+}</code></pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Il docente sottolinea: <em>"Eseguire i task in modo sequenziale e come il SingleThreadWebServer: poor performance, poor responsiveness, poor resource usage. Con un thread per task si migliora tutto, ma si crea il problema della stabilita sotto carico pesante."</em> Il thread pool e il punto di equilibrio.</p></div>
+
+    <h3>Vantaggi del Pool-Based Approach</h3>
+
+    <p>Rispetto alla creazione esplicita di thread per ogni task (one-thread-per-task), l'approccio pool-based offre:</p>
+    <ul>
+      <li><strong>Migliori performance</strong> — i thread vengono riusati, evitando overhead di creazione/teardown</li>
+      <li><strong>Miglior stabilita</strong> — sotto carico pesante, il pool limita il numero di thread concorrenti, prevenendo l'esaurimento delle risorse</li>
+      <li><strong>Disaccoppiamento</strong> — la logica di business non si preoccupa di come viene eseguita</li>
+    </ul>
+
+    <p>Il professore sottolinea anche un <strong>avvertimento importante</strong>: nel framework Executor, i task devono essere indipendenti. Un task non dovrebbe aspettare un altro task, perche bloccando un task si blocca anche il thread fisico che lo esegue, aprendo la possibilita a deadlock.</p>
+
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>I task nell'Executor Framework sono unita di lavoro <em>ben definite</em> che iniziano e terminano. Non sono loop infiniti (come potrebbero essere thread, agenti o processi). Questa differenza e cruciale: un task compute-area termina; un thread server no.</p></div>
+  
+    </div>
+    <figure class="lk-fig" role="img" aria-label="Schema di un executor con thread pool: i task sottomessi entrano in una coda e vengono prelevati dai worker thread del pool">
+      <svg viewBox="0 0 640 200" width="640" style="max-width:100%;height:auto" fill="none" stroke="#1546B8" stroke-width="2">
+        <!-- produttori -->
+        <rect x="12" y="30" width="120" height="34" rx="6"/>
+        <rect x="12" y="86" width="120" height="34" rx="6"/>
+        <rect x="12" y="142" width="120" height="34" rx="6"/>
+        <text x="72" y="51" text-anchor="middle" fill="#1546B8" stroke="none" font-size="12">execute(task)</text>
+        <text x="72" y="107" text-anchor="middle" fill="#1546B8" stroke="none" font-size="12">submit(task)</text>
+        <text x="72" y="163" text-anchor="middle" fill="#1546B8" stroke="none" font-size="12">submit(task)</text>
+        <!-- frecce verso la coda -->
+        <path d="M132 47 L188 90"/><path d="M132 103 L188 103"/><path d="M132 159 L188 116"/>
+        <!-- coda di task -->
+        <rect x="192" y="84" width="150" height="38" rx="4"/>
+        <line x1="222" y1="84" x2="222" y2="122"/>
+        <line x1="252" y1="84" x2="252" y2="122"/>
+        <line x1="282" y1="84" x2="282" y2="122"/>
+        <line x1="312" y1="84" x2="312" y2="122"/>
+        <circle cx="207" cy="103" r="7" stroke="#B83D2D"/>
+        <circle cx="237" cy="103" r="7" stroke="#B83D2D"/>
+        <circle cx="267" cy="103" r="7" stroke="#B83D2D"/>
+        <text x="267" y="140" text-anchor="middle" fill="#1546B8" stroke="none" font-size="12">coda dei task</text>
+        <!-- freccia coda -> pool -->
+        <path d="M342 103 L380 103"/><path d="M373 97 L380 103 L373 109"/>
+        <!-- pool -->
+        <rect x="384" y="40" width="160" height="126" rx="8"/>
+        <circle cx="424" cy="76" r="16"/>
+        <circle cx="424" cy="130" r="16"/>
+        <circle cx="500" cy="103" r="16"/>
+        <text x="424" y="80" text-anchor="middle" fill="#1546B8" stroke="none" font-size="11">T1</text>
+        <text x="424" y="134" text-anchor="middle" fill="#1546B8" stroke="none" font-size="11">T2</text>
+        <text x="500" y="107" text-anchor="middle" fill="#1546B8" stroke="none" font-size="11">Tn</text>
+        <text x="464" y="30" text-anchor="middle" fill="#1546B8" stroke="none" font-size="12">thread pool (riuso dei thread)</text>
+        <!-- freccia risultati -->
+        <path d="M544 103 L596 103"/><path d="M589 97 L596 103 L589 109"/>
+        <text x="596" y="88" text-anchor="end" fill="#B83D2D" stroke="none" font-size="12">Future / effetti</text>
+      </svg>
+      <figcaption><b>Fig. 1</b> — L'Executor Framework disaccoppia la sottomissione dall'esecuzione: i task entrano in una coda (pattern producer-consumer) e i worker thread del pool li prelevano e li eseguono, riusando i thread.</figcaption>
+    </figure>
+    <div data-src="PCD-2026-03-30.html#s12">
+    <p>Prima di immergersi completamente nell'asincrono, il professore dedica una parte importante della lezione al <strong>task-oriented programming</strong> in Java, che fa da ponte tra il mondo dei thread e quello degli event loop.</p>
+
+    <p>Un <strong>task</strong> &egrave; un'unit&agrave; di lavoro astratta, discreta e indipendente, disaccoppiata dal concetto di thread. L'idea &egrave; di adottare una strategia <em>divide-et-impera</em>: identificare i confini dei task (attivit&agrave; indipendenti, che non dipendono dallo stato/risultato di altri task) e scegliere una <em>execution policy</em> adeguata.</p>
+
+    <p>Le tre strategie di esecuzione tradizionali sono:</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Strategia</th>
+          <th>Descrizione</th>
+          <th>Pro</th>
+          <th>Contro</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Sequenziale</td>
+          <td>Un singolo thread serve le richieste una dopo l'altra</td>
+          <td>Semplice, nessuna concorrenza</td>
+          <td>Throughput e reattivit&agrave; bassissimi</td>
+        </tr>
+        <tr>
+          <td>Thread-per-task</td>
+          <td>Un nuovo thread per ogni task</td>
+          <td>Semplice, migliora throughput</td>
+          <td>Overhead di creazione, consumo risorse, instabilit&agrave;</td>
+        </tr>
+        <tr>
+          <td>Executor con pool</td>
+          <td>Thread pool dimensionato sulle risorse disponibili</td>
+          <td>Stabile, efficiente, separa logica da fisica</td>
+          <td>Richiede attenzione a deadlock e blocking</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Le slide di laboratorio ripropongono lo stesso esempio del <code>TaskExecutionWebServer</code> con fixed thread pool mostrato sopra.</p>
+
+    <p>Il <strong>thread pool</strong> segue il pattern producer-consumer: i produttori sono le attivit&agrave; che inviano task, i consumatori sono i thread del pool che li eseguono. I thread del pool eseguono un ciclo implicito: prendi il prossimo task dalla coda, eseguilo, torna in attesa.</p>
+
+    <p>Il professore mette in guardia da un pericolo subdolo:</p>
+
+    <div class="callout warn"><span class="callout-label">Attenzione: deadlock con thread pool</span>
+      <p>Se i task all'interno del pool usano una barriera o attendono il completamento di altri task, <strong>e il pool ha un numero limitato di thread</strong>, si pu&ograve; verificare un deadlock: tutti i thread del pool sono bloccati in attesa, e nessuno pu&ograve; eseguire i task che sbloccherebbero la situazione. La soluzione "sbagliata" ma immediata &egrave; creare un pool con tanti thread quanti sono i task. La soluzione corretta &egrave; ripensare la struttura dei task per evitare attese bloccanti all'interno del pool.</p>
+    </div>
+
+  
+    </div>
+  </section>
+  <section id="s10">
+    <h2>10. Callable, Future e task con risultato</h2>
+    <div data-src="PCD-2026-03-20.html#s3">
+    <p>Non tutti i task sono di tipo <em>fire-and-forget</em> (Runnable). Spesso un task deve restituire un risultato. Per questo l'Executor Framework introduce due interfacce complementari: <code>Callable&lt;V&gt;</code> e <code>Future&lt;V&gt;</code>.</p>
+
+    <h3>Callable</h3>
+    <p>Simile a Runnable ma con due differenze fondamentali: il metodo si chiama <code>call()</code> invece di <code>run()</code>, e puo restituire un valore oltre a poter lanciare eccezioni.</p>
+
+    <pre><code class="language-java">public interface Callable&lt;V&gt; {
+    V call() throws Exception;
+}</code></pre>
+
+    <h3>Future</h3>
+    <p>Un <code>Future&lt;V&gt;</code> rappresenta il risultato di un calcolo asincrono. Il professore spiega che e un contenitore che sara valorizzato <em>nel tempo</em>, una sorta di <em>promessa</em> di un risultato futuro.</p>
+
+    <pre><code class="language-java">public interface Future&lt;V&gt; {
+    boolean cancel(boolean mayInterruptIfRunning);
+    boolean isCancelled();
+    boolean isDone();
+    V get() throws InterruptedException, ExecutionException,
+                 CancellationException();
+    V get(long timeout, TimeUnit unit) throws ...;
+}</code></pre>
+
+    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>Il docente accenna a un dibattito interessante: tecnicamente le Future non sono "funzionali" perche introducono tempo e non-determinismo. Un collega (Viroli) sostiene che con le monadi si possa conciliare il tutto, ma il professore preferisce rimanere su una spiegazione pragmatica.</p></div>
+
+    <h3>Submit vs Execute</h3>
+
+    <p>La differenza tra <code>execute(Runnable)</code> e <code>submit(Callable)</code> e la seguente:</p>
+
+    <pre><code class="language-java">// Esegue un task senza risultato
+executor.execute(runnableTask);
+
+// Sottomette un task con risultato e restituisce un Future
+Future&lt;Integer&gt; future = executor.submit(callableTask);
+Integer result = future.get();  // bloccante finche il task non completa</code></pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p><code>future.get()</code> e <strong>bloccante</strong>: il thread chiamante si sospende finche il task non ha prodotto il risultato. Questo e il punto in cui la concorrenza si riconcilia con la sequenzialita.</p></div>
+
+    <h3>Esempio: Approssimazione di Integrale (somma di trapezi)</h3>
+
+    <p>Il professore presenta il classico problema del calcolo di un integrale definito per approssimazione <em>trapezoidale</em>:</p>
+
+    <pre><code class="language-java">// ComputeAreaTask: calcola l'area di un singolo trapezio
+class ComputeAreaTask implements Callable&lt;Double&gt; {
+    private final double x0, delta;
+    private final Function&lt;Double,Double&gt; f;
+    // costruttore...
+    public Double call() {
+        return (f.apply(x0) + f.apply(x0 + delta)) * delta / 2.0;
+    }
+}
+
+// Master: scompone l'intervallo e colleziona i risultati
+List&lt;Future&lt;Double&gt;&gt; futures = new ArrayList&lt;&gt;();
+for (double x = a; x &lt; b; x += delta) {
+    futures.add(executor.submit(new ComputeAreaTask(x, delta, f)));
+}
+double totale = 0.0;
+for (Future&lt;Double&gt; f : futures) {
+    totale += f.get();  // si blocca finche il task non e pronto
+}</code></pre>
+
+    <p>Il docente sottolinea che il master non si sospende subito: sottomette tutti i task, colleziona i future, e solo <em>dopo</em> chiama get() su ciascuno. In questo modo i task possono essere eseguiti concorrentemente mentre il master continua a preparare i task successivi.</p>
+
+    <h3>Cancellazione dei Task</h3>
+
+    <p>L'esempio del <em>PrimeGenerator</em> mostra come implementare la cancellazione cooperativa usando un flag <code>volatile</code>:</p>
+
+    <pre><code class="language-java">public class PrimeGenerator implements Runnable {
+    private final List&lt;BigInteger&gt; primes = new ArrayList&lt;&gt;();
+    private volatile boolean cancelled;
+
+    public void run() {
+        BigInteger p = BigInteger.ONE;
+        while (!cancelled) {
+            p = p.nextProbablePrime();
+            synchronized (this) { primes.add(p); }
+        }
+    }
+
+    public void cancel() { cancelled = true; }
+    public synchronized List&lt;BigInteger&gt; get() {
+        return new ArrayList&lt;&gt;(primes);
+    }
+}
+
+// Uso: genera numeri primi per 1 secondo
+List&lt;BigInteger&gt; aSecondOfPrimes() throws InterruptedException {
+    PrimeGenerator gen = new PrimeGenerator();
+    new Thread(gen).start();
+    try { SECONDS.sleep(1); } finally { gen.cancel(); }
+    return gen.get();
+}</code></pre>
+
+    <p>Il docente avverte: la cancellazione <em>cooperativa</em> (con flag) non funziona se il thread e bloccato su una put bloccante di un buffer pieno. In quel caso serve l'<em>interruption</em>.</p>
+
+    <pre><code class="language-java">class PrimeProducer extends Thread {
+    private BlockingQueue&lt;BigInteger&gt; queue;
+    // costruttore...
+    public void run() {
+        BigInteger p = BigInteger.ONE;
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                queue.put(p.nextProbablePrime());
+            }
+        } catch (InterruptedException ex) {
+            // allow thread to exit
+        }
+    }
+    public void cancel() { interrupt(); }
+}</code></pre>
+  
+    </div>
+    <div data-src="PCD-2026-03-30.html#s13">
+    <p>L'interfaccia <code>ExecutorService</code> estende <code>Executor</code> aggiungendo il controllo del ciclo di vita e il supporto per task con risultato. Ecco la gerarchia:</p>
+
+    <pre class="mermaid">
+flowchart BT
+    Exec["&lt;&lt;interface&gt;&gt; Executor\nexecute(Runnable)"] --> ExecService["&lt;&lt;interface&gt;&gt; ExecutorService\nsubmit(Callable&lt;T&gt;): Future&lt;T&gt;\nshutdown(), awaitTermination()"]
+    ExecService --> SchedExec["&lt;&lt;interface&gt;&gt; ScheduledExecutorService\nschedule(), scheduleAtFixedRate()"]
+    ExecFactory["Executors (factory)\nnewFixedThreadPool(), newCachedThreadPool(),\nnewSingleThreadExecutor(), newScheduledThreadPool()"]
+    ExecFactory -.->|crea| ExecService
+    </pre>
+
+    <p>Un task che produce un risultato si definisce tramite l'interfaccia <code>Callable&lt;V&gt;</code> (che ha <code>V call() throws Exception</code> invece di <code>void run()</code>) e viene sottomesso con <code>submit()</code>, che restituisce un oggetto <code>Future&lt;V&gt;</code>.</p>
+
+    <pre><code class="language-java">// Callable + Future pattern
+ExecutorService exec = Executors.newFixedThreadPool(4);
+Future&lt;Integer&gt; future = exec.submit(() -&gt; {
+    // computazione lunga...
+    return 42;
+});
+
+// ... altro lavoro concorrente ...
+
+Integer risultato = future.get(); // bloccante se non ancora pronto</code></pre>
+
+    <p>Il ciclo di vita di un <code>ExecutorService</code> ha tre stati:</p>
+
+    <ul>
+      <li><strong>Running</strong> — appena creato, accetta nuovi task;</li>
+      <li><strong>Shutting down</strong> — dopo la chiamata a <code>shutdown()</code> (non accetta nuovi task ma completa quelli in esecuzione) o <code>shutdownNow()</code> (tenta di cancellare i task in esecuzione);</li>
+      <li><strong>Terminated</strong> — tutti i task sono completati.</li>
+    </ul>
+
+    <p>Per attendere il completamento: <code>awaitTermination(timeout, unit)</code> sospende il chiamante finché tutti i task non sono finiti o scade il timeout.</p>
+
+  
+    </div>
+  </section>
+  <section id="s11" data-src="PCD-2026-03-30.html#s14">
+    <h2>11. Cancellazione cooperativa e interruption</h2>
+        <p>La cancellazione di un'attivit&agrave; concorrente segue un approccio <strong>cooperativo</strong>, non asincrono/preemptive. In Java, il meccanismo principale &egrave; l'<strong>interruption</strong>:</p>
+
+    <pre><code class="language-java">// Pattern di cancellazione cooperativa (dalle slide)
+public class PrimeGenerator implements Runnable {
+    private volatile boolean cancelled;
+
+    public void run() {
+        BigInteger p = BigInteger.ONE;
+        while (!cancelled) {
+            p = p.nextProbablePrime();
+            // ... elaborazione ...
+        }
+    }
+
+    public void cancel() { cancelled = true; }
+}</code></pre>
+
+    <p>Il flag <code>volatile</code> garantisce che le scritture di <code>cancel()</code> siano visibili immediatamente al thread in esecuzione. Se il thread &egrave; bloccato su una <code>wait()</code>, <code>sleep()</code> o <code>join()</code>, si usa il meccanismo di <code>interrupt()</code> che sblocca questi stati e lancia <code>InterruptedException</code>.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+      <p>La differenza tra <code>shutdown()</code> (graceful: completa i task in coda) e <code>shutdownNow()</code> (abrupt: tenta di cancellare) &egrave; un classico da esame. <code>shutdownNow()</code> restituisce la lista dei task che non sono stati avviati. La <strong>poison pill</strong> &egrave; una tecnica alternativa: si inserisce un oggetto "sentinella" nella coda condivisa che segnala ai consumatori di terminare.</p>
+    </div>
+
+  
+  </section>
+  <section id="s12" data-src="PCD-2026-03-20.html#s4">
+    <h2>12. Cronometro MVC: il bug della reattivita</h2>
+        <p>Il professor Ricci passa a un esempio pratico e doloroso: un cronometro implementato con pattern Model-View-Controller, ma con due bug classici della programmazione concorrente in GUI Java.</p>
+
+    <p>Il programma si chiama <em>CronoMVCNotReactivePlusRace</em> ed e l'esempio di <strong>come NON si fa</strong>. L'idea e semplice: un cronometro con pulsanti Start, Stop e Reset che conta i secondi in un text field.</p>
+
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Questa versione ha due problemi fondamentali:<br>
+    1. <strong>Non e reattiva (non responsive)</strong> — premere Start blocca completamente l'interfaccia<br>
+    2. <strong>Race condition</strong> — viola la mutua esclusione sullo stato del modello</p></div>
+
+    <p>Il bug principale e nel controller: l'azione di start viene eseguita direttamente sull'<strong>Event Dispatch Thread (EDT)</strong>, il thread di Swing che gestisce tutti gli eventi della GUI. Cosa succede?</p>
+
+    <pre><code class="language-java">// VERSIONE BUGGY: il controller esegue il loop sull'EDT!
+buttonStart.addActionListener(e -&gt; {
+    started = true;
+    while (started) {
+        model.updateState();
+        display.setText(String.valueOf(model.getValue()));
+        // ^^^^^ setText accoda un task all'EDT...
+        // ma l'EDT e gia occupato qui nel loop!
+        Thread.sleep(100);  // blocca tutto
+    }
+});</code></pre>
+
+    <p>Il problema e duplice:</p>
+    <ul>
+      <li><code>setText()</code> su un componente Swing non aggiorna immediatamente il display: accoda un task nella coda eventi dell'EDT.</li>
+      <li>Ma l'EDT e gia in esecuzione! Sta eseguendo il <code>while(started)</code> del controller. Quindi non puo servire la coda eventi. Il display non si aggiorna mai e l'interfaccia e completamente bloccata.</li>
+    </ul>
+
+    <div id="ac-cronobug"></div>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>L'EDT e un thread a event loop: deve stare sempre in attesa sulla coda eventi, eseguire rapidamente un handler, e tornare ad aspettare. Se lo "imbragliamo" in un loop che non compete a lui, il sistema si blocca.</p></div>
+  
+  </section>
+  <section id="s13" data-src="PCD-2026-03-20.html#s5">
+    <h2>13. Cronometro MVC: la soluzione</h2>
+        <p>La versione corretta si chiama <em>CronoMVCReactiveNonRaces</em>. La regola fondamentale e: <strong>l'EDT si occupa solo della business logic che riguarda la view</strong>, non il model, non il controller.</p>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Separare il flusso di controllo: la reazione agli eventi (notifyStarted, notifyStopped) appartiene al controller, ma l'esecuzione del loop di conteggio deve avvenire su un thread separato, non sull'EDT.</p></div>
+
+    <pre><code class="language-java">// VERSIONE CORRETTA: il controller delega a un thread separato
+class Controller {
+    private final Model model;
+    private final View view;
+    private Thread countingThread;  // thread separato per il conteggio
+
+    public void notifyStarted() {
+        countingThread = new Thread(() -&gt; {
+            while (isRunning()) {
+                model.updateState();       // aggiorno il modello
+                SwingUtilities.invokeLater(() -&gt; {
+                    view.updateDisplay(    // aggiorno la view sull'EDT
+                        model.getValue());
+                });
+                Thread.sleep(100);
+            }
+        });
+        countingThread.start();
+    }
+
+    public void notifyStopped() {
+        stopRunning();  // flag per fermare il loop
+    }
+}</code></pre>
+
+    <p><code>SwingUtilities.invokeLater()</code> accoda un task nella coda dell'EDT e torna immediatamente. Il thread di conteggio puo continuare a eseguire senza bloccare l'interfaccia. In questo modo l'EDT rimane libero di servire eventi (pulsanti, aggiornamenti) e il cronometro funziona correttamente.</p>
+
+    <p>Il docente sottolinea che <code>invokeAndWait()</code> e un'alternativa sincrona: il chiamante si blocca finche l'EDT non ha completato il task. Utile per sincronizzarsi, ma per l'aggiornamento del display e preferibile <code>invokeLater()</code>.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Ricorda: <code>invokeLater</code> e <code>invokeAndWait</code> — entrambi accodano un task nella Event Queue dell'EDT. La differenza e che <code>invokeAndWait</code> e sincrono: il chiamante attende il completamento. <code>invokeLater</code> e asincrono: accoda e ritorna immediatamente.</p></div>
+  
+  </section>
+  <section id="s14" data-src="PCD-2026-03-20.html#s6">
+    <h2>14. Sketch2: input asincrono da tastiera</h2>
+        <p>Il secondo esempio pratico e <strong>Sketch2</strong>, un programma GUI che illustra come gestire <em>input asincrono</em> da tastiera all'interno di un'architettura Model-View-Controller.</p>
+
+    <p>L'applicazione mostra un conteggio che viene aggiornato sia automaticamente (da un componente attivo che incrementa il valore periodicamente) sia manualmente (premendo il tasto <kbd>I</kbd> sulla tastiera). Il tasto <kbd>R</kbd> resetta il conteggio.</p>
+
+    <p>La sfida: la tastiera genera eventi in modo <strong>asincrono</strong>, indipendentemente dal ciclo di vita del programma. Come li integriamo nel MVC?</p>
+
+    <pre><code class="language-java">// Gestione dell'input da tastiera in Java con MVC
+public class Sketch2 {
+    public static void main(String[] args) {
+        Model model = new Model();
+        View view = new View(model);
+        Controller controller = new Controller(model, view);
+
+        // Il controller registra listener per gli eventi di tastiera
+        view.addKeyListener(new KeyAdapter() {
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_I) {
+                    controller.notifyIncrementRequest();
+                } else if (e.getKeyCode() == KeyEvent.VK_R) {
+                    controller.notifyResetRequest();
+                }
+            }
+        });
+    }
+}</code></pre>
+
+    <p>Il professore spiega che la gestione e concettualmente identica a quella del cronometro: il controller reagisce agli eventi, modifica il modello su un thread separato (non l'EDT), e usa <code>SwingUtilities.invokeLater()</code> per aggiornare la vista. In questo modo l'interfaccia rimane reattiva anche durante computazioni lunghe.</p>
+
+    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>Sketch2 rappresenta un pattern generale per la gestione di input asincrono in GUI concorrenti: gli eventi esterni (tastiera, mouse, rete) vengono catturati da listener che notificano il controller, il quale orchestra le modifiche al modello su thread separati.</p></div>
+  
+  </section>
+  <section id="s15" data-src="PCD-2026-03-20.html#s7">
+    <h2>15. Simulazione fisica: palle che rimbalzano</h2>
+        <p>L'esercizio delle palle che rimbalzano e un caso studio di simulazione fisica concorrente. Il professore presenta un modello in cui delle palline si muovono in uno spazio bidimensionale, con:</p>
+
+    <ul>
+      <li><strong>Attrito</strong> — una decelerazione costante che dipende dalla velocita (<code>friction factor</code>)</li>
+      <li><strong>Rimbalzo ai bordi</strong> — quando una pallina raggiunge il bordo, inverte il vettore velocita</li>
+      <li><strong>Aggiornamento cinematico</strong> — posizione = posizione + velocita * delta tempo</li>
+    </ul>
+
+    <p>Ecco la logica di aggiornamento del modello fisico:</p>
+
+    <pre><code class="language-java">class Particle {
+    double x, y;       // posizione
+    double vx, vy;     // velocita
+
+    void update(double dt) {
+        // Applica attrito (decelerazione costante)
+        double friction = 0.98;  // coefficiente
+        vx *= friction;
+        vy *= friction;
+
+        // Se la velocita e molto bassa, ferma del tutto
+        if (Math.abs(vx) &lt; 0.01) vx = 0;
+        if (Math.abs(vy) &lt; 0.01) vy = 0;
+
+        // Aggiorna posizione (cinematica)
+        x += vx * dt;
+        y += vy * dt;
+
+        // Boundary check: rimbalzo sui bordi
+        if (x &lt; 0 || x &gt; maxX) { vx = -vx; x = clamp(x, 0, maxX); }
+        if (y &lt; 0 || y &gt; maxY) { vy = -vy; y = clamp(y, 0, maxY); }
+    }
+}</code></pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Il professore sottolinea la separazione netta: le coordinate del modello sono <strong>logiche</strong>, non pixel. Sara la view a mappare le coordinate logiche nello spazio visivo (viewport). Questo e il pattern MVC applicato alla simulazione fisica.</p></div>
+  
+  </section>
+  <section id="s16">
+    <h2>16. Fork-Join, work-stealing e structured concurrency</h2>
+    <div data-src="PCD-2026-03-20.html#s8">
+    <p>Il professor Ricci introduce il <strong>Fork-Join Framework</strong> (Java SE 7) come evoluzione del pattern Executor per algoritmi che non hanno una topologia dei dati conosciuta a priori (es. strutture a grafo o ad albero).</p>
+
+    <p>Il problema: con un executor tradizionale, se un task Callable aspetta il risultato di un altro Callable, il thread che lo esegue rimane in attesa sprecando una risorsa. Fork-Join risolve questo con l'<strong>algoritmo di work-stealing</strong>.</p>
+
+    <pre><code class="language-java">// Esempio: somma degli elementi di un array (divide &amp; conquer)
+class SumTask extends RecursiveTask&lt;Long&gt; {
+    static final int THRESHOLD = 1000;
+    private final int[] array;
+    private final int lo, hi;
+
+    SumTask(int[] a, int lo, int hi) { this.array = a; this.lo = lo; this.hi = hi; }
+
+    protected Long compute() {
+        if (hi - lo &lt; THRESHOLD) {
+            long sum = 0;
+            for (int i = lo; i &lt; hi; i++) sum += array[i];
+            return sum;
+        }
+        int mid = (lo + hi) / 2;
+        SumTask left = new SumTask(array, lo, mid);
+        SumTask right = new SumTask(array, mid, hi);
+        left.fork();                // fork: avvia il task in parallelo
+        long rightResult = right.compute();  // compute: esegui direttamente
+        long leftResult = left.join();       // join: attendi il risultato
+        return leftResult + rightResult;
+    }
+}
+
+// Uso con ForkJoinPool
+ForkJoinPool pool = new ForkJoinPool();
+long total = pool.invoke(new SumTask(array, 0, array.length));</code></pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Il <strong>work-stealing</strong> e il trucco: quando un thread si blocca in attesa del risultato di un fork, invece di rimanere idle, ruba (steal) un altro task dalla coda di un altro thread. Questo mantiene tutti i thread occupati e migliora il throughput complessivo.</p></div>
+
+    <h3>Mappa-Riduci con Fork-Join</h3>
+
+    <p>Fork-Join realizza il pattern <strong>Map-Reduce</strong> (o divide-et-impera):</p>
+    <ul>
+      <li><strong>Map phase</strong>: splitting del dominio in chunk indipendenti, processati in parallelo</li>
+      <li><strong>Reduce phase</strong>: collezionamento dei risultati parziali per formare il risultato finale</li>
+    </ul>
+
+    <p>Il Fork-Join Framework e particolarmente efficace per algoritmi su strutture ricorsive come alberi, grafi, e per elaborazione di grandi volumi di dati con pattern map/reduce.</p>
+  
+    </div>
+    <div data-src="PCD-2026-03-30.html#s15">
+    <p>Il <strong>Fork-Join Framework</strong> (Java SE 7) estende il modello degli executor per gestire algoritmi <em>map/reduce</em> e <em>divide-et-impera</em> dove la topologia dei dati non &egrave; nota in anticipo. Le classi principali sono:</p>
+
+    <ul>
+      <li><code>ForkJoinPool</code> — executor specializzato che supporta il <strong>work-stealing</strong>: quando un thread &egrave; in attesa (<code>join()</code>), ruba lavoro dalla coda di un altro thread;</li>
+      <li><code>ForkJoinTask</code> con le sottoclassi <code>RecursiveAction</code> (senza risultato) e <code>RecursiveTask</code> (con risultato);</li>
+      <li>I metodi <code>fork()</code> (lancia un subtask asincrono) e <code>join()</code> (attende il risultato).</li>
+    </ul>
+
+    <pre><code class="language-java">// Schema fork-join: merge sort parallelo (idea dalle slide)
+class MergeSortTask extends RecursiveAction {
+    private int[] array;
+    private int lo, hi;
+
+    protected void compute() {
+        if (hi - lo &lt; THRESHOLD) {
+            Arrays.sort(array, lo, hi);
+        } else {
+            int mid = (lo + hi) / 2;
+            var left = new MergeSortTask(array, lo, mid);
+            var right = new MergeSortTask(array, mid, hi);
+            left.fork();   // fork asincrono
+            right.compute();
+            left.join();   // attendi il risultato
+            merge(array, lo, mid, hi);
+        }
+    }
+}</code></pre>
+
+    <p>Pi&ugrave; recentemente, Java ha introdotto la <strong>Structured Concurrency</strong> (JEP 437, JDK 20+), che estende il modello fork-join con un approccio strutturato: se un task si divide in sottotask concorrenti, questi devono tornare tutti allo stesso blocco di codice (<code>scope</code>) del task padre.</p>
+
+    <p>Il codice d'esempio con <code>StructuredTaskScope</code>, identico nelle due lezioni, e riportato una sola volta qui sotto.</p>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>La Structured Concurrency risolve un problema di visibilit&agrave;: con i thread tradizionali, un task avviato ma non completato pu&ograve; "fuggire" e rimanere in esecuzione anche dopo che il metodo chiamante &egrave; terminato. Con <code>StructuredTaskScope</code>, la durata dei sottotask &egrave; lessicalmente delimitata dal blocco <code>try-with-resources</code>.</p>
+    </div>
+
+  
+    </div>
+    <div data-src="PCD-2026-03-20.html#s9">
+    <p>Il professore accenna, nelle slide, al concetto di <strong>Structured Concurrency</strong> introdotto in JDK 20 (incubating). L'idea e semplice ma potente: se un task si divide in subtask concorrenti, <em>tutti</em> i subtask devono tornare allo stesso punto — il blocco di codice del task padre.</p>
+
+    <p>La classe <code>StructuredTaskScope</code> permette di strutturare un task come una famiglia di subtask concorrenti, coordinati come unita:</p>
+
+    <pre><code class="language-java">// Esempio: fetch parallelo di due sorgenti
+Response handle() throws ExecutionException, InterruptedException {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        Future&lt;String&gt; user = scope.fork(() -&gt; findUser());
+        Future&lt;Integer&gt; order = scope.fork(() -&gt; fetchOrder());
+
+        scope.join();            // attendi entrambi i fork
+        scope.throwIfFailed();   // propaga errori
+
+        // Entrambi completati con successo
+        return new Response(user.resultNow(), order.resultNow());
+    }  // scope si chiude: tutti i fork sono completati
+}</code></pre>
+
+    <p>Il vantaggio: il ciclo di vita dei subtask e confinato al blocco <code>try-with-resources</code>. Non ci sono thread o task "orfani" che continuano dopo che il parent e terminato. La leggibilita e la manutenibilita sono simili al codice sequenziale.</p>
+  
+    </div>
+  </section>
+
+  <section id="quiz" data-src="PCD-2026-03-20.html#quiz">
+        <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details><summary>Qual e la differenza tra un task e un thread?</summary>
+      <p>Un task e un'unita di lavoro logica, astratta, con inizio e fine. Un thread e il veicolo fisico che esegue il task. Il task-oriented programming separa i due concetti: il programmatore definisce i task; l'executor decide come e quando eseguirli su thread.</p></details>
+
+      <details><summary>Perche il CronometroMVCNotReactivePlusRace non funziona?</summary>
+      <p>Perche il loop di conteggio viene eseguito direttamente sull'Event Dispatch Thread (EDT). L'EDT rimane bloccato nel loop, non puo servire altri eventi (pulsanti, aggiornamenti), e setText() sulla GUI accoda un task nella coda eventi che non viene mai eseguito. Risultato: interfaccia bloccata e display non aggiornato.</p></details>
+
+      <details><summary>Cosa fa SwingUtilities.invokeLater(Runnable)?</summary>
+      <p>Accoda un task nella coda degli eventi dell'EDT e ritorna immediatamente (asincrono). Il task verra eseguito dall'EDT quando sara il suo turno. E il meccanismo standard per aggiornare la GUI da un thread diverso dall'EDT.</p></details>
+
+      <details><summary>Quale invariante soddisfa un semaforo?</summary>
+      <p>Due invarianti: <code>S.V &gt;= 0</code> e <code>S.V = k + #signal(S) - #wait(S)</code>, dove k e il valore iniziale, #signal(S) e il numero di signal completati, #wait(S) e il numero di wait completati (esclusi i processi bloccati).</p></details>
+
+      <details><summary>Quali sono le quattro condizioni necessarie per il deadlock (Coffman)?</summary>
+      <p>1. Mutua esclusione — una risorsa non condivisibile<br>2. Hold and wait — processi tengono risorse mentre ne richiedono altre<br>3. No preemption — le risorse non possono essere revocate<br>4. Circular wait — esiste un ciclo di attesa tra processi</p>
+      <p>Se una qualsiasi delle quattro e assente, il deadlock e impossibile.</p></details>
+
+      <details><summary>Differenza tra semaforo (wait/signal) e condition variable (waitC/signalC)?</summary>
+      <p>Tre differenze chiave: (1) wait sul semaforo puo non bloccare se S.V &gt; 0; waitC blocca sempre. (2) signal sul semaforo ha sempre effetto (incrementa S.V); signalC non ha effetto se la coda e vuota. (3) signal sblocca un processo arbitrario; signalC sblocca il processo in testa alla coda (FIFO).</p></details>
+
+      <details><summary>Perche un monitor usa while invece di if nella condizione di wait?</summary>
+      <p>Con la semantica Signal &amp; Continue (usata da Java), il thread risvegliato non ha garanzia che la condizione sia ancora vera: un altro thread potrebbe averla invalidata prima che il risvegliato riacquisisca il lock. Il while ricontrolla la condizione, garantendo la correttezza.</p></details>
+
+      <details><summary>Qual e la differenza tra testing e model checking?</summary>
+      <p>Il testing verifica che una proprieta valga per <em>alcuni</em> scenari selezionati. Il model checking verifica che la proprieta valga per <em>tutti</em> gli scenari possibili, esplorando esaustivamente lo spazio degli stati. Il testing rivela la presenza di errori; il model checking puo provare l'assenza.</p></details>
+
+      <details><summary>Cosa significa bounded overtaking nel CS problem?</summary>
+      <p>Dal momento in cui un processo P cerca di entrare in CS, un altro processo Q puo entrare al massimo k volte prima che P riesca ad entrare. In LTL: <code>tryp &rarr; (&not;CSq) W (CSq W ((&not;CSq) W CSp))</code> per 1-bounded overtaking.</p></details>
+    </div>
+  
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-07-monitor.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-09-verifica.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 16 febbraio, 2 marzo, 16 marzo, 20 marzo e 30 marzo · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+/* ---- Annotated Code: Java Thread (da PCD-2026-02-16-2) ---- */
+    LessonKit.annotatedCode('#ac-thread', { lang:'java', lines:[
+      ['class MyThread extends Thread {', 'Estendere Thread: una classe che rappresenta un flusso di controllo attivo.'],
+      ['  private int id;', 'Ogni thread ha un identificativo per distinguere i messaggi.'],
+      ['  public void run() {', 'Il metodo run() definisce il comportamento attivo. Non chiamarlo direttamente!'],
+      ['    System.out.println("t"+id+" avviato");', 'Messaggio di avvio — eseguito sul NUOVO thread.'],
+      ['    Thread.sleep(5000);', 'Simula un\'operazione lunga (5 secondi). Il thread si sospende senza consumare CPU.'],
+      ['    System.out.println("t"+id+" done");', 'Al risveglio, stampa "done" e termina.'],
+      ['  }', 'Fine del metodo run(). Dopo l\'uscita, il thread termina automaticamente.'],
+      ['}', 'Fine della classe.'],
+      ['...', 'Nel main: creiamo due istanze e le avviamo con start().'],
+      ['t1.start();', 'start() crea un nuovo thread OS e invoca run() su quel thread.'],
+      ['t2.start();', 'Secondo thread: parte concorrentemente. L\'ordine di esecuzione non e deterministico.']
+    ]});
+
+/* ---- Widgets da PCD-2026-03-02 ---- */
+      LessonKit.annotatedCode('#ac-sync-block', { lang: 'java', lines: [
+        ['Object lock = new Object();', 'Oggetto condiviso usato come lock. Qualsiasi oggetto Java puo essere lock.'],
+        ['', ''],
+        ['// Thread A', 'Primo thread attivo: esegue A1, A2, A3 in ciclo.'],
+        ['synchronized (lock) {', 'Acquisisce il lock intrinseco di lock. Se occupato, il thread si blocca.'],
+        ['    System.out.println("A2");', 'A2 e A3 sono nella sezione critica: mutua esclusione garantita.'],
+        ['    System.out.println("A3");', 'Nessun altro thread puo eseguire blocchi synchronize(lock) concorrentemente.'],
+        ['}', 'Uscita dal blocco: rilascio automatico del lock.'],
+        ['', ''],
+        ['// Thread B', 'Secondo thread attivo: cicla su B1, B2, B3.'],
+        ['synchronized (lock) {', 'Stesso lock: se A lo tiene, B si blocca finche A non esce.'],
+        ['    System.out.println("B2");', 'B2 e B3 eseguono in mutua esclusione con A2/A3.'],
+        ['    System.out.println("B3");', 'L\'interleaving fra A e B non puo mischiare A2 con B2.'],
+        ['}', 'Rilascio del lock: se B era in attesa, ora puo proseguire.']
+      ]});
+
+      LessonKit.annotatedCode('#ac-counter', { lang: 'java', lines: [
+        ['public class Counter {', 'Classe con stato mutabile condiviso — il target del problema.'],
+        ['    private int count = 0;', 'Variabile condivisa fra i thread.'],
+        ['', ''],
+        ['    public void inc() {', 'Metodo NON sincronizzato — pericoloso in contesto concorrente.'],
+        ['        count++;', 'count++ e read-modify-write: (1) load count, (2) add 1, (3) store count.'],
+        ['    }', 'Senza sincronizzazione, due thread possono perdere un incremento.'],
+        ['}', ''],
+        ['// Concorrenza: risultato atteso 200000, ottenuto < 200000', 'Lost update: alcuni incrementi vengono sovrascritti.'],
+        ['// Esempio: count=5, T1 legge 5, T2 legge 5, T1 scrive 6, T2 scrive 6 -> perso +1', 'Dovrebbe essere 7, ma il secondo thread sovrascrive il primo.']
+      ]});
+
+      LessonKit.annotatedCode('#ac-bounded', { lang: 'java', lines: [
+        ['public class BoundedCounter {', 'Contatore con minimo e massimo.'],
+        ['    private int val;', 'Valore corrente del contatore.'],
+        ['    private final int min, max;', 'Soglie inferiori e superiori.'],
+        ['', ''],
+        ['    public BoundedCounter(int min, int max, int init) {', 'Costruttore: inizializza soglie e valore.'],
+        ['        this.min = min; this.max = max; this.val = init;', ''],
+        ['    }', ''],
+        ['', ''],
+        ['    public synchronized void inc() {', 'synchronized: incremento atomico e mutuamente esclusivo.'],
+        ['        if (val >= max) throw new OverflowException();', 'Check: se gia al massimo, eccezione.'],
+        ['        val++;', 'Act: incremento effettivo.'],
+        ['    }', 'Grazie a synchronized, check e act sono atomici insieme.'],
+        ['', ''],
+        ['    public synchronized void dec() {', 'Decremento: stessa protezione di inc().'],
+        ['        if (val <= min) throw new UnderflowException();', 'Check: se gia al minimo, eccezione.'],
+        ['        val--;', 'Act: decremento effettivo.'],
+        ['    }', ''],
+        ['', ''],
+        ['    public synchronized int getVal() { return val; }', 'Anche la lettura deve essere synchronized per visibilita.'],
+        ['}', 'Thread-safe per costruzione: tutti i metodi pubblici sono synchronized.']
+      ]});
+
+      LessonKit.stepper('#step-lostupdate', {
+        title: 'Simulatore: Lost Update su count++',
+        sub: 'Avanza P o Q passo-passo. count parte da 0, ogni thread incrementa 2 volte. Con interleaving sfavorevole si perde un incremento.',
+        shared: { count: 0 },
+        watch: ['count'],
+        threads: {
+          P: {
+            name: 'P',
+            steps: [
+              { label: 'tmp := count', run: function (s, l) { l.tmp = s.count; } },
+              { label: 'tmp := tmp + 1', run: function (s, l) { l.tmp++; } },
+              { label: 'count := tmp', run: function (s, l) { s.count = l.tmp; } },
+              { label: 'tmp := count', run: function (s, l) { l.tmp = s.count; } },
+              { label: 'tmp := tmp + 1', run: function (s, l) { l.tmp++; } },
+              { label: 'count := tmp', run: function (s, l) { s.count = l.tmp; } }
+            ]
+          },
+          Q: {
+            name: 'Q',
+            steps: [
+              { label: 'tmp := count', run: function (s, l) { l.tmp = s.count; } },
+              { label: 'tmp := tmp + 1', run: function (s, l) { l.tmp++; } },
+              { label: 'count := tmp', run: function (s, l) { s.count = l.tmp; } },
+              { label: 'tmp := count', run: function (s, l) { l.tmp = s.count; } },
+              { label: 'tmp := tmp + 1', run: function (s, l) { l.tmp++; } },
+              { label: 'count := tmp', run: function (s, l) { s.count = l.tmp; } }
+            ]
+          }
+        },
+        verdict: function (s, done) {
+          if (s.count === 4) return { status: 'ok', text: 'Corretto: nessun lost update. count = 4.' };
+          if (s.count < 4 && done) return { status: 'bad', text: 'Lost update! count = ' + s.count + ' invece di 4. Due incrementi letti prima della scrittura.' };
+          return { status: '', text: 'Avanza P o Q. L\'obiettivo e che count arrivi a 4 (2 incrementi per thread).' };
+        }
+      });
+
+
+/* ---- Annotated Code: Cronometro MVC bug (da PCD-2026-03-20) ---- */
+    LessonKit.annotatedCode('#ac-cronobug', { lang:'java', lines:[
+      ['buttonStart.addActionListener(e -> {', 'Listener collegato all\'EDT: qui inizia il problema.'],
+      ['    started = true;', 'Flag booleano per il loop.'],
+      ['    while (started) {', 'LOOP INFINITO sull\'EDT! Blocca l\'intero thread della GUI.'],
+      ['        model.updateState();', 'Aggiorna il modello (ok, ma sull\'EDT sbagliato).'],
+      ['        display.setText(String.valueOf(model.getValue()));', 'setText() accoda un task all\'EDT... che e bloccato qui!'],
+      ['        Thread.sleep(100);', 'sleep blocca ulteriormente l\'EDT; nessun evento Swing viene servito.'],
+      ['    }', 'L\'EDT non esce mai da questo loop.'],
+      ['});', 'Fine listener: l\'interfaccia e congelata e non responsive.']
+    ]});
+
+
+</script>
+</body>
+</html>

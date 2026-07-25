@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 7 — Monitor e variabili condizione · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-06-deadlock.html">&larr; Cap. 6 — Deadlock</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-08-java.html">Cap. 8 — Concorrenza in Java: thread, synchronized, task ed executor &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte I — Concorrenza a memoria condivisa · Capitolo 7</div>
+    <h1>Monitor e variabili condizione</h1>
+    <div class="lk-meta"><span>~40 min di lettura</span><span>5 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Oltre i semafori: i monitor</a></li>
+      <li><a href="#s2">Variabili condizione: operazioni e semantica</a></li>
+      <li><a href="#s3">Discipline di segnalazione</a></li>
+      <li><a href="#s4">Producer-Consumer con monitor</a></li>
+      <li><a href="#s5">Readers-and-Writers con monitor</a></li>
+      <li><a href="#s6">Monitor in Java: synchronized, wait, notify</a></li>
+      <li><a href="#s7">Bounded buffer come monitor in Java</a></li>
+      <li><a href="#s8">ReentrantLock e Condition: monitor di alto livello</a></li>
+      <li><a href="#s9">Semantica di segnalazione in Java: effetti indesiderati</a></li>
+      <li><a href="#s10">Monitor e semafori: equivalenza espressiva</a></li>
+      <li><a href="#s11">Confronto: semafori vs variabili di condizione</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="PCD-2026-03-06.html#s17,PCD-2026-03-13.html#s15,PCD-2026-03-20.html#s15,PCD-2026-03-27.html#s17">
+    <h2>1. Oltre i semafori: i monitor</h2>
+    <p>I semafori sono potenti ma di <strong>basso livello</strong>: il professore sottolinea che sono espressivi e permettono di risolvere qualsiasi problema di interazione, ma il loro uso non e banale perche sono un meccanismo comunque di basso livello, facile da sbagliare — programmi soggetti a errori, difficili da usare in programmi concorrenti complessi. Da qui nasce l'esigenza di costrutti di piu alto livello: i <strong>Monitor</strong>, introdotti da <strong>Brinch Hansen</strong> (1973) e generalizzati da <strong>Tony Hoare</strong> (1974).</p>
+
+    <div data-src="PCD-2026-03-16.html#s9">
+      <div class="mermaid">
+flowchart LR
+    subgraph "Semafori (basso livello)"
+        A["wait/signal<br/>mutex + sync misti"]
+    end
+    subgraph "Monitor (alto livello)"
+        B["mutua esclusione<br/>implicita +<br/>variabili di condizione"]
+    end
+    A -->|"error-prone"| B
+      </div>
+      <p>I monitor sono l'evoluzione naturale dei semafori: un modulo che incapsula l'accesso concorrente a uno stato condiviso, fornendo <strong>mutua esclusione intrinseca</strong> (le procedure vengono eseguite in mutua esclusione, al massimo un processo attivo per volta) e <strong>sincronizzazione esplicita</strong> tramite variabili di condizione che permettono di sospendere e risvegliare i processi.</p>
+    </div>
+
+    <p>Un Monitor e un'<strong>astrazione di dati</strong> per la programmazione concorrente che incapsula in un'unica entita:</p>
+    <ul>
+      <li>Lo <strong>stato</strong> (variabili permanenti, private all'interno del monitor)</li>
+      <li>Le <strong>operazioni</strong> (procedure pubbliche che costituiscono l'interfaccia)</li>
+      <li>La <strong>politica di concorrenza</strong> (mutua esclusione implicita + sincronizzazione esplicita)</li>
+    </ul>
+
+    <pre><code class="language-pascal">monitor MonitorName {
+    // variabili permanenti (stato privato)
+    // codice di inizializzazione
+    procedure (o entry) NomeOp(params) {
+        // corpo
+    }
+}</code></pre>
+
+    <h3>Proprieta fondamentali</h3>
+    <ul>
+      <li><strong>Mutua esclusione implicita</strong>: le procedure del monitor si eseguono automaticamente in mutua esclusione — al piu un processo alla volta puo eseguire una procedura del monitor. Non serve alcun meccanismo esplicito come wait/signal per la mutua esclusione. I processi che trovano il monitor occupato vengono sospesi.</li>
+      <li><strong>Incapsulamento</strong>: solo le procedure (l'interfaccia) sono visibili all'esterno; le variabili permanenti sono accessibili solo dall'interno.</li>
+      <li><strong>Nessuna coda esplicita</strong>: non c'e una coda associata alle procedure del monitor — la politica di scheduling e lasciata all'implementazione. Questo puo portare a starvation.</li>
+      <li><strong>Sincronizzazione esplicita</strong>: tramite <strong>variabili condizione</strong>, usate per ritardare un processo che non puo continuare fino a quando lo stato del monitor non soddisfa una certa condizione booleana.</li>
+    </ul>
+
+    <p>Il professore nota che il monitor e una generalizzazione del concetto di <strong>kernel</strong> dei sistemi operativi: invece di avere un unico kernel centralizzato che gestisce tutte le sezioni critiche, ogni monitor e un "mini-kernel" decentralizzato specializzato per un dato condiviso. E anche una generalizzazione del concetto di <strong>oggetto</strong> nella OOP: come un modulo OOP che incapsula dati + operazioni + politica di sincronizzazione/mutua esclusione, includendo il costrutto di base per garantire la correttezza dell'accesso concorrente.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Un monitor e un data type astratto che incapsula stato, operazioni <strong>e</strong> politica di sincronizzazione. E come un modulo (o un oggetto) che fornisce intrinsecamente mutua esclusione su tutti i suoi metodi.</p>
+    </div>
+
+    <p>L'esempio piu semplice e un contatore thread-safe:</p>
+
+    <pre><code class="language-pascal">monitor Counter {
+    int count;
+
+    procedure inc() {
+        count := count + 1
+    }
+
+    procedure getValue(): int {
+        return count
+    }
+}</code></pre>
+
+    <p>L'esempio del contatore mostra la potenza dell'astrazione: non c'e alcun <code>wait</code>/<code>signal</code> esplicito per la mutua esclusione. Se due processi chiamano <code>inc()</code> contemporaneamente, il monitor garantisce l'atomicita: due thread non eseguiranno mai <code>inc()</code> nello stesso momento. Il docente sottolinea che la mutua esclusione e <em>implicita</em>, fornita dall'implementazione del monitor: le operazioni sono eseguite atomicamente le une rispetto alle altre, senza che il programmatore usi semafori o altri meccanismi.</p>
+  </section>
+
+  <section id="s2" data-src="PCD-2026-03-06.html#s18,PCD-2026-03-20.html#s16">
+    <h2>2. Variabili condizione: operazioni e semantica</h2>
+    <p>La sola mutua esclusione non basta: serve anche la <strong>sincronizzazione</strong>. Le <strong>variabili condizione</strong> (condition variables) sono un tipo di dato primitivo che i monitor mettono a disposizione per la sincronizzazione esplicita: permettono di <em>sospendere</em> (waitC) e <em>risvegliare</em> (signalC) processi all'interno di un monitor, rappresentando condizioni (eventi) sullo stato del monitor in attesa di essere soddisfatte. Ogni variabile condizione e associata a una <strong>coda FIFO</strong> di processi bloccati su quella condizione.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Struttura di un monitor: coda d'ingresso E, stato incapsulato, processo attivo unico e coda W di una variabile condizione">
+      <svg viewBox="0 0 640 300" width="640" style="max-width:100%;height:auto">
+        <rect x="200" y="20" width="410" height="260" rx="10" fill="none" stroke="#1546B8" stroke-width="2"/>
+        <text x="405" y="44" text-anchor="middle" fill="#1546B8" font-size="14" font-weight="bold" font-family="sans-serif">monitor</text>
+        <rect x="240" y="60" width="200" height="60" rx="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="340" y="85" text-anchor="middle" fill="#1546B8" font-size="12" font-family="sans-serif">variabili permanenti</text>
+        <text x="340" y="103" text-anchor="middle" fill="#1546B8" font-size="12" font-family="sans-serif">(stato privato)</text>
+        <rect x="200" y="150" width="90" height="30" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="245" y="170" text-anchor="middle" fill="#1546B8" font-size="12" font-family="monospace">put()</text>
+        <rect x="200" y="200" width="90" height="30" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="245" y="220" text-anchor="middle" fill="#1546B8" font-size="12" font-family="monospace">take()</text>
+        <circle cx="40" cy="190" r="11" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <circle cx="75" cy="190" r="11" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <circle cx="110" cy="190" r="11" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <line x1="128" y1="190" x2="192" y2="190" stroke="#1546B8" stroke-width="1.5"/>
+        <path d="M192 190 l-8 -4 v8 z" fill="#1546B8"/>
+        <text x="75" y="222" text-anchor="middle" fill="#1546B8" font-size="11" font-family="sans-serif">coda d'ingresso (E)</text>
+        <circle cx="350" cy="200" r="11" fill="#B83D2D" stroke="#B83D2D" stroke-width="1.5"/>
+        <text x="350" y="232" text-anchor="middle" fill="#B83D2D" font-size="11" font-family="sans-serif">processo attivo (max 1)</text>
+        <rect x="460" y="150" width="120" height="90" rx="6" fill="none" stroke="#1546B8" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text x="520" y="170" text-anchor="middle" fill="#1546B8" font-size="11" font-family="monospace">cond c</text>
+        <circle cx="495" cy="195" r="9" fill="none" stroke="#B83D2D" stroke-width="1.5"/>
+        <circle cx="522" cy="195" r="9" fill="none" stroke="#B83D2D" stroke-width="1.5"/>
+        <text x="520" y="228" text-anchor="middle" fill="#1546B8" font-size="11" font-family="sans-serif">coda FIFO (W)</text>
+        <path d="M370 195 q 40 -20 82 -10" fill="none" stroke="#B83D2D" stroke-width="1.5"/>
+        <path d="M452 185 l-9 -1 5 8 z" fill="#B83D2D"/>
+        <text x="410" y="172" text-anchor="middle" fill="#B83D2D" font-size="11" font-family="monospace">waitC(c)</text>
+        <path d="M460 250 q -60 20 -100 -18" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <path d="M360 232 l2 9 7 -6 z" fill="#1546B8"/>
+        <text x="425" y="272" text-anchor="middle" fill="#1546B8" font-size="11" font-family="monospace">signalC(c)</text>
+      </svg>
+      <figcaption><b>Fig. 1</b> — Struttura di un monitor: i processi in attesa di entrare formano la coda d'ingresso (E); al massimo un processo e attivo dentro il monitor; con <code>waitC</code> il processo attivo si sospende nella coda FIFO (W) della variabile condizione rilasciando il lock, e con <code>signalC</code> viene risvegliato il primo processo in coda.</figcaption>
+    </figure>
+
+    <h3>Operazioni</h3>
+    <table>
+      <tr><th>Operazione</th><th>Comportamento</th></tr>
+      <tr><td><code>waitC(cond)</code></td><td>Sospende il processo chiamante e <strong>rilascia il lock del monitor</strong> (fondamentale: senza questo rilascio, nessun altro processo potrebbe entrare per cambiare lo stato). Il processo viene aggiunto alla coda della condizione.</td></tr>
+      <tr><td><code>signalC(cond)</code></td><td>Se la coda non e vuota, sblocca il primo processo in attesa (lo porta a ready); se la coda e vuota, non ha effetto</td></tr>
+      <tr><td><code>emptyC(cond)</code></td><td>Verifica se la coda della condizione e vuota</td></tr>
+      <tr><td><code>signalAllC(cond)</code></td><td>Sblocca <strong>tutti</strong> i processi in attesa sulla condizione (utile quando non si sa quale risvegliera)</td></tr>
+      <tr><td><code>waitC(cond, rank)</code></td><td>Attesa con priorita: il processo viene inserito in coda in ordine crescente di rank</td></tr>
+      <tr><td><code>minrank(cond)</code></td><td>Restituisce il rank del processo in testa alla coda</td></tr>
+    </table>
+
+    <p>Formalmente, le due operazioni fondamentali si definiscono cosi:</p>
+
+    <pre>waitC(cond) = &lt; append p to cond.queue
+                p.state := blocked
+                monitor.lock := release &gt;
+
+signalC(cond) = &lt; if cond.queue != empty
+                    q := remove head of cond.queue
+                    q.state := ready &gt;</pre>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p><code>waitC</code> rilascia il lock del monitor (altrimenti nessun altro processo potrebbe entrare per cambiare lo stato e risvegliarlo). <code>signalC</code> risveglia il processo in testa alla coda (semaforo forte). A differenza di <code>signal</code> su semaforo — che incrementa sempre il contatore — <code>signalC</code> non ha effetto se la coda e vuota.</p></div>
+
+    <h3>Esempio: SynchCell (cella sincronizzata)</h3>
+    <p>Una cella che permette a un processo di depositare un valore e a un altro di prelevarlo, con sincronizzazione automatica:</p>
+
+    <pre><code class="language-pascal">monitor SynchCell {
+    int value;
+    boolean available := false;
+    cond isAvail;
+
+    procedure set(int v) {
+        value := v
+        available := true
+        signalC(isAvail)
+    }
+
+    procedure get(): int {
+        if (!available)
+            waitC(isAvail)
+        return value
+    }
+}</code></pre>
+
+    <p>Un processo chiama <code>get()</code> ma se il valore non e ancora disponibile (<code>available = false</code>), si sospende su <code>isAvail</code>. Quando un altro processo chiama <code>set()</code>, imposta il valore e segnala <code>isAvail</code>, risvegliando il processo in attesa. Il professore sottolinea che il <code>waitC</code> rilascia automaticamente il lock del monitor, permettendo cosi ad altri processi di chiamare <code>set()</code> per fornire il dato.</p>
+
+    <p>Il professore fa anche notare: se piu processi sono in <code>waitC</code> su <code>isAvail</code>, un singolo <code>signalC</code> ne sveglia solo uno. Per svegliarli tutti, si usa <code>signalAllC</code> — utile quando non si sa quanti processi stanno aspettando.</p>
+  </section>
+
+  <section id="s3" data-src="PCD-2026-03-13.html#s16,PCD-2026-03-16.html#s10,PCD-2026-02-27.html#s19">
+    <h2>3. Discipline di segnalazione</h2>
+    <p>Quando un processo esegue una <code>signalC</code>, sia il signaller che il signalled potrebbero essere pronti a proseguire nel monitor, ma solo uno puo avere accesso esclusivo: si pone il problema di chi debba continuare, il processo che segnala o quello che viene risvegliato? Le tre discipline classiche differiscono per l'ordine di priorita tra signaller (S), waiting (W — processi in attesa sulla condizione) ed external processes (E — processi bloccati sull'entry del monitor):</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Signal &amp; Continue</button>
+        <button class="lk-tab">Signal &amp; Wait</button>
+        <button class="lk-tab">Signal &amp; Urgent Wait</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Signal and Continue</strong> (nonpreemptive): il processo che segnala continua l'esecuzione; il processo risvegliato eseguira in un momento successivo, quando potra riacquisire il lock del monitor, competendo con gli altri processi. Precedenze: <code>E &lt; W &lt; S</code> (processi bloccati sull'entry &lt; processi in attesa sulla condizione &lt; processo che segnala). E la disciplina piu comune (usata da Java, per esempio — che adotta pero la variante <var>E = W &lt; S</var>).</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Signal and Wait</strong> (preemptive): il processo risvegliato viene eseguito immediatamente; il processo che ha segnalato si mette in attesa, competendo ad armi pari con i processi esterni (E) per il lock. Precedenze: <code>E = S &lt; W</code> — i risvegliati hanno priorita massima.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Signal and Urgent Wait</strong> (Immediate Resumption Requirement): come Signal and Wait, ma il processo che ha segnalato ha <strong>priorita</strong> rispetto ai processi in attesa sul lock del monitor quando puo riprendere. Precedenze: <code>E &lt; S &lt; W</code>. E la disciplina classica per i monitor nella letteratura originale, quella definita da Hoare.</p>
+      </div>
+    </div>
+
+    <p>In forma tabellare compatta:</p>
+
+    <table>
+      <thead><tr><th>Disciplina</th><th>Ordine di precedenza</th><th>Comportamento</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Signal &amp; Continue</strong></td><td>E &lt; W &lt; S</td><td>Il segnalante continua; il risvegliato compete con gli altri</td></tr>
+        <tr><td><strong>Signal &amp; Wait</strong></td><td>E = S &lt; W</td><td>Il risvegliato esegue subito; il segnalante aspetta</td></tr>
+        <tr><td><strong>Signal &amp; Urgent Wait</strong></td><td>E &lt; S &lt; W</td><td>Il risvegliato esegue subito; il segnalante ha priorita sugli altri in attesa del lock</td></tr>
+      </tbody>
+    </table>
+
+    <p><small>Legenda: S = segnalante, W = processi in waitC, E = processi bloccati sull'entry del monitor.</small></p>
+
+    <h3>Conseguenza pratica: if vs while</h3>
+    <p>A seconda della disciplina di segnalazione, il test sulla condizione dopo un <code>waitC</code> puo essere un <code>if</code> o un <code>while</code>: l'uso del <code>while</code> e sempre sicuro ed e necessario con Signal and Continue, perche la condizione potrebbe essere cambiata da un altro processo tra il risveglio e la riacquisizione del lock. Il professore nota che la scelta della disciplina ha implicazioni pratiche: con Signal &amp; Continue, dopo un <code>waitC(cond)</code> e consigliabile usare <code>while (!condizione)</code> invece di <code>if (!condizione)</code> per gestire possibili risvegli spuri (il signalled potrebbe trovare la condizione ancora falsa perche un altro processo l'ha cambiata nel frattempo).</p>
+
+    <pre><code class="language-pascal">// Con Signal and Wait (preemptive): if basta (ma while e sempre sicuro)
+if (!B) waitC(cond)
+
+// Con Signal and Continue: while necessario!
+while (!B) waitC(cond)</code></pre>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>La differenza tra S&amp;C e S&amp;W ha implicazioni pratiche. Con S&amp;C (come in Java), dopo <code>signal</code> il thread risvegliato deve competere per il lock con chiunque altro sia in attesa. Con S&amp;W, il risveglio e immediato. Questo influenza come si scrivono i cicli di controllo delle condizioni.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="PCD-2026-03-06.html#s19">
+    <h2>4. Producer-Consumer con monitor</h2>
+    <p>Ecco l'implementazione del <strong>bounded buffer</strong> come monitor, che incapsula automaticamente la mutua esclusione sull'accesso al buffer e la sincronizzazione tramite variabili condizione. Il buffer e implementato come array circolare:</p>
+
+    <pre><code class="language-pascal">monitor BoundedBuffer {
+    int[] elems := new int[MAX_ELEMS]
+    int first := 0, last := 0
+    cond notFull, notEmpty
+
+    procedure put(int elem) {
+        if ((last + 1) % MAX_ELEMS = first)
+            waitC(notFull)
+        elems[last] := elem
+        last := (last + 1) % MAX_ELEMS
+        signalC(notEmpty)
+    }
+
+    procedure take(): int {
+        if (first = last)
+            waitC(notEmpty)
+        int elem := elems[first]
+        first := (first + 1) % MAX_ELEMS
+        signalC(notFull)
+        return elem
+    }
+}
+
+// Producer                    // Consumer
+loop                          loop
+    ElemType el := produce        ElemType el := BoundedBuffer.take()
+    BoundedBuffer.put(el)         consume(el)</code></pre>
+
+    <p>Il codice produttore e consumatore diventa estremamente semplice: chiamano rispettivamente <code>put</code> e <code>take</code> sul monitor, senza preoccuparsi di lock espliciti o semafori. La variabile condizione <code>notFull</code> blocca il produttore se il buffer e pieno; <code>notEmpty</code> blocca il consumatore se il buffer e vuoto. Quando un produttore aggiunge un elemento, segnala <code>notEmpty</code> per sbloccare un eventuale consumatore in attesa; quando un consumatore preleva, segnala <code>notFull</code> per sbloccare un eventuale produttore.</p>
+
+    <p>Il professore commenta: "Questa soluzione e molto piu semplice e chiara rispetto a quella con semafori. Il monitor gestisce automaticamente la mutua esclusione sul buffer, e le variabili condizione notFull/notEmpty gestiscono la sincronizzazione."</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Nell'implementazione con array circolare (dimensione fissa MAX_ELEMS), lo spazio utile e MAX_ELEMS-1 per distinguere buffer pieno da buffer vuoto. Con disciplina Signal &amp; Continue, il controllo <code>if</code> dovrebbe essere <code>while</code> per gestire risvegli spuri, e si puo usare una variabile di stato esplicita (come un contatore) invece di controllare direttamente se il buffer e pieno/vuoto.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="PCD-2026-03-06.html#s20,PCD-2026-03-20.html#s17,PCD-2026-03-27.html#s18">
+    <h2>5. Readers-and-Writers con monitor</h2>
+    <p>L'implementazione del RWLock come monitor mostra la potenza delle variabili condizione per gestire politiche di sincronizzazione complesse: la politica di sincronizzazione viene incapsulata nella struttura dati stessa, usando due variabili di condizione (<var>okToRead</var>, <var>okToWrite</var>). Ecco la versione con disciplina Signal &amp; Continue:</p>
+
+    <pre><code class="language-pascal">// Invariant: (nr == 0 or nw == 0) and (nw &lt;= 1)
+monitor RWLock {
+    int nr, nw := 0
+    cond okToRead, okToWrite
+
+    procedure request_read() {
+        while (nw &gt; 0)
+            waitC(okToRead)
+        nr := nr + 1
+    }
+
+    procedure release_read() {
+        nr := nr - 1
+        if nr = 0
+            signalC(okToWrite)
+    }
+
+    procedure request_write() {
+        while (nr &gt; 0 or nw &gt; 0)
+            waitC(okToWrite)
+        nw := nw + 1
+    }
+
+    procedure release_write() {
+        nw := nw - 1
+        signalC(okToWrite)
+        signalAllC(okToRead)
+    }
+}</code></pre>
+
+    <p>L'invariante fondamentale: <code>(nr == 0 or nw == 0) and (nw &lt;= 1)</code> — o ci sono solo reader, o solo un writer (o nessuno). Questa soluzione garantisce che i lettori non si escludano tra loro ma escludano gli scrittori, e viceversa. <code>release_write()</code> fa due segnalazioni: <code>signalC(okToWrite)</code> per sbloccare un writer in attesa (se c'e), e <code>signalAllC(okToRead)</code> per risvegliare tutti i reader in attesa.</p>
+
+    <p>Il docente sottolinea l'uso di <code>while</code> invece di <code>if</code> nella condizione di wait — pattern fondamentale per gestire la riapertura della condizione dopo signal (soprattutto con semantica Signal &amp; Continue).</p>
+
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Con Signal &amp; Continue, dopo esser stati risvegliati, i processi devono <em>ricontrollare</em> la condizione. Un while loop e obbligatorio, non opzionale. Questo e un errore comune che porta a bug sottili.</p></div>
+
+    <p>Il professore mostra anche una seconda versione, piu compatta, che usa il pattern "cascading signal": dopo <code>startRead()</code>, il primo reader sbloccato chiama a sua volta <code>signalC(okToRead)</code> per risvegliare il successivo, creando una catena. Questa versione elimina il <code>while</code> e torna a usare <code>if</code> per il controllo delle condizioni.</p>
+
+    <pre><code class="language-pascal">procedure startRead() {
+  if writers != 0
+    waitC(okToRead);
+  readers := readers + 1;
+  signalC(okToRead);    { risveglia il prossimo reader in cascata }
+}
+
+procedure endWrite() {
+  writers := writers - 1;
+  if emptyC(okToRead)
+    then signalC(okToWrite)   { se nessun reader aspetta, sblocca un writer }
+    else signalC(okToRead);   { altrimenti sblocca il primo reader }
+}</code></pre>
+  </section>
+
+  <section id="s6" data-src="PCD-2026-03-16.html#s11">
+    <h2>6. Monitor in Java: synchronized, wait, notify</h2>
+    <p>Java offre due approcci per implementare monitor. Il primo, di piu basso livello, sfrutta i meccanismi nativi della JVM: <code>synchronized</code>, <code>wait</code>, <code>notify</code>, <code>notifyAll</code>.</p>
+
+    <p>Quando un metodo e dichiarato <code>synchronized</code>, la JVM genera automaticamente le istruzioni bytecode <code>monitorenter</code> e <code>monitorexit</code>. Ogni oggetto Java ha un <strong>intrinsic lock</strong> (o <strong>monitor lock</strong>) associato.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Trappola comune</span>
+      <p>Un errore frequente: chiamare <code>wait()</code> o <code>notify()</code> fuori da un blocco <code>synchronized</code> causa <code>IllegalMonitorStateException</code>. Il thread chiamante deve essere il proprietario del lock sull'oggetto. Il professore ha mostrato questo errore in aula con un esempio dal vivo.</p>
+    </div>
+
+    <h3>Pattern del monitor in Java</h3>
+    <p>Regole per implementare il monitor pattern:</p>
+    <ol>
+      <li>Tutti i metodi pubblici devono essere <code>synchronized</code></li>
+      <li>Nessun campo pubblico</li>
+      <li>Il codice del monitor deve accedere solo a oggetti completamente confinati al suo interno</li>
+      <li>E disponibile un'unica variabile di condizione implicita (l'oggetto stesso)</li>
+    </ol>
+
+    <h3>Esempio: SynchCell</h3>
+
+    <div id="ac-synchcell"></div>
+
+    <h3>Semantica di wait</h3>
+    <ul>
+      <li>Se il thread e stato interrotto, <code>wait</code> lancia <code>InterruptedException</code></li>
+      <li>Altrimenti, il thread viene bloccato e posto nel <em>wait set</em> dell'oggetto</li>
+      <li>Il lock di sincronizzazione viene rilasciato (anche se rientrante)</li>
+      <li>Al risveglio, il lock viene riacquisito prima di proseguire</li>
+    </ul>
+
+    <h3>Semantica di notify e notifyAll</h3>
+    <ul>
+      <li><code>notify</code> rimuove un thread arbitrario dal wait set (nessuna garanzia su quale)</li>
+      <li>Il thread risvegliato deve riacquisire il lock e si blocca finche il notificante non rilascia il lock</li>
+      <li><code>notifyAll</code> opera su tutti i thread nel wait set (ma riacquisiranno il lock uno alla volta)</li>
+    </ul>
+
+    <h3>Spurious wakeup e il pattern while</h3>
+    <p>La documentazione Java avverte: <em>"A thread can also wake up without being notified, interrupted, or timing out, a so-called spurious wakeup."</em> Per questo il pattern corretto e sempre <strong>wrappare wait in un ciclo while</strong> che riverifica la condizione:</p>
+
+    <pre><code class="language-java">synchronized void get() {
+    while (!available) {    // SEMPRE while, mai if!
+        try { wait(); } catch (InterruptedException ex) {}
+    }
+    return value;
+}</code></pre>
+
+    <p>Un'altra limitazione del meccanismo di base: piu predicati di condizione diversi devono essere associati alla stessa unica variabile di condizione (l'oggetto). Questo forza l'uso di <code>notifyAll</code> invece di <code>notify</code>, e il ciclo <code>while</code> permette a ogni thread di riverificare la propria condizione specifica al risveglio.</p>
+  </section>
+
+  <section id="s7" data-src="PCD-2026-03-16.html#s12">
+    <h2>7. Bounded buffer come monitor in Java</h2>
+    <p>Implementiamo il bounded buffer produttori-consumatori usando il monitor pattern in Java, con <code>synchronized</code>/<code>wait</code>/<code>notifyAll</code>.</p>
+
+    <pre><code class="language-java">public class BoundedBuffer&lt;Item&gt; {
+    private int first, last, count;
+    private Item[] buffer;
+
+    public BoundedBuffer(int size) {
+        first = last = count = 0;
+        buffer = (Item[]) new Object[size];
+    }
+
+    public synchronized void put(Item item) throws InterruptedException {
+        while (isFull()) { wait(); }
+        last = (last + 1) % buffer.length;
+        count++;
+        buffer[last] = item;
+        notifyAll();
+    }
+
+    public synchronized Item get() throws InterruptedException {
+        while (isEmpty()) { wait(); }
+        first = (first + 1) % buffer.length;
+        count--;
+        notifyAll();
+        return buffer[first];
+    }
+
+    public synchronized boolean isEmpty() { return count == 0; }
+    public synchronized boolean isFull() { return count == buffer.length; }
+}</code></pre>
+
+    <div class="callout idea">
+      <span class="callout-label">Nota: notifyAll e overhead</span>
+      <p>Domanda del professore: e davvero necessario usare <code>notifyAll</code> invece di <code>notify</code>? Se ci sono sia produttori che consumatori in attesa sulla stessa variabile di condizione, <code>notify</code> potrebbe svegliare un thread "sbagliato" (es. un produttore invece di un consumatore), che si rimetterebbe in attesa. <code>notifyAll</code> sveglia tutti, introducendo un overhead ma garantendo il progresso. Con <code>ReentrantLock</code> e <code>Condition</code> separate, questo problema si risolve elegantemente.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="PCD-2026-03-16.html#s13">
+    <h2>8. ReentrantLock e Condition: monitor di alto livello</h2>
+    <p>La libreria <code>java.util.concurrent</code> fornisce classi per implementare monitor con <strong>variabili di condizione multiple</strong>, superando le limitazioni del meccanismo <code>synchronized</code>.</p>
+
+    <p>La classe <code>ReentrantLock</code> e un'implementazione rientrante di lock mutex. Da un lock si possono creare multiple <code>Condition</code>, che rappresentano variabili di condizione distinte.</p>
+
+    <h3>SynchCell con ReentrantLock</h3>
+
+    <pre><code class="language-java">public class SynchCell2 {
+    private int value;
+    private boolean available;
+    private Lock mutex;
+    private Condition isAvail;
+
+    public SynchCell2() {
+        available = false;
+        mutex = new ReentrantLock();
+        isAvail = mutex.newCondition();
+    }
+
+    public void set(int v) {
+        try {
+            mutex.lock();
+            value = v;
+            available = true;
+            isAvail.signalAll();
+        } finally {
+            mutex.unlock();
+        }
+    }
+
+    public int get() {
+        try {
+            mutex.lock();
+            if (!available) {
+                try { isAvail.await(); } catch (InterruptedException ex) {}
+            }
+            return value;
+        } finally {
+            mutex.unlock();
+        }
+    }
+}</code></pre>
+
+    <p>Note importanti: i metodi <strong>non sono synchronized</strong>; il lock e gestito esplicitamente con <code>lock()</code>/<code>unlock()</code>; e essenziale il blocco <code>finally</code> per garantire il rilascio anche in caso di eccezioni; <code>Condition</code> offre <code>await()</code>, <code>signal()</code>, <code>signalAll()</code> al posto di <code>wait</code>/<code>notify</code>/<code>notifyAll</code>.</p>
+
+    <h3>BoundedBuffer con condition variabili multiple</h3>
+    <p>Con <code>ReentrantLock</code> possiamo finalmente avere <code>notFull</code> e <code>notEmpty</code> come variabili di condizione separate, permettendo segnalazioni selettive:</p>
+
+    <div id="ac-bbuffer"></div>
+
+    <p>Notate: nel <code>put</code> si fa <code>notEmpty.signal()</code> (sveglia solo consumatori), nel <code>get</code> si fa <code>notFull.signal()</code> (sveglia solo produttori). Nessun overhead di risvegli inutili!</p>
+  </section>
+
+  <section id="s9" data-src="PCD-2026-03-16.html#s14">
+    <h2>9. Semantica di segnalazione in Java: effetti indesiderati</h2>
+    <p>Il professore ha dedicato una parte significativa della lezione a mostrare un comportamento curioso della semantica di segnalazione in Java. La semantica adottata (Signal-and-Continue con <var>E = W &lt; S</var>) puo portare a ordini di esecuzione controintuitivi.</p>
+
+    <p><strong>Scenario dimostrativo:</strong> Tre thread competono per un monitor. <var>T1</var> entra, esegue <code>await()</code> e si sospende. <var>T2</var> entra, esegue <code>signal()</code> e rilascia. <var>T3</var> sta aspettando di entrare. Chi ottiene il lock dopo <var>T2</var>?</p>
+
+    <p>Con <var>E = W &lt; S</var>, il thread risvegliato (<var>T1</var>) compete ad armi pari con i thread in attesa sul lock (<var>T3</var>). Dipende dall'implementazione della JVM e dallo scheduler del sistema operativo chi entra per primo. Nell'esempio mostrato, <var>T3</var> e entrato prima di <var>T1</var>.</p>
+
+    <pre><code class="language-plaintext">OUTPUT OSSERVATO:
+First thread started.
+First thread inside, going to wait
+Second thread started.
+Second thread inside
+Third thread started.
+Second thread inside, going to signal
+Second thread inside signaled.
+Third thread inside.            // &lt;- T3 entra prima di T1!
+First thread unblocked.         // &lt;- T1 solo dopo T3</code></pre>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Questo comportamento non e un bug di Java, ma una conseguenza della semantica S&amp;C. Non bisogna mai assumere che dopo un signal il thread risvegliato sia il prossimo a eseguire. E per questo che tutte le attese devono essere in ciclo <code>while</code> (non <code>if</code>) e la logica deve essere robusta indipendentemente dall'ordine di ripresa.</p>
+    </div>
+
+    <p><strong>Errore comune:</strong> Confondere <code>wait</code>/<code>notify</code> (meccanismi di base su Object) con <code>await</code>/<code>signal</code> (da Condition). Il professore ha mostrato il caso in cui, usando ReentrantLock, si chiama erroneamente <code>wait()</code> invece di <code>await()</code> o <code>notify</code> invece di <code>signal</code>, cosa che causa <code>IllegalMonitorStateException</code> o comportamenti errati.</p>
+  </section>
+
+  <section id="s10" data-src="PCD-2026-03-06.html#s21">
+    <h2>10. Monitor e semafori: equivalenza espressiva</h2>
+    <p>I monitor possono essere realizzati usando semafori come building blocks di livello piu basso. Per ogni monitor servono:</p>
+    <ul>
+      <li>Un semaforo <code>mutex</code> (inizializzato a 1) per garantire la mutua esclusione: <code>wait(mutex)</code> in prologo, <code>signal(mutex)</code> in epilogo di ogni operazione</li>
+      <li>Per ogni variabile condizione <code>cond</code>, un semaforo <code>condsem</code> e un contatore <code>condcount</code> per tracciare quanti processi sono in attesa</li>
+    </ul>
+
+    <p>Le due discipline si implementano cosi:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Signal &amp; Continue</button>
+        <button class="lk-tab">Signal &amp; Wait</button>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-pascal">Prologo per ogni operazione:
+  wait(mutex)
+Epilogo per ogni operazione:
+  signal(mutex)
+
+waitC(cond) =
+  condcount++;
+  signal(mutex);     { rilascia il lock del monitor }
+  wait(condsem);     { si blocca sulla condizione }
+  wait(mutex);       { quando si risveglia, riacquisisce il lock }
+
+signalC(cond) =
+  if (condcount &gt; 0) {
+    condcount--;
+    signal(condsem); { sblocca un processo in attesa }
+  }</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-pascal">Prologo per ogni operazione:
+  wait(mutex)
+Epilogo per ogni operazione:
+  signal(mutex)
+
+waitC(cond) =
+  condcount++;
+  signal(mutex);
+  wait(condsem);     { si blocca — verra sbloccato da signalC }
+
+signalC(cond) =
+  if (condcount &gt; 0) {
+    condcount--;
+    signal(condsem); { sblocca il processo in attesa }
+    wait(mutex);     { il signaller si mette in attesa del lock }
+  }</code></pre>
+      </div>
+    </div>
+
+    <h3>Implementare un semaforo con un monitor</h3>
+    <p>Chiudendo il cerchio, si puo anche implementare un semaforo usando un monitor, dimostrando l'equivalenza espressiva dei due costrutti:</p>
+
+    <pre><code class="language-pascal">monitor Semaphore {
+  integer s := &lt;InitValue&gt;
+  cond notZero;
+
+  procedure wait() {
+    if s = 0
+      waitC(notZero);
+    s := s - 1;
+  }
+
+  procedure signal() {
+    s := s + 1;
+    signalC(notZero);
+  }
+}</code></pre>
+
+    <p>Il professore mostra anche una versione alternativa che separa il caso in cui <code>s &gt; 0</code> (decrementa senza bloccare) dal caso <code>s = 0</code> (si blocca). Entrambe le versioni sono corrette. Potete esplorarla riga per riga qui sotto:</p>
+
+    <div data-src="PCD-2026-03-13.html#s17">
+      <div id="ac-monitor-sem"></div>
+
+      <div class="callout note"><span class="callout-label">Nota del redattore</span>
+      I monitor consentono di costruire componenti di coordinamento riutilizzabili: <em>latch, barriere, rendez-vous, message box, blackboard, event services</em>. Sono un tassello fondamentale nella progettazione di sistemi concorrenti perche separano la politica di sincronizzazione dalla logica applicativa.
+      </div>
+    </div>
+  </section>
+
+  <section id="s11" data-src="PCD-2026-03-13.html#s18">
+    <h2>11. Confronto: semafori vs variabili di condizione</h2>
+    <p>Il professore dedica una slide specifica al confronto, che e importante per evitare confusioni:</p>
+
+    <table>
+      <tr><th>Semaforo</th><th>Variabile di condizione (nei monitor)</th></tr>
+      <tr><td><code>wait(S)</code> puo non bloccare (se S.V &gt; 0)</td><td><code>waitC(cond)</code> blocca <strong>sempre</strong> (rilascia il lock e si sospende)</td></tr>
+      <tr><td><code>signal(S)</code> ha <strong>sempre effetto</strong> (incrementa S.V o sblocca un processo)</td><td><code>signalC(cond)</code> non ha effetto se la coda e vuota</td></tr>
+      <tr><td><code>signal(S)</code> sblocca un processo arbitrario (nei semafori deboli)</td><td><code>signalC(cond)</code> sblocca il processo in testa alla coda FIFO</td></tr>
+      <tr><td>Il processo sbloccato da <code>signal</code> puo riprendere immediatamente</td><td>Il processo sbloccato da <code>signalC</code> deve attendere che il processo segnalante esca dal monitor (a seconda della disciplina di segnalazione)</td></tr>
+    </table>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+    Domanda classica: "Qual e la differenza tra semafori e variabili di condizione?" Rispondete con questa tabella. Aggiungete che i semafori sono un meccanismo di coordinamento <strong>esterno</strong> ai dati, mentre le variabili di condizione operano <strong>all'interno</strong> del monitor e sono strettamente legate allo stato incapsulato.</div>
+  </section>
+
+  <section id="quiz" data-src="PCD-2026-03-16.html#quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Qual e la differenza fondamentale tra <code>wait</code> su un semaforo e <code>waitC</code> su una variabile di condizione?</summary>
+        <p><code>wait(S)</code> su semaforo puo non bloccare (se <var>S.V &gt; 0</var> si limita a decrementare). <code>waitC(cond)</code> su variabile di condizione blocca <strong>sempre</strong> e rilascia il lock del monitor. Inoltre, <code>signal</code> su semaforo ha sempre effetto (incrementa o sblocca), mentre <code>signalC</code> non ha effetto se la coda e vuota.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono le quattro condizioni necessarie per il deadlock secondo Coffman?</summary>
+        <p>Mutua esclusione, hold and wait, no preemption, circular wait. Devono valere tutte simultaneamente. Rimuovendone anche solo una, il deadlock e impossibile.</p>
+      </details>
+
+      <details>
+        <summary>Perche in Java si deve sempre usare <code>while</code> e non <code>if</code> per il controllo della condizione dopo <code>wait()</code>?</summary>
+        <p>Per due ragioni: (1) <strong>spurious wakeup</strong> — un thread puo svegliarsi senza notify/interrupt/timeout; (2) <strong>signaling semantics</strong> — in Java (S&amp;C) il thread risvegliato deve competere per il lock e potrebbe passare del tempo prima di riottenere l'esecuzione, durante il quale la condizione potrebbe cambiare. Il ciclo while garantisce che la condizione sia riverificata prima di proseguire.</p>
+      </details>
+
+      <details>
+        <summary>Cosa significa che un semaforo soddisfa l'invariante <var>S.V = k + #signal(S) - #wait(S)</var>?</summary>
+        <p>Significa che il valore corrente del semaforo e uguale al valore iniziale piu il numero di signal eseguiti meno il numero di wait completati (quelli che non hanno bloccato). Questo invariante formalizza il comportamento del semaforo ed e la base per dimostrare la correttezza dei programmi che lo usano.</p>
+      </details>
+
+      <details>
+        <summary>Qual e la differenza tra safety e liveness? Fate un esempio di ciascuna per il problema dei Filosofi.</summary>
+        <p><strong>Safety:</strong> "le cose brutte non accadono mai" — es. "nessun filosofo mangia con un solo forchetta in mano" (invarianza). Si esprime con . <strong>Liveness:</strong> "le cose buone prima o poi accadono" — es. "ogni filosofo che ha fame prima o poi mangia" (assenza di starvation). Si esprime con .</p>
+      </details>
+
+      <details>
+        <summary>Perche con un semaforo weak la soluzione della sezione critica per N processi non garantisce assenza di starvation?</summary>
+        <p>Nei semafori weak, <var>S.L</var> e un insieme — quando si fa signal, il processo sbloccato e scelto arbitrariamente. Un processo potrebbe non essere mai selezionato se lo scheduler e sfortunato (o se altri processi continuano a entrare e uscire dalla CS). Nei semafori strong (coda FIFO), l'ordine di arrivo garantisce che ogni processo prima o poi venga servito.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-06-deadlock.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-08-java.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 27 febbraio, 6 marzo, 13 marzo, 16 marzo, 20 marzo e 27 marzo 2026 · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+/* ---- Annotated Code: SynchCell con synchronized/wait/notifyAll (da PCD-2026-03-16) ---- */
+LessonKit.annotatedCode('#ac-synchcell', {
+  lang: 'java',
+  lines: [
+    ['public class SynchCell {', 'Incapsula stato condiviso (value) e flag di disponibilita (available).'],
+    ['  private int value;', 'Il dato da trasferire dal produttore al consumatore.'],
+    ['  private boolean available;', 'Flag: true quando un valore e stato scritto e non ancora letto.'],
+    ['  public synchronized void set(int v) {', 'Metodo synchronized: mutua esclusione automatica.'],
+    ['    value = v;', 'Scrive il valore nello stato condiviso.'],
+    ['    available = true;', 'Segnala che il dato e disponibile.'],
+    ['    notifyAll();', 'Sveglia tutti i thread in wait set. Potrebbe essere notify() ma notifyAll e piu safe.'],
+    ['  }', ''],
+    ['  public synchronized int get() {', 'Anche get e synchronized — stesso lock implicito (this).'],
+    ['    while (!available) {', 'Ciclo while (non if!) per spurious wakeup e signaling semantics.'],
+    ['      try { wait(); }', 'Rilascia il lock e si sospende finche qualcuno non fa notify.'],
+    ['      catch (InterruptedException ex) {}', 'InterruptedException può essere lanciata se un altro thread interrompe questo.'],
+    ['    }', ''],
+    ['    return value;', 'Quando available e true, restituisce il valore.'],
+    ['  }', ''],
+    ['}', 'Pattern monitor base con una variabile di condizione implicita.']
+  ]
+});
+
+/* ---- Annotated Code: BoundedBuffer con ReentrantLock + Condition (da PCD-2026-03-16) ---- */
+LessonKit.annotatedCode('#ac-bbuffer', {
+  lang: 'java',
+  lines: [
+    ['public class BoundedBuffer<Item> {', 'Implementazione con ReentrantLock + Condition multiple.'],
+    ['  private int first, last, count;', 'Indici circolari e contatore elementi.'],
+    ['  private Item[] buffer;', 'Array circolare per i dati.'],
+    ['  private Lock mutex;', 'Lock esplicito per la mutua esclusione.'],
+    ['  private Condition notFull, notEmpty;', 'DUE variabili di condizione separate!'],
+    ['  public BoundedBuffer(int size) {', 'Costruttore: inizializza lo stato e le condition.'],
+    ['    mutex = new ReentrantLock();', 'Crea un lock rientrante (fair se passi true).'],
+    ['    notFull = mutex.newCondition();', 'notFull: produttori attendono quando buffer pieno.'],
+    ['    notEmpty = mutex.newCondition();', 'notEmpty: consumatori attendono quando buffer vuoto.'],
+    ['  }', ''],
+    ['  public void put(Item item) {', 'Metodo NON synchronized — lock esplicito.'],
+    ['    try { mutex.lock();', 'Acquisisce il lock.'],
+    ['      while (count == buffer.length) notFull.await();', 'Se pieno, attendi su notFull (solo produttori).'],
+    ['      last = (last + 1) % buffer.length; count++;', 'Inserimento circolare.'],
+    ['      buffer[last] = item;', ''],
+    ['      notEmpty.signal();', 'Segnala selettivamente ai consumatori!'],
+    ['    } finally { mutex.unlock(); }', 'finally rilascia SEMPRE il lock.'],
+    ['  }', ''],
+    ['  public Item get() {', 'Metodo speculare per il consumatore.'],
+    ['    try { mutex.lock();', ''],
+    ['      while (count == 0) notEmpty.await();', 'Se vuoto, attendi su notEmpty (solo consumatori).'],
+    ['      first = (first + 1) % buffer.length; count--;', 'Prelievo circolare.'],
+    ['      notFull.signal();', 'Segnala selettivamente ai produttori!'],
+    ['      return buffer[first];', ''],
+    ['    } finally { mutex.unlock(); }', ''],
+    ['  }', ''],
+    ['}', 'Vantaggio: risvegli mirati, nessun overhead di notifyAll.']
+  ]
+});
+
+/* ---- Annotated Code: Semaforo implementato con monitor (da PCD-2026-03-13) ---- */
+(function(){
+  var semDiv = document.getElementById('ac-monitor-sem');
+  if (semDiv) {
+    var semWrap = document.createElement('div');
+    semWrap.id = 'ac-monitor-sem-inner';
+    semDiv.parentNode.replaceChild(semWrap, semDiv);
+    LessonKit.annotatedCode('#ac-monitor-sem-inner', {
+      lang: 'java',
+      lines: [
+        ['monitor Semaphore {', 'Incapsula lo stato del semaforo e la condizione.'],
+        ['  integer s := InitValue', 'Variabile intera che mantiene il valore del semaforo.'],
+        ['  cond notZero;', 'Variabile di condizione: i processi attendono qui se s == 0.'],
+        ['  procedure wait() {', 'Operazione P (wait): richiede che s > 0 per proseguire.'],
+        ['    if s = 0', 'Se s == 0, il processo deve bloccarsi.'],
+        ['      waitC(notZero)', 'waitC rilascia il lock del monitor e sospende il processo.'],
+        ['    s := s - 1', 'Quando viene risvegliato, decrementa s (ora s > 0 garantito dal while).'],
+        ['  }', 'Fine wait.'],
+        ['  procedure signal() {', 'Operazione V (signal): libera una risorsa.'],
+        ['    if emptyC(notZero)', 'Se nessun processo e in attesa...'],
+        ['      s := s + 1', '...incrementa direttamente il contatore.'],
+        ['    else', 'Altrimenti...'],
+        ['      signalC(notZero)', '...sblocca il primo processo in coda (non incrementa s).'],
+        ['  }', 'Fine signal.'],
+        ['}', 'Chiusura monitor.']
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>
