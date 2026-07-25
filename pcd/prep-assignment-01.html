@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prep esame — Assignment 1: Poool · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-09-verifica.html">&larr; Cap. 9 — Verifica formale e model checking</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-10-async.html">Cap. 10 — Programmazione asincrona &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Prep esame · Assignment 1</div>
+    <h1>Assignment 1 — Poool</h1>
+    <div class="lk-meta"><span>~25 min di lettura</span><span>ripasso orale sul codice consegnato</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questa scheda</h3>
+    <ol>
+      <li><a href="#s1">Cosa ho costruito</a></li>
+      <li><a href="#s2">Scelte concorrenti</a></li>
+      <li><a href="#s3">Domande probabili</a></li>
+      <li><a href="#s4">Punti deboli</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. Cosa ho costruito</h2>
+    <p>L'assignment chiede due versioni concorrenti del gioco <em>Poool</em>: (v1) multithreading con soli platform thread e monitor implementati da noi, (v2) una variante task-based sull'Executor Framework. Il codice sta in <code>assignments/assignment-01/src/pcd/sketch01</code> ed e organizzato in modo che le due versioni siano <strong>due strategie intercambiabili dietro la stessa interfaccia</strong>, cosi fisica e ordine delle fasi restano identici e il confronto di performance e onesto.</p>
+
+    <h3>Architettura comune</h3>
+    <p><code>Board</code> possiede lo stato (palline, buche, punteggi) e l'<em>ordine</em> delle fasi di un frame; una <code>PhysicsStrategy</code> decide solo <em>come e su quali thread</em> eseguire le fasi parallelizzabili. Il frame e una pipeline di sei passi:</p>
+    <ol>
+      <li><strong>integrate</strong> — aggiorna velocita/posizione di ogni pallina (scritture disgiunte: parallelizzabile);</li>
+      <li><strong>buildGrid</strong> — bucketing spaziale in una griglia di celle (<code>Grid</code>, <code>Cell</code>): una riduzione su input disgiunto, parallelizzabile;</li>
+      <li><strong>detect</strong> — rileva le coppie che collidono (sola lettura sullo stato: parallelizzabile);</li>
+      <li><strong>resolve</strong> — risolve le collisioni: <em>deliberatamente sequenziale</em>, perche coppie rilevate condividono palline ((A,B) e (B,C) scrivono entrambe B);</li>
+      <li><strong>sweep player/bot</strong> — anch'esso sequenziale (ogni iterazione scrive le due palline grandi);</li>
+      <li><strong>processHoles</strong> — punteggio, rimozione, fine partita.</li>
+    </ol>
+    <p>Intorno alla pipeline c'e un main loop (<code>Sketch01</code>) in stile game loop: svuota in modo <em>non bloccante</em> due <code>Buffer&lt;PlayerAction&gt;</code> (input tastiera dalla EDT via <code>ViewFrame</code>, input del bot dal thread <code>BotBehavior</code>), applica gli impulsi, chiama <code>board.updateState(dt)</code>, aggiorna la <code>ViewModel</code> (monitor con snapshot copiati) e fa il render sincrono con la EDT tramite il monitor <code>RenderSynch</code>. La mappa <code>lastHitBy</code> in <code>Board</code> attribuisce il punto a chi ha colpito per ultimo la pallina imbucata.</p>
+
+    <h3>Versione 1 — platform thread e monitor propri (<code>ThreadPoolStrategy</code>)</h3>
+    <p>Un insieme fisso di worker (<code>CollisionDetector</code>, thread <code>collision-worker-i</code>) viene avviato una volta e vive per tutta la partita. Ad ogni frame il chiamante partiziona le celle della griglia in modo <em>statico</em> (<code>cell.x mod workerCount</code>), consegna a ogni worker un <code>CollisionTask</code> attraverso il suo <code>Buffer</code> dedicato, e si blocca su un monitor <code>Barrier</code> finche tutti hanno riportato. I monitor sono tutti nostri, costruiti su <code>synchronized</code>/<code>wait</code>/<code>notifyAll</code>:</p>
+    <ul>
+      <li><code>Buffer&lt;T&gt;</code> — coda produttore/consumatore con <code>next()</code> bloccante (worker) e <code>poll()</code> non bloccante (game loop);</li>
+      <li><code>Barrier&lt;T&gt;</code> — rendezvous a round che fa tre cose: blocca il chiamante finche tutte le parti hanno riportato, aggrega i risultati parziali, e scarta segnali marcati con un round passato (guardia di generazione);</li>
+      <li><code>RenderSynch</code> — sincronizza il game loop con la EDT sul frame renderizzato.</li>
+    </ul>
+    <p>In v1 solo la <em>detection</em> e parallela; integrate e buildGrid restano sul thread chiamante. Due limiti sono documentati nel codice stesso e sono il motivo di v2: la partizione statica fa aspettare tutti al barrier quando un worker pesca la striscia densa della board, e il <code>Barrier</code> aggrega in ordine di <em>completamento</em>, quindi l'ordine delle coppie (e della successiva risoluzione) varia tra esecuzioni.</p>
+
+    <h3>Versione 2 — task sull'Executor Framework (<code>ExecutorStrategy</code>)</h3>
+    <p>Un <code>Executors.newFixedThreadPool(poolSize)</code> con <code>ThreadFactory</code> propria (thread <code>physics-i</code>, daemon). Il task e il <em>corpo</em> del lavoro, non piu il loop perpetuo del worker: ogni fase produce una lista di <code>Callable</code> e <code>awaitAll</code> li consegna a <code>invokeAll</code>, che e insieme il rendezvous e il punto di aggregazione — il <code>Barrier</code> sparisce. Rispetto a v1:</p>
+    <ul>
+      <li>il numero di chunk e disaccoppiato dal numero di thread (<code>chunksPerThread</code>): un thread che finisce presto prende un altro chunk invece di aspettare;</li>
+      <li>anche integrate e buildGrid sono paralleli, non solo detect;</li>
+      <li>i risultati sono consumati in ordine di <em>sottomissione</em>, quindi il merge non dipende da chi finisce prima: la simulazione riproduce esattamente la baseline sequenziale;</li>
+      <li>la visibilita e garantita dal JMM via <code>Future.get()</code>, non da un monitor nostro.</li>
+    </ul>
+    <p>Completano il quadro <code>SequentialStrategy</code> (baseline per lo speedup) e gli helper condivisi di <code>Grid</code> — dove <code>newGrid()</code> ritorna una <code>LinkedHashMap</code> apposta, per rendere l'ordine di iterazione delle celle indipendente da come e stato spartito il lavoro.</p>
+
+    <h3>Strumenti di misura e verifica</h3>
+    <ul>
+      <li><code>PhysicsBenchmark</code> — sweep di tutte le strategie sulla board massive (4500 palline, <code>MassiveBoardConf</code>), con warmup e trial multipli; riporta tempo medio di frame e speedup rispetto al sequenziale, variando pool size e chunk per thread;</li>
+      <li><code>StrategyEquivalence</code> — controllo di correttezza: stessa board, stessi frame, confronto di ogni coordinata finale contro la baseline. Atteso: executor IDENTICAL, platform-threads puo differire negli ultimi bit (ordine di completamento, non una race);</li>
+      <li><code>jpf/TestBarrier</code> + <code>jpf/UnsafeBarrier</code> + <code>verify-jpf.sh</code> — model checking JPF del monitor <code>Barrier</code> (2 parti, 2 round) e di una copia deliberatamente rotta che dimostra che il setup rileva davvero i difetti.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Stato reale del lavoro</span>
+      <p>Il codice delle due versioni richieste c'e ed e funzionante, ma il lavoro e <em>in progress</em>: la cartella <code>doc/</code> con <code>report.pdf</code> (analisi, design, reti di Petri, numeri di benchmark) <strong>non esiste ancora</strong>, e nel package restano <code>CalculateGrid</code> e <code>Loc</code>, residui di un tentativo precedente di parallelizzare la griglia, oggi non referenziati da nessuno.</p>
+    </div>
+  </section>
+
+  <section id="s2">
+    <h2>2. Scelte concorrenti</h2>
+
+    <h3>Monitor implementati a mano</h3>
+    <p>La consegna chiede costrutti di alto livello con implementazione propria: i tre monitor (<code>Buffer</code>, <code>Barrier</code>, <code>RenderSynch</code>) usano il pattern canonico Java — <code>synchronized</code>, <code>wait()</code> dentro un <code>while</code> sulla condizione, <code>notifyAll()</code> — cioe la disciplina <em>signal-and-continue</em> dei monitor Java (<a href="cap-07-monitor.html">Cap. 7 — Monitor</a>). Il <code>while</code> e obbligatorio: tra il notify e la ripresa il lock viene riacquisito e la condizione puo essere di nuovo falsa (risvegli spuri, altri consumatori).</p>
+
+    <h3>Produttore/consumatore per l'input asincrono</h3>
+    <p>Tastiera (EDT) e bot producono <code>PlayerAction</code> su due <code>Buffer</code>; il game loop consuma. E lo schema produttore/consumatore classico (<a href="cap-05-semafori.html">Cap. 5 — Semafori e problemi classici</a>), ma con una variante importante: il game loop non puo bloccarsi, quindi usa <code>poll()</code> (ritorna <code>Optional.empty()</code> a coda vuota), mentre i worker di v1 usano <code>next()</code> bloccante. Il monitor e anche il punto di <em>pubblicazione sicura</em>: gli impulsi vengono applicati alla pallina solo dal thread del main loop, dopo il passaggio dal buffer.</p>
+
+    <h3>Barriera a round con guardia di generazione</h3>
+    <p>Il <code>Barrier</code> di v1 e un rendezvous: il main aspetta che tutti i worker abbiano riportato. La guardia di generazione (<code>signalDone(gen, ...)</code> ignora round passati) protegge il barrier — che e un oggetto longevo, riusato ogni frame — da un report tardivo di un round precedente. La correttezza del protocollo (niente perso, niente duplicato, il main non resta bloccato) e verificata con JPF (<a href="cap-09-verifica.html">Cap. 9 — Verifica formale e model checking</a>). Sui rischi di attese circolari e di segnali persi: <a href="cap-06-deadlock.html">Cap. 6 — Deadlock</a>.</p>
+
+    <h3>Task, non thread: cosa compra l'Executor</h3>
+    <p>In v1 il loop perpetuo del worker («prendi dal mio inbox, calcola, riporta») e politica di esecuzione scritta a mano dentro il worker; in v2 l'unita di lavoro e solo il calcolo e la politica e del pool (<a href="cap-08-java.html">Cap. 8 — Concorrenza in Java: task ed Executor</a>). <code>invokeAll</code> sostituisce in una chiamata il rendezvous e l'aggregazione del <code>Barrier</code>, e la visibilita dei risultati e garantita dal happens-before di <code>Future.get()</code> (le azioni nel task <em>happen-before</em> il ritiro del risultato) invece che dal nostro <code>synchronized</code>.</p>
+<pre><code class="language-java">// ExecutorStrategy.awaitAll: rendezvous + aggregazione in una chiamata
+List&lt;Future&lt;T&gt;&gt; futures = pool.invokeAll(tasks);
+for (Future&lt;T&gt; future : futures) {   // ordine di sottomissione, non di completamento
+    results.add(future.get());       // happens-before: vedo tutte le scritture del task
+}</code></pre>
+
+    <h3>Granularita dei task e bilanciamento del carico</h3>
+    <p>V1 ha necessariamente un chunk per thread (la partizione <em>e</em> l'inbox del thread); v2 sottomette <code>poolSize × chunksPerThread</code> chunk che si accodano, cosi chi finisce presto continua a lavorare. Con distribuzione delle palline non uniforme e che cambia ogni frame, nessuna partizione statica resta buona a lungo — e su core eterogenei (P-core/E-core) le partizioni uguali garantiscono che i core lenti tengano fermo ogni rendezvous. Il ragionamento su cosa parallelizzare (scritture disgiunte, riduzioni, letture pure) e cosa no e modellazione delle dipendenze tra azioni: <a href="cap-02-modellazione.html">Cap. 2 — Modellazione</a>.</p>
+
+    <h3>Determinismo come proprieta di correttezza</h3>
+    <p>Lo speedup ha senso solo se il programma veloce calcola la stessa cosa: per questo v2 fonde i parziali in ordine di sottomissione e <code>Grid.newGrid()</code> usa una <code>LinkedHashMap</code> (l'ordine di iterazione delle celle determina l'ordine di risoluzione del pass 4, che e order-dependent). <code>StrategyEquivalence</code> trasforma questa proprieta in un check eseguibile. Distinzione da saper difendere: la non-determinismo di v1 <em>non e una race</em> — ogni accesso e sincronizzato — e order-dependence del risultato (<a href="cap-03-correttezza.html">Cap. 3 — Correttezza: safety e liveness</a>).</p>
+
+    <h3>Sincronizzazione con la EDT</h3>
+    <p><code>ViewFrame.render()</code> chiede il <code>repaint()</code> e poi si blocca su <code>RenderSynch.waitForFrameRendered(nf)</code> finche la EDT non ha davvero dipinto: rendering sincrono per evitare race tra paint e aggiornamento della view model. In piu <code>ViewModel</code> e un monitor che copia snapshot immutabili (<code>BallViewInfo</code> record), cosi la EDT non tocca mai lo stato vivo di <code>Board</code> (<a href="cap-07-monitor.html">Cap. 7 — Monitor</a>).</p>
+
+    <h3>Verifica con JPF: anche il fallimento e un deliverable</h3>
+    <p><code>verify-jpf.sh</code> lancia due run: il <code>Barrier</code> vero (atteso: nessun errore su <em>tutti</em> gli interleaving) e <code>UnsafeBarrier</code>, copia con una sola parola tolta (<code>synchronized</code> su <code>signalDone</code>). Il bug seminato e la lost update su <code>++count</code>: nessuna assert scatta, il programma semplicemente non avanza — JPF lo trova come deadlock, cioe una violazione di <em>liveness</em> invisibile a ogni test sugli stati (<a href="cap-09-verifica.html">Cap. 9 — Verifica formale e model checking</a>).</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Domande probabili</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Perche nel Buffer e nel Barrier il wait() sta dentro un while e non un if?</summary>
+        <p>Java implementa i monitor con disciplina signal-and-continue: chi viene notificato non entra subito, deve riacquisire il lock, e nel frattempo la condizione puo essere tornata falsa (un altro consumatore ha svuotato la coda, o e arrivato un risveglio spurio). Il <code>while</code> ricontrolla la condizione a ogni risveglio; con un <code>if</code> si procederebbe su una condizione non piu vera. Riferimento nel codice: <code>Buffer.next()</code> e <code>Barrier.await()</code>.</p>
+      </details>
+
+      <details>
+        <summary>A cosa serve la guardia di generazione nel Barrier? Cosa succederebbe senza?</summary>
+        <p>Il <code>Barrier</code> e un oggetto longevo riusato a ogni frame. Senza guardia, un report in ritardo di un round precedente (es. un worker interrotto/lento) verrebbe contato nel round corrente: <code>count</code> salirebbe due volte per lo stesso worker e il main potrebbe sbloccarsi con risultati mancanti o duplicati. <code>signalDone(gen, ...)</code> confronta il round dichiarato con quello corrente e scarta i segnali stantii. In v2 la guardia non serve piu: <code>invokeAll</code> non riusa nulla tra i round, quindi la situazione e irrappresentabile invece che difesa.</p>
+      </details>
+
+      <details>
+        <summary>Il tuo programma puo andare in deadlock? Perche no?</summary>
+        <p>Ogni monitor ha un solo lock e nessun metodo di un monitor chiama un altro monitor tenendo il proprio lock (niente hold-and-wait annidato, quindi niente attesa circolare tra i quattro requisiti di Coffman). L'unico blocco e su condizioni (<code>wait</code>) sempre accoppiate a un <code>notifyAll</code> raggiungibile: il barrier si sblocca quando l'ultimo worker riporta, il buffer quando qualcuno produce. Il rischio residuo — un worker muore e il barrier aspetta per sempre — e gestito da interrupt in <code>close()</code> e verificato con il deadlock detector di JPF sul protocollo del barrier.</p>
+      </details>
+
+      <details>
+        <summary>Perche la risoluzione delle collisioni (pass 4) non e parallelizzata?</summary>
+        <p>Le coppie rilevate condividono palline: (A,B) e (B,C) scrivono entrambe B. Risolverle in parallelo sarebbe una race; mettere un lock per pallina eliminerebbe la race ma non l'<em>order-dependence</em> — il risultato fisico dipende dall'ordine di risoluzione — e il lavoro per coppia e troppo piccolo per ammortizzare il locking. Stessa analisi per il pass 5 (ogni iterazione scrive playerBall e botBall). La divisione e documentata nel commento di <code>PhysicsStrategy</code> e di <code>Board.updateState</code>.</p>
+      </details>
+
+      <details>
+        <summary>In v2 come sai che il main thread vede le scritture fatte dai task del pool?</summary>
+        <p>Per il Java Memory Model, le azioni di un task in un <code>ExecutorService</code> happen-before il ritiro del suo risultato via <code>Future.get()</code>. In <code>awaitAll</code> ogni risultato passa da <code>future.get()</code>, quindi il main vede tutte le scritture del task (posizioni delle palline incluse, anche nei task <code>Callable&lt;Void&gt;</code> di integrate). In v1 la stessa garanzia la dava il nostro monitor: <code>signalDone</code> e <code>await</code> sono <code>synchronized</code> sullo stesso lock, e unlock/lock stabiliscono l'happens-before.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'e tra la tua versione a thread e quella a task? Cosa hai guadagnato davvero?</summary>
+        <p>Tre cose misurabili e una concettuale. (1) Bilanciamento: chunk disaccoppiati dai thread (<code>chunksPerThread</code>), quindi niente attese al barrier per la partizione statica sfortunata. (2) Copertura: v2 parallelizza anche integrate e buildGrid, abbassando il residuo seriale che per Amdahl limita lo speedup di v1. (3) Determinismo: merge in ordine di sottomissione, quindi output identico al sequenziale (verificato da <code>StrategyEquivalence</code>). Concettuale: il task e il corpo del lavoro, la politica di esecuzione e del pool — la separazione che l'Executor Framework esiste per fornire.</p>
+      </details>
+
+      <details>
+        <summary>La versione a thread da risultati diversi tra un run e l'altro: e una race condition?</summary>
+        <p>No, e la distinzione va fatta con precisione. Ogni accesso condiviso in v1 e correttamente sincronizzato (nessun data race, JPF non trova errori sul barrier). Ma il <code>Barrier</code> aggrega i parziali in ordine di <em>completamento</em>, che varia tra run; il pass 4 risolve le collisioni in quell'ordine, e la risoluzione e order-dependent, quindi le posizioni finali possono differire negli ultimi bit. E un non-determinismo di scheduling sul risultato, non un accesso non sincronizzato — ed e esattamente la proprieta che rende il pass 4 non parallelizzabile.</p>
+      </details>
+
+      <details>
+        <summary>Come hai misurato lo speedup e cosa ti aspetti di vedere?</summary>
+        <p><code>PhysicsBenchmark</code>: board massive (4500 palline), warmup di almeno 20 frame, trial multipli, media del tempo di frame; sweep su numero di worker (1, 2, 4, ..., core disponibili) e, per l'executor, su chunk per thread (1, 2, 4). Atteso: speedup sublineare — Amdahl con i pass 4-6 seriali fissa il tetto; v1 sotto v2 a parita di worker perche parallelizza solo la detection e paga la partizione statica; l'effetto dei chunk visibile soprattutto con distribuzioni dense non uniformi e su core eterogenei.</p>
+      </details>
+
+      <details>
+        <summary>Cosa hai verificato con JPF, e perche hai incluso anche una versione rotta?</summary>
+        <p>Il monitor <code>Barrier</code> con 2 parti e 2 round (<code>jpf/TestBarrier</code>): safety con assert (nessun contributo perso o duplicato, la generazione avanza una volta per round) e liveness col deadlock detector di JPF, su <em>tutti</em> gli interleaving. La scala minima e scelta: con 1 parte non ci sono interleaving tra worker, con 1 round la guardia di generazione e irraggiungibile. <code>UnsafeBarrier</code> toglie <code>synchronized</code> da <code>signalDone</code>: la lost update su <code>++count</code> fa si che <code>notifyAll</code> non parta mai e <code>await()</code> penda per sempre — un fallimento di liveness che nessuna assert vede e che l'esecuzione normale quasi mai riproduce. Serve a dimostrare che "no errors detected" sul barrier vero significa qualcosa: lo stesso setup rileva un difetto reale.</p>
+      </details>
+
+      <details>
+        <summary>Ball.applyImpulse non e synchronized: come escludi una race sull'input del giocatore?</summary>
+        <p>Per confinamento: gli impulsi vengono applicati <em>solo</em> dal thread del main loop, che li estrae dai due <code>Buffer</code> con <code>poll()</code> prima di <code>updateState</code>. EDT e bot non toccano mai la pallina: producono <code>PlayerAction</code> (enum immutabile) nel buffer, che essendo un monitor e anche il punto di pubblicazione sicura. Lo stato vivo di <code>Board</code> e confinato al main thread; verso la EDT viaggiano solo gli snapshot immutabili copiati dentro il monitor <code>ViewModel</code>.</p>
+      </details>
+
+      <details>
+        <summary>Perche la griglia usa una LinkedHashMap e non una HashMap?</summary>
+        <p>La detection itera <code>grid.keySet()</code> e l'ordine delle coppie rilevate e l'ordine con cui il pass 4 — order-dependent — le risolve. Con <code>HashMap</code> l'ordine di iterazione dipende dalla storia di inserimento della tabella: costruire la griglia con una scansione sequenziale o fondendo N mappe parziali produce ordini diversi, quindi simulazioni misurabilmente diverse. <code>LinkedHashMap</code> fissa l'ordine a "prima apparizione scandendo le palline in ordine", indipendente da come e stato spartito il lavoro, a costo trascurabile. E il tassello che, insieme al merge in ordine di sottomissione, rende v2 identica alla baseline.</p>
+      </details>
+
+      <details>
+        <summary>Come termina in modo pulito il programma? Chi ferma chi?</summary>
+        <p>Cooperativamente, via interrupt. A fine partita (o uscita dal loop) <code>Sketch01</code> nel <code>finally</code> chiama <code>board.shutdown()</code> — che delega a <code>strategy.close()</code>: in v1 interrupt e join di ogni worker (il worker esce dal <code>next()</code> bloccante rilanciando lo stato di interrupt), in v2 <code>pool.shutdownNow()</code> piu <code>awaitTermination</code> — e poi interrompe e joina il thread del bot, che esce dalla <code>sleep</code>. <code>detect()</code> restituisce <code>null</code> se il chiamante viene interrotto a meta rendezvous e <code>updateState</code> abbandona il frame senza risolvere collisioni parziali.</p>
+      </details>
+
+      <details>
+        <summary>Il tuo Barrier e riutilizzabile come una CyclicBarrier? Quali assunzioni fa?</summary>
+        <p>Non del tutto: assume un <em>solo</em> thread in <code>await()</code> (il main). E await a resettare contatore, lista e generazione; se due thread aspettassero, il primo risveglio consumerebbe i risultati e resetterebbe il round sotto i piedi del secondo. Inoltre le parti non aspettano tra loro (i worker riportano e proseguono): e piu un rendezvous con aggregazione che una barriera simmetrica. L'assunzione e legittima nel design — il protocollo ha un solo coordinatore per costruzione — ma va dichiarata; il test JPF modella esattamente questo schema, non quello generale.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Punti deboli</h2>
+
+    <div class="callout warn">
+      <span class="callout-label">Mancanze rispetto alla consegna</span>
+      <p><strong>Il report non c'e ancora.</strong> La consegna richiede <code>doc/report.pdf</code> con analisi del problema, design (anche con reti di Petri), test di performance e verifica. Il materiale esiste sparso nei commenti di <code>PhysicsStrategy</code>, <code>ExecutorStrategy</code>, <code>Grid</code> e negli harness (<code>PhysicsBenchmark</code>, <code>StrategyEquivalence</code>, <code>verify-jpf.sh</code>), ma va consolidato: servono i numeri di benchmark effettivi della propria macchina (media, speedup per worker/chunk) e almeno una rete di Petri del protocollo main/worker/barrier di v1 (<a href="cap-02-modellazione.html">Cap. 2</a>).</p>
+    </div>
+
+    <ul>
+      <li><strong>Codice morto nel package:</strong> <code>CalculateGrid</code> e <code>Loc</code> non sono referenziati da nessuna strategia — residui di un tentativo precedente sul bucketing. Da rimuovere prima della consegna, o all'orale sembrano parte del design.</li>
+      <li><strong>In v1 solo la detection e parallela.</strong> Integrate e buildGrid restano sul thread chiamante. E una scelta documentata (v1 e la base di confronto che v2 migliora), ma alla domanda "perche non avete dato anche integrate ai worker in v1?" bisogna rispondere nel merito: farlo col protocollo buffer+barrier avrebbe richiesto un rendezvous per fase, triplicando i punti di sincronizzazione per frame — costo che l'Executor assorbe in <code>invokeAll</code>.</li>
+      <li><strong>Il Buffer e illimitato.</strong> Niente back-pressure: la coda puo crescere senza limite se il produttore corre piu del consumatore. In pratica i produttori sono lenti (tastiera, bot con sleep fino a 1.5 s), ma il corso tratta il bounded buffer come caso canonico (<a href="cap-05-semafori.html">Cap. 5</a>): aspettarsi la domanda "perche non bounded?" e saper rispondere che qui il rate e strutturalmente basso e il poll non bloccante del game loop svuota tutto a ogni frame.</li>
+      <li><strong>Il game loop non ha frame cap.</strong> Gira alla massima velocita possibile con <code>dt</code> misurato; niente sleep verso un target fps. Sulla board minimal consuma un core intero per nulla. Facile da difendere come scelta di semplicita, ma va riconosciuto.</li>
+      <li><strong>Chiusura della finestra brutale:</strong> <code>ViewFrame</code> fa <code>System.exit(-1)</code> su windowClosing, bypassando <code>shutdown()</code>/interrupt. Incoerente con la terminazione cooperativa curata altrove.</li>
+      <li><strong>RenderSynch viene dallo sketch del docente.</strong> Legittimo riusarlo, ma va saputo spiegare come proprio: perche il rendering e sincrono, perche il monitor conta i frame, e quale sarebbe l'alternativa (double buffering) e perche non e stata adottata.</li>
+      <li><strong>La verifica JPF copre solo il Barrier.</strong> <code>Buffer</code> e <code>RenderSynch</code> non hanno harness; se all'orale chiedono "perche proprio il barrier?", la risposta e che e il monitor col protocollo piu ricco (round, generazioni, aggregazione) e l'unico con un fallimento non banale da esibire — ma la scelta va argomentata, non subita. Nota pratica: <code>verify-jpf.sh</code> richiede JDK 11 per jpf-core mentre il progetto compila a 17; sapere il perche (jpf-core non builda su 17+).</li>
+      <li><strong>StrategyEquivalence e un main, non un test.</strong> Niente JUnit ne exit code utile in CI: l'equivalenza va letta a occhio sull'output. Per il report conviene almeno riportarne l'output testuale.</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">Da preparare con cura extra</span>
+      <p>(1) La distinzione race vs order-dependence, con <code>StrategyEquivalence</code> come prova; (2) il perche di ogni singola parola di <code>Barrier.await()</code> — while, notifyAll e non notify, il reset dentro await; (3) la lettura dei numeri del benchmark alla luce di Amdahl (residuo seriale = pass 4-6); (4) la run JPF di <code>UnsafeBarrier</code>: saper raccontare l'interleaving che perde l'incremento senza guardare il codice.</p>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-09-verifica.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-10-async.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: codice in <code>assignments/assignment-01/src/pcd/sketch01</code> (repo pcd-2025-2026) e consegna <code>README.md</code> v1.0.1 · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+<script>
+hljs.highlightAll();
+</script>
+</body>
+</html>

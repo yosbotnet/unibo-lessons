@@ -1,0 +1,1375 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 13 — Il modello ad attori · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bespoke-compare { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .bespoke-compare > div { flex: 1; min-width: 220px; border: 1px solid var(--lk-border, #d7d2c8); border-radius: 6px; padding: .75rem; background: #f8fafc; }
+  .bespoke-compare > div h4 { margin: 0 0 .5rem; font-size: .9rem; text-transform: uppercase; letter-spacing: .04em; color: var(--lk-muted, #666); }
+  .bespoke-compare > div ul { margin: 0; padding-left: 1rem; font-size: .875rem; }
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-12-message-passing.html">&larr; Cap. 12 — Message passing e canali</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-14-attori-avanzati.html">Cap. 14 — Attori avanzati: timer e cluster &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Message passing e attori · Capitolo 13</div>
+    <h1>Il modello ad attori</h1>
+    <div class="lk-meta"><span>~50 min di lettura</span><span>12 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Perch&eacute; il modello ad attori</a></li>
+      <li><a href="#s2">Il modello di Carl Hewitt</a></li>
+      <li><a href="#s3">Le tre primitive: send, create, become</a></li>
+      <li><a href="#s4">Semantica: macro-step, incapsulamento, fairness</a></li>
+      <li><a href="#s5">L'event loop degli attori</a></li>
+      <li><a href="#s6">Implementazioni: panoramica e ActorFoundry</a></li>
+      <li><a href="#s7">Pekko (ex Akka): attori sulla JVM</a></li>
+      <li><a href="#s8">Erlang: processi, mailbox e pattern matching</a></li>
+      <li><a href="#s9">Pattern di messaggistica e actor idioms</a></li>
+      <li><a href="#s10">Spaghetti asincrono: future, stashing e LSC</a></li>
+      <li><a href="#s11">Il problema della proattivit&agrave;</a></li>
+      <li><a href="#s12">Supervisione e fault tolerance</a></li>
+      <li><a href="#s13">Delivery semantics e ordinamento dei messaggi</a></li>
+      <li><a href="#s14">Testing degli attori</a></li>
+      <li><a href="#s15">Errori comuni e best practice</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <!-- ============================================================ -->
+  <section id="s1" data-src="PCD-2026-04-27.html#s1,PCD-2026-03-30.html#s16,PCD-2026-05-04.html#s1">
+    <h2>1. Perch&eacute; il modello ad attori</h2>
+
+    <p>Il modello ad attori nasce come alternativa al multi-threading tradizionale per la programmazione concorrente e distribuita. L'idea centrale &egrave; che tutto nel sistema sia un attore: un'entit&agrave; autonoma, puramente reattiva, che comunica solo tramite scambio asincrono di messaggi.</p>
+
+    <p>Nella lezione, il Prof. Ricci sottolinea come il modello ad attori sia diventato sempre pi&ugrave; rilevante nel panorama mainstream. Framework come Akka (ora Pekko sulla JVM), Erlang, HTML5 Web Workers e Dart Isolates sono esempi concreti di adozione di questo modello. La ragione principale &egrave; che gli attori offrono una via d'uscita dai problemi classici della programmazione concorrente: race condition, deadlock, complessit&agrave; della sincronizzazione manuale.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Un attore &egrave; come un "oggetto concorrente": incapsula stato <em>e</em> flusso di controllo. A differenza degli oggetti classici dell'OOP, dove lo stato &egrave; protetto ma il metodo viene eseguito nel thread del chiamante, un attore possiede un proprio flusso di controllo logico e processa i messaggi uno alla volta.</p>
+    </div>
+
+    <p>Il Prof. Ricci ricorda come Alan Kay, padre della OOP, intendesse originariamente gli oggetti proprio come entit&agrave; che comunicano tramite message passing. Il modello ad attori realizza compiutamente questa visione: ogni attore ha un identificatore unico, una mailbox (coda di messaggi) e un comportamento che determina come reagire ai messaggi ricevuti.</p>
+
+    <div class="bespoke-compare">
+      <div>
+        <h4>Thread classici</h4>
+        <ul>
+          <li>Memoria condivisa</li>
+          <li>Lock / synchronized</li>
+          <li>Race condition frequenti</li>
+          <li>Deadlock possibili</li>
+          <li>Debug complesso</li>
+        </ul>
+      </div>
+      <div>
+        <h4>Attori</h4>
+        <ul>
+          <li>Nessuno stato condiviso</li>
+          <li>Solo message passing</li>
+          <li>Race condition eliminate</li>
+          <li>Deadlock gestiti dal modello</li>
+          <li>Isolamento naturale</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span>
+      <p>Il modello Actor &egrave; una delle alternative al multi-threading che potete adottare nel secondo assignment. &Egrave; importante capire la differenza fondamentale: mentre nei thread la comunicazione avviene tramite memoria condivisa (con i relativi problemi di race condition e lock), negli attori la comunicazione avviene esclusivamente tramite <strong>messaggi asincroni</strong>.</p>
+    </div>
+
+    <p>L'idea centrale &egrave;: <strong>everything is an actor</strong>. Ogni entit&agrave; computazionale &egrave; un attore, con:</p>
+    <ul>
+      <li>un <strong>identificatore unico</strong> (actor reference);</li>
+      <li>uno <strong>stato incapsulato</strong> (non accessibile direttamente dall'esterno);</li>
+      <li>un <strong>comportamento</strong> (la logica di reazione ai messaggi);</li>
+      <li>una <strong>mailbox</strong> (coda di messaggi in ingresso).</li>
+    </ul>
+
+    <h3>Il modello in 90 secondi</h3>
+    <p>Nella lezione di ripasso il messaggio chiave &egrave; condensato cos&igrave;: un actor &egrave; uno stato incapsulato che reagisce solo ai messaggi. Niente accesso diretto allo stato altrui, niente controllo condiviso, solo comunicazione asincrona.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p><strong>Actor = mailbox + stato + comportamento.</strong> Il controllo vive nel messaggio che arriva, non in una variabile condivisa.</p>
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>Concetto</th><th>In pratica</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>send</code></td><td>Invia un messaggio senza bloccare il mittente</td></tr>
+        <tr><td><code>create</code></td><td>Istanzia un nuovo actor con un comportamento preciso</td></tr>
+        <tr><td><code>become</code></td><td>Cambia il comportamento per il prossimo messaggio</td></tr>
+        <tr><td>macro-step</td><td>Un handler si completa prima di passare al messaggio successivo</td></tr>
+      </tbody>
+    </table>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">send</button><button class="lk-tab">become</button><button class="lk-tab">warning</button>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-java">send(other, "ping", self(), "ciao")
+// invio asincrono: il mittente continua subito</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-java">public void ping(ActorName caller) {
+  send(caller, "alive", self());
+  become(new WaitingForAck());
+}</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Gli actor semplificano il ragionamento sulle race, ma diventano difficili da leggere se spezzi la logica in troppi handler senza un protocollo chiaro.</p>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Un handler non deve bloccare. Se ti serve attesa, buffering o chaining: sposta la logica nel protocollo, non in un while infinito.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s2" data-src="PCD-2026-04-27.html#s2,PCD-2026-04-24.html#s12,PCD-2026-05-11.html#s9,PCD-2026-04-17.html#s12">
+    <h2>2. Il modello di Carl Hewitt</h2>
+
+    <p>Il <strong>modello Actor</strong> fu originariamente introdotto da <strong>Carl Hewitt</strong> e colleghi al MIT negli anni '70, nel contesto dell'intelligenza artificiale. Successivamente sviluppato da <strong>Gul Agha</strong> e <strong>Akinori Yonezawa</strong> negli anni '80 e '90 come unificazione fra OOP e concorrenza: la cosiddetta <em>Concurrent Object-Oriented Programming</em>. Il punto di partenza &egrave; la domanda: <em>"come possiamo modellare il calcolo concorrente in modo matematico?"</em></p>
+
+    <p>La risposta &egrave; sorprendentemente semplice: l'attore &egrave; il <strong>primitivo universale</strong> del calcolo concorrente digitale. Il modello Actor &egrave; una <strong>teoria matematica</strong> che tratta gli attori come i primitivi universali della computazione concorrente. Tutto — incluse le strutture di controllo tradizionali (if, while, procedure) — pu&ograve; essere modellato come pattern di scambio di messaggi tra attori. Ogni entit&agrave; nel sistema &egrave; un attore con un identificatore univoco e una mailbox (coda di messaggi).</p>
+
+    <ol class="lk-timeline">
+      <li><span class="lk-tl-when">1973</span> — Carl Hewitt introduce il modello Actor con "A Universal Modular ACTOR Formalism", come teoria matematica per il calcolo concorrente</li>
+      <li><span class="lk-tl-when">1977</span> — Hewitt pubblica "Viewing Control Structures as Patterns of Passing Messages" (Journal of AI)</li>
+      <li><span class="lk-tl-when">1986</span> — Gul Agha formalizza il modello nella tesi "Actors: A Model of Concurrent Computation in Distributed Systems"</li>
+      <li><span class="lk-tl-when">1987</span> — Yonezawa e Tokoro curano "Concurrent Object Oriented Programming" (MIT Press); nello stesso anno nasce Erlang in Ericsson per applicazioni telecom</li>
+      <li><span class="lk-tl-when">1990</span> — Agha pubblica su CACM: il modello Actor come unificazione di OOP e concorrenza</li>
+      <li><span class="lk-tl-when">2009</span> — Akka: framework actor industrial-grade per la JVM</li>
+      <li><span class="lk-tl-when">2000+</span> — Erlang, Scala/Akka (poi Pekko), HTML5 Web Workers, Dart isolates e sistemi cloud-native portano gli attori nel mainstream</li>
+    </ol>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Il modello Actor &egrave; fortemente legato all'idea originale di OOP secondo <strong>Alan Kay</strong>: il punto fondamentale dell'OOP non erano le classi o l'ereditariet&agrave;, ma il <strong>message passing</strong> ("The key point was message passing"). Gli oggetti sono entit&agrave; autonome che comunicano scambiandosi messaggi — esattamente come gli attori. Con una differenza: un attore incapsula stato, comportamento <strong>e</strong> un flusso di controllo logico; gli oggetti classici non incapsulano il flusso di controllo.</p>
+    </div>
+
+    <p>Un <strong>attore</strong> &egrave; dunque un'entit&agrave; computazionale che incapsula stato, comportamento e un flusso di controllo logico. A differenza degli oggetti classici, gli attori sono <strong>autonomi</strong> e <strong>reattivi</strong>: lavorano solo quando ricevono un messaggio.</p>
+
+    <pre class="mermaid">
+flowchart LR
+    subgraph A1 [Attore A]
+        S1[(Stato)] &amp; C1[Comportamento] &amp; ID1[ID]
+    end
+    subgraph A2 [Attore B]
+        S2[(Stato)] &amp; C2[Comportamento] &amp; ID2[ID]
+    end
+    A1 -->|messaggio asincrono| A2
+    A2 -->|messaggio asincrono| A1
+    </pre>
+
+    <h3>I tre pilastri del modello</h3>
+    <p>Un attore &egrave; definito da tre elementi essenziali:</p>
+    <ul>
+      <li><strong>Un identificatore unico</strong> — permette ad altri attori di inviargli messaggi senza conoscere la sua posizione fisica (location transparency).</li>
+      <li><strong>Una mailbox</strong> — una coda (tipicamente FIFO) dove i messaggi in arrivo vengono accodati.</li>
+      <li><strong>Un comportamento</strong> — il codice che definisce come l'attore reagisce al messaggio corrente (send, create nuovi attori, become).</li>
+    </ul>
+
+    <pre class="mermaid">
+flowchart LR
+    A1[Attore 1] -->|send msg| A2[Attore 2]
+    A2 -->|send reply| A1
+    A1 -->|create| A3[Attore 3]
+    A3 -->|become| A3b[Attore 3 con nuovo behavior]
+    </pre>
+
+    <p>Nonostante le origini accademiche, il modello Actor ha trovato ampia adozione industriale: Erlang per sistemi telecom estremamente robusti, Akka/Pekko per applicazioni enterprise su JVM, HTML5 Web Workers per il parallelismo nel browser, Dart isolates, e molti altri framework. &Egrave; considerato un'alternativa valida al multithreading tradizionale per costruire sistemi concorrenti scalabili.</p>
+
+    <div id="se-actor-vita"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Lo state explorer illustra il ciclo di vita di un attore: dalla creazione all'attesa di messaggi (ATTIVO), all'esecuzione atomica del gestore (ELABORAZIONE), fino alla terminazione. Un attore &egrave; puramente reattivo: pu&ograve; solo rispondere a messaggi, non iniziare azioni autonomamente.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s3" data-src="PCD-2026-04-27.html#s3,PCD-2026-04-24.html#s13,PCD-2026-05-11.html#s10">
+    <h2>3. Le tre primitive: send, create, become</h2>
+
+    <p>Il modello ad attori definisce solo <strong>tre primitive</strong> per comporre il comportamento di un attore. Ogni altra costruzione (sincronizzazione, ordinamento, pattern) &egrave; derivabile da queste tre.</p>
+
+    <table>
+      <thead>
+        <tr><th>Primitiva</th><th>Azione</th><th>Analogia sequenziale</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>send</code></td><td>Invia asincronamente un messaggio a un attore specificato</td><td>Equivalente alla chiamata di procedura (procedure invocation)</td></tr>
+        <tr><td><code>create</code></td><td>Crea un attore con il comportamento specificato</td><td>Equivalente all'astrazione di procedura (procedure abstraction)</td></tr>
+        <tr><td><code>become</code></td><td>Specifica un nuovo comportamento (e stato locale) per il prossimo messaggio</td><td>Assegnazione di stato: dota l'attore di comportamento history-sensitive</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout idea"><span class="callout-label">Idea chiave</span>
+      <p>Il professore sottolinea l'eleganza del modello: con solo tre primitive si pu&ograve; esprimere qualsiasi computazione concorrente. <code>send</code> &egrave; l'equivalente concorrente della chiamata di procedura; <code>create</code> &egrave; l'equivalente della definizione di procedura; <code>become</code> permette la storia (cambio di stato nel tempo).</p>
+    </div>
+
+    <div class="lk-hex-grid">
+      <div class="lk-hex-card"><span class="num">send</span><span class="label">Invia un msg asincrono a un attore</span></div>
+      <div class="lk-hex-card"><span class="num">create</span><span class="label">Crea un nuovo attore con un dato behavior</span></div>
+      <div class="lk-hex-card"><span class="num">become</span><span class="label">Cambia il behavior per il prossimo messaggio</span></div>
+    </div>
+
+    <p><strong>Send</strong> &egrave; per la programmazione concorrente ci&ograve; che l'invocazione di procedura &egrave; per la programmazione sequenziale: il mattoncino fondamentale. <strong>Create</strong> &egrave; l'analogo dell'astrazione di procedura: permette di definire nuovi attori. <strong>Become</strong> permette all'attore di cambiare il proprio comportamento (e quindi il proprio stato locale) per il messaggio successivo, dando agli attori una <em>history-sensitive behaviour</em> necessaria per modellare oggetti mutabili condivisi.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Send</button>
+        <button class="lk-tab">Create</button>
+        <button class="lk-tab">Become</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Send</strong> — invia un messaggio asincrono a un attore specificato. &Egrave; per la programmazione concorrente ci&ograve; che l'invocazione di procedura &egrave; per la programmazione sequenziale: l'operazione fondamentale di interazione.</p>
+        <p>In Pekko si usa l'operatore <code>tell</code> o <code>!</code>: <code>actorRef ! messaggio</code>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Create</strong> — crea un nuovo attore con un comportamento specificato. &Egrave; per la programmazione concorrente ci&ograve; che l'astrazione di procedura &egrave; per la programmazione sequenziale.</p>
+        <p>In Pekko: <code>context.spawn(behavior, "nome")</code>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Become</strong> — specifica un nuovo comportamento che l'attore user&agrave; per rispondere al <em>prossimo</em> messaggio. Questo d&agrave; agli attori la capacit&agrave; di avere un comportamento <em>history-sensitive</em>, necessario per modellare dati mutabili condivisi.</p>
+        <p>In Pekko: <code>context.become(nuovoBehavior)</code> restituito dalla receive.</p>
+      </div>
+    </div>
+
+    <p>Un aspetto cruciale &egrave; che un attore pu&ograve; comunicare solo con attori di cui conosce l'identificatore. Questi identificatori possono essere scambiati all'interno dei messaggi, permettendo la costruzione di topologie di comunicazione dinamiche.</p>
+
+    <p>Un'altra osservazione importante: a differenza degli oggetti classici dell'OOP, gli attori incapsulano anche il controllo — un oggetto normale non ha un flusso di controllo proprio (&egrave; passivo), mentre un attore &egrave; intrinsecamente <strong>attivo</strong>. Tuttavia, gli attori sono disaccoppiati dai thread fisici del sistema operativo: sono <strong>entit&agrave; logiche</strong>. Come le goroutine di Go, una piattaforma attori pu&ograve; gestire milioni di attori su pochi thread fisici.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Le tre primitive sono state enunciate da Hewitt nel 1973 e rimangono valide oggi. Ogni framework moderno le implementa con nomi e sintassi diversi, ma la semantica &egrave; sempre quella.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s4" data-src="PCD-2026-04-27.html#s4,PCD-2026-04-24.html#s14,PCD-2026-04-17.html#s13">
+    <h2>4. Semantica: macro-step, incapsulamento, fairness</h2>
+
+    <p>La semantica del modello Actor si fonda su cinque aspetti chiave:</p>
+
+    <table>
+      <thead>
+        <tr><th>Principio</th><th>Descrizione</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Comportamento puramente reattivo</strong></td><td>Un attore lavora solo quando riceve un messaggio. Nessun messaggio = bloccato.</td></tr>
+        <tr><td><strong>Incapsulamento dello stato</strong></td><td>Un attore non pu&ograve; accedere direttamente allo stato interno di un altro attore.</td></tr>
+        <tr><td><strong>Macro-step semantics</strong></td><td>Una volta ricevuto un messaggio, la computazione viene eseguita <em>completamente</em> prima di servire un altro messaggio (run-to-completion).</td></tr>
+        <tr><td><strong>Fairness</strong></td><td>Un messaggio inviato a un attore viene prima o poi recapitato e processato.</td></tr>
+        <tr><td><strong>Location transparency</strong></td><td>Per inviare un messaggio a un attore basta conoscere la sua identit&agrave;, non la sua locazione fisica.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Macro-step semantics (run-to-completion)</h3>
+    <p>Quando un attore riceve un messaggio, l'intero handler viene eseguito completamente prima di passare al messaggio successivo. Questo elimina alla radice il problema delle race condition sullo stato interno. Gli handler devono per&ograve; avere un comportamento <strong>non bloccante</strong> — l'unico punto di blocco &egrave; gestito dal ciclo eventi dell'attore.</p>
+
+    <pre class="mermaid">
+flowchart LR
+    A[Attore] --> B[mailbox: msg1, msg2, msg3]
+    B --> C[estrai msg1]
+    C --> D[esegui handler]
+    D --> E[msg1 completato]
+    E --> F[estrai msg2]
+    F --> G[esegui handler]
+    G --> H[msg2 completato]
+    </pre>
+
+    <p>Le conseguenze della macro-step semantics sono profonde:</p>
+    <ul>
+      <li><strong>Assenza di race condition</strong> — lo stato interno non &egrave; mai accessibile concorrentemente: un handler non viene mai interrotto da un altro handler sullo stesso attore.</li>
+      <li><strong>Semplicit&agrave; di ragionamento</strong> — il programmatore pu&ograve; ragionare sul comportamento dell'attore come se fosse sequenziale: ogni messaggio viene elaborato in un contesto stabile e consistente.</li>
+      <li><strong>Problema dello "spaghetti asincrono"</strong> — la logica applicativa viene frammentata in handler separati, rendendo il codice difficile da seguire quando ci sono conversazioni complesse tra attori.</li>
+      <li><strong>Nessun blocking call</strong> — un handler non deve mai bloccare, altrimenti blocca l'intero event loop dell'attore: se un handler deve fare una richiesta a un altro attore e attendere la risposta, non pu&ograve; semplicemente bloccarsi — deve organizzarsi in callback/handler separati.</li>
+    </ul>
+
+    <div id="ac-macrostep"></div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>La <strong>macro-step semantics</strong> &egrave; cruciale: evita le race condition perch&eacute; l'handler viene eseguito atomicamente rispetto agli altri messaggi. Tuttavia, complica la programmazione perch&eacute; un handler non pu&ograve; bloccarsi in attesa di un altro messaggio — bloccherebbe tutto l'attore.</p>
+    </div>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>La semantica macro-step &egrave; una benedizione per la correttezza ma una maledizione per la leggibilit&agrave;. Il Prof. Ricci cita il problema dello <em>"asynchronous spaghetti"</em> (Ricci &amp; Santi, AGERE! 2012): la logica applicativa viene spezzata in una serie di handler disconnessi, ciascuno dei quali reagisce a un singolo messaggio.</p>
+    </div>
+
+    <p>La macro-step semantics &egrave; identica a quella delle architetture event-driven: GUI management, JavaScript con callback, Node.js. Tutte condividono lo stesso modello: un ciclo eventi che estrae un evento, esegue il gestore fino al completamento, poi passa al prossimo evento.</p>
+
+    <h3>Incapsulamento dello stato</h3>
+    <p>Un attore non pu&ograve; accedere direttamente allo stato interno di un altro attore. L'unico modo per interagire con un attore &egrave; inviargli un messaggio. Questo incapsulamento &egrave; molto pi&ugrave; forte di quello dell'OOP classico: non solo i dati, ma anche <em>il flusso di controllo</em> &egrave; incapsulato. L'attore decide <em>quando</em> e <em>come</em> processare un messaggio, e pu&ograve; persino rimandare messaggi (stashing).</p>
+
+    <h3>Fairness</h3>
+    <p>La <strong>fairness</strong> &egrave; un altro punto cruciale. Hewitt voleva un modello efficace anche nei sistemi distribuiti, quindi stabil&igrave; che: se un attore invia un messaggio, questo sar&agrave; <em>eventualmente</em> recapitato alla mailbox del destinatario. Non c'&egrave; garanzia sul tempo, n&eacute; sull'ordine. Questa assunzione &egrave; volutamente debole per essere realizzabile in ambienti distribuiti reali (diversamente da UDP, che non garantisce neppure la consegna).</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>La fairness in message delivery &egrave; un assunto fondamentale del modello Actor: un messaggio inviato viene <strong>eventualmente</strong> recapitato ed elaborato. Non ci sono garanzie temporali n&eacute; di ordinamento. La frase "eventually delivered" &egrave; un concetto chiave da ricordare.</p>
+    </div>
+
+    <h3>Location transparency</h3>
+    <p>La <strong>location transparency</strong> permette di inviare messaggi a un attore conoscendo solo la sua identit&agrave; (actor ref), senza sapere se risiede sullo stesso processo, sulla stessa macchina, o su un nodo remoto. Questo &egrave; ci&ograve; che rende il modello Actor naturalmente adatto a sistemi distribuiti: lo stesso meccanismo funziona per attori locali e remoti.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>La <strong>location transparency</strong> &egrave; il pilastro che permette ad Akka/Pekko Cluster di funzionare: un ActorRef si comporta allo stesso modo sia che l'attore sia locale o remoto. Il professore ha sottolineato pi&ugrave; volte questo concetto durante la lezione.</p>
+    </div>
+
+    <h3>State Explorer: ciclo di vita con become</h3>
+    <div id="se-actor-become"></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s5" data-src="PCD-2026-04-17.html#s14,PCD-2026-03-30.html#s17">
+    <h2>5. L'event loop degli attori</h2>
+
+    <p>L'implementazione pratica del modello attore si basa su un <strong>event loop</strong> implicito o esplicito. L'architettura di controllo di un attore &egrave; un <strong>message loop</strong> (implicitamente gestito dal framework):</p>
+
+    <h3>Event loop implicito</h3>
+    <pre><code class="language-java">loop {
+  msg &lt;- waitForMsg()            // attesa bloccante (solo qui)
+  handler &lt;- selectHandler(msg)  // dispatch del messaggio
+  execute(handler)               // esecuzione atomica
+}</code></pre>
+    <p>Esempi: ActorFoundry, Akka/Pekko, Vert.x, Web Workers.</p>
+
+    <h3>Event loop esplicito</h3>
+    <p>Il programmatore scrive il loop di ricezione e usa pattern matching. Esempio: Erlang.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>La macro-step semantics &egrave; condivisa da entrambi gli approcci: un handler viene eseguito completamente prima di ricevere il messaggio successivo. L'unico punto di blocco &egrave; la receive. Questo implica che gli handler devono avere un comportamento <strong>non bloccante</strong> — la stessa sfida della never-blocking rule vista per gli event loop.</p>
+    </div>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Vantaggi</button>
+        <button class="lk-tab">Svantaggi</button>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li>Niente race condition (grazie alla macro-step semantics).</li>
+          <li>Ragionamento semplificato sul programma.</li>
+          <li>Disaccoppiamento tra concorrenza logica (N attori) e fisica (M thread OS).</li>
+          <li>Migliaia/centinaia di migliaia di attori possono coesistere su pochi thread.</li>
+        </ul>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li>Problema dello <strong>"spaghetti asincrono"</strong>.</li>
+          <li>Difficolt&agrave; a esprimere comportamenti pro-attivi.</li>
+          <li>Complesso coordinare attori che devono attendersi prima di procedere.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p>Il widget seguente mostra il ciclo di vita di un attore visto dal punto di vista del message loop:</p>
+
+    <div id="se-actor-loop"></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s6" data-src="PCD-2026-03-30.html#s18,PCD-2026-04-24.html#s15,PCD-2026-04-17.html#s15,PCD-2026-05-11.html#s11">
+    <h2>6. Implementazioni: panoramica e ActorFoundry</h2>
+
+    <p>Il modello Actor ha diverse implementazioni, con varianti semantiche significative. Le pi&ugrave; importanti presentate a lezione sono tre: <strong>Erlang</strong> (linguaggio nativo), <strong>Akka/Pekko</strong> (framework JVM), e <strong>ActorFoundry</strong> (framework accademico Java).</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Erlang</button>
+        <button class="lk-tab">Akka (Java)</button>
+        <button class="lk-tab">ActorFoundry</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Erlang &egrave; un <strong>linguaggio funzionale</strong> sviluppato in Ericsson per applicazioni di telecomunicazione. La sua VM (BEAM) gestisce processi leggeri come entit&agrave; logiche, non legate a thread OS. Un programma Erlang &egrave; un insieme di funzioni; i processi (attori) vengono creati con <code>spawn</code>, comunicano con <code>!</code> (send) e ricevono con <code>receive</code> su pattern matching.</p>
+        <pre><code class="language-erlang">counter(Sum) ->
+    receive
+        {inc} ->
+            counter(Sum + 1);
+        {getValue, Pid} ->
+            Pid ! {count_value, Sum},
+            counter(Sum)
+    end.</code></pre>
+        <p>Erlang &egrave; noto per l'estrema efficienza: centinaia di migliaia di processi su un singolo host.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Akka &egrave; un framework industriale per Java e Scala, che supersede la vecchia libreria Scala Actors. Offre attori tipati (Akka Typed), cluster, sharding, persistence, e un ricco ecosistema. Gli attori Akka sono definiti tramite <code>Behaviors</code> e <code>ActorContext</code>.</p>
+        <pre><code class="language-java">public class MyUntypedActor extends UntypedActor {
+    LoggingAdapter log = Logging.getLogger(getContext().system(), this);
+    public void onReceive(Object message) throws Exception {
+        if (message instanceof String) {
+            log.info("Received String message: {}", message);
+            getSender().tell("received");
+        } else unhandled(message);
+    }
+}</code></pre>
+        <p>Akka (oggi nel fork Apache Pekko) &egrave; la piattaforma di riferimento per il corso, ed &egrave; quella che il professore usa in tutti gli esempi pratici.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>ActorFoundry &egrave; un framework accademico Java sviluppato dal gruppo di Agha all'Universit&agrave; dell'Illinois. Usa annotazioni <code>@message</code> per definire gli handler. Supporta ottimizzazioni come <code>Kilim</code> e constraint di sincronizzazione locale.</p>
+        <pre><code class="language-java">public class PingActor extends Actor {
+    ActorName otherPinger;
+    @message
+    public void start(ActorName other) {
+        otherPinger = other;
+        send(otherPinger, "ping", self(), "...");
+    }
+}</code></pre>
+        <p>&Egrave; principalmente usato per scopi di ricerca e didattici.</p>
+      </div>
+    </div>
+
+    <h3>Explicit vs Implicit receive</h3>
+    <p>Una differenza fondamentale tra i framework &egrave; come gestiscono il message loop:</p>
+    <ul>
+      <li><strong>Implicit receive</strong> (Akka/Pekko, ActorFoundry): il loop di ricezione dei messaggi &egrave; nascosto all'interno del framework. Il programmatore definisce solo gli handler. Ci&ograve; &egrave; semplice ma porta all'<em>async spaghetti</em>.</li>
+      <li><strong>Explicit receive</strong> (Erlang): il programmatore scrive esplicitamente il loop <code>receive ... end</code>, con pattern matching e guardie. Pi&ugrave; flessibile e con maggiore controllo, ma anche pi&ugrave; verboso e con pi&ugrave; disciplina richiesta. Supporta la <em>selective receive</em> con guardie.</li>
+    </ul>
+
+    <h3>ActorFoundry: esempio concreto in Java</h3>
+    <p><strong>ActorFoundry</strong> &egrave; un framework accademico basato su Java, sviluppato dal gruppo di Gul Agha all'Universit&agrave; dell'Illinois (UIUC). Include ottimizzazioni e idee da altri lavori di ricerca come Kilim. Mostra in modo chiaro e minimalista le primitive fondamentali del modello: il programmatore estende la classe <code>Actor</code> e definisce i metodi che saranno invocati alla ricezione di un messaggio.</p>
+
+    <p>Il codice seguente mostra un classico <em>ping-pong</em> fra attori:</p>
+
+    <div id="ac-actorfoundry"></div>
+
+    <p>Analizziamo gli elementi chiave:</p>
+    <ul>
+      <li><code>extends Actor</code>: ogni attore estende la classe base <code>Actor</code></li>
+      <li><code>@message</code>: annotation che marca un metodo come gestore di messaggi — quando arriva un messaggio, il framework invoca automaticamente il metodo corrispondente</li>
+      <li><code>send(target, "messageName", args...)</code>: primitiva di invio asincrono — il primo argomento &egrave; l'attore destinatario, il secondo &egrave; una stringa che identifica il tipo di messaggio (corrispondente al nome del metodo)</li>
+      <li><code>self()</code>: restituisce l'identificatore dell'attore corrente (di tipo <code>ActorName</code>)</li>
+      <li><code>create(Classe.class)</code>: crea un nuovo attore specificando la classe che ne definisce il comportamento</li>
+    </ul>
+
+    <p>In <code>PingBoot</code>, l'attore di boot crea due attori <code>PingActor</code> e avvia il protocollo inviando a <code>pinger1</code> il messaggio <code>"start"</code> con il riferimento a <code>pinger2</code>. I due attori si scambiano messaggi <code>"ping"</code> e <code>"alive"</code>, stampando il tutto sullo stdout tramite l'attore standard <code>stdout</code>.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>La notazione <code>send(otherPinger, "ping", self(), ...)</code> mostra la differenza fondamentale rispetto alla chiamata a metodo OOP: <code>otherPinger.ping(...)</code> sarebbe una chiamata bloccante con trasferimento del controllo; <code>send(...)</code> &egrave; invece un invio asincrono di un dato nella mailbox del destinatario, senza trasferimento del flusso di controllo.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s7" data-src="PCD-2026-04-27.html#s5,PCD-2026-04-27.html#s6,PCD-2026-04-27.html#s7,PCD-2026-04-24.html#s16">
+    <h2>7. Pekko (ex Akka): attori sulla JVM</h2>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il framework di riferimento del corso &egrave; <strong>Apache Pekko</strong>, fork open-source di Akka: quando Lightbend (l'azienda dietro Akka) ha cambiato licenza in Business Source License, la comunit&agrave; ha forkato il cuore tecnologico sotto l'ombrello Apache. La trascrizione della lezione riporta il nome come "Pecco": in questo capitolo normalizziamo ovunque a <strong>Pekko</strong>. Pekko &egrave; compatibile al 100% con Akka: gli stessi moduli, le stesse API (package <code>org.apache.pekko</code>), la stessa documentazione. Tutti gli esempi preesistenti per Akka funzionano con Pekko senza modifiche.</p>
+    </div>
+
+    <p><strong>Akka</strong> &egrave; il framework per attori pi&ugrave; maturo a livello industriale per l'ecosistema JVM. Scritto in Scala ma utilizzabile da entrambi i linguaggi, offre un ricco set di funzionalit&agrave; tra cui tolleranza ai guasti stile Erlang ("let it crash"), clustering, stashing, e pattern di supervisione e di messaggistica avanzati. Supporta sia untyped actors (Java) che typed actors (Scala).</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Akka in Java (UntypedActor)</button>
+        <button class="lk-tab">Akka in Scala (Typed Actor)</button>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-java">import akka.actor.UntypedActor;
+import akka.event.Logging;
+import akka.event.LoggingAdapter;
+
+public class MyUntypedActor extends UntypedActor {
+  LoggingAdapter log = Logging.getLogger(getContext().system(), this);
+
+  public void onReceive(Object message) throws Exception {
+    if (message instanceof String) {
+      log.info("Received String message: {}", message);
+      getSender().tell("received");
+    } else
+      unhandled(message);
+  }
+}</code></pre>
+        <p>L'attore estende <code>UntypedActor</code> e sovrascrive <code>onReceive</code>. Il metodo riceve un <code>Object</code> generico e usa pattern matching tramite <code>instanceof</code> per determinare il tipo di messaggio. <code>getSender()</code> restituisce il riferimento al mittente per poter rispondere.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-scala">import akka.actor.Actor
+import akka.actor.Props
+import akka.event.Logging
+
+class MyActor extends Actor {
+  val log = Logging(context.system, this)
+  def receive = {
+    case "test" => log.info("received test")
+    case _      => log.info("received unknown message")
+  }
+}</code></pre>
+        <p>La versione Scala &egrave; pi&ugrave; concisa grazie al pattern matching nativo del linguaggio. Il metodo <code>receive</code> definisce una <strong>partial function</strong> che matcha i messaggi in arrivo. <code>context.system</code> d&agrave; accesso al sistema attori. Il pattern matching &egrave; esaustivo (il caso <code>_</code> cattura tutti i messaggi sconosciuti).</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Approfondimento</span>
+      <p>Akka/Pekko implementa l'architettura a event loop incapsulato (<em>encapsulated event loop</em>): il programmatore definisce solo gli handler (come <code>onReceive</code> o <code>receive</code>), e il framework gestisce implicitamente il ciclo di attesa dei messaggi. L'attore &egrave; quindi implicitamente reattivo — la reattivit&agrave; &egrave; una propriet&agrave; dell'architettura, non del codice scritto dal programmatore.</p>
+    </div>
+
+    <h3>L'API typed di Pekko</h3>
+    <p>Le dipendenze necessarie per iniziare con Pekko includono il modulo core typed e il modulo di logging basato su SLF4J. La versione <em>typed</em> dell'API &egrave; un'evoluzione importante: nell'API classica (untyped) si poteva mandare qualsiasi messaggio a qualsiasi attore, anche messaggi che l'attore non era in grado di gestire. Con l'API typed, ogni attore dichiara il tipo <code>T</code> dei messaggi che accetta, e il compilatore garantisce la correttezza a tempo di compilazione.</p>
+
+    <table>
+      <thead>
+        <tr><th>Concetto</th><th>Ruolo</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>ActorSystem</code></td><td>Root del sistema ad attori; runtime che gestisce tutti gli attori</td></tr>
+        <tr><td><code>Behavior&lt;T&gt;</code></td><td>Definisce il comportamento di un attore in risposta a messaggi di tipo T</td></tr>
+        <tr><td><code>ActorRef&lt;T&gt;</code></td><td>Riferimento tipizzato a un attore; si usa per inviargli messaggi</td></tr>
+        <tr><td><code>ActorContext&lt;T&gt;</code></td><td>Contesto dell'attore: permette di spawnare figli, fermarsi, accedere al sistema</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Actor system, behavior e actor ref</h3>
+    <p>Il sistema ad attori ha una struttura <strong>gerarchica</strong>. L'<code>ActorSystem</code> &egrave; la radice: crea gli attori di primo livello. Ogni attore pu&ograve; a sua volta essere padre di altri attori, formando un albero di supervisione. Questo &egrave; ispirato al modello di Erlang, dove la filosofia &egrave; <em>"Let It Crash"</em>: gli attori possono fallire, ma il padre (supervisore) decide come reagire.</p>
+
+    <pre class="mermaid">
+flowchart TD
+    S[ActorSystem] --> A1[Attore A]
+    S --> A2[Attore B]
+    A1 --> C1[Attore C - figlio di A]
+    A1 --> C2[Attore D - figlio di A]
+    A2 --> E1[Attore E - figlio di B]
+    </pre>
+
+    <p>Un <strong>behavior</strong> in Pekko &egrave; il comportamento dell'attore: una funzione che prende un messaggio e un contesto e restituisce il prossimo behavior. &Egrave; importante capire che il prossimo behavior non deve essere per forza lo stesso: un attore pu&ograve; <strong>cambiare comportamento</strong> dinamicamente in risposta ai messaggi.</p>
+
+    <h4>Creazione di un attore in Pekko</h4>
+    <pre><code class="language-java">import org.apache.pekko.actor.typed.*;
+import org.apache.pekko.actor.typed.javadsl.*;
+
+public class HelloWorld {
+    public static Behavior&lt;String&gt; create() {
+        return Behaviors.setup(context -> {
+            return Behaviors.receiveMessage(message -> {
+                System.out.println("Hello " + message);
+                return Behaviors.same();
+            });
+        });
+    }
+
+    public static void main(String[] args) {
+        ActorSystem&lt;String&gt; system = ActorSystem.create(HelloWorld.create(), "hello-system");
+        system.tell("World!");
+    }
+}</code></pre>
+
+    <p>L'<strong>actor ref</strong> &egrave; il riferimento tramite cui si interagisce con un attore. &Egrave; parametrizzato sul tipo T dei messaggi accettati: <code>ActorRef&lt;T&gt;</code>. Se si prova a inviare un messaggio di tipo sbagliato, il programma non compila.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Distinguere bene: <code>Behavior&lt;T&gt;</code> &egrave; <em>cosa</em> l'attore fa; <code>ActorRef&lt;T&gt;</code> &egrave; <em>dove</em> inviare messaggi; <code>ActorContext&lt;T&gt;</code> &egrave; <em>il contesto</em> per operazioni come spawn, stop, watch.</p>
+    </div>
+
+    <h3>Esempio Ping-Pong in Pekko</h3>
+    <p>Il Prof. Ricci mostra l'esempio classico per illustrare l'interazione tra attori: il protocollo Ping-Pong. Due attori si scambiano messaggi: Pinger e Ponger. Il messaggio Ping contiene un campo <code>replyTo</code> con l'actor ref a cui rispondere.</p>
+
+    <pre><code class="language-java">public interface PingProtocol { }
+public static final class Ping implements PingProtocol {
+    public final ActorRef&lt;PongProtocol&gt; replyTo;
+    public Ping(ActorRef&lt;PongProtocol&gt; replyTo) {
+        this.replyTo = replyTo;
+    }
+}
+public interface PongProtocol { }
+public static final class Pong implements PongProtocol { }
+
+public static Behavior&lt;PingProtocol&gt; pingerBehavior() {
+    return Behaviors.setup(context -> Behaviors.receiveMessage(msg -> {
+        if (msg instanceof Ping p) {
+            p.replyTo.tell(new Pong());
+            return Behaviors.same();
+        }
+        return Behaviors.unhandled();
+    }));
+}
+
+public static Behavior&lt;PongProtocol&gt; pongerBehavior() {
+    return Behaviors.setup(context -> Behaviors.receiveMessage(msg -> {
+        if (msg instanceof Pong) {
+            System.out.println("Ricevuto Pong!");
+            return Behaviors.same();
+        }
+        return Behaviors.unhandled();
+    }));
+}</code></pre>
+
+    <div id="ac-ping-pong"></div>
+
+    <p>Il pattern &egrave; chiaro: il messaggio Ping "incapsula" il protocollo di risposta portando con s&eacute; il riferimento a chi deve rispondere. Questo evita la necessit&agrave; di un meccanismo di sincronizzazione separato. Il Prof. Ricci sottolinea che questo &egrave; il modo idiomatico di fare request-response nel mondo ad attori: via messaggio con campo <code>replyTo</code>, non via chiamata bloccante.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Message-driven protocol</span>
+      <p>Invece di usare <code>ask</code> (che restituisce una Future), il modo pi&ugrave; idiomatico e puro &egrave; includere l'actor ref del mittente nel messaggio stesso. Questo mantiene il sistema completamente asincrono e reattivo.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s8" data-src="PCD-2026-04-27.html#s10,PCD-2026-04-27.html#s11,PCD-2026-04-24.html#s17,PCD-2026-04-17.html#s17">
+    <h2>8. Erlang: processi, mailbox e pattern matching</h2>
+
+    <p><strong>Erlang</strong> &egrave; il linguaggio che ha portato il modello attore nella produzione industriale: probabilmente il linguaggio di programmazione concorrente pi&ugrave; robusto e utilizzato dall'industria, insieme ad Ada. Sviluppato in Ericsson a partire dal 1987 per costruire applicazioni telecom, &egrave; un linguaggio funzionale che si basa su un modello a <strong>processi leggeri</strong> (non thread OS) che comunicano via message passing asincrono. Il cuore di Erlang &egrave; la BEAM (Bogdan/Bj&ouml;rn's Erlang Abstract Machine), una macchina virtuale che implementa un modello ad attori nativo: i processi Erlang sono concettualmente identici agli attori.</p>
+
+    <pre class="mermaid">
+flowchart LR
+    subgraph BEAM[BEAM Virtual Machine]
+        P1[Processo 1<br/>mailbox]
+        P2[Processo 2<br/>mailbox]
+        P3[Processo N<br/>mailbox]
+    end
+    P1 -->|invia messaggio| P2
+    P2 -->|invia messaggio| P3
+    P3 -->|invia messaggio| P1
+    </pre>
+
+    <h3>Caratteristiche principali</h3>
+    <ul>
+      <li>La BEAM &egrave; una macchina virtuale concorrente che gestisce processi come <strong>entit&agrave; completamente logiche</strong>, non legate a thread o processi OS</li>
+      <li>La creazione di processi &egrave; estremamente economica — centinaia di migliaia di processi possono essere creati su un singolo host, con costo di pochi microsecondi</li>
+      <li>&Egrave; un linguaggio funzionale: pattern matching, assenza di variabili globali, moduli per organizzare le funzioni</li>
+      <li>La filosofia &egrave;: <strong>everything is a process</strong> — non c'&egrave; memoria condivisa, quindi anche un contatore &egrave; un processo</li>
+    </ul>
+
+    <h3>Processi vs Thread</h3>
+    <table>
+      <thead>
+        <tr><th>Caratteristica</th><th>Thread OS</th><th>Processo Erlang</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Costo creazione</td><td>Decine di microsecondi</td><td>~5 microsecondi</td></tr>
+        <tr><td>Numero massimo</td><td>Migliaia</td><td>Centinaia di migliaia</td></tr>
+        <tr><td>Memoria per processo</td><td>MB (stack + TCB)</td><td>~300 parole</td></tr>
+        <tr><td>Scheduling</td><td>Preemptivo (OS)</td><td>Cooperativo (BEAM)</td></tr>
+        <tr><td>Isolamento</td><td>Memoria condivisa</td><td>Nessuna memoria condivisa</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Il Prof. Ricci avverte: non confondete i processi Erlang con i processi del sistema operativo. I processi Erlang sono entit&agrave; virtuali gestite dalla BEAM, molto pi&ugrave; leggeri e veloci da creare. Ogni processo ha una propria mailbox e non condivide memoria con altri processi.</p>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Joe Armstrong, il creatore di Erlang, ha definito il linguaggio come "il miglior modo per scrivere sistemi concorrenti, distribuiti e fault-tolerant". La BEAM supporta centinaia di migliaia di processi con costo di creazione di pochi microsecondi.</p>
+    </div>
+
+    <h3>Primitive fondamentali</h3>
+    <p>Erlang &egrave; un linguaggio funzionale: un programma descrive una serie di funzioni, con pattern matching per determinare quale clausola eseguire. Le variabili iniziano con la lettera maiuscola (come in Prolog). Non esistono variabili globali.</p>
+    <p>La primitiva <code>spawn</code> crea un nuovo processo (attore) specificando modulo, nome funzione e parametri (o una fun anonima). Restituisce un <strong>PID</strong> (Process IDentifier) che identifica univocamente il processo. L'operatore <code>!</code> invia un messaggio a un processo: <code>Pid ! Message</code>. La receive selettiva estrae un messaggio dalla mailbox del processo usando pattern matching:</p>
+
+    <pre><code class="language-erlang">% Creazione processo
+Pid = spawn(fun () -> account(0) end).
+% Invio messaggio
+Pid ! Message.
+% Ricezione con pattern matching
+receive
+  Pattern1 [ when Guard1 ] -> Expression1;
+  Pattern2 [ when Guard2 ] -> Expression2;
+  ...
+end</code></pre>
+
+    <p>Il processo si blocca finch&eacute; non trova un messaggio nella coda che matcha un pattern con guardia verificata.</p>
+
+    <h3>Esempio: area server</h3>
+    <pre><code class="language-erlang">% Esempio Erlang: area server (dalle slide)
+-module(area_server0).
+-export([loop/0]).
+
+loop() ->
+    receive
+        {rectangle, Width, Ht} ->
+            io:format("Area of rectangle is ~p~n", [Width * Ht]),
+            loop();
+        {circle, R} ->
+            io:format("Area of circle is ~p~n", [3.14159 * R * R]),
+            loop();
+        Other ->
+            io:format("I don't know what ~p is~n", [Other]),
+            loop()
+    end.
+
+% Nell'interprete:
+% 1> Pid = spawn(fun area_server0:loop/0).
+% 2> Pid ! {rectangle, 3, 4}.
+% Area of rectangle is 12</code></pre>
+
+    <p>Notare che: (1) ogni caso della receive termina con <code>;</code> tranne l'ultimo che termina con <code>.</code>; (2) ogni caso chiama ricorsivamente <code>loop()</code> per rimettersi in ascolto del messaggio successivo; (3) il pattern <code>Other</code> cattura qualsiasi messaggio non riconosciuto.</p>
+
+    <h3>Esempio Counter in Erlang</h3>
+    <p>Il Prof. Ricci mostra come in Erlang anche un semplice contatore sia un processo. Non esiste memoria condivisa: tutto &egrave; un processo. Lo stato (il valore corrente) vive nel parametro della funzione ricorsiva.</p>
+
+    <pre><code class="language-erlang">-module(counter).
+-export([start/0]).
+
+start() -> loop(0).
+
+loop(Sum) ->
+    receive
+        {inc} ->
+            loop(Sum + 1);
+        {getValue, Pid} ->
+            Pid ! {count_value, Sum},
+            loop(Sum)
+    end.
+
+% 1> Pid = spawn(counter, start, []).
+% 2> Pid ! {inc}.
+% 3> Pid ! {getValue, self()}.</code></pre>
+
+    <h3>Esempio: account bancario</h3>
+    <pre><code class="language-erlang">account(Balance) ->
+  receive
+    {deposit, Amount, Whom} -> Whom ! {deposit_receipt, Amount},
+                               account(Balance + Amount);
+    {balance, Whom} -> Whom ! {balance, Balance},
+                       account(Balance);
+    {withdrawal, Amount, Whom} when Amount > Balance ->
+                               Whom ! overdraft, account(Balance);
+    {withdrawal, Amount, Whom} -> Whom ! {withdrawal_receipt, Amount},
+                               account(Balance - Amount)
+  end.</code></pre>
+
+    <p>L'esempio con la <code>for</code> comprehension mostra come creare decine di migliaia di processi in pochi millisecondi, misurando il tempo di spawn:</p>
+
+    <pre><code class="language-erlang">-module(processes).
+-export([max/1]).
+
+max(N) ->
+    Max = erlang:system_info(process_limit),
+    io:format("Maximum allowed processes:~p~n",[Max]),
+    statistics(runtime),
+    statistics(wall_clock),
+    L = for(1, N, fun() -> spawn(fun() -> wait() end) end),
+    {_, Time1} = statistics(runtime),
+    {_, Time2} = statistics(wall_clock),
+    ...
+
+% Output per N=20000:
+% Process spawn time=5.5 (9.4) microseconds</code></pre>
+
+    <div class="callout idea">
+      <span class="callout-label">"Everything is a process"</span>
+      <p>In Erlang, non esistono oggetti o dati mutabili condivisi. Anche un semplice contatore &egrave; un processo con la propria mailbox. Questa filosofia radicale elimina ogni possibilit&agrave; di race condition.</p>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Il professore sottolinea che Erlang non &egrave; un linguaggio accademico ma &egrave; stato usato (ed &egrave; ancora usato) per fare software molto robusto in ambito telecom. La BEAM &egrave; una delle macchine virtuali concorrenti pi&ugrave; collaudate al mondo.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s9" data-src="PCD-2026-04-27.html#s9,PCD-2026-03-30.html#s19,PCD-2026-04-17.html#s18">
+    <h2>9. Pattern di messaggistica e actor idioms</h2>
+
+    <p>Il modello ad attori prevede diversi pattern di interazione, ciascuno con i propri casi d'uso. Il Prof. Ricci li presenta in ordine crescente di complessit&agrave;.</p>
+
+    <h3>Fire-and-forget (tell)</h3>
+    <p>L'attore invia un messaggio e non si aspetta una risposta. &Egrave; il caso pi&ugrave; semplice e comune: si usa <code>actorRef.tell(messaggio)</code> o l'operatore <code>!</code>. Esempio: inviare un <code>Increment</code> a un contatore senza curarsi del risultato.</p>
+
+    <h3>Request-response con replyTo</h3>
+    <p>L'attore mittente include nel messaggio un campo <code>replyTo: ActorRef&lt;Risposta&gt;</code>. Il destinatario usa questo riferimento per inviare la risposta. &Egrave; il pattern idiomatico del mondo ad attori: preserva l'asincronia e non richiede blocking.</p>
+
+    <h3>Ask pattern</h3>
+    <p>Pekko fornisce anche l'operatore <code>ask</code> che restituisce una <code>Future</code>. Questo &egrave; utile quando si vuole interagire con un attore da codice non-actor (es. da un main) o quando serve una risposta ma non si vuole implementare il protocollo manualmente.</p>
+
+    <pre><code class="language-java">import static org.apache.pekko.actor.typed.javadsl.AskPattern.ask;
+import java.time.Duration;
+import java.util.concurrent.CompletionStage;
+
+CompletionStage&lt;String&gt; risposta = ask(
+    actorRef,
+    replyTo -> new RichiediDati(replyTo),
+    Duration.ofSeconds(5),
+    system.scheduler()
+);
+
+risposta.thenAccept(valore -> {
+    System.out.println("Ricevuto: " + valore);
+});</code></pre>
+
+    <p>Il Prof. Ricci fa notare che <code>ask</code> &egrave; utile ma "esce un po' dal modello puro". L'uso della Future introduce un meccanismo che non &egrave; nativo del modello ad attori. Tuttavia, quando usato con giudizio, risolve il problema dell'asynchronous spaghetti: si possono combinare pi&ugrave; ask in sequenza con <code>thenCompose</code> o in parallelo con <code>Promise.all</code>.</p>
+
+    <div id="step-ask-pattern"></div>
+
+    <h3>Actor Idioms (Schumacher, AGERE! 2012)</h3>
+    <p>Come ogni paradigma, anche il modello Actor ha i suoi <strong>pattern ricorrenti</strong>. I principali sono:</p>
+    <ul>
+      <li><strong>Future</strong>: un attore che funge da proxy per un risultato non ancora disponibile. &Egrave; un modo per implementare comunicazione sincrona (RPC-like) all'interno di un modello asincrono, massimizzando la concorrenza. Ha tre stati: iniziale (nessun valore, nessun cliente), attesa (clienti accodati), risolto (clienti notificati, valore immutabile). Il future pu&ograve; essere passato ad altri attori prima di essere risolto.</li>
+      <li><strong>Serializer</strong>: un attore che serializza l'accesso a una risorsa condivisa, garantendo che le operazioni siano eseguite una alla volta sulla sua mailbox.</li>
+      <li><strong>Fork-Join</strong>: un pattern per dividere un compito in sotto-compiti paralleli e aggregare i risultati, simile all'omonimo pattern nel mondo dei thread ma realizzato interamente via message passing.</li>
+      <li><strong>Scheduler</strong>: un attore che gestisce il passaggio del testimone.</li>
+    </ul>
+
+    <h3>Messaging Patterns (V. Vernon)</h3>
+    <ul>
+      <li><strong>Messaging Channels</strong>: Point-to-Point, Publish-Subscribe, Dead Letter, Message Bus.</li>
+      <li><strong>Message Construction</strong>: Command, Document, Event, Request-Reply, Correlation Identifier.</li>
+      <li><strong>Message Routing</strong>: Content-based Filter, Message Filter, Process Manager, Message Broker.</li>
+      <li><strong>Message Transformation</strong>: Envelope Wrapper, Content Enricher, Content Filter.</li>
+    </ul>
+
+    <h3>Timeline storica del message passing</h3>
+    <ol class="lk-timeline">
+      <li><span class="lk-tl-when">1970</span> — Brinch-Hansen introduce l'async message passing per l'RC4000.</li>
+      <li><span class="lk-tl-when">1971</span> — Bob Balzer introduce il concetto di communication port.</li>
+      <li><span class="lk-tl-when">1973</span> — Carl Hewitt introduce il modello Actor all'MIT.</li>
+      <li><span class="lk-tl-when">1974</span> — Dijkstra introduce le guarded commands.</li>
+      <li><span class="lk-tl-when">1978</span> — Hoare formalizza CSP (Communicating Sequential Processes).</li>
+      <li><span class="lk-tl-when">1986</span> — Gul Agha pubblica "Actors: A Model of Concurrent Computation".</li>
+      <li><span class="lk-tl-when">1987</span> — Ericsson sviluppa Erlang per telecomunicazioni.</li>
+      <li><span class="lk-tl-when">2007</span> — Go language (Google): goroutine, canali, select.</li>
+      <li><span class="lk-tl-when">Oggi</span> — Akka/Pekko, Dart isolates, Web Workers, attori mainstream.</li>
+    </ol>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s10" data-src="PCD-2026-04-17.html#s16,PCD-2026-04-24.html#s18,PCD-2026-05-11.html#s12">
+    <h2>10. Spaghetti asincrono: future, stashing e LSC</h2>
+
+    <p>La macro-step semantics semplifica il ragionamento sugli attori ma introduce un problema serio: la logica applicativa viene frammentata in un insieme non strutturato di handler/callback, ciascuno dei quali reagisce a un evento specifico. Quando un flusso di lavoro richiede una sequenza di passi, ogni passo diventa un handler separato. Il professore chiama questo il problema degli <strong>"spaghetti asincroni"</strong> (asynchronous spaghetti), rifacendosi a [RS-12].</p>
+
+    <h3>Esempio: sin(x) * cos(y)</h3>
+    <p>L'esempio classico dalle slide: un attore deve valutare l'espressione <code>sin(x)*cos(y)</code> delegando i calcoli a due attori specializzati (sinActor e cosActor). Con la semantica macro-step, l'attore principale non pu&ograve; bloccarsi in attesa dei risultati. Deve:</p>
+    <ol>
+      <li>Inviare x a sinActor e y a cosActor.</li>
+      <li>Ricevere il risultato da sinActor in un handler.</li>
+      <li>Ricevere il risultato da cosActor in un altro handler.</li>
+      <li>Quando entrambi i risultati sono arrivati, calcolare il prodotto.</li>
+    </ol>
+    <p>Questo frammenta la logica in tre handler separati, perdendo la struttura sequenziale naturale dell'algoritmo: ogni risposta richiede un handler diverso, e bisogna tracciare lo stato per sapere se l'altra risposta &egrave; gi&agrave; arrivata. La letteratura [RS-12] documenta approfonditamente questo problema.</p>
+
+    <h3>Soluzioni proposte</h3>
+    <ul>
+      <li><strong>Futures/Promises</strong>: oggetti proxy per un risultato non ancora disponibile.</li>
+      <li><strong>Promise pipelines</strong>: compongono future in sequenza.</li>
+      <li><strong>Stashing</strong> (Akka/Pekko): mettere da parte i messaggi che non possono essere processati ora.</li>
+      <li><strong>Local Synchronization Constraints</strong> (ActorFoundry): condizioni booleane che abilitano/disabilitano la ricezione di messaggi.</li>
+    </ul>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Future/Promise</button>
+        <button class="lk-tab">Akka Stashing</button>
+        <button class="lk-tab">Local Sync Constraints</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Un <strong>future</strong> &egrave; un proxy per un risultato inizialmente sconosciuto. Nell'Actor model, un future &egrave; rappresentato da un attore con tre stati: senza valore e senza clienti in attesa; clienti in coda fino a quando il valore &egrave; disponibile; valore disponibile che notifica i clienti in attesa.</p>
+        <p>Il future pu&ograve; essere passato ad altri attori <strong>prima</strong> di essere risolto, aumentando il parallelismo. Linguaggi come E e AmbientTalk offrono supporto nativo ai future/promise. Akka/Pekko fornisce <code>Future</code> e <code>Promise</code> come pattern fondamentali.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Akka introduce il meccanismo di <strong>stashing</strong>: i messaggi ricevuti possono essere accantonati temporaneamente in una coda separata (<code>stash</code>) e recuperati successivamente (<code>unstashAll</code>). Questo permette di gestire protocolli con stati senza frammentare la logica.</p>
+        <pre><code class="language-scala">class ActorWithProtocol extends Actor with Stash {
+  def receive = {
+    case "open" =>
+      unstashAll()
+      context.become({
+        case "write" => // do writing...
+        case "close" => unstashAll(); context.unbecome()
+        case msg => stash()
+      }, discardOld = false)
+    case msg => stash()
+  }
+}</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p>ActorFoundry implementa le <strong>Local Synchronization Constraints (LSC)</strong>: condizioni di abilitazione/disabilitazione specificate per gli handler tramite annotazioni. Una condizione <code>@Disable</code> definisce quando un messaggio NON pu&ograve; essere processato; i messaggi disabilitati vengono accodati in una <em>save queue</em> per elaborazione successiva.</p>
+        <pre><code class="language-java">@Disable(messageName = "put")
+public Boolean disablePut(Integer x) {
+  if (bufferReady) { return (tail == bufferSize); }
+  else return true;
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Le LSC (Local Synchronization Constraints) separano il <em>quando</em> un messaggio viene processato dal <em>come</em>. Un messaggio disabilitato viene messo in una <code>save queue</code> per essere processato in seguito.</p>
+    </div>
+
+    <h3>Lo stash in dettaglio</h3>
+    <p>Lo stash &egrave; una coda implicita separata dalla mailbox principale:</p>
+    <ul>
+      <li><code>stash()</code>: accoda il messaggio corrente nello stash.</li>
+      <li><code>unstashAll()</code>: re-inserisce tutti i messaggi stashati nella mailbox principale.</li>
+    </ul>
+    <p>Il pattern classico &egrave;: in uno stato transitorio, i messaggi non gestibili vengono stashati; quando si arriva allo stato giusto (o scade un timer), si fa <code>unstashAll()</code> e si riprocessano.</p>
+
+    <pre><code class="language-scala">// Pattern Akka: stash per gestire un protocollo a stati
+Behaviors.receive { (ctx, msg) =&gt;
+  msg match {
+    case "open" =&gt;
+      unstashAll()
+      Behaviors.receiveMessage {
+        case "write" =&gt; // scrivi...
+        case "close" =&gt;
+          unstashAll()
+          context.unbecome()
+        case _ =&gt; stash()
+      }
+    case _ =&gt; stash()
+  }
+}</code></pre>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Il problema degli spaghetti asincroni colpisce pi&ugrave; in generale tutte le architetture event-driven basate su callback: programmazione Web (JavaScript), GUI management, Node.js, e attori. Alcune soluzioni includono promise pipeline e costrutti linguistici che permettono di scrivere codice dall'aspetto sequenziale mantenendo l'elaborazione asincrona.</p>
+    </div>
+
+    <h3>RPC-like messaging</h3>
+    <p>Un pattern comune &egrave; simulare chiamate RPC in un modello puramente asincrono. Il client invia una richiesta e poi controlla i messaggi in arrivo. Se arriva la risposta, la processa; altrimenti, bufferizza i messaggi non correlati per elaborazione futura. Questo protocollo &egrave; implementabile con le primitive di base ma &egrave; complesso — per questo i framework offrono supporto diretto, come la primitiva <code>call</code> in ActorFoundry. Il pattern <strong>Future</strong> &egrave; alla base della comunicazione RPC-like nel modello actor: un attore-future fa da proxy per un risultato non ancora disponibile e, quando il valore viene calcolato, notifica tutti gli attori in attesa.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s11" data-src="PCD-2026-04-24.html#s19">
+    <h2>11. Il problema della proattivit&agrave;</h2>
+
+    <p>Gli attori sono entit&agrave; <strong>puramente reattive</strong>: lavorano solo quando ricevono un messaggio. Ma come si modella un comportamento <strong>proattivo</strong>, orientato al raggiungimento di obiettivi tramite un piano di azioni? Il professore dedica una parte significativa della lezione a questo problema, che ritiene concettualmente importante. Le soluzioni classiche includono: dividere l'attore in pi&ugrave; attori interagenti, oppure il self-sending di messaggi.</p>
+
+    <p>L'esempio concreto: un attore deve calcolare e stampare i primi 100 numeri, ma deve poter ricevere un messaggio <code>stop</code> che interrompe la stampa. Un attore puramente reattivo non pu&ograve; iniziare da solo la stampa — deve aspettare un messaggio che glielo richieda. La soluzione proposta dal professore &egrave; il <strong>self-sending</strong>: l'attore invia messaggi a se stesso per procedere incrementalmente nel lavoro.</p>
+
+    <pre><code class="language-pseudocode">// Messaggio di start
+send me, "iterat_print", i, end
+
+// Handler per iterat_print
+if (not stopped)
+  print(i)
+  if (i &lt; end)
+    send me, "iterat_print", i+1, end
+
+// Handler per stop
+stopped = true</code></pre>
+
+    <p>Il pattern &egrave; semplice ma profondo: ogni stampa &egrave; un passo atomico gestito da un messaggio. Se arriva un messaggio <code>stop</code> prima del completamento, l'attore smette di auto-inviarsi messaggi e la stampa si ferma. L'attore rimane reattivo (ogni messaggio &egrave; una reazione), ma l'auto-invio crea un effetto proattivo complessivo.</p>
+
+    <div id="step-proactivity"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il simulatore mostra l'alternanza fra il messaggio di auto-invio (che fa progredire la stampa) e la possibilit&agrave; di inserire uno stop in qualsiasi momento. Il professore sottolinea che questa &egrave; una soluzione elegante ma parziale; la letteratura [RS-12] propone astrazioni pi&ugrave; avanzate per integrare proattivit&agrave; e reattivit&agrave; a livello di linguaggio.</p>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il self-sending di messaggi &egrave; una tecnica potente che ricorda il <code>postMessage</code> degli event loop: l'attore programma la sua prossima attivit&agrave; mandando un messaggio alla propria mailbox. Questo rispetta la natura reattiva (c'&egrave; sempre un messaggio che innesca l'azione) pur ottenendo un comportamento ciclico/pro-attivo.</p>
+    </div>
+
+    <p>Il problema della proattivit&agrave; &egrave; affrontato anche dalla ricerca: esistono proposte per estendere il modello Actor con astrazioni che permettano di specificare comportamenti proattivi (piani, goal) mantenendo la reattivit&agrave; come meccanismo di interazione. Tuttavia, nel modello di base, il self-sending rimane la tecnica pi&ugrave; diffusa e pragmatica.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s12" data-src="PCD-2026-04-27.html#s8">
+    <h2>12. Supervisione e fault tolerance</h2>
+
+    <p>Uno degli aspetti pi&ugrave; potenti del modello ad attori &egrave; il meccanismo di <strong>supervisione</strong>, ispirato a Erlang. L'idea &egrave; che gli attori falliscano (lanciando eccezioni), ma il padre-supervisore decide come reagire. Non si cerca di prevenire tutti i fallimenti: si accetta che accadano e si fornisce un meccanismo di recovery (<em>"Let It Crash"</em>).</p>
+
+    <p>Lo state explorer seguente mostra il ciclo di vita completo di un attore, incluso lo stato di fallimento gestito dal supervisore:</p>
+
+    <div id="se-actor-lifecycle"></div>
+
+    <div id="se-supervision"></div>
+
+    <h3>Strategie di supervisione</h3>
+    <p>Quando un attore figlio fallisce, il padre pu&ograve; applicare diverse strategie:</p>
+    <table>
+      <thead>
+        <tr><th>Strategia</th><th>Comportamento</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>Restart</code></td><td>Riavvia l'attore figlio: viene creato da capo con stato iniziale (quello definito in <code>setup</code>)</td></tr>
+        <tr><td><code>Resume</code></td><td>Riprende l'esecuzione del figlio mantenendo lo stato interno corrente (delicato, perch&eacute; lo stato potrebbe essere corrotto)</td></tr>
+        <tr><td><code>Stop</code></td><td>Ferma definitivamente l'attore figlio</td></tr>
+        <tr><td><code>Escalate</code></td><td>Propaga il fallimento al supervisore del padre, che decider&agrave; a sua volta</td></tr>
+      </tbody>
+    </table>
+
+    <p>Il meccanismo di supervisione ha un effetto collaterale molto importante: la <strong>pulizia automatica delle risorse</strong>. Se un attore padre fallisce, tutti i figli vengono automaticamente fermati e le loro risorse rilasciate. Questo &egrave; molto diverso dal mondo dei thread, dove un thread orfano continua a vivere e il programmatore deve implementare meccanismi ad hoc per chiudere file, rilasciare lock, ecc.</p>
+
+    <pre><code class="language-java">Behaviors.setup(context -> {
+    ActorRef&lt;MyMsg&gt; child = context.spawn(
+        Behaviors.supervise(childBehavior())
+            .onFailure(SupervisorStrategy.restart()),
+        "child-actor"
+    );
+    return childBehavior();
+});</code></pre>
+
+    <p>Il Prof. Ricci menziona anche la funzione <code>watch</code>: un padre pu&ograve; osservare un figlio e ricevere una notifica <code>ChildFailed</code> o <code>Terminated</code> quando termina. Questo permette al padre di reagire alla terminazione (es. cleanup aggiuntivo o terminazione a catena del sistema).</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s13" data-src="PCD-2026-04-27.html#s14">
+    <h2>13. Delivery semantics e ordinamento dei messaggi</h2>
+
+    <p>Un tema importante toccato nella lezione riguarda le garanzie di consegna dei messaggi tra attori. Pekko (come Akka ed Erlang) adotta una semantica <strong>at-most-once</strong>: i messaggi possono essere persi (per crash, problemi di rete, ecc.), ma non saranno mai duplicati.</p>
+
+    <table>
+      <thead>
+        <tr><th>Garanzia</th><th>Descrizione</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>At-most-once</td><td>Ogni messaggio viene consegnato al massimo una volta. Possibile perdita, mai duplicazione.</td></tr>
+        <tr><td>At-least-once</td><td>Ogni messaggio viene consegnato almeno una volta. Possibile duplicazione, mai perdita.</td></tr>
+        <tr><td>Exactly-once</td><td>Ogni messaggio viene consegnato esattamente una volta. Massimo costo e complessit&agrave;.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Nel modello di base, la send non d&agrave; alcuna garanzia sui tempi di consegna n&eacute; sull'ordine di ricezione. Anche quando due send vengono eseguite in sequenza dallo stesso mittente, i messaggi potrebbero arrivare in ordine diverso al destinatario. Ogni forma di ordinamento deve essere realizzata tramite pattern di scambio messaggi.</p>
+    </div>
+
+    <h3>Ordinamento</h3>
+    <p>Le implementazioni pratiche come Pekko rafforzano il modello di base: viene garantito un ordinamento <em>sender-receiver</em>. Se A invia il messaggio M1 e poi M2 a B, M1 viene consegnato prima di M2. Tuttavia, non c'&egrave; garanzia di ordinamento tra coppie diverse: se A invia M1 a B e M2 a C, M2 potrebbe arrivare prima di M1. Per gestire la sincronizzazione e l'ordinamento locale, alcuni framework offrono inoltre vincoli di sincronizzazione locale (LSC in ActorFoundry) o lo stashing di Akka/Pekko, visti nella sezione 10.</p>
+
+    <div id="ac-ordering"></div>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Non date per scontato l'ordinamento globale dei messaggi. Il modello garantisce solo l'ordinamento per coppia sender-receiver. Se avete bisogno di ordinamento globale, dovete implementarlo voi usando pattern di messaggistica opportuni (es. sequencer actor).</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s14" data-src="PCD-2026-04-27.html#s15">
+    <h2>14. Testing degli attori</h2>
+
+    <p>Pekko fornisce un modulo di testing integrato con ScalaTest e JUnit. Il test kit permette di creare un ActorSystem di test, spawnare attori e verificare che i messaggi vengano scambiati correttamente.</p>
+
+    <pre><code class="language-java">import org.apache.pekko.actor.testkit.typed.javadsl.*;
+
+@Test
+public void testPingPong() {
+    var testKit = ActorTestKit.create();
+    var probe = testKit.createTestProbe();
+    var pinger = testKit.spawn(pingerBehavior());
+
+    pinger.tell(new Ping(probe.ref()));
+    probe.expectMessageClass(Pong.class);
+}</code></pre>
+
+    <p>Il Prof. Ricci sottolinea l'importanza di testare gli attori, soprattutto perch&eacute; la semantica asincrona pu&ograve; nascondere bug sottili. Il test kit di Pekko permette di: (1) spawnare attori in un ambiente controllato, (2) usare probe per catturare i messaggi in uscita, (3) impostare timeout per evitare test che si bloccano.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il testing degli attori &egrave; pi&ugrave; vicino al testing di integrazione che al testing unitario. Anche un singolo attore ha bisogno del runtime (ActorSystem) per funzionare. Il test kit fornisce un ambiente leggero per questo scopo.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="s15" data-src="PCD-2026-04-27.html#s16">
+    <h2>15. Errori comuni e best practice</h2>
+
+    <p>Il Prof. Ricci conclude la lezione con una serie di raccomandazioni pratiche su cosa evitare quando si sviluppa con gli attori.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Queste raccomandazioni sono state sottolineate esplicitamente dal professore durante la lezione. Ricordatele per il progetto e per l'esame.</p>
+    </div>
+
+    <h3>Cosa evitare</h3>
+    <table>
+      <thead>
+        <tr><th>Pratica scorretta</th><th>Spiegazione</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Bloccare gli handler</td><td>Non fare <code>Thread.sleep()</code>, I/O bloccante, o attese in un handler. Blocca l'event loop dell'attore.</td></tr>
+        <tr><td>Usare <code>ask</code> dappertutto</td><td>Preferire messaggi con <code>replyTo</code> per mantenere la purezza del modello ad attori.</td></tr>
+        <tr><td>Trattare la supervisione come validazione</td><td>La supervisione serve per gestire fallimenti imprevisti, non per validare input errati.</td></tr>
+        <tr><td>Esporre il contesto</td><td>Non esporre mai <code>ActorContext</code> all'esterno dell'attore. Rompe l'incapsulamento.</td></tr>
+        <tr><td>Attori monolitici</td><td>Meglio tanti piccoli attori che uno grande. Si possono creare milioni di attori: sfruttate questa caratteristica.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Raccomandazioni positive</h3>
+    <ul>
+      <li><strong>Frammentare</strong>: identificare funzionalit&agrave; specifiche e creare attori specializzati per ciascuna.</li>
+      <li><strong>Protocolli espliciti</strong>: definire i protocolli di interazione come strutture dati (es. sealed interface/class in Java).</li>
+      <li><strong>Message-driven</strong>: preferire sempre il passaggio di messaggi diretto (con replyTo) anzich&eacute; meccanismi ibridi come ask.</li>
+      <li><strong>Sfruttare la gerarchia</strong>: organizzare gli attori in alberi di supervisione per una gestione robusta dei fallimenti.</li>
+      <li><strong>Testing sistematico</strong>: usare il test kit di Pekko per verificare il comportamento degli attori.</li>
+    </ul>
+
+    <p>Il Prof. Ricci ricorda che il modello ad attori consente di definire in modo esplicito il protocollo di interazione tra componenti, offre un modo strutturato per gestire fallimenti e ciclo di vita, e costituisce la base per passare dalla programmazione concorrente a quella distribuita (argomento del prossimo capitolo).</p>
+
+    <div id="ac-best-practices"></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="quiz" data-src="PCD-2026-04-27.html#quiz,PCD-2026-05-04.html#quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Quali sono le tre primitive fondamentali del modello ad attori secondo Hewitt?</summary>
+        <p><strong>Send</strong> (inviare un messaggio asincrono), <strong>Create</strong> (creare un nuovo attore con un comportamento specificato), <strong>Become</strong> (cambiare il comportamento dell'attore per il prossimo messaggio).</p>
+      </details>
+
+      <details>
+        <summary>Cosa garantisce la semantica macro-step (run-to-completion)?</summary>
+        <p>Quando un attore riceve un messaggio, l'intero handler viene eseguito completamente prima di passare al messaggio successivo. Questo elimina le race condition sullo stato interno dell'attore.</p>
+      </details>
+
+      <details>
+        <summary>Perch&eacute; un actor riduce le race condition?</summary>
+        <p>Perch&eacute; lo stato resta incapsulato e il controllo passa solo attraverso messaggi asincroni, non tramite memoria condivisa.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'&egrave; tra <code>tell</code> e <code>ask</code> in Pekko?</summary>
+        <p><code>tell</code> invia un messaggio fire-and-forget (non si aspetta risposta). <code>ask</code> invia un messaggio e restituisce una <code>Future</code> per attendere la risposta. Il pattern idiomatico nel mondo ad attori &egrave; usare <code>tell</code> con un campo <code>replyTo</code> nel messaggio.</p>
+      </details>
+
+      <details>
+        <summary>Qual &egrave; la semantica di consegna dei messaggi di default in Pekko/Akka?</summary>
+        <p><strong>At-most-once</strong>: i messaggi possono essere persi ma mai duplicati. Per quanto riguarda l'ordinamento, viene garantito l'ordine per coppia sender-receiver (se A manda M1 e poi M2 a B, M1 arriva prima di M2).</p>
+      </details>
+
+      <details>
+        <summary>Cosa significa "Let It Crash" nel contesto della supervisione?</summary>
+        <p>&Egrave; la filosofia di Erlang adottata anche da Pekko: non cercare di prevenire ogni possibile fallimento, ma accettarlo e fornire meccanismi di recovery automatici attraverso la gerarchia di supervisione. Il padre dell'attore fallito decide se riavviarlo, riprenderlo o fermarlo.</p>
+      </details>
+
+      <details>
+        <summary>Qual &egrave; la differenza tra un processo Erlang e un thread OS?</summary>
+        <p>Un processo Erlang &egrave; un'entit&agrave; logica gestita dalla BEAM, non un thread OS. La creazione costa ~5 microsecondi (contro decine di microsecondi per un thread), si possono creare centinaia di migliaia di processi, e ogni processo ha una memoria di circa 300 parole (contro MB per un thread). Non condividono memoria.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono i tre stati di una Promise?</summary>
+        <p><strong>Pending</strong> (creata, in attesa di completamento), <strong>Resolved/Fulfilled</strong> (completata con successo), <strong>Rejected</strong> (completata con errore). Una volta risolta o rifiutata, la Promise &egrave; <em>settled</em> e il suo stato non cambia pi&ugrave;.</p>
+      </details>
+
+      <details>
+        <summary>Che cosa devi evitare dentro un handler?</summary>
+        <p>Blocchi lunghi, wait attive e loop infiniti: rompono la reattivit&agrave; del sistema.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono gli errori pi&ugrave; comuni da evitare nella programmazione ad attori?</summary>
+        <p>Bloccare gli handler (non fare mai blocking call), usare <code>ask</code> dappertutto (preferire messaggi con replyTo), usare la supervisione per validazione (serve per fallimenti imprevisti), esporre il contesto dell'attore all'esterno, creare attori monolitici (preferire tanti piccoli attori).</p>
+      </details>
+
+      <details>
+        <summary>Qual &egrave; il primo passo per Assignment 3?</summary>
+        <p>Tradurre la traccia in ruoli, messaggi, stato minimo e invarianti prima di scrivere implementazione.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-12-message-passing.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-14-attori-avanzati.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 30 marzo, 17 aprile, 24 aprile, 27 aprile, 4 maggio e 11 maggio 2026 · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    // ---- Highlight.js + Mermaid ----
+    hljs.highlightAll();
+    mermaid.initialize({ startOnLoad: true, theme: 'neutral', maxTextSize: 60000 });
+
+    /* ---- State Explorer (sez. 2): ciclo di vita di base — da PCD-2026-04-24, id originale #se-actor ---- */
+    LessonKit.stateExplorer('#se-actor-vita', {
+      start:'CREATO',
+      states:{
+        CREATO:{ desc:'L\'attore e\' stato creato tramite create() ma non ha ancora ricevuto messaggi. La sua mailbox e\' vuota e il suo comportamento e\' quello iniziale specificato al momento della creazione.', to:[['start() / primo msg','ATTIVO']] },
+        ATTIVO:{ desc:'L\'attore e\' in attesa di messaggi: la sua mailbox puo\' contenere messaggi in coda, oppure e\' vuota e l\'attore e\' bloccato (nessun flusso di controllo attivo). E\' lo stato in cui l\'attore trascorre la maggior parte del tempo.', to:[['arriva un messaggio','ELABORAZIONE'],['riceve stop/kill','TERMINATO']] },
+        ELABORAZIONE:{ desc:'L\'attore sta eseguendo un handler in risposta a un messaggio. Grazie alla macro-step semantics, l\'handler viene eseguito run-to-completion senza interferenze. Lo stato interno puo\' essere modificato, e nuovi messaggi possono essere inviati ad altri attori.', to:[['handler completa','ATTIVO'],['handler chiama terminate()','TERMINATO']] },
+        TERMINATO:{ desc:'L\'attore ha terminato la sua esecuzione. Non risponde piu\' a messaggi; eventuali messaggi in arrivo vengono scartati o gestiti dal sistema (dead letter). Il suo identificatore non e\' piu\' valido.', to:[] }
+      }
+    });
+
+    /* ---- State Explorer (sez. 4): ciclo di vita con become — da PCD-2026-04-17, id originale #se-actor-lifecycle ---- */
+    LessonKit.stateExplorer('#se-actor-become', {
+      title: 'Ciclo di vita di un attore',
+      start: 'CREATO', states: {
+        'CREATO': { desc: 'Attore creato con create(). ID univoco, mailbox vuota.', to: [['Arriva messaggio','ELABORAZIONE']] },
+        'ELABORAZIONE': { desc: 'Estrae primo msg dalla mailbox, esegue handler (macro-step). Altri msg in coda non processati finche handler non termina.', to: [['Handler ok, mailbox non vuota','ELABORAZIONE'],['Handler ok, mailbox vuota','INATTIVO'],['Handler chiama become()','CAMBIATO']] },
+        'INATTIVO': { desc: 'Handler completati, mailbox vuota. Bloccato in attesa di nuovi messaggi.', to: [['Arriva messaggio','ELABORAZIONE']] },
+        'CAMBIATO': { desc: 'Attore ha invocato become(). Nuovo comportamento pronto.', to: [['Mailbox non vuota: nuovo comportamento','ELABORAZIONE'],['Mailbox vuota: attesa','INATTIVO']] }
+      }
+    });
+
+    /* ---- State Explorer (sez. 5): message loop — da PCD-2026-03-30, id originale #se-actor ---- */
+    LessonKit.stateExplorer('#se-actor-loop', { start:'CREATO', states:{
+      CREATO:{ desc:'L\'attore e stato creato (spawn o create) ma non ha ancora ricevuto messaggi. Ha una mailbox vuota e un comportamento iniziale definito.', to:[['arriva messaggio','PRONTO']] },
+      PRONTO:{ desc:'L\'attore ha messaggi nella mailbox. Preleva il primo messaggio e seleziona l\'handler appropriato in base al tipo/intestazione del messaggio.', to:[['seleziona handler','ESECUZIONE']] },
+      ESECUZIONE:{ desc:'L\'handler del messaggio e in esecuzione (macro-step). L\'attore puo: modificare il suo stato, inviare messaggi ad altri attori (send), creare nuovi attori (create), cambiare comportamento (become).', to:[['handler termina','PRONTO'],['send messaggio','ESECUZIONE'],['become','ESECUZIONE']] },
+      BLOCCATO:{ desc:'L\'attore e in attesa (non ha messaggi in mailbox e ha esaurito i messaggi da processare). Rimane in questo stato finche non arriva un nuovo messaggio.', to:[['arriva messaggio','PRONTO']] }
+    }});
+
+    /* ---- Annotated Code (sez. 6): ActorFoundry ping-pong ---- */
+    LessonKit.annotatedCode('#ac-actorfoundry', {
+      lang:'java',
+      lines:[
+        ['public class PingActor extends Actor {', 'Ogni attore estende la classe base Actor.'],
+        ['  ActorName otherPinger;', 'Riferimento all\'altro attore. ActorName e\' l\'identificatore univoco.'],
+        ['  @message', 'L\'annotation @message marca un metodo come gestore di messaggi.'],
+        ['  public void start(ActorName other) {', 'Handler per il messaggio "start": riceve il riferimento all\'altro attore.'],
+        ['    otherPinger = other;', 'Salva il riferimento dell\'altro attore.'],
+        ['    send(otherPinger, "ping", self(), Id.stamp()+"called from "+self());', 'send e\' asincrona: non c\'e\' trasferimento di controllo, solo invio nella mailbox.'],
+        ['  }', ''],
+        ['  @message', ''],
+        ['  public void ping(ActorName caller, String msg) {', 'Handler per "ping": riceve chiamata e messaggio da un altro attore.'],
+        ['    send(stdout, "println", "Received ping from "+caller);', 'stdout e\' un attore predefinito per la stampa.'],
+        ['    send(caller, "alive", self()+" is alive");', 'Risponde al mittente con un messaggio "alive".'],
+        ['  }', ''],
+        ['  @message', ''],
+        ['  public void alive(String reply) {', 'Handler per "alive": elabora la risposta ricevuta.'],
+        ['    send(stdout, "println", "Received "+reply+" from pinged actor");', ''],
+        ['  }', ''],
+        ['}', ''],
+        ['public class PingBoot extends Actor {', 'Attore di boot: crea e coordina gli altri attori.'],
+        ['  @message', ''],
+        ['  public void boot() {', ''],
+        ['    ActorName pinger1 = create(PingActor.class);', 'create: crea un nuovo attore con comportamento PingActor.'],
+        ['    ActorName pinger2 = create(PingActor.class);', ''],
+        ['    send(pinger1, "start", pinger2);', 'Avvia il protocollo inviando "start" a pinger1 con il riferimento a pinger2.'],
+        ['  }', ''],
+        ['}', '']
+      ]
+    });
+
+    /* ---- Annotated Code (sez. 4): event loop macro-step ---- */
+    LessonKit.annotatedCode('#ac-macrostep', { lang:'java', lines:[
+      ['loop {', 'L\'event loop incapsulato dell\'attore.'],
+      ['  msg <- waitForMsg()', 'Attende un messaggio dalla mailbox (operazione bloccante solo qui).'],
+      ['  handler <- selectHandler(msg)', 'Seleziona l\'handler in base al tipo/pattern del messaggio.'],
+      ['  execute(handler)', 'Esegue l\'handler per intero — semantica macro-step.'],
+      ['}', 'Dopo il completamento, torna ad attendere il prossimo messaggio.']
+    ]});
+
+    /* ---- Annotated Code (sez. 7): Ping-Pong in Pekko ---- */
+    LessonKit.annotatedCode('#ac-ping-pong', { lang:'java', lines:[
+      ['public static final class Ping {', 'Definisce il messaggio Ping.'],
+      ['  public final ActorRef<PongProtocol> replyTo;', 'Include il riferimento per la risposta (request-response).'],
+      ['  public Ping(ActorRef<PongProtocol> replyTo) {', 'Costruttore: il mittente passa il proprio actor ref.'],
+      ['    this.replyTo = replyTo;', 'Incapsula il canale di risposta nel messaggio stesso.'],
+      ['  }', 'Pattern idiomatico: nessuna chiamata bloccante necessaria.']
+    ]});
+
+    /* ---- State Explorer (sez. 12): ciclo di vita completo con fallimento — da PCD-2026-04-27 ---- */
+    LessonKit.stateExplorer('#se-actor-lifecycle', { start:'Creato', title:'Ciclo di vita di un attore', states:{
+      'Creato':{ desc:'L\'attore e stato istanziato ma non ancora pronto a ricevere messaggi. Il metodo di setup (factory) non e stato ancora invocato.', to:[['setup()','Avviato']] },
+      'Avviato':{ desc:'L\'attore e operativo. La mailbox e attiva e riceve messaggi. Il behavior definito nello startup viene eseguito per ogni messaggio.', to:[['riceve messaggio','Elaborazione'],['stop()','Terminato'],['fallimento','Fallito']] },
+      'Elaborazione':{ desc:'L\'attore sta processando un messaggio secondo la semantica macro-step (run-to-completion). Altri messaggi vengono accodati nella mailbox.', to:[['elaborazione completata','Avviato'],['cambio comportamento (become)','Avviato (nuovo behavior)'],['fallimento','Fallito']] },
+      'Fallito':{ desc:'L\'attore ha lanciato un\'eccezione. Il padre (supervisore) decide la strategia: restart, resume, stop o escalate.', to:[['restart','Avviato'],['resume','Avviato (stato preservato)'],['stop','Terminato'],['escalate','Propagato al padre']] },
+      'Terminato':{ desc:'L\'attore ha terminato volontariamente (stop) o per decisione del supervisore. Le risorse sono state rilasciate automaticamente.', to:[] }
+    }});
+
+    /* ---- State Explorer (sez. 12): strategie di supervisione ---- */
+    LessonKit.stateExplorer('#se-supervision', { start:'Attore sano', title:'Strategie di supervisione', states:{
+      'Attore sano':{ desc:'L\'attore funziona correttamente. Elabora messaggi dalla mailbox normalmente.', to:[['Fallimento','Fallito']] },
+      'Fallito':{ desc:'Eccezione lanciata durante l\'elaborazione di un messaggio. Ora il supervisore (padre) decide:', to:[['Restart','Riavviato (stato iniziale)'],['Resume','Ripreso (stato preservato)'],['Stop','Fermato definitivamente'],['Escalate','Propagato al nonno']] },
+      'Riavviato (stato iniziale)':{ desc:'Il supervisore ha scelto Restart. L\'attore viene ricreato con lo stato iniziale (come definito in setup). Tutte le risorse sono state rilasciate e riacquisite.', to:[['Attore sano']] },
+      'Ripreso (stato preservato)':{ desc:'Il supervisore ha scelto Resume. L\'attore riprende dallo stesso stato interno. Attenzione: lo stato potrebbe essere corrotto. Usare con cautela.', to:[['Attore sano']] },
+      'Fermato definitivamente':{ desc:'Il supervisore ha scelto Stop. L\'attore viene fermato e le risorse rilasciate. Il padre riceve una notifica di terminazione.', to:[] },
+      'Propagato al nonno':{ desc:'Il supervisore ha scelto Escalate. Il nonno (supervisore del padre) decide ora la strategia per l\'intero sotto-albero.', to:[['Attore sano']] }
+    }});
+
+    /* ---- Stepper (sez. 9): ask pattern combinato ---- */
+    LessonKit.stepper('#step-ask-pattern', {
+      title:'Ask pattern combinato', sub:'Due richieste parallele (A e B), poi combinate in C.',
+      shared:{ A:null, B:null, C:null, ready:0 },
+      watch:['A','B','C','ready'],
+      threads:{
+        Client:{ name:'Client', steps:[
+          { label:'ask(actorA)', run:function(s,l){ s.A='attesa...'; } },
+          { label:'ask(actorB)', run:function(s,l){ s.B='attesa...'; } },
+          { label:'Promise.all([A,B])', run:function(s,l){ if(s.ready===2){ s.C='combinato!'; return; } return 'block'; } },
+          { label:'Risultato C pronto', run:function(s,l){} }
+        ]},
+        ActorA:{ name:'Actor A', steps:[
+          { label:'riceve richiesta', run:function(s,l){} },
+          { label:'calcola risultato', run:function(s,l){} },
+          { label:'risponde', run:function(s,l){ s.A=42; s.ready++; } }
+        ]},
+        ActorB:{ name:'Actor B', steps:[
+          { label:'riceve richiesta', run:function(s,l){} },
+          { label:'calcola risultato', run:function(s,l){} },
+          { label:'risponde', run:function(s,l){ s.B=7; s.ready++; } }
+        ]}
+      },
+      verdict:function(s,done){ if(done) return {status:'ok',text:'Entrambe le risposte ricevute e combinate con successo.'}; else if(s.ready>0) return {status:'',text:'Attesa delle risposte parallele...'}; else return {status:'',text:'Avvia il Client per iniziare.'}; }
+    });
+
+    /* ---- Stepper (sez. 11): attore proattivo con self-sending ---- */
+    LessonKit.stepper('#step-proactivity', {
+      title:'Attore proattivo con self-sending',
+      sub:'L\'attore stampa numeri auto-inviandosi messaggi. Puoi fermarlo con stop in qualsiasi momento.',
+      shared:{ current:1, end:10, stopped:false },
+      watch:['current','stopped'],
+      threads:{
+        A:{ name:'Attore Stampante', steps:[
+          { label:'start', run:function(s,l){ s.current = 1; s.stopped = false; } },
+          { label:'stampa numero', run:function(s,l){ if(!s.stopped){ /* stampa */ } } },
+          { label:'auto-invia iterat_print', run:function(s,l){ if(!s.stopped && s.current < s.end){ s.current++; } else if(!s.stopped && s.current >= s.end){ /* finito */ } } },
+          { label:'(attesa messaggio)', run:function(s,l){ } }
+        ]},
+        S:{ name:'Segnale Esterno', steps:[
+          { label:'invia stop', run:function(s,l){ s.stopped = true; } },
+          { label:'(attesa)', run:function(s,l){ } }
+        ]}
+      },
+      verdict:function(s,done){
+        if(s.stopped && s.current < s.end) return {status:'ok',text:'Attore fermato dallo stop dopo ' + (s.current-1) + ' numeri stampati. Il self-sending si e\' interrotto.'};
+        if(!s.stopped && s.current >= s.end) return {status:'ok',text:'Attore ha completato la stampa di ' + s.end + ' numeri senza essere fermato.'};
+        if(s.stopped && s.current >= s.end) return {status:'ok',text:'Attore ha completato la stampa, lo stop era superfluo ma innocuo.'};
+        return {status:'',text:'Usa "invia stop" in qualsiasi momento per fermare la stampa.'};
+      }
+    });
+
+    /* ---- Annotated Code (sez. 13): ordinamento dei messaggi ---- */
+    LessonKit.annotatedCode('#ac-ordering', { lang:'java', lines:[
+      ['// A invia M1 a B, poi M2 a B', 'Stesso mittente, stesso destinatario.'],
+      ['A_tell_B ! M1;   A_tell_B ! M2;', 'M1 arriva prima di M2 (garanzia sender-receiver).'],
+      ['', ''],
+      ['// A invia M1 a B, poi M2 a C', 'Stesso mittente, destinatari diversi.'],
+      ['B_tell ! M1;   C_tell ! M2;', 'M2 potrebbe arrivare prima di M1! Nessuna garanzia.'],
+      ['', ''],
+      ['// Soluzione: usare un actor sequencer', 'Se serve ordinamento globale, va implementato.'],
+      ['// che serializza i messaggi verso B e C.', 'Pattern: un attore che inoltra ordinatamente.']
+    ]});
+
+    /* ---- Annotated Code (sez. 15): best practice ---- */
+    LessonKit.annotatedCode('#ac-best-practices', { lang:'java', lines:[
+      ['// SCORRETTO: bloccare l\'handler', 'Non fare blocking call dentro un handler.'],
+      ['Thread.sleep(1000);  // NO!', 'Blocca l\'event loop dell\'attore.'],
+      ['', ''],
+      ['// CORRETTO: messaggio con replyTo', 'Usare il protocollo nel messaggio.'],
+      ['msg.replyTo.tell(new Risultato(dati));', 'Preserva l\'asincronia e la reattivita.'],
+      ['return Behaviors.same();', 'L\'attore resta in ascolto di nuovi messaggi.']
+    ]});
+  </script>
+</body>
+</html>

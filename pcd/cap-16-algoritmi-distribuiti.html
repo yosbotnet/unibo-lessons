@@ -1,0 +1,1401 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 16 — Algoritmi distribuiti · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-15-distribuiti.html">&larr; Cap. 15 — Computazione distribuita: modelli e orologi logici</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-17-oggetti-servizi.html">Cap. 17 — Oggetti distribuiti e servizi &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte IV — Sistemi distribuiti · Capitolo 16</div>
+    <h1>Algoritmi distribuiti</h1>
+    <div class="lk-meta"><span>~50 min di lettura</span><span>17 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Sfide degli algoritmi distribuiti</a></li>
+      <li><a href="#s2">Mutua esclusione distribuita: il problema</a></li>
+      <li><a href="#s3">Algoritmo centralizzato con coordinatore</a></li>
+      <li><a href="#s4">Pseudocodice: processo client e coordinatore</a></li>
+      <li><a href="#s5">Simulatore: algoritmo centralizzato</a></li>
+      <li><a href="#s6">Algoritmo decentralizzato: Ricart-Agrawala</a></li>
+      <li><a href="#s7">Pseudocodice Ricart-Agrawala</a></li>
+      <li><a href="#s8">Ricart-Agrawala in azione: due simulatori</a></li>
+      <li><a href="#s9">Leader election: Chang-Roberts</a></li>
+      <li><a href="#s10">Esplora: macchina a stati di Chang-Roberts</a></li>
+      <li><a href="#s11">Message ordering: ordinamento causale</a></li>
+      <li><a href="#s12">Algoritmo con matrice di clock</a></li>
+      <li><a href="#s13">Ordinamento totale e sincronizzatori</a></li>
+      <li><a href="#s14">Global state: consistent cut e snapshot</a></li>
+      <li><a href="#s15">Algoritmo di Chandy-Lamport</a></li>
+      <li><a href="#s16">Esplora: gli stati di Chandy-Lamport</a></li>
+      <li><a href="#s17">Consensus: definizione e proprieta</a></li>
+      <li><a href="#s18">FLP e algoritmo base con round</a></li>
+      <li><a href="#s19">Byzantine fault e BGA</a></li>
+      <li><a href="#s20">Paxos, Raft e replicated state machines</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. Sfide degli algoritmi distribuiti</h2>
+
+    <div data-src="PCD-2026-05-15.html#s1">
+      <p>Progettare algoritmi per sistemi distribuiti significa operare senza clock condiviso, senza memoria condivisa e in presenza di guasti. Questi tre vincoli cambiano radicalmente l'approccio: non possiamo piu usare semafori o mutex come si fa nel caso concorrente classico, perche non esiste una risorsa centrale di sincronizzazione.</p>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>L'unico meccanismo di coordinazione disponibile in un sistema distribuito asincrono e lo scambio di messaggi. Ogni algoritmo distribuito si riduce a decidere <em>cosa</em> comunicare, <em>quando</em> comunicarlo e <em>come</em> interpretare cio che si riceve.</p>
+      </div>
+
+      <p>La maggior parte degli algoritmi discussi in questo capitolo assume un sistema asincrono senza guasti (tempo di consegna finito ma non noto a priori). Solo per il consenso si introduce l'ipotesi di sincronia con timeout per gestire i fallimenti.</p>
+
+      <table>
+        <thead>
+          <tr><th>Sfida</th><th>Conseguenza</th><th>Soluzione negli algoritmi</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Nessun clock condiviso</td><td>Impossibile ordinare eventi con tempo fisico</td><td>Clock logici e relazione happened-before</td></tr>
+          <tr><td>Nessuna memoria condivisa</td><td>Stato globale non osservabile direttamente</td><td>Snapshot algoritmi come Chandy-Lamport</td></tr>
+          <tr><td>Nessun failure detection accurato</td><td>Lento e guasto sono indistinguibili</td><td>Timeout e modelli a sincronia</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s2">
+      <p>Piu in dettaglio, i sistemi distribuiti presentano tre assenze fondamentali che li rendono radicalmente diversi dai sistemi concorrenti tradizionali (basati su memoria condivisa):</p>
+      <ul>
+        <li><strong>Assenza di un clock condiviso</strong>: non e possibile sincronizzare perfettamente gli orologi di processori diversi a causa dell'incertezza nei tempi di comunicazione. Gli orologi fisici non possono essere usati per la sincronizzazione</li>
+        <li><strong>Assenza di memoria condivisa</strong>: nessun processore puo conoscere lo stato globale del sistema in un dato istante. E difficile osservare qualsiasi proprieta globale</li>
+        <li><strong>Assenza di rilevamento accurato dei guasti</strong>: in un sistema asincrono (senza bound superiore sul tempo di comunicazione) non si puo distinguere tra un processore lento e uno caduto</li>
+      </ul>
+
+      <div class="lk-tabs" data-kit="tabs">
+        <div class="lk-tablist">
+          <button class="lk-tab">Sistemi asincroni</button>
+          <button class="lk-tab">Sistemi sincroni</button>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Non esiste un limite superiore noto al tempo di consegna dei messaggi. Il ritardo puo essere arbitrario ma finito. La maggior parte degli algoritmi distribuiti assume reti asincrone in assenza di guasti. Il nondeterminismo e massimo, la concorrenza e massima. Ideali per ambienti non critici dove la probabilita di guasto e bassa.</p>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Esiste un limite superiore noto al tempo di consegna dei messaggi e alla durata delle azioni dei processi. Si possono usare <strong>timeout</strong> per rilevare guasti. La progettazione degli algoritmi e piu semplice. Necessari quando si devono gestire guasti, ad esempio negli algoritmi di consensus o nei protocolli bizantini.</p>
+        </div>
+      </div>
+
+      <h3>Categorie principali di algoritmi distribuiti</h3>
+      <p>Il professore elenca le cinque macro-categorie che gli algoritmi distribuiti devono affrontare, tutte basate sugli orologi logici e sulla relazione <em>happened before</em> gia introdotta nel modulo precedente:</p>
+      <ol>
+        <li><strong>Ordinamento degli eventi</strong> (parziale): orologi logici di Lamport, vector clocks. Sono il fondamento usato da tutti gli altri algoritmi</li>
+        <li><strong>Osservazione dello stato</strong>: global snapshot per catturare lo stato globale del sistema da un singolo processo</li>
+        <li><strong>Coordinamento e accordo</strong>: mutua esclusione distribuita, elezione del leader, multicast communication con ordinamento, consensus</li>
+        <li><strong>Transazioni distribuite e controllo della concorrenza</strong></li>
+        <li><strong>Replicazione e servizi fault-tolerant</strong></li>
+      </ol>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>Tutti questi algoritmi si basano sugli orologi logici e sulla relazione happened before (→) per definire un ordinamento tra eventi correlati. Il concetto di tempo logico di Lamport (1978) e il fondamento su cui poggia l'intera architettura degli algoritmi distribuiti.</p>
+      </div>
+
+      <h3>Modelli di computazione distribuita</h3>
+      <p>Il professore richiama i tre modelli principali per descrivere il comportamento di un programma distribuito:</p>
+      <ul>
+        <li><strong>Interleaving model</strong>: assume un ordinamento totale tra gli eventi. OK per la verifica di proprieta</li>
+        <li><strong>Happened-before model</strong>: ordine parziale, con ordine totale solo per eventi dello stesso processo. Serve per catturare il comportamento osservabile</li>
+        <li><strong>Potential causality model</strong>: nessuna assunzione nemmeno per singoli processi multi-thread. Utile per debugging distribuito</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="s2" data-src="PCD-2026-05-15.html#s2">
+    <h2>2. Mutua esclusione distribuita: il problema</h2>
+    <p>Il problema e analogo a quello della sezione critica in ambito concorrente: un insieme di processi distribuiti ha nel proprio codice una porzione di programma che puo essere eseguita da un solo processo alla volta. Nel caso concorrente useremmo un semaforo o un mutex. Nel caso distribuito dobbiamo progettare un algoritmo basato esclusivamente sullo scambio di messaggi.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Le tre proprieta della sezione critica distribuita sono: <strong>safety</strong> (due processi non possono mai essere contemporaneamente in CS), <strong>liveness</strong> (ogni richiesta viene prima o poi concessa) e <strong>fairness</strong> (le richieste vengono servite secondo l'ordine della relazione happened-before).</p>
+    </div>
+
+    <p>Il professore sottolinea due approcci principali. Il primo e <strong>centralizzato</strong>: si assume un coordinatore che gestisce i permessi, soluzione piu semplice ma con un single point of failure. Il secondo e <strong>decentralizzato</strong> (Ricart-Agrawala), dove non esiste un coordinatore unico e tutti i processi collaborano in modo simmetrico.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Centralizzato</button>
+        <button class="lk-tab">Decentralizzato</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Un processo coordinatore gestisce un token. I processi inviano richieste al coordinatore, che le accoda e assegna il token rispettando l'ordinamento causale. Piu semplice da implementare, ma il coordinatore e un collo di bottiglia e un punto unico di fallimento.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Ogni processo che vuole entrare in CS invia una richiesta timestampata a tutti gli altri processi. Un processo concede il permesso (OK) se non e interessato alla CS o se la propria richiesta ha un timestamp maggiore. Simmetrico, senza coordinatori, ma richiede O(N-1) messaggi per richiesta.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s3">
+    <h2>3. Algoritmo centralizzato con coordinatore</h2>
+
+    <div data-src="PCD-2026-05-15.html#s3">
+      <p>Nell'algoritmo centralizzato esiste un processo coordinatore <code>P0</code> che detiene il token. I processi clients <code>Pi</code> (con i = 1..N) cooperano trasportando il proprio vector clock <code>v</code> in ogni messaggio (piggybacking), cosi che il coordinatore possa ricostruire l'ordinamento causale delle richieste.</p>
+
+      <p>Il punto fondamentale e la <strong>fairness</strong>: se due richieste arrivano, la richiesta che e accaduta prima nella relazione happened-before deve essere servita prima, anche se arriva al coordinatore dopo. Per fare questo, ogni processo allega il proprio vector clock <code>v</code> alla richiesta: <code>v[j]</code> rappresenta il numero di richieste fatte da <code>Pj</code> che precedono causalmente lo stato corrente.</p>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>Quando un processo invia una richiesta al coordinatore, include non solo la propria richiesta ma anche la conoscenza che ha delle richieste fatte dagli altri. Cosi il coordinatore puo ritardare una richiesta se sa che ce n'e un'altra in sospeso che la precede causalmente.</p>
+      </div>
+
+      <h3>Strutture dati del coordinatore</h3>
+      <p>Il coordinatore mantiene due strutture:</p>
+      <ul>
+        <li><code>reqList</code>: lista delle richieste ricevute ma non ancora soddisfatte.</li>
+        <li><code>reqDone</code>: array tale che <code>reqDone[i]</code> = numero di richieste di <code>Pi</code> gia soddisfatte.</li>
+      </ul>
+      <p>Una richiesta <code>w</code> in <code>reqList</code> e <strong>eligible</strong> se per ogni <code>j</code>, <code>w.v[j] == reqDone[j]</code> (e per <code>j == w.p</code>, <code>w.v[j] == reqDone[j] + 1</code>). Cio significa: non ci sono richieste accadute prima di <code>w</code> che non sono state ancora soddisfatte.</p>
+
+      <p>Vediamo un esempio concreto. P1 invia una richiesta con vettore [1,0]. P2 invia una richiesta con vettore [1,1] (perche sa che P1 ha gia fatto richiesta). Il coordinatore, quando riceve [1,0] da P1, nota che non ci sono richieste pendenti da altri, quindi puo servire subito P1. Quando riceve [1,1] da P2, vede che P2 stesso dichiara che P1 ha una richiesta in sospeso &mdash; ma il coordinatore ha gia servito P1, quindi il suo <code>reqDone[1]</code> ora vale 1, e la richiesta di P2 diventa eligible.</p>
+
+<pre class="mermaid">sequenceDiagram
+    participant P1
+    participant P0 as Coordinatore
+    participant P2
+
+    P1->>P0: req(v=[1,0])
+    P0->>P0: reqDone=[0,0] serve P1
+    P0->>P1: token
+    P1->>P0: release(token)
+    P2->>P0: req(v=[1,1])
+    P0->>P0: reqDone=[1,0] w.v=[1,1] eligible
+    P0->>P2: token</pre>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s16">
+      <p>In termini piu formali: se s &rarr; t (lo stato s precede causalmente lo stato t), la richiesta fatta in s deve essere servita prima di quella fatta in t, anche se la richiesta t arriva al coordinatore prima. Sul lato coordinatore, una richiesta w e eleggibile se w.v &le; reqDone: per ogni j &ne; w.p, w.v[j] == reqDone[j] (nessuna richiesta pendente da altri), e per j = w.p, w.v[j] == reqDone[j] + 1 (esattamente una richiesta pendente dal richiedente).</p>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p>La condizione di eleggibilit&agrave; &egrave; il cuore dell'algoritmo: garantisce che le richieste siano servite secondo l'ordine causale, non secondo l'ordine di arrivo al coordinatore. &Egrave; un esempio perfetto di come gli orologi vettoriali possano essere usati per implementare fairness in un sistema distribuito.</p>
+      </div>
+    </div>
+
+    <div data-src="PCD-2026-05-11.html#s13">
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>I processi <strong>piggybackano</strong> il proprio vector clock su tutti i messaggi in uscita. Quando un processo riceve un messaggio, aggiorna il proprio vector clock con il component-wise max. Cosi il vettore nella richiesta contiene la conoscenza causale del richiedente.</p>
+      </div>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p>L'algoritmo centralizzato richiede <strong>2 messaggi per richiesta</strong> (richiesta + token di risposta) piu i messaggi per propagare i vector clock. Il coordinatore e un single point of failure e puo diventare un collo di bottiglia.</p>
+      </div>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s3">
+      <p>Il flusso completo richiesta&ndash;token&ndash;rilascio, con la chiamata a <code>checkReq</code> sia alla ricezione di una richiesta sia al ritorno del token, e riassunto nel diagramma seguente.</p>
+
+      <pre class="mermaid">
+sequenceDiagram
+    participant P1 as Pi (client)
+    participant C as P0 (coordinator)
+    participant P2 as Pj (client)
+
+    Note over P1: v[i]++, send(req, v)
+    P1->>C: (req, v = [1,0,0,...])
+    Note over C: append reqList<br/>if haveToken: checkReq()
+    Note over C: w = first(eligible)<br/>send token, incr reqDone
+    C->>P1: token
+    Note over P1: inCS = true
+    Note over P1: [sezione critica]
+    P1->>C: token (release)
+    Note over P1: inCS = false
+    Note over C: haveToken = true<br/>checkReq() again
+    C->>P2: token (prossimo eligible)
+    </pre>
+
+      <p>Il processo client Pi, quando riceve un messaggio da un altro processo, aggiorna il proprio vettore v con il component-wise max del suo vecchio valore e del vettore ricevuto. Questo garantisce che la conoscenza causale si propaghi correttamente.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="PCD-2026-05-15.html#s4">
+    <h2>4. Pseudocodice: processo client e coordinatore</h2>
+    <p>Il codice seguente mostra la struttura dell'algoritmo: ogni client tiene un vector clock <code>v</code>, incrementa la propria componente per ogni richiesta, e invia il vettore al coordinatore. Il coordinatore, ricevuta la richiesta, verifica l'eligibility prima di assegnare il token.</p>
+
+    <div id="ac-centralized"></div>
+  </section>
+
+  <section id="s5" data-src="PCD-2026-05-15.html#s5">
+    <h2>5. Simulatore: algoritmo centralizzato</h2>
+    <p>Aziona il simulatore per vedere come il coordinatore gestisce le richieste concorrenti di due processi. Clicca "Passo P1" o "Passo P2" per far avanzare ogni processo, oppure "Reset" per ricominciare. Il coordinatore decide automaticamente se assegnare il token.</p>
+
+    <div id="step-centralized"></div>
+  </section>
+
+  <section id="s6">
+    <h2>6. Algoritmo decentralizzato: Ricart-Agrawala</h2>
+
+    <div data-src="PCD-2026-05-15.html#s6">
+      <p>Presentato da Glenn Ricart e Ashok Agrawala nel 1981, questo algoritmo e <strong>completamente decentralizzato</strong> e non richiede un coordinatore. L'idea e semplice: ogni processo che vuole entrare in sezione critica invia un messaggio con timestamp a <em>tutti</em> gli altri processi. Un processo ricevente risponde con un OK se non e interessato a entrare in CS o se la propria richiesta ha un timestamp maggiore (cioe e avvenuta dopo secondo l'ordine logico). Altrimenti, accoda la richiesta in attesa.</p>
+
+      <p>Un processo ottiene il permesso di entrare in CS quando ha ricevuto OK da tutti gli N-1 processi. Quando esce dalla CS, invia OK a tutti i processi nella propria coda di attesa.</p>
+
+      <p>Il numero di messaggi per richiesta e <strong>2(N-1)</strong>: (N-1) richieste inviate + (N-1) OK ricevuti. L'algoritmo funziona anche con canali non FIFO.</p>
+
+      <div class="callout note">
+        <span class="callout-label">Nota del redattore</span>
+        <p>Ricart-Agrawala e considerato ottimale per il numero di messaggi: ogni entrata in CS richiede esattamente 2(N-1) messaggi, e nessun messaggio superfluo viene generato.</p>
+      </div>
+
+<pre class="mermaid">flowchart TD
+    A[Pi vuole entrare in CS] --> B[myts = logical_clock]
+    B --> C[Invia req(myts) a tutti]
+    C --> D{Attesa OK da tutti}
+    D -->|Riceve OK da Pj| E[numOK++]
+    E --> F{numOK == N-1?}
+    F -->|Si| G[Entra in CS]
+    F -->|No| D
+    G --> H[myts = infinity]
+    H --> I[Invia OK a pending queue]
+    I --> J[Svuota pending queue]</pre>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s17">
+      <h3>Protocollo</h3>
+      <ol>
+        <li><strong>Richiesta:</strong> P<sub>i</sub> imposta myts = orologio logico corrente, invia <code>req(myts)</code> a tutti gli altri processi, azzera numOK.</li>
+        <li><strong>Ricezione richiesta (P<sub>j</sub>):</strong> se myts<sub>mittente</sub> &lt; myts<sub>locale</sub>, invia OK immediatamente; altrimenti accoda il mittente in pendingQ.</li>
+        <li><strong>Ricezione OK:</strong> incrementa numOK. Quando numOK == N-1, P<sub>i</sub> entra in CS.</li>
+        <li><strong>Rilascio:</strong> P<sub>i</sub> imposta myts = infinito, invia OK a tutti i processi in pendingQ, svuota la coda.</li>
+      </ol>
+
+      <p>&Egrave; un esempio di come un timestamp logico possa fungere da &laquo;biglietto numerato&raquo; per determinare l'ordine di accesso a una risorsa condivisa senza un'autorit&agrave; centrale.</p>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>L'algoritmo di Ricart-Agrawala dimostra che la mutua esclusione distribuita pu&ograve; essere implementata senza un coordinatore centrale, a costo di O(N) messaggi per accesso. &Egrave; un compromesso classico tra centralizzazione (un singolo punto di guasto, ma pochi messaggi) e decentralizzazione (nessun punto di guasto singolo, ma pi&ugrave; messaggi).</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s7" data-src="PCD-2026-05-15.html#s7">
+    <h2>7. Pseudocodice Ricart-Agrawala</h2>
+    <p>Ogni processo <code>Pi</code> mantiene una coda di richieste pendenti (<code>pendingQ</code>), un timestamp <code>myts</code> (inizializzato a infinito, segnalando che non si e interessati alla CS), e un contatore <code>numOK</code>.</p>
+
+    <div id="ac-ricart"></div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Ricart-Agrawala in azione: due simulatori</h2>
+
+    <div data-src="PCD-2026-05-11.html#s14">
+      <p>Il primo simulatore ripercorre l'algoritmo su 3 processi, evidenziando le condizioni di risposta:</p>
+      <ol>
+        <li>Per richiedere la CS, un processo <code>Pi</code> imposta <code>myts</code> al proprio clock logico e invia un messaggio <code>(req, myts)</code> a <strong>tutti</strong> gli altri processi.</li>
+        <li>Alla ricezione di una richiesta da <code>Pj</code>, un processo <code>Pi</code> risponde con <code>OK</code> se:
+          <ul>
+            <li>non e interessato a entrare in CS (<code>myts == infinity</code>), oppure</li>
+            <li>la propria richiesta ha timestamp maggiore (quindi e successiva).</li>
+          </ul>
+          Altrimenti, accoda <code>Pj</code> nella propria pendingQ.</li>
+        <li>Un processo ottiene la CS quando ha ricevuto <code>OK</code> da tutti gli altri processi.</li>
+        <li>Nel rilasciare la CS, invia <code>OK</code> a tutti i processi in pendingQ e resetta <code>myts</code> a infinity.</li>
+      </ol>
+
+      <div id="ra-simulator">
+        <div class="lk-bespoke-console" id="ra-log">Premi "Passo successivo" per eseguire Ricart-Agrawala con 3 processi passo-passo.</div>
+      </div>
+
+      <p>La fairness e assicurata dalla relazione d'ordine sui timestamp (a parita di timestamp, vince il PID piu basso).</p>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s4">
+      <p>Il secondo simulatore, con avanzamento manuale dei singoli processi, mostra il caso in cui due processi competono per la sezione critica: chi ha il timestamp piu alto accoda l'altro in <code>pendingQ</code> e concede l'OK solo al rilascio.</p>
+
+      <div id="step-ricart"></div>
+    </div>
+  </section>
+
+  <section id="s9">
+    <h2>9. Leader election: Chang-Roberts</h2>
+
+    <div data-src="PCD-2026-05-15.html#s8">
+      <p>Il problema della <strong>leader election</strong> (elezione del leader) sorge naturalmente quando si usa un approccio centralizzato: se il coordinatore fallisce, chi diventa il nuovo coordinatore? L'algoritmo di Chang-Roberts risolve questo problema superimponendo una topologia logica ad anello sulla rete fisica e usando un criterio semplice: viene eletto il processo con il PID piu alto.</p>
+
+      <p>Il funzionamento e il seguente:</p>
+      <ul>
+        <li>Uno o piu processi possono risvegliarsi spontaneamente e iniziare un'elezione, inviando un messaggio <code>election</code> con il proprio ID al vicino sinistro sull'anello.</li>
+        <li>Un processo che riceve un messaggio <code>election(j)</code> controlla: se <code>j &gt; myid</code>, inoltra il messaggio con l'ID corrente; se <code>j == myid</code>, significa che il messaggio ha fatto tutto il giro e il mittente originale e il leader: invia un messaggio <code>leader(myid)</code>; se <code>j &lt; myid</code> e il processo non e ancora sveglio, scarta il messaggio e si candida lui stesso.</li>
+        <li>Il messaggio <code>leader</code> viene propagato a tutto l'anello per notificare chi e il nuovo leader.</li>
+      </ul>
+
+      <p>Il numero di messaggi nel caso peggiore e <strong>2N-1 election + N leader</strong>.</p>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>L'anello logico non esiste nella rete fisica: e una sovrapposizione (superimposing) creata dall'algoritmo per organizzare il flusso dei messaggi. Questo e un pattern comune negli algoritmi distribuiti.</p>
+      </div>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s18">
+      <p>L'algoritmo di Chang-Roberts (1979) &egrave; elegante nella sua semplicit&agrave;. Alla ricezione di <code>(leader, j)</code>, un processo registra j come leader e inoltra il messaggio (se non &egrave; il leader stesso). &Egrave; ampiamente usato per scegliere coordinatori in algoritmi centralizzati, sfruttando il fatto che la topologia ad anello &egrave; facile da mantenere e il protocollo &egrave; semplice da dimostrare corretto.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-11.html#s15">
+      <p>Un dettaglio importante riguarda i messaggi con ID minore del proprio: se il processo e gia <code>awake</code>, il messaggio viene semplicemente <em>inghiottito</em> (scartato), senza avviare una nuova candidatura.</p>
+
+      <pre class="mermaid">
+flowchart LR
+    subgraph Anello PID
+        P1[P1] --> P2[P2]
+        P2 --> P3[P3]
+        P3 --> P4[P4]
+        P4 --> P1
+    end
+    P1 -.->|"election(1)"| P2
+    P2 -.->|"election(2)"| P3
+    P3 -.->|"election(3)"| P4
+    P4 -.->|"election(4) → leader(4)"| P1
+</pre>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s5">
+      <p>Un esempio con PID non ordinati sull'anello: P2 avvia l'elezione, il suo messaggio viene rimpiazzato da quello di P7 (l'ID massimo), che fa il giro completo e torna al mittente.</p>
+
+      <pre class="mermaid">
+graph LR
+    A[P2<br/>id=2] -->|election,2| B[P7<br/>id=7]
+    B -->|election,7| C[P3<br/>id=3]
+    C -->|election,7| D[P1<br/>id=1]
+    D -->|election,7| E[P5<br/>id=5]
+    E -->|election,7| F[P4<br/>id=4]
+    F -->|election,7| A
+    A -->|leader,7| B
+    B -->|leader,7| C
+    C -->|leader,7| D
+    D -->|leader,7| E
+    E -->|leader,7| F
+    F -->|leader,7| A
+    </pre>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>L'algoritmo usa l'anello logico solo per il controllo dell'elezione, non per il flusso dei dati applicativi. E un esempio classico di superimposing: sovrapporre un protocollo di coordinamento a una topologia fisica arbitraria. Questo pattern si ritrova in molti algoritmi distribuiti.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s10" data-src="PCD-2026-05-15.html#s9">
+    <h2>10. Esplora: macchina a stati di Chang-Roberts</h2>
+    <p>Esplora i possibili stati di un processo durante l'esecuzione dell'algoritmo di Chang-Roberts. Clicca sugli stati per vedere le transizioni possibili e la descrizione di ciascuno stato.</p>
+
+    <div id="se-chang"></div>
+
+    <p>Lo pseudocodice dell'algoritmo e mostrato qui sotto. Ogni processo mantiene <code>awake</code> (se ha gia partecipato all'elezione) e <code>leaderId</code> (una volta eletto).</p>
+
+    <div id="ac-chang"></div>
+  </section>
+
+  <section id="s11">
+    <h2>11. Message ordering: ordinamento causale</h2>
+
+    <div data-src="PCD-2026-05-15.html#s10">
+      <p>Nella computazione asincrona classica non ci sono restrizioni sull'ordine di ricezione dei messaggi. L'ordinamento causale e una restrizione utile: se <code>send(m1) &#8594; send(m2)</code> (l'invio di m1 precede causalmente l'invio di m2), allora vogliamo che <code>rec(m1) &#8594; rec(m2)</code> (la ricezione di m1 deve precedere la ricezione di m2). Nessun overtaking causale.</p>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p>L'ordinamento FIFO e piu debole: garantisce solo che se lo stesso processo invia m1 prima di m2, allora m1 viene ricevuto prima di m2. L'ordinamento causale e piu forte: considera anche la causalita che attraversa processi diversi.</p>
+      </div>
+
+      <p>Immaginiamo tre processi P1, P2, P3. P1 invia un messaggio a P3, poi P1 invia un messaggio a P2. P2, dopo aver ricevuto il messaggio da P1, invia un messaggio a P3. Senza ordinamento causale, P3 potrebbe ricevere prima il messaggio di P2 e poi quello di P1, violando la causalita: l'invio di P1 a P3 e avvenuto prima dell'invio di P2 a P3, quindi dovrebbe essere ricevuto prima.</p>
+
+<pre class="mermaid">flowchart LR
+    subgraph P1
+        a1[send m1 to P3] --> a2[send m2 to P2]
+    end
+    subgraph P2
+        a2 --> b1[rec m2 from P1]
+        b1 --> b2[send m3 to P3]
+    end
+    subgraph P3
+        a1 -.-> c1[rec m1]
+        b2 -.-> c2[rec m3]
+    end
+    a1 --> c1
+    b2 --> c2
+    a2 --> b1</pre>
+
+      <p>Nell'esempio: send(m1) &#8594; send(m3) perche send(m1) &#8594; rec(m2) &#8594; send(m3). Quindi vogliamo rec(m1) &#8594; rec(m3).</p>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s6">
+      <p>In un sistema completamente asincrono non ci sono restrizioni sull'ordinamento dei messaggi. Questo massimizza il nondeterminismo e la concorrenza, ma a volte e utile ridurre il nondeterminismo imponendo vincoli sull'ordinamento per semplificare la programmazione. Dal punto di vista del middleware, la verifica di eligibility avviene nel <em>sistema di comunicazione</em>: un messaggio non eligible viene messo in una coda di buffer e consegnato al processo solo quando lo diventa (perche altri messaggi sono arrivati e hanno aggiornato la matrice).</p>
+
+      <pre class="mermaid">
+sequenceDiagram
+    participant A as P1
+    participant B as P2
+    participant C as P3
+
+    Note over A: m[1,2]++, send to P2
+    A->>B: msg1 (con matrice m)
+    Note over B: check eligibility:<br/>m'[1,2] == m[1,2]+1?<br/>se si: update, receive
+    Note over A: m[1,3]++, send to P3
+    A->>C: msg2 (con matrice m)
+    Note over B: P2 invia a P3
+    B->>C: msg3 (con matrice m')
+    Note over C: msg3 arriva prima di msg2?<br/>Se send(msg2) -> send(msg3)<br/>allora rec(msg2) -> rec(msg3)<br/>Se msg3 arriva prima, buffer
+    C->>C: buffer msg3<br/>aspetta msg2
+    A->>C: msg2 arriva (dopo)
+    Note over C: msg2 eligible? si<br/>aggiorna matrice<br/>controlla msg3 bufferizzato<br/>ora msg3 eligible
+    C->>C: deliver msg3
+    </pre>
+    </div>
+  </section>
+
+  <section id="s12">
+    <h2>12. Algoritmo con matrice di clock</h2>
+
+    <div data-src="PCD-2026-05-15.html#s11">
+      <p>L'algoritmo per garantire l'ordinamento causale estende il vector clock in una <strong>matrice di clock</strong> <code>m</code> di dimensione N&#215;N, dove <code>m[j,k]</code> rappresenta il numero di messaggi inviati da <code>Pj</code> a <code>Pk</code> conosciuti da <code>Pi</code> nello stato corrente.</p>
+
+      <p>Quando un processo <code>Pi</code> invia un messaggio a <code>Pj</code>:</p>
+      <ul>
+        <li>Incrementa <code>m[i,j]</code> di 1</li>
+        <li>Allega l'intera matrice <code>m</code> al messaggio (piggyback)</li>
+      </ul>
+
+      <p>Quando un processo <code>Pi</code> riceve un messaggio da <code>Pj</code> con matrice <code>m'</code>:</p>
+      <ul>
+        <li>Il messaggio e <strong>eligible</strong> se per ogni k diverso da j: <code>m'[k,i] == m[k,i]</code> (nessun messaggio da altri processi a Pi che il mittente conosce ma Pi non ha ancora ricevuto) e per k = j: <code>m'[j,i] == m[j,i] + 1</code> (il messaggio corrente e l'unico atteso da Pj).</li>
+        <li>Se non e eligible, il messaggio viene bufferizzato fino a quando non lo diventa.</li>
+        <li>Se e eligible, Pi aggiorna la propria matrice <code>m</code> con <code>m'</code> (component-wise max) e procede con la ricezione.</li>
+      </ul>
+
+      <div class="callout note">
+        <span class="callout-label">Nota del redattore</span>
+        <p>Il professore osserva che, nonostante la complessita della matrice, il principio e semplice: ogni processo guarda solo la propria colonna nella matrice ricevuta per decidere se ci sono messaggi pendenti da altri processi che devono essere ricevuti prima.</p>
+      </div>
+
+      <div id="ac-matrix"></div>
+
+      <p>Il professore nota anche che se non ci fosse stato lo scambio di messaggi tra P1 e P2, gli eventi sarebbero stati concorrenti e non si sarebbe potuta ricostruire la catena causale. Tutto dipende dagli scambi di messaggi effettivi tra i processi.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s19">
+      <p>Riassumendo la condizione di eleggibilit&agrave; per un messaggio ricevuto da P<sub>i</sub> da P<sub>j</sub> con matrice m':</p>
+      <ul>
+        <li>&forall; k &ne; j: m'[k,i] == m[k,i] (tutti i messaggi da altri processi a i, noti al mittente, sono gi&agrave; stati ricevuti)</li>
+        <li>m'[j,i] == m[j,i] + 1 (questo &egrave; il prossimo messaggio atteso da j)</li>
+      </ul>
+      <p>Non &egrave; consentito il &laquo;sorpasso causale&raquo;: se un messaggio &egrave; stato inviato prima (causalmente) di un altro, deve essere ricevuto prima.</p>
+    </div>
+  </section>
+
+  <section id="s13">
+    <h2>13. Ordinamento totale e sincronizzatori</h2>
+
+    <div data-src="PCD-2026-05-15.html#s12">
+      <p>Oltre all'ordinamento causale, esistono forme piu forti. L'<strong>ordinamento totale</strong> (sincrono) e piu restrittivo dell'ordinamento causale: richiede che tutti i messaggi possano essere trattati come logicamente istantanei. Nel caso di messaggi multicast, significa che tutti i messaggi vengono consegnati nello stesso ordine a tutti i processi. Per ogni coppia di messaggi x, y e per ogni coppia di processi P, Q: se x viene ricevuto da P prima di y, allora y non viene ricevuto da Q prima di x.</p>
+
+      <h3>Sincronizzatori</h3>
+      <p>Progettare algoritmi distribuiti e piu facile assumendo una rete sincrona. I sincronizzatori permettono di simulare una rete sincrona su una asincrona, usando il meccanismo dei <strong>pulse</strong> (colpi): ogni processo ha un contatore pulse, e in ogni round i invia esattamente un messaggio a tutti i vicini con pulse = i, e attende un messaggio da ogni vicino con lo stesso pulse prima di avanzare al round successivo.</p>
+
+<pre><code class="language-java">Pj::
+var
+  pulse: integer := 0
+
+round i:
+  pulse := pulse + 1
+  /* simula round i dell'algoritmo sincrono */
+  send msg to all neighbors with pulse
+  wait for exactly one msg from each neighbor with (pulse = i)</code></pre>
+
+      <p>Il costo di un sincronizzatore si misura in termini di messaggi aggiuntivi (message complexity) e di tempo aggiuntivo (time complexity) necessari per simulare un singolo pulse.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-11.html#s17">
+      <p>Il quadro completo delle garanzie di ordinamento comprende tre livelli. L'ordinamento <strong>FIFO</strong> e la forma piu debole: i messaggi inviati da uno stesso mittente a uno stesso destinatario vengono ricevuti nell'ordine di invio; molti middleware di messaggistica lo garantiscono per default. L'ordine <strong>totale</strong> richiede un coordinamento aggiuntivo e si basa su algoritmi come ISIS o su un sequencer centralizzato: e la base per i sistemi di replicated state machine.</p>
+
+      <div class="lk-tabs" data-kit="tabs">
+        <div class="lk-tablist">
+          <button class="lk-tab">FIFO</button>
+          <button class="lk-tab">Causale</button>
+          <button class="lk-tab">Totale</button>
+        </div>
+        <div class="lk-tabpanel">
+          <p><strong>Garanzia:</strong> i messaggi tra coppia (mittente, destinatario) arrivano in ordine di invio.</p>
+          <p><strong>Costo:</strong> basso, spesso fornito dal protocollo di trasporto (TCP).</p>
+          <p><strong>Limitazione:</strong> non dice nulla su messaggi da mittenti diversi o a destinatari diversi.</p>
+        </div>
+        <div class="lk-tabpanel">
+          <p><strong>Garanzia:</strong> se invio di m1 precede causalmente invio di m2, allora m1 viene ricevuto prima di m2 ovunque.</p>
+          <p><strong>Costo:</strong> matrice <code>NxN</code> di interi per processo. Buffer per messaggi non ancora eligible.</p>
+          <p><strong>Utile per:</strong> applicazioni dove l'ordine causale e importante (es. aggiornamenti a un documento condiviso).</p>
+        </div>
+        <div class="lk-tabpanel">
+          <p><strong>Garanzia:</strong> tutti i processi vedono tutti i messaggi multicast nello stesso ordine globale.</p>
+          <p><strong>Costo:</strong> richiede un sequencer o un consenso distribuito.</p>
+          <p><strong>Utile per:</strong> replicated state machine, database distribuiti, sistemi di consensus.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="s14" data-src="PCD-2026-05-15.html#s13">
+    <h2>14. Global state: consistent cut e snapshot</h2>
+    <p>Catturare lo stato globale di un sistema distribuito e una sfida perche non esiste memoria condivisa. Uno <strong>stato globale</strong> e un insieme di stati locali che sono tutti concorrenti tra loro secondo la relazione happened-before. Per molte applicazioni e sufficiente catturare uno stato globale che e esistito nel passato, non necessariamente quello corrente.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Uno stato globale consistente non e semplicemente il prodotto cartesiano degli stati locali. Serve garantire che se un evento e = receive(msg) e e' = send(msg), allora se e' &#8594; e, deve valere che e' appartiene allo stato globale. Questa e la definizione di <strong>consistent cut</strong>.</p>
+    </div>
+
+    <p>Un taglio inconsistente si verifica quando registriamo la ricezione di un messaggio senza aver registrato anche il suo invio. Per esempio, se P1 invia un messaggio a P2, e nella nostra istantanea vediamo P2 che lo ha ricevuto ma P1 che non lo ha ancora inviato, la istantanea e inconsistente.</p>
+
+<pre class="mermaid">flowchart LR
+    subgraph P1
+        a1[e1] --> a2[e2]
+        a2 --> a3[e3]
+    end
+    subgraph P2
+        b1[e4] --> b2[e5]
+        b2 --> b3[e6]
+    end
+    a2 -. msg .-> b2</pre>
+
+    <p>G1 (inconsistente): include e2, e3, e5, e6. G2 (consistente): include e1, e2, e4, e5. In G1, e5 (ricezione del messaggio) e incluso ma non e2 (invio). In G2, se il messaggio e inviato ma non ancora ricevuto, va considerato come "in transito" e incluso nello stato del canale.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Due timeline di processo con un messaggio da P1 a P2; un taglio inconsistente include la ricezione ma non l'invio, un taglio consistente include l'invio e considera il messaggio in transito">
+      <svg viewBox="0 0 640 250" width="640" style="max-width:100%;height:auto">
+        <!-- timeline P1 -->
+        <line x1="60" y1="70" x2="600" y2="70" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="20" y="75" font-size="14" fill="#1546B8">P1</text>
+        <circle cx="120" cy="70" r="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="112" y="52" font-size="12" fill="#1546B8">e1</text>
+        <circle cx="270" cy="70" r="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="240" y="52" font-size="12" fill="#1546B8">e2 = send</text>
+        <circle cx="470" cy="70" r="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="462" y="52" font-size="12" fill="#1546B8">e3</text>
+        <!-- timeline P2 -->
+        <line x1="60" y1="180" x2="600" y2="180" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="20" y="185" font-size="14" fill="#1546B8">P2</text>
+        <circle cx="160" cy="180" r="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="152" y="212" font-size="12" fill="#1546B8">e4</text>
+        <circle cx="350" cy="180" r="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="316" y="212" font-size="12" fill="#1546B8">e5 = receive</text>
+        <circle cx="520" cy="180" r="6" fill="none" stroke="#1546B8" stroke-width="1.5"/>
+        <text x="512" y="212" font-size="12" fill="#1546B8">e6</text>
+        <!-- message arrow e2 -> e5 -->
+        <line x1="274" y1="76" x2="345" y2="173" stroke="#1546B8" stroke-width="1.5"/>
+        <path d="M 345 173 l -9 -3 l 5 -8 z" fill="#1546B8"/>
+        <text x="318" y="120" font-size="12" fill="#1546B8">msg</text>
+        <!-- inconsistent cut G1 (vermilion): after e1 on P1, after e5 on P2 -->
+        <path d="M 190 30 C 200 90, 400 120, 415 230" fill="none" stroke="#B83D2D" stroke-width="1.5" stroke-dasharray="6 4"/>
+        <text x="168" y="22" font-size="12" fill="#B83D2D">G1 (inconsistente)</text>
+        <!-- consistent cut G2 (cobalt): after e2 on P1, after e4 on P2 -->
+        <path d="M 315 30 C 300 90, 230 130, 240 230" fill="none" stroke="#1546B8" stroke-width="1.5" stroke-dasharray="2 4"/>
+        <text x="322" y="22" font-size="12" fill="#1546B8">G2 (consistente)</text>
+      </svg>
+      <figcaption><b>Fig. 1</b> — Consistent cut: il taglio G1 (vermiglio) include la ricezione e5 ma non l'invio e2, quindi e inconsistente; il taglio G2 (blu) include l'invio e2 ma non la ricezione: il messaggio e "in transito" e va registrato nello stato del canale.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s15">
+    <h2>15. Algoritmo di Chandy-Lamport</h2>
+
+    <div data-src="PCD-2026-05-15.html#s14">
+      <p>Proposto da K. Mani Chandy e Leslie Lamport nel 1985, questo algoritmo permette di catturare uno snapshot globale consistente senza bloccare i processi, utilizzando un meccanismo a marker.</p>
+
+      <p>Assunzioni: tutti i canali sono unidirezionali e FIFO. Ogni processo ha un colore (bianco/rosso).</p>
+
+      <p>L'algoritmo funziona cosi:</p>
+      <ul>
+        <li>Tutti i processi sono inizialmente <strong>bianchi</strong>.</li>
+        <li>Un processo <code>Pi</code> decide di avviare lo snapshot: salva il proprio stato locale, diventa <strong>rosso</strong> e invia un messaggio di <strong>marker</strong> su tutti i canali in uscita prima di inviare qualsiasi altro messaggio.</li>
+        <li>Quando un processo riceve un marker su un canale j:
+          <ul>
+            <li>Se e ancora bianco, diventa rosso, salva lo stato locale e propaga il marker a tutti i vicini.</li>
+            <li>Segna il canale j come chiuso (nessun altro messaggio bianco arrivera su quel canale, grazie a FIFO).</li>
+          </ul>
+        </li>
+        <li>I messaggi normali ricevuti su un canale j dopo che il marker e stato ricevuto (cioe quando il processo e rosso e il canale non e ancora chiuso) fanno parte dello stato del canale: vengono accodati in <code>chan[j]</code>.</li>
+      </ul>
+
+      <p>Grazie ai canali FIFO, nessun processo bianco riceve mai un messaggio inviato da un processo rosso. Questo garantisce che gli stati locali salvati siano mutuamente concorrenti (consistent cut).</p>
+
+      <div id="ac-chandy"></div>
+
+      <p>Applicazioni degli snapshot includono: rilevamento deadlock, rilevamento terminazione, debug distribuito, checkpoint e recovery.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s20">
+      <p>Un punto sottile: lo snapshot catturato corrisponde allo stato del sistema <em>appena prima</em> che i processi diventino rossi. Lo stato dei canali &egrave; dato dai messaggi inviati da processi bianchi e ricevuti da processi rossi: sono i messaggi <em>in transito</em> al momento dello snapshot.</p>
+
+      <pre class="mermaid">
+flowchart LR
+  subgraph P["Processo P"]
+    p0["e0"] --> p1["e1"] --> p2["e2"]
+    p2 --> p3["e3"]
+  end
+  subgraph Q["Processo Q"]
+    q0["f0"] --> q1["f1"] --> q2["f2"]
+  end
+  p2 -.->|"messaggio m"| q1
+  p1 -.->|"messaggio m'"| q2
+  </pre>
+
+      <p>L'algoritmo &egrave; usato per rilevamento di deadlock, terminazione e osservazione di predicati globali.</p>
+    </div>
+  </section>
+
+  <section id="s16">
+    <h2>16. Esplora: gli stati di Chandy-Lamport</h2>
+
+    <div data-src="PCD-2026-05-11.html#s16">
+      <p>Chandy-Lamport e uno dei risultati piu importanti e influenti nel campo dei sistemi distribuiti, alla base di molte tecniche di debugging e checkpointing. Il primo esploratore segue il ciclo di vita del protocollo dal punto di vista dell'intero snapshot.</p>
+
+      <div id="se-cl"></div>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>I canali FIFO garantiscono che nessun messaggio inviato da un processo white possa arrivare dopo il marker a un processo red. Questo assicura che gli stati locali catturati siano mutuamente concorrenti.</p>
+      </div>
+
+      <p>Il risultato e un'istantanea globale che corrisponde allo stato del sistema "subito prima che i processi diventassero rossi". Questa istantanea e consistente e puo essere usata per rilevare deadlock, terminare computazioni, o come checkpoint per il recovery.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s7">
+      <div class="callout warn">
+        <span class="callout-label">Attenzione</span>
+        <p>Uno stato globale non e semplicemente il prodotto degli stati locali. Un <strong>taglio inconsistente</strong> (inconsistent cut) si verifica quando viene registrata la ricezione di un messaggio ma non la sua spedizione. Formalmente, un global state S e consistente se per ogni evento e = receive(msg), l'evento e' = send(msg) (dove e' → e) appartiene a S.</p>
+      </div>
+
+      <p>Il secondo esploratore segue invece il singolo processo, canale per canale:</p>
+      <ul>
+        <li>Ogni processo ha una variabile <strong>color</strong> (red/white). Lo snapshot globale corrisponde allo stato del sistema <strong>subito prima che i processi diventino rossi</strong></li>
+        <li>Tutti i processi iniziano come <strong>white</strong></li>
+        <li>Dopo aver registrato lo stato locale, un processo diventa <strong>red</strong></li>
+        <li>Per registrare lo stato dei canali: un processo rosso invia un <strong>marker</strong> su tutti i canali in uscita prima di qualsiasi altro messaggio</li>
+        <li>Un processo <strong>deve diventare rosso</strong> alla ricezione di un marker se non lo ha gia fatto</li>
+      </ul>
+
+      <div id="se-snapshot"></div>
+    </div>
+  </section>
+
+  <section id="s17">
+    <h2>17. Consensus: definizione e proprieta</h2>
+
+    <div data-src="PCD-2026-05-15.html#s15">
+      <p>Il <strong>consenso</strong> e uno dei problemi fondamentali del distributed computing: trovare un accordo tra processi distribuiti sul valore di una proprieta o su un'azione da compiere. E pervasivo nei sistemi reali: transazioni in DB (commit/abort), leader election, replicazione di state machine, atomic broadcast, clock synchronization, blockchain.</p>
+
+      <p>La definizione formale del problema richiede:</p>
+      <ul>
+        <li>Ogni processo <code>Pi</code> parte in stato <strong>undecided</strong> e propone un valore <code>vi</code>.</li>
+        <li>I processi comunicano e scambiano valori.</li>
+        <li>Ogni processo alla fine fissa una <strong>decision variable</strong> <code>di</code> ed entra in stato <strong>decided</strong>, senza piu poter cambiare idea.</li>
+      </ul>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p>Le tre proprieta del consenso sono: <strong>termination</strong> (ogni processo corretto deve prima o poi settare la propria decision variable), <strong>agreement</strong> (tutti i processi corretti decidono lo stesso valore) e <strong>integrity</strong> (se tutti i processi corretti propongono lo stesso valore, quel valore deve essere la decisione; non si puo cambiare idea una volta deciso).</p>
+      </div>
+
+      <div class="callout idea">
+        <span class="callout-label">Idea chiave</span>
+        <p>Molti problemi distribuiti sono riconducibili al consenso. Perfino la mutua esclusione puo essere vista come un problema di consenso: dobbiamo trovare un accordo su chi entra in sezione critica. I criteri possono essere diversi (primo che ha fatto richiesta, PID piu alto), ma il meccanismo di accordo e lo stesso.</p>
+      </div>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s8">
+      <p>In forma piu formale, i tre requisiti si esprimono cosi:</p>
+      <ul>
+        <li><strong>Termination</strong>: ogni processo corretto prima o poi imposta la propria variabile di decisione</li>
+        <li><strong>Agreement</strong>: tutti i processi corretti che sono entrati nello stato decided hanno lo stesso valore (di = dj per ogni coppia di processi corretti Pi, Pj)</li>
+        <li><strong>Integrity</strong>: se tutti i processi corretti hanno proposto lo stesso valore, allora un processo corretto nello stato decided ha scelto quel valore. In altre parole, non si cambia idea</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="callout-label">Risultato fondamentale: FLP</span>
+        <p><strong>FLP (Fischer, Lynch, Patterson, 1985)</strong>: in una rete asincrona, anche con un singolo processo che puo morire (crash non annunciato), il problema del consensus e <strong>impossibile da risolvere</strong>. Questo teorema di impossibilita ha profonde implicazioni pratiche: tutti i protocolli di consensus reali devono rilassare qualche assunzione, tipicamente introducendo sincronia o randomizzazione.</p>
+      </div>
+
+      <h3>Dal teorema alla pratica: consensus sotto sincronia</h3>
+      <p>Per aggirare FLP, si assume un <strong>sistema sincrono</strong> (bound superiore sul ritardo dei messaggi e sulla durata delle azioni) e si definiscono <strong>modelli di guasto</strong> specifici. I modelli principali sono:</p>
+      <table>
+        <thead>
+          <tr><th>Modello</th><th>Descrizione</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>Crash</strong></td><td>Un processore si arresta (halt). Il guasto piu semplice da modellare</td></tr>
+          <tr><td><strong>Crash+link</strong></td><td>Un processore crasha oppure un link di rete cade e resta giu permanentemente</td></tr>
+          <tr><td><strong>Omission</strong></td><td>Un processo invia solo un sottoinsieme dei messaggi che dovrebbe inviare, o ne riceve solo un sottoinsieme</td></tr>
+          <tr><td><strong>Byzantine</strong></td><td>Un processore ha comportamento arbitrario: puo inviare messaggi contraddittori, valori falsi, o agire in modo malevolo. Il caso piu generale e difficile</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s18">
+    <h2>18. FLP e algoritmo base con round</h2>
+
+    <div data-src="PCD-2026-05-15.html#s16">
+      <p>Il celebre risultato <strong>FLP</strong> (Fischer, Lynch, Patterson, 1985) dimostra che in una rete asincrona, in presenza anche di un solo processo che crasha in modo non annunciato, il problema del consenso e <strong>impossibile da risolvere</strong>. Questo perche non e possibile distinguere un processo lento da uno crashato.</p>
+
+      <p>Per risolvere il consenso si assume quindi un sistema <strong>sincrono</strong>, con un bound superiore sul ritardo dei messaggi e sulla durata delle azioni. L'algoritmo base procede a <strong>round</strong>:</p>
+
+      <ul>
+        <li>Ogni processo corretto esegue <code>f + 1</code> round, dove <code>f</code> e il numero massimo di processori che possono fallire.</li>
+        <li>In ogni round, un processo invia a tutti i valori che non ha ancora inviato, riceve i valori dagli altri (aspettando un timeout), e aggiorna il proprio set <code>V</code>.</li>
+        <li>Alla fine, decide usando un criterio deterministico comune (es. il valore minimo, la maggioranza).</li>
+      </ul>
+
+      <p>Numero di messaggi: <code>O((f+1)N^2)</code>.</p>
+
+      <div id="ac-consensus"></div>
+
+      <div class="callout warn">
+        <span class="callout-label">Attenzione</span>
+        <p>L'algoritmo base funziona solo in assenza di comportamenti byzantine. Se un processo puo inviare valori arbitrari o mentire, serve un algoritmo piu robusto.</p>
+      </div>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s21">
+      <p>L'impossibilit&agrave; deriva dall'incertezza: non potendo distinguere un processo guasto da uno lento, un algoritmo che deve garantire terminazione non pu&ograve; aspettare indefinitamente, ma se decide troppo presto rischia di sbagliare. Le soluzioni pratiche introducono ipotesi aggiuntive: sincronia parziale, failure detector, o assunzioni probabilistiche. Il teorema non dice che il consenso &egrave; impossibile nella pratica: dice che &egrave; impossibile garantirne la soluzione in un modello puramente asincrono.</p>
+    </div>
+  </section>
+
+  <section id="s19">
+    <h2>19. Byzantine fault e BGA</h2>
+
+    <div data-src="PCD-2026-05-08.html#s22">
+      <p>Per superare l'impossibilit&agrave; FLP, la pratica introduce assunzioni di <strong>sincronia</strong>: un limite superiore noto al ritardo dei messaggi e alla durata delle azioni. Questo permette di usare timeout per rilevare guasti. Quando i guasti possono essere arbitrari (byzantine), serve N &ge; 3f+1 per tollerare f guasti bizantini.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-15.html#s17">
+      <p>Nel caso <strong>byzantine faults</strong>, i processi guasti possono avere comportamenti arbitrari: inviare valori sbagliati, contraddirsi, mentire deliberatamente. Il problema e noto come <strong>Byzantine General Agreement (BGA)</strong>: generali leali (processi corretti) devono coordinarsi (decidere se attaccare o ritirarsi) nonostante la presenza di traditori (processi faulty).</p>
+
+      <p>Il teorema fondamentale: <strong>non esiste protocollo f-resiliente per BGA se N &le; 3f</strong>, dove N = numero totale di processi, f = numero di processi faulty. In altre parole, serve almeno il 66.7% di processi corretti per tollerare guasti bizantini.</p>
+
+      <h3>Algoritmo con rotating coordinator (king)</h3>
+      <p>L'algoritmo opera in <code>f + 1</code> round, con un coordinatore rotante (chiamato <em>king</em>) in ogni round. Almeno un round avra un king non faulty:</p>
+      <ul>
+        <li><strong>Prima fase</strong>: ogni processo invia il proprio valore a tutti, riceve i valori dagli altri e determina il proprio <code>myvalue</code> come maggioranza nel vettore V (o "non definito" se non c'e maggioranza).</li>
+        <li><strong>Seconda fase</strong>: il king (coordinatore del round) invia il proprio <code>myvalue</code> a tutti. Ogni processo, se il proprio vettore V ha piu di <code>N/2 + f</code> copie del proprio valore, mantiene il proprio valore; altrimenti adotta il valore del king.</li>
+      </ul>
+
+      <p>Questo garantisce che tutti i processi corretti convergano allo stesso valore finale nonostante la presenza di faulty processes.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s9">
+      <p>Il diagramma seguente illustra la struttura a round dell'algoritmo base (crash-stop) con f = 1, quindi 2 round: dopo lo scambio completo, tutti i processi corretti hanno lo stesso insieme V e applicano la stessa funzione di decisione.</p>
+
+      <pre class="mermaid">
+graph TD
+    subgraph "Round 1"
+        P1a[P1: V={v1}] -->|send v1| P2a[P2]
+        P1a -->|send v1| P3a[P3]
+        P2a[P2: V={v2}] -->|send v2| P1a
+        P2a -->|send v2| P3a
+        P3a[P3: V={v3}] -->|send v3| P1a
+        P3a -->|send v3| P2a
+    end
+    subgraph "Round 2 (f=1, rounds=2)"
+        P1b[P1: V={v1,v2,v3}] -->|send nuovi| P2b[P2]
+        P1b -->|send nuovi| P3b[P3]
+        P2b[P2: V={v1,v2,v3}] -->|send nuovi| P1b
+        P2b -->|send nuovi| P3b
+        P3b[P3: V={v1,v2,v3}] -->|send nuovi| P1b
+        P3b -->|send nuovi| P2b
+    end
+    subgraph "Decisione"
+        P1c[P1: decide(V)]
+        P2c[P2: decide(V)]
+        P3c[P3: decide(V)]
+    end
+    </pre>
+
+      <p>Il problema dei <strong>generali bizantini</strong> (Lamport, Shostak, Pease, 1982) e un classico: i generali leali devono decidere all'unisono se attaccare o ritirarsi nonostante la presenza di traditori che possono inviare messaggi contraddittori a destinatari diversi, o non inviare nulla.</p>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p><strong>Teorema BGA</strong>: non esiste un protocollo f-resilient per il Byzantine General Agreement se N &le; 3f (N = numero totale di processi, f = guasti). Serve almeno 3f+1 processi per tollerare f guasti bizantini. Ad esempio, con 1 traditore servono almeno 4 generali; con 2 traditori almeno 7.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s20">
+    <h2>20. Paxos, Raft e replicated state machines</h2>
+
+    <div data-src="PCD-2026-05-15.html#s18">
+      <p>Il professore accenna a due famiglie di protocolli di consenso piu avanzati, che tipicamente vengono approfonditi in corsi successivi.</p>
+
+      <div class="lk-tabs" data-kit="tabs">
+        <div class="lk-tablist">
+          <button class="lk-tab">Paxos</button>
+          <button class="lk-tab">Raft</button>
+          <button class="lk-tab">Replicated State Machines</button>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Paxos (Lamport, 1998) e una famiglia di protocolli per il consenso in reti con processori non affidabili, pensata per ambienti <strong>crash-stop</strong> (non bizantini). Offre vari trade-off tra numero di processori, ritardi di messaggio, livello di attivita dei partecipanti e tipi di fallimento tollerati. Ampiamente usato per la replica di file e database dove serve durabilita.</p>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Raft (Ongaro e Ousterhout, 2013) e un algoritmo di consenso progettato per essere <strong>facile da capire</strong> rispetto a Paxos, pur essendo equivalente in termini di fault-tolerance e performance. Offre un modo generico per distribuire una state machine su un cluster di nodi. Il sito <a href="https://raft.github.io/" target="_blank" rel="noopener">raft.github.io</a> contiene implementazioni open-source in Go, C++, Java e Scala.</p>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Il consenso emerge tipicamente nel contesto delle <strong>replicated state machine</strong>: ogni server ha una state machine e un log. La state machine e il componente che vogliamo rendere fault-tolerant (es. una hash table). L'algoritmo di consenso gestisce un log replicato contenente i comandi dei client. Le state machine processano sequenze identiche di comandi, producendo cosi le stesse uscite. Se una state machine applica il comando "set x to 3" come n-esimo comando, nessun'altra state machine applichera un n-esimo comando diverso.</p>
+        </div>
+      </div>
+
+<pre class="mermaid">flowchart LR
+    Client -->|"set x=3"| S1[Server 1]
+    Client -->|"set x=3"| S2[Server 2]
+    Client -->|"set x=3"| S3[Server 3]
+    subgraph Consensus
+        S1 --> L1[Log: set x=3]
+        S2 --> L2[Log: set x=3]
+        S3 --> L3[Log: set x=3]
+    end
+    L1 --> M1[State Machine: x=3]
+    L2 --> M2[State Machine: x=3]
+    L3 --> M3[State Machine: x=3]</pre>
+    </div>
+
+    <div data-src="PCD-2026-05-18.html#s10">
+      <h3>Paxos (Lamport, 1998)</h3>
+      <p>Il nome deriva dall'articolo "The Part-Time Parliament" (Lamport, 1998), che presenta il consenso come un parlamento che legifera anche quando alcuni parlamentari sono assenti. Paxos bilancia diversi aspetti: numero di processori, ritardi di messaggio prima di apprendere il valore concordato, livello di attivita dei partecipanti, numero di messaggi scambiati, e tipi di guasto tollerati. E usato in tutti i contesti dove serve <strong>durabilita</strong>, come la replicazione di file o database.</p>
+
+      <h3>Raft (Ongaro, Ousterhout, 2013)</h3>
+      <p>Raft (Reliable, Replicated, Redundant, And Fault-Tolerant) e un algoritmo di consensus progettato per essere <strong>facile da capire</strong>. Equivalente a Paxos in fault-tolerance e performance, ma significativamente piu semplice da implementare. E utilizzato in progetti come etcd e Consul.</p>
+
+      <div class="lk-tabs" data-kit="tabs">
+        <div class="lk-tablist">
+          <button class="lk-tab">Paxos</button>
+          <button class="lk-tab">Raft</button>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Proposto da Leslie Lamport nel 1998. Famiglia di protocolli, non un singolo algoritmo monolitico. Considerato storicamente il riferimento per il consensus in produzione, ma notoriamente difficile da comprendere e implementare correttamente. Il nome e la metafora del parlamento riflettono la complessita della presentazione originale.</p>
+        </div>
+        <div class="lk-tabpanel">
+          <p>Proposto da Diego Ongaro e John Ousterhout nel 2013. Progettato esplicitamente per l'insegnamento e la comprensione. Usa un <strong>leader forte</strong>, elezione del leader con timeout randomizzati, e una struttura a log piu chiara. E lo standard de facto per nuovi progetti che necessitano di consensus.</p>
+        </div>
+      </div>
+
+      <p>L'algoritmo di consensus coordina il log replicato: garantisce che se una state machine applica "set x to 3" come n-esimo comando, nessun'altra state machine nello stesso cluster applichera mai un comando diverso come n-esimo. Tutte eseguono la stessa identica sequenza di comandi, producendo gli stessi risultati e arrivando agli stessi stati.</p>
+
+      <pre class="mermaid">
+graph LR
+    Client -->|"set x=3, get y, ..."| LB[Load Balancer]
+    LB --> SM1[Server 1<br/>State Machine<br/>Log: [set x=3,...]]
+    LB --> SM2[Server 2<br/>State Machine<br/>Log: [set x=3,...]]
+    LB --> SM3[Server 3<br/>State Machine<br/>Log: [set x=3,...]]
+    Consensus[Consensus Module<br/>Raft / Paxos] -.-> SM1
+    Consensus -.-> SM2
+    Consensus -.-> SM3
+    SM1 -.->|replica log| Consensus
+    SM2 -.->|replica log| Consensus
+    SM3 -.->|replica log| Consensus
+    </pre>
+
+      <p>Il sistema appare ai client come un'unica state machine affidabile, anche se una minoranza dei server nel cluster fallisce. Questo pattern e alla base di sistemi come Google File System (GFS), HDFS, RAMCloud, e innumerevoli database distribuiti.</p>
+    </div>
+
+    <div data-src="PCD-2026-05-11.html#s18">
+      <div class="callout warn">
+        <span class="callout-label">Il risultato FLP</span>
+        <p>FLP dimostra che non esiste un algoritmo di consenso deterministico che sia contemporaneamente: tollerante a un singolo crash, funzionante in rete asincrona, e garantito terminare sempre. Almeno una di queste tre condizioni va rilassata &mdash; ed e esattamente cio che fanno Paxos e Raft con le loro assunzioni di sincronia parziale.</p>
+      </div>
+
+      <p>In Raft il flusso e guidato da un leader forte: il client invia il comando al leader, che lo replica ai follower tramite <code>AppendEntries</code> e conferma il commit una volta raggiunta la maggioranza.</p>
+
+      <pre class="mermaid">
+flowchart TD
+    Client -->|"set x=3"| Leader[Leader]
+    subgraph Raft Cluster
+        Leader -->|"AppendEntries"| F1[Follower]
+        Leader -->|"AppendEntries"| F2[Follower]
+        Leader -->|"AppendEntries"| F3[Follower]
+    end
+    F1 -->|"ACK"| Leader
+    F2 -->|"ACK"| Leader
+    F3 -->|"ACK"| Leader
+    Leader -->|"commit x=3"| Client
+</pre>
+
+      <p>Se un server fallisce, la macchina a stati continua a funzionare sugli altri. Questa architettura e alla base di molti sistemi fault-tolerant: GFS, HDFS, RAMCloud, Chubby, ZooKeeper, etcd.</p>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p>Il professore ha menzionato Paxos e Raft come "further explorations". Il risultato di FLP, le proprieta del consenso e la differenza tra crash-stop e byzantine sono argomenti chiave per l'esame.</p>
+      </div>
+    </div>
+
+    <div data-src="PCD-2026-05-08.html#s23">
+      <p>La fama di Paxos come algoritmo difficile da comprendere ha portato allo sviluppo di Raft.</p>
+
+      <div class="callout exam">
+        <span class="callout-label">Per l'esame</span>
+        <p>La catena concettuale &egrave;: il <strong>consenso</strong> &egrave; il problema astratto, <strong>Paxos e Raft</strong> sono algoritmi concreti che lo risolvono sotto ipotesi di crash-stop, e le <strong>macchine a stati replicati</strong> sono l'architettura che usa il consenso per costruire servizi fault-tolerant. Questa gerarchia &egrave; fondamentale per comprendere i sistemi distribuiti moderni.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="PCD-2026-05-15.html#quiz,PCD-2026-05-18.html#quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <p>Testa la tua comprensione degli algoritmi distribuiti con queste domande. Clicca su ogni domanda per vedere la risposta.</p>
+
+    <div class="lk-quiz">
+      <details>
+        <summary>Quali sono le tre proprieta della sezione critica distribuita?</summary>
+        <p><strong>Safety</strong>: mai due processi contemporaneamente in CS. <strong>Liveness</strong>: ogni richiesta prima o poi viene concessa. <strong>Fairness</strong>: le richieste vengono servite nell'ordine della relazione happened-before.</p>
+      </details>
+
+      <details>
+        <summary>Come fa il coordinatore nell'algoritmo centralizzato a garantire la fairness anche se le richieste arrivano in ordine diverso da quello causale?</summary>
+        <p>Usando i vector clock trasportati dalle richieste (piggyback vector). Il coordinatore valuta l'eligibility di una richiesta w confrontando w.v con il proprio reqDone: una richiesta e eligible solo se non ci sono richieste accadute prima di w che non sono state ancora soddisfatte. Se una richiesta arriva in ritardo, il coordinatore la ritarda fintanto che non arrivano tutte quelle che la precedono causalmente.</p>
+      </details>
+
+      <details>
+        <summary>Quanti messaggi servono per entrare in CS nell'algoritmo di Ricart-Agrawala?</summary>
+        <p><strong>2(N-1)</strong> messaggi: (N-1) richieste inviate a tutti gli altri processi + (N-1) OK ricevuti. Non ci sono messaggi superflui.</p>
+      </details>
+
+      <details>
+        <summary>Nell'algoritmo di Chang-Roberts, come fa un processo a capire di essere il leader?</summary>
+        <p>Quando riceve un messaggio <code>election</code> con ID uguale al proprio (j == myid), significa che il suo messaggio iniziale ha fatto tutto il giro dell'anello ed e tornato indietro perche nessun altro aveva un ID piu alto. A quel punto si autoproclama leader e propaga un messaggio <code>leader</code>.</p>
+      </details>
+
+      <details>
+        <summary>Cosa dice il risultato FLP?</summary>
+        <p>In una rete asincrona, anche con un singolo processo che crasha in modo non annunciato, il consenso e impossibile da risolvere. Questo perche non si puo distinguere un processo lento da uno crashato. Per risolvere il consenso serve un'ipotesi di sincronia (con timeout).</p>
+      </details>
+
+      <details>
+        <summary>Quanti processi servono per tollerare f byzantine faults?</summary>
+        <p>Il teorema BGA dice che N deve essere maggiore di 3f (quindi almeno 3f + 1). In altre parole, servono almeno il 66.7% di processi corretti per tollerare guasti bizantini.</p>
+      </details>
+
+      <details>
+        <summary>Cos'e un consistent cut e perche e importante?</summary>
+        <p>Un consistent cut e un insieme di stati locali dove per ogni evento receive(m) incluso, anche l'evento send(m) corrispondente e incluso (a meno che accada dopo il taglio e il messaggio sia considerato in transito). E importante perche garantisce che lo snapshot globale rappresenti uno stato che e effettivamente esistito nel sistema, senza paradossi temporali come messaggi ricevuti ma mai inviati.</p>
+      </details>
+
+      <details>
+        <summary>Cosa garantiscono i canali FIFO nell'algoritmo di Chandy-Lamport?</summary>
+        <p>Garantiscono che nessun processo bianco riceva mai un messaggio inviato da un processo rosso. Questo e fondamentale per assicurare che gli stati locali salvati siano mutuamente concorrenti (consistent cut): quando un processo diventa rosso dopo aver ricevuto un marker, tutti i messaggi successivi che ricevera saranno da mittenti rossi.</p>
+      </details>
+
+      <details>
+        <summary>Differenza tra orologio logico e vector clock?</summary>
+        <p>L'orologio logico (Lamport) assegna un singolo numero a ogni evento e soddisfa: se a &#8594; b allora C(a) &lt; C(b), ma non viceversa. Il vector clock usa un array di N contatori e soddisfa: a &#8594; b se e solo se VC(a) &lt; VC(b), permettendo cosi di determinare con precisione se due eventi sono in relazione causale o concorrenti.</p>
+      </details>
+
+      <details>
+        <summary>Perche il problema del consenso e considerato fondamentale nei sistemi distribuiti?</summary>
+        <p>Perche molti problemi si riconducono a un problema di consenso: mutua esclusione (chi entra in CS?), leader election (chi e il leader?), atomic broadcast, transazioni distribuite, blockchain, clock synchronization. Una volta risolto il consenso, si ha uno strumento generale per risolvere un'intera classe di problemi di coordinazione distribuita.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono le tre assenze fondamentali che caratterizzano i sistemi distribuiti?</summary>
+        <p>Assenza di clock condiviso (non si possono sincronizzare orologi fisici), assenza di memoria condivisa (nessun processo conosce lo stato globale), assenza di rilevamento accurato dei guasti (in un sistema asincrono non si distingue tra processo lento e processo caduto).</p>
+      </details>
+
+      <details>
+        <summary>Nell'algoritmo di mutua esclusione centralizzato, quando una richiesta w e considerata "eligible"?</summary>
+        <p>w e eleggibile se w.v e "al massimo" uguale a reqDone: per ogni j diverso da w.p si ha w.v[j] == reqDone[j], e per j == w.p si ha w.v[j] == reqDone[j] + 1. Questo significa che non esistono richieste accadute prima di w che non sono ancora state soddisfatte.</p>
+      </details>
+
+      <details>
+        <summary>Qual e la condizione per avere un protocollo BGA (Byzantine General Agreement) risolvibile?</summary>
+        <p>N > 3f, dove N e il numero totale di processi e f e il numero di processi guasti con comportamento arbitrario. Se N &le; 3f, non esiste alcun protocollo f-resilient. Ad esempio, per tollerare 1 guasto bizantino servono almeno 4 processi.</p>
+      </details>
+
+      <details>
+        <summary>Cosa garantisce l'ordinamento causale dei messaggi rispetto al semplice FIFO?</summary>
+        <p>L'ordinamento causale e piu forte del FIFO: dati due messaggi m1, m2 tali che send(m1) → send(m2), allora rec(m1) → rec(m2). Il FIFO garantisce solo l'ordine all'interno dello stesso processo mittente, mentre l'ordinamento causale vieta i sorpassi (overtaking) anche tra processi diversi.</p>
+      </details>
+
+      <details>
+        <summary>Cosa dice il teorema CAP di Brewer?</summary>
+        <p>Un sistema distribuito con dati condivisi puo garantire al massimo due delle tre proprieta: Consistency (tutti vedono gli stessi dati), Availability (ogni richiesta riceve risposta), Partition tolerance (funziona nonostante partizioni di rete). La scelta dipende dai requisiti applicativi.</p>
+      </details>
+
+      <details>
+        <summary>Qual e la differenza fondamentale tra Java RMI e un message-oriented middleware (MOM)?</summary>
+        <p>RMI e basato su distributed object computing: chiamate a metodo sincrone, proxy/stub, trasparenza oggettuale, invocazione di metodi su oggetti remoti. Un MOM (es. RabbitMQ) e basato su messaggi asincroni, code, pubblicazione/sottoscrizione, disaccoppiamento temporale e spaziale. RMI e orientato agli oggetti; i MOM sono orientati ai messaggi.</p>
+      </details>
+
+      <details>
+        <summary>Descrivi il funzionamento dell'algoritmo di Chandy-Lamport per il global snapshot.</summary>
+        <p>Ogni processo ha un colore (bianco/rosso). Tutti iniziano bianchi. Quando un processo decide di fare lo snapshot (o riceve un marker), salva lo stato locale, diventa rosso, e invia marker su tutti i canali in uscita. I messaggi inviati da processi bianchi e ricevuti da processi rossi costituiscono lo stato dei canali. Canali FIFO garantiscono che nessun processo bianco riceva messaggi da processi rossi, assicurando che gli stati locali siano mutuamente concorrenti (consistent cut).</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-15-distribuiti.html">&larr; Cap. 15 — Computazione distribuita: modelli e orologi logici</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-17-oggetti-servizi.html">Cap. 17 — Oggetti distribuiti e servizi &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni dell'8 maggio, 11 maggio, 15 maggio e 18 maggio 2026 · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    // ---- Highlight.js ----
+    hljs.highlightAll();
+
+    // ---- Mermaid ----
+    mermaid.initialize({ theme: 'neutral', fontFamily: 'Inter,sans-serif' });
+
+    /* --- Annotated Code: Centralized Mutual Exclusion (slide 10-11) --- */
+    LessonKit.annotatedCode('#ac-centralized', { lang:'java', lines:[
+      ['P[i]::', 'Processo client Pi, i = 1..N. Ogni client ha un vector clock v e un flag inCS.'],
+      ['  var v: array[1..N] of integer := [0]', 'Vector clock locale: v[j] = richieste di Pj note a Pi.'],
+      ['  var inCS: boolean := false', 'Indica se il processo e attualmente in sezione critica.'],
+      ['  To request:', 'Fase di richiesta: incrementa la propria componente del vettore.'],
+      ['    v[i] := v[i] + 1', 'Aggiunge 1 al conteggio delle proprie richieste.'],
+      ['    send (req, v) to P[0]', 'Invia richiesta + vector clock al coordinatore P0.'],
+      ['  Upon receive(token) from P[0]:', 'Il coordinatore concede il permesso.'],
+      ['    inCS := true', 'Ora Pu entrare in CS.'],
+      ['  To release:', 'Fase di rilascio: restituisce il token al coordinatore.'],
+      ['    send token to P[0]', 'Rimanda indietro il token (non il vettore, il coordinatore lo ha gia).'],
+      ['    inCS := false', 'Esce dalla sezione critica.'],
+      ['  Upon receive(u):', 'Aggiornamento del vector clock alla ricezione di un messaggio.'],
+      ['    v:= max(v, u.v)', 'Component-wise max tra il vettore locale e quello ricevuto.'],
+      ['', ''],
+      ['P[0]::', 'Processo coordinatore: gestisce il token.'],
+      ['  var reqDone: array[1..N] of integer := [0]', 'reqDone[i] = numero richieste di Pi gia soddisfatte.'],
+      ['  var reqList: list of (pid, reqvector) := empty', 'Richieste ricevute ma non ancora soddisfatte.'],
+      ['  var haveToken: boolean := true', 'Allinizio il coordinatore ha il token.'],
+      ['  Upon receive(u,req):', 'Arriva una richiesta da un client.'],
+      ['    append(reqList, u)', 'Aggiunge la richiesta in coda.'],
+      ['    if (haveToken) checkReq()', 'Se ha il token, verifica subito le richieste eligible.'],
+      ['  Upon receive(u,token):', 'Il token viene restituito dopo il rilascio.'],
+      ['    haveToken := true; checkReq()', 'Riacquisisce il token e verifica le richieste pendenti.'],
+      ['  checkReq:', 'Funzione di eligibility: decide a chi assegnare il token.'],
+      ['    eligible := { w in reqList |', 'Seleziona le richieste w per cui non ci sono request pendenti che le precedono causalmente.'],
+      ['      for each j: w.v[j] == reqDone[j] (+1 se j==w.p) }', 'Condizione: w.v <= reqDone (con +1 per la richiesta corrente di w).'],
+      ['    if (eligible != {})', 'Se ci sono richieste pronte.'],
+      ['      w := first(eligible); delete(reqList, w)', 'Prende la prima richiesta eligible e la rimuove dalla lista.'],
+      ['      reqDone[w.p]++; send token to P[w.p]', 'Aggiorna reqDone e invia il token.'],
+      ['      haveToken := false', 'Il coordinatore non ha piu il token.'],
+    ]});
+
+    /* --- Annotated Code: Ricart-Agrawala (slide 13) --- */
+    LessonKit.annotatedCode('#ac-ricart', { lang:'java', lines:[
+      ['P[i]::', 'Ogni processo Pi esegue lo stesso algoritmo simmetrico.'],
+      ['  var pendingQ: list of process ids := null', 'Coda dei processi che hanno fatto richiesta ma con timestamp maggiore (aspetteranno).'],
+      ['  var myts: integer timestamp := infinity', 'Timestamp della propria richiesta (infinity = non interessato alla CS).'],
+      ['  var numOK: integer := 0', 'Contatore di OK ricevuti dagli altri processi.'],
+      ['  request:', 'Fase di richiesta.'],
+      ['    myts := logical_clock', 'Prende il timestamp dall orologio logico locale.'],
+      ['    send req with myts to all other processes', 'Invia richiesta timestampata a tutti.'],
+      ['    numOK := 0', 'Resetta il contatore.'],
+      ['  receive(u,req):', 'Alla ricezione di una richiesta da un altro processo.'],
+      ['    if (u.myts < myts)', 'Se la richiesta altrui ha timestamp minore (= e avvenuta prima).'],
+      ['      send OK to process P[u.pid]', 'Concede subito il permesso.'],
+      ['    else', 'Altrimenti (timestamp maggiore o uguale, o io non sono interessato).'],
+      ['      append(pendingQ, u.pid)', 'Accodo la richiesta: rispondero quando usciro dalla CS.'],
+      ['  receive(u,OK):', 'Alla ricezione di un OK da un altro processo.'],
+      ['    numOK := numOK + 1', 'Incrementa il contatore.'],
+      ['    if (numOK == N-1)', 'Quando ho ricevuto OK da tutti gli altri processi.'],
+      ['      enter_CS', 'Posso entrare in sezione critica.'],
+      ['  release:', 'Fase di rilascio.'],
+      ['    myts := infinity', 'Resetta il timestamp: non sono piu interessato.'],
+      ['    for each pid in pendingQ', 'Per ogni richiesta che avevo accodato.'],
+      ['      send OK to P[pid]', 'Concedo il permesso al processo in attesa.'],
+      ['    empty(pendingQ)', 'Svuoto la coda.'],
+    ]});
+
+    /* --- State Explorer: Chang-Roberts lifecycle --- */
+    LessonKit.stateExplorer('#se-chang', { start:'Sleeping', states:{
+      'Sleeping':{ desc:'Processo inattivo, non partecipa alle elezioni. Puo ricevere un messaggio election da un vicino o iniziare lui stesso lelezione.', to:[['riceve election con ID maggiore','Forwarding'],['inizia elezione','Candidate']] },
+      'Candidate':{ desc:'Il processo si e autocandidato come leader e invia election(myid) al vicino. Attende il ritorno del proprio messaggio.', to:[['messaggio election torna con myid','Leader'],['riceve election con ID maggiore','Forwarding']] },
+      'Forwarding':{ desc:'Il processo inoltra i messaggi election con ID maggiore del proprio al vicino successivo sullanello. Eventuali messaggi con ID minore vengono ingoiati (swallowed).', to:[['messaggio election con ID proprio','Leader'],['riceve leader(msg)','Elected']] },
+      'Leader':{ desc:'Il processo ha ricevuto indietro il proprio messaggio election: nessun altro ha ID piu alto. Si autoproclama leader e propaga leader(myid).', to:[['propaga leader msg','Elected']] },
+      'Elected':{ desc:'Il processo ha appreso chi e il leader tramite messaggio leader. Tutti i processi corretti convergono su leaderId.', to:[['leader msg propagato al prossimo','Elected'],['elezione completata','Done']] },
+      'Done':{ desc:'Elezione conclusa. Ogni processo conosce leaderId. Nuovo coordinatore pronto.', to:[] }
+    }});
+
+    /* --- Annotated Code: Chang-Roberts (slide 17) --- */
+    LessonKit.annotatedCode('#ac-chang', { lang:'java', lines:[
+      ['P[i]::', 'Ogni processo sullanello logico.'],
+      ['  var myid: integer', 'Identificatore unico del processo.'],
+      ['  var awake: boolean := false', 'Flag che indica se il processo ha gia partecipato allelezione.'],
+      ['  var leaderId: integer := null', 'ID del leader una volta eletto.'],
+      ['  To initiate election:', 'Un processo puo iniziare lelezione spontaneamente.'],
+      ['    send (election, myid) to P[i-1]', 'Invia messaggio election con il proprio ID al vicino sinistro.'],
+      ['    awake := true', 'Segna come attivo.'],
+      ['  Upon receive(election, j):', 'Alla ricezione di un messaggio election.'],
+      ['    if (j > myid)', 'Se ID ricevuto maggiore del proprio.'],
+      ['      send (election, j) to P[i-1]', 'Inoltra lID maggiore al vicino.'],
+      ['    else if (j == myid)', 'Se ID ricevuto uguale al proprio: il messaggio ha fatto il giro!'],
+      ['      send (leader, myid) to P[i-1]', 'Sono il leader: invio notifica.'],
+      ['    else if ((j < myid) and !awake)', 'Se ID ricevuto minore e non sono ancora sveglio.'],
+      ['      send (election, myid) to P[i-1]', 'Mi autocandido con il mio ID.'],
+      ['      awake := true', 'Ora sono attivo.'],
+      ['  Upon receive(leader, j):', 'Alla ricezione della notifica del leader.'],
+      ['    leaderId := j', 'Salvo lID del leader.'],
+      ['    if (j != myid)', 'Se non sono io il leader.'],
+      ['      send (leader, j) to P[i-1]', 'Propago la notifica al prossimo.'],
+    ]});
+
+    /* --- Annotated Code: Matrix clock for causal ordering (slide 21) --- */
+    LessonKit.annotatedCode('#ac-matrix', { lang:'java', lines:[
+      ['Pi::', 'Ogni processo mantiene una matrice NxN di clock.'],
+      ['  var m: array[1..N, 1..N] of integer := 0', 'm[j,k] = msgs inviati da Pj a Pk conosciuti da Pi.'],
+      ['  For every msg sent (from Pi) to Pj:', 'Quando Pi invia un messaggio a Pj.'],
+      ['    m[i,j] := m[i,j] + 1', 'Incrementa il contatore i->j nella propria matrice.'],
+      ['    piggyback the matrix m along with the msg', 'Allega lintera matrice come timestamp.'],
+      ['  For every msg received (by Pi) from Pj, with matrix m\':', 'Quando Pi riceve un messaggio da Pj.'],
+      ['    the msg is eligible if:', 'Il messaggio e eligible se non ci sono messaggi pendenti che lo precedono causalmente.'],
+      ['      for k != j: m\'[k,i] == m[k,i]', 'Nessun msg da Pk a Pi che il mittente conosce e Pi non ha ancora ricevuto.'],
+      ['      for k == j: m\'[j,i] == m[j,i] + 1', 'Il messaggio corrente e quello atteso da Pj (contatore incrementato di 1).'],
+      ['    if not eligible', 'Se non e ancora il momento di ricevere.'],
+      ['      delay the msg (put in a queue)', 'Bufferizza il messaggio, lo ricevera quando diventa eligible.'],
+      ['    else', 'Se e eligible.'],
+      ['      update m with m\'', 'Aggiorna la matrice locale (component-wise max).'],
+      ['      receive the msg', 'Consegna il messaggio al processo.'],
+      ['      check for other possible eligible messages', 'Potrebbero esserci altri messaggi bufferizzati ora eligible.'],
+    ]});
+
+    /* --- Annotated Code: Chandy-Lamport snapshot (slide 31) --- */
+    LessonKit.annotatedCode('#ac-chandy', { lang:'java', lines:[
+      ['Pi::', 'Ogni processo esegue lalgoritmo di snapshot.'],
+      ['  var color: {white, red} := white', 'Inizialmente tutti bianchi.'],
+      ['  var chan: array[1..k] of queues of msg := empty', 'Stato dei canali in ingresso da registrare (messaggi in transito).'],
+      ['  var closed: array[1..k] of boolean := [false]', 'Flag per ogni canale: chiuso = marker ricevuto.'],
+      ['  turn_red() enabled if (color = white):', 'Diventa rosso: inizio cattura snapshot.'],
+      ['    save_local_state', 'Salva lo stato locale del processo.'],
+      ['    color := red', 'Cambia colore.'],
+      ['    send marker to all neighbors', 'Invia marker su tutti i canali in uscita.'],
+      ['  Upon receive(marker) on incoming channel j:', 'Arriva un marker da un vicino.'],
+      ['    if (color = white)', 'Se ancora bianco.'],
+      ['      turn_red()', 'Diventa rosso, salva stato, propaga marker.'],
+      ['    closed[j] := true', 'Chiude il canale j: non registrera piu messaggi ricevuti su di esso.'],
+      ['  Upon receive(program_message) on incoming channel j:', 'Arriva un messaggio normale.'],
+      ['    if (color = red and not closed[j])', 'Se sono rosso e il canale non e ancora chiuso.'],
+      ['      append(chan[j], program_message)', 'Accoda il messaggio: fa parte dello stato del canale (in transito).'],
+    ]});
+
+    /* --- Annotated Code: Consensus base (slide 39) --- */
+    LessonKit.annotatedCode('#ac-consensus', { lang:'java', lines:[
+      ['Pi::', 'Ogni processo partecipa al consenso.'],
+      ['  var V: set of values := { v[i] }', 'Inizialmente conosce solo il proprio valore proposto.'],
+      ['  for k := 1 to f + 1 do', 'Esegue f+1 round (f = massimo numero di processi che possono fallire).'],
+      ['    send { v in V | Pi has not already sent v } to all', 'Invia a tutti i valori non ancora inviati.'],
+      ['    receive Sj from all process Pj, j != i', 'Riceve i valori dagli altri processi.'],
+      ['    V := V U Sj', 'Unisce i valori ricevuti al proprio set V.'],
+      ['  y := decide(V)', 'Alla fine decide usando un criterio deterministico comune (es. il valore minimo).'],
+      ['', ''],
+      ['// decide() = stesso criterio per tutti i processi corretti', 'Importante: tutti usano la stessa funzione di decisione.'],
+    ]});
+
+    /* --- Step Simulator: Centralized Mutual Exclusion --- */
+    LessonKit.stepper('#step-centralized', {
+      title:'Mutua esclusione centralizzata',
+      sub:'Avanza P1 o P2 per simulare richieste e rilascio del token. Il coordinatore P0 decide automaticamente.',
+      shared:{ tokenAt:0, inCS:0, reqP1:0, reqP2:0, servedP1:0, servedP2:0 },
+      watch:['tokenAt','inCS','servedP1','servedP2'],
+      threads:{
+        P1:{ name:'P1', steps:[
+          { label:'Inizia richiesta CS', run:function(s){ s.reqP1++; } },
+          { label:'Invia req(v=[1,0]) a P0', run:function(s){ } },
+          { label:'Attende token...', run:function(s){ if(s.tokenAt!=1) return 'block'; } },
+          { label:'IN SEZIONE CRITICA', run:function(s){ s.inCS++; } },
+          { label:'Rilascia token a P0', run:function(s){ s.inCS--; s.tokenAt=0; s.servedP1++; } }
+        ]},
+        P2:{ name:'P2', steps:[
+          { label:'Inizia richiesta CS', run:function(s){ s.reqP2++; } },
+          { label:'Invia req(v=[0,1]) a P0', run:function(s){ } },
+          { label:'Attende token...', run:function(s){ if(s.tokenAt!=2) return 'block'; } },
+          { label:'IN SEZIONE CRITICA', run:function(s){ s.inCS++; } },
+          { label:'Rilascia token a P0', run:function(s){ s.inCS--; s.tokenAt=0; s.servedP2++; } }
+        ]},
+        P0:{ name:'Coordinatore', steps:[
+          { label:'Riceve richiesta dal client', run:function(s,l){ } },
+          { label:'Verifica eligibility', run:function(s,l){ } },
+          { label:'Assegna token a P1', run:function(s){ if(s.tokenAt===0 && s.reqP1>s.servedP1){ s.tokenAt=1; } } },
+          { label:'Token di P1 torna', run:function(s){ } },
+          { label:'Assegna token a P2', run:function(s){ if(s.tokenAt===0 && s.reqP2>s.servedP2){ s.tokenAt=2; } } },
+          { label:'Token di P2 torna', run:function(s){ } }
+        ]}
+      },
+      verdict:function(s,done){
+        if(s.inCS>1) return {status:'bad', text:'Mutua esclusione violata: due processi in CS!'};
+        return done ? {status:'ok', text:'Tutte le richieste servite correttamente. Mutua esclusione rispettata.'} : {status:'', text:'Avanza un processo per proseguire.'};
+      }
+    });
+
+    // ---- State Explorer: Chandy-Lamport (lezione 11 maggio) ----
+    LessonKit.stateExplorer('#se-cl', {
+      title: 'Chandy-Lamport: stati dell\'algoritmo',
+      start: 'WHITE',
+      states: {
+        'WHITE': {
+          desc: 'Stato iniziale. Il processo non ha ancora registrato il proprio snapshot. Puo ricevere messaggi normali e inviarne. Un marker puo arrivare da un qualsiasi canale.',
+          to: [['Riceve marker e diventa', 'RED_INIT'], ['Avvia snapshot', 'RED_INIT']]
+        },
+        'RED_INIT': {
+          desc: 'Il processo diventa rosso: salva lo stato locale istantaneamente. Poi invia marker su TUTTI i canali in uscita prima di qualsiasi altro messaggio.',
+          to: [['Marker inviati su tutti i canali', 'RED_MARKER_SENT']]
+        },
+        'RED_MARKER_SENT': {
+          desc: 'Marker inviati. Il processo registra i messaggi che arrivano sui canali non ancora chiusi. Un canale si chiude quando arriva il marker di ritorno.',
+          to: [['Marker ricevuto su canale j', 'RED_WAITING'], ['Tutti i canali chiusi', 'SNAPSHOT_COMPLETE']]
+        },
+        'RED_WAITING': {
+          desc: 'In attesa che tutti i canali si chiudano. I messaggi ricevuti su canali aperti vengono registrati come "in transito" e fanno parte dello snapshot.',
+          to: [['Ancora un canale aperto', 'RED_MARKER_SENT'], ['Ultimo canale chiuso', 'SNAPSHOT_COMPLETE']]
+        },
+        'SNAPSHOT_COMPLETE': {
+          desc: 'Snapshot completato! Abbiamo: (1) stato locale di ogni processo salvato, (2) marker inviati/ricevuti su tutti i canali, (3) messaggi in transito registrati. Il risultato e un consistent cut.',
+          to: []
+        }
+      }
+    });
+
+    // ---- Bespoke Widget: Ricart-Agrawala Simulator ----
+    (function() {
+      var container = document.getElementById('ra-simulator');
+      if (!container) return;
+
+      var steps = [
+        { desc: 'Inizio: P1, P2, P3 sono tutti idle. Timestamps = infinity. Nessuno richiede la CS.', msg: '', procs: { P1: {myts:'inf', ok:0, pend:[]}, P2: {myts:'inf', ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: [] },
+        { desc: 'P1 vuole entrare in CS. Imposta myts=1 e invia REQ(1) a P2 e P3.', msg: 'P1 -> P2: REQ(1) | P1 -> P3: REQ(1)', procs: { P1: {myts:1, ok:0, pend:[]}, P2: {myts:'inf', ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P1'] },
+        { desc: 'P2 riceve REQ(1) da P1. myts(P2)=inf, non interessato -> invia OK a P1.', msg: 'P2 -> P1: OK', procs: { P1: {myts:1, ok:0, pend:[]}, P2: {myts:'inf', ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P2'] },
+        { desc: 'P3 riceve REQ(1) da P1. myts(P3)=inf, non interessato -> invia OK a P1.', msg: 'P3 -> P1: OK', procs: { P1: {myts:1, ok:0, pend:[]}, P2: {myts:'inf', ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P3'] },
+        { desc: 'P1 riceve OK da P2 e P3. numOK = 2 = N-1. P1 ENTRA IN CS!', msg: 'P1: numOK = 2 -> CS concessa!', procs: { P1: {myts:1, ok:2, pend:[], inCS:true}, P2: {myts:'inf', ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P1'], cs: 'P1' },
+        { desc: 'P2 vuole entrare in CS. Imposta myts=2 e invia REQ(2) a P1 e P3.', msg: 'P2 -> P1: REQ(2) | P2 -> P3: REQ(2)', procs: { P1: {myts:1, ok:2, pend:[], inCS:true}, P2: {myts:2, ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P2'], cs: 'P1' },
+        { desc: 'P3 riceve REQ(2) da P2. myts(P3)=inf, non interessato -> invia OK a P2.', msg: 'P3 -> P2: OK', procs: { P1: {myts:1, ok:2, pend:[], inCS:true}, P2: {myts:2, ok:0, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P3'], cs: 'P1' },
+        { desc: 'P1 riceve REQ(2) da P2. P1.myts=1 < P2.myts=2, la richiesta di P1 e precedente -> P1 NON invia OK, mette P2 in pendingQ.', msg: 'P2 accodato in pendingQ di P1', procs: { P1: {myts:1, ok:2, pend:['P2'], inCS:true}, P2: {myts:2, ok:1, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P1'], cs: 'P1' },
+        { desc: 'P1 rilascia la CS. myts(P1)=inf. Invia OK a P2 (in pendingQ). P1 non e piu in CS.', msg: 'P1 -> P2: OK (rilascio CS)', procs: { P1: {myts:'inf', ok:0, pend:[], inCS:false}, P2: {myts:2, ok:1, pend:[]}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P1'] },
+        { desc: 'P2 riceve OK da P1. numOK = 2 = N-1. P2 ENTRA IN CS!', msg: 'P2: numOK = 2 -> CS concessa!', procs: { P1: {myts:'inf', ok:0, pend:[]}, P2: {myts:2, ok:2, pend:[], inCS:true}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P2'], cs: 'P2' },
+        { desc: 'P2 rilascia la CS. myts(P2)=inf, pendingQ vuota. Fine.', msg: 'P2 -> nessuno in pendingQ. Fatto.', procs: { P1: {myts:'inf', ok:0, pend:[]}, P2: {myts:'inf', ok:0, pend:[], inCS:false}, P3: {myts:'inf', ok:0, pend:[]} }, active: ['P2'] },
+      ];
+      var currentStep = -1;
+      var wrapper = document.createElement('div');
+      wrapper.className = 'lk-ri-wrapper';
+      container.appendChild(wrapper);
+
+      function renderStep(idx) {
+        if (idx < 0 || idx >= steps.length) return;
+        var s = steps[idx];
+        var procs = s.procs;
+        var isDone = (idx === steps.length - 1);
+
+        var html = '<div class="lk-step-indicator">';
+        for (var i = 0; i < steps.length; i++) {
+          var cls = 'lk-step-dot';
+          if (i < idx) cls += ' done';
+          else if (i === idx) cls += ' active';
+          html += '<span class="' + cls + '"></span>';
+        }
+        html += '</div>';
+
+        html += '<div class="lk-ri-procs">';
+        Object.keys(procs).forEach(function(pk) {
+          var p = procs[pk];
+          var activeCls = s.active.indexOf(pk) >= 0 ? ' active-proc' : '';
+          html += '<div class="lk-ri-proc' + activeCls + '">';
+          html += '<div class="lk-ri-proc-head">' + pk + '</div>';
+          html += '<div class="lk-ri-proc-body">';
+          html += '<div>myts: <span class="lk-ri-val">' + p.myts + '</span></div>';
+          html += '<div>numOK: <span class="lk-ri-val">' + (p.ok||0) + '</span></div>';
+          if (p.pend && p.pend.length) html += '<div>pendingQ: <span class="lk-ri-val">[' + p.pend.join(',') + ']</span></div>';
+          if (p.inCS) html += '<div class="lk-ri-cs">IN CS</div>';
+          html += '</div></div>';
+        });
+        html += '</div>';
+
+        if (s.msg) html += '<div class="lk-ri-msg"><strong>' + s.msg + '</strong></div>';
+
+        html += '<div class="lk-ri-description">Passo ' + (idx + 1) + '/' + steps.length + ': ' + s.desc;
+        if (isDone) html += ' <strong>[FINE]</strong>';
+        html += '</div>';
+
+        html += '<div class="lk-ri-toolbar">';
+        if (idx > 0) html += '<button id="ra-prev">Precedente</button>';
+        if (idx < steps.length - 1) html += '<button id="ra-next">Passo successivo</button>';
+        if (idx >= 0) html += '<button id="ra-reset">Riavvia</button>';
+        html += '<span class="lk-ri-stepno">Passo ' + (idx + 1) + ' di ' + steps.length + '</span>';
+        html += '</div>';
+
+        wrapper.innerHTML = html;
+
+        var nextBtn = wrapper.querySelector('#ra-next');
+        if (nextBtn) nextBtn.addEventListener('click', function() { currentStep++; renderStep(currentStep); });
+        var prevBtn = wrapper.querySelector('#ra-prev');
+        if (prevBtn) prevBtn.addEventListener('click', function() { currentStep--; renderStep(currentStep); });
+        var resetBtn = wrapper.querySelector('#ra-reset');
+        if (resetBtn) resetBtn.addEventListener('click', function() { currentStep = 0; renderStep(currentStep); });
+      }
+
+      currentStep = 0;
+      renderStep(0);
+    })();
+
+    // ---- State Explorer: Chandy-Lamport, vista del singolo processo (lezione 18 maggio) ----
+    LessonKit.stateExplorer('#se-snapshot', { start:'WHITE', states:{
+      WHITE:{ desc:'Stato iniziale. Il processo non ha ancora registrato il proprio snapshot locale. Tutti i processi partono da qui.', to:[['riceve marker','RECEIVED_MARKER'],['decide di partire','TURNING_RED']] },
+      RECEIVED_MARKER:{ desc:'Un processo bianco riceve un marker su un canale in ingresso. Questo attiva la procedura di snapshot.', to:[['turn_red()','RED']] },
+      TURNING_RED:{ desc:'Il processo decide di iniziare lo snapshot: salva lo stato locale (proprio prima di diventare rosso) e cambia colore.', to:[['invia marker su tutti i canali uscenti','SENDING_MARKERS']] },
+      SENDING_MARKERS:{ desc:'Subito dopo essere diventato rosso, il processo invia un marker su ogni canale in uscita PRIMA di qualsiasi altro messaggio.', to:[['attende messaggi programma','RED_ACTIVE']] },
+      RED_ACTIVE:{ desc:'Processo rosso. I messaggi programma in arrivo su canali non ancora chiusi vengono registrati nello stato del canale.', to:[['riceve marker su canale j','CHANNEL_CLOSED'],['riceve messaggio programma','RECORDING_CHANNEL']] },
+      RECORDING_CHANNEL:{ desc:'Messaggio programma ricevuto su canale non ancora chiuso: viene accodato come parte dello stato di quel canale.', to:[['continua','RED_ACTIVE']] },
+      CHANNEL_CLOSED:{ desc:'Marker ricevuto su canale j: la registrazione del canale j e completa. Lo stato del canale e la coda dei messaggi registrati.', to:[['tutti i canali chiusi','SNAPSHOT_COMPLETE'],['altri canali aperti','RED_ACTIVE']] },
+      SNAPSHOT_COMPLETE:{ desc:'Snapshot completato. Il global snapshot risultante e un consistent cut: nessun messaggio ricevuto senza la corrispondente spedizione.', to:[] }
+    }});
+
+    LessonKit.stepper('#step-ricart', {
+      title:'Mutua Esclusione distribuita — Ricart-Agrawala',
+      sub:'Simulazione con 3 processi. P1 richiede la sezione critica per primo, P2 risponde subito, P3 compete. Avanza un processo alla volta con i pulsanti.',
+      shared:{ inCS:0, granted:0, pendingReqs:0 }, watch:['inCS','granted','pendingReqs'],
+      threads:{
+        P1:{ name:'P1 (richiede)', steps:[
+          { label:'myts = clock()', run:function(s,l){ s.pendingReqs++; } },
+          { label:'send(req,ts=3) a P2,P3', run:function(s,l){ } },
+          { label:'numOK = 0, attesa OK', run:function(s,l){ l.numOK=0; } },
+          { label:'ricevi OK da P2', run:function(s,l){ l.numOK=(l.numOK||0)+1; } },
+          { label:'ricevi OK da P3', run:function(s,l){ l.numOK=(l.numOK||0)+1; } },
+          { label:'numOK == 2? Entra in CS!', run:function(s,l){ if((l.numOK||0)>=2){ s.inCS=1; s.granted++; } } },
+          { label:'Rilascia CS: myts=inf', run:function(s,l){ s.inCS=0; s.pendingReqs=Math.max(0,s.pendingReqs-1); } },
+          { label:'send OK a pendingQ', run:function(s,l){ } }
+        ]},
+        P2:{ name:'P2 (ascolta)', steps:[
+          { label:'ricevi req da P1 (ts=3)', run:function(s,l){ } },
+          { label:'myts=inf, send OK a P1', run:function(s,l){ } }
+        ]},
+        P3:{ name:'P3 (compete)', steps:[
+          { label:'myts = clock()', run:function(s,l){ s.pendingReqs++; } },
+          { label:'send(req,ts=1) a P1,P2', run:function(s,l){ } },
+          { label:'ricevi req da P1 (ts=3 > 1)', run:function(s,l){ } },
+          { label:'ts P1 > ts P3, accoda P1', run:function(s,l){ l.queuedP1=true; } },
+          { label:'ricevi OK da P1, P2', run:function(s,l){ l.numOK=(l.numOK||0)+2; } },
+          { label:'P1 rilascia, send OK a P3', run:function(s,l){ l.numOK=(l.numOK||0)+1; } },
+          { label:'P3 ha tutti gli OK', run:function(s,l){ } }
+        ]}
+      },
+      verdict:function(s,done){
+        if(s.inCS>1) return {status:'bad',text:'ERRORE: mutua esclusione violata! Due processi contemporaneamente in CS.'};
+        if(s.granted>=1) return {status:'ok',text:'OK: P1 ha ottenuto la CS per primo (timestamp minore). Mutua esclusione e fairness rispettate.'};
+        return done?{status:'ok',text:'Simulazione completata.'}:{status:'',text:'Avanza i processi per vedere l\'algoritmo in azione.'};
+      }
+    });
+  </script>
+</body>
+</html>
