@@ -75,3 +75,15 @@ deploy.
 
 Commit to `main`, push to GitHub, `git pull` on VPS (`~/hosted/unibo-lessons`,
 already served at notes.ybc.sh by Caddy — no config change).
+
+## Addendum (2026-08-07): full-course expansion
+
+Pilot approved; scope extended to the whole course on Baro's go-ahead ("do it all").
+Added Macro-03 (ch 4, pantry/loanable funds), Macro-04 (ch 5-6, arcade/quantity
+theory), Macro-05 (ch 8, bathtub), Macro-06 (ch 12/14, mattress/AD-AS stepper),
+Macro-07 (ch 16, escalator/Phillips + disinflation game), and the Exam Room (16
+fresh questions, 40-minute timer, real scoring, per-lesson breakdown). Every page
+carries a hero illustration generated with Nano Banana Pro (google/gemini-3-pro-image
+via OpenRouter), one consistent ink-and-watercolor style, one rose accent, stored as
+~30-80KB webp in macro/assets/img/. Same voice rules as the pilot: story + one
+analogy per model, recall bridges, no em dashes.
