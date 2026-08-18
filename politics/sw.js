@@ -1,33 +1,31 @@
-/* Service worker for the macro course.
+/* Service worker for the politics course.
    Strategy: precache the whole course on install; when online, always fetch
    fresh from the network and refresh the cache; when offline, serve the cache.
    Google Fonts are cached first-hit and kept (they never change).
-   When adding files to macro/, add them to FILES and bump CACHE. */
+   When adding files to politics/, add them to FILES and bump CACHE. */
 'use strict';
-var CACHE = 'macro-v1';
+var CACHE = 'politics-v1';
 var FILES = [
   './',
   'index.html',
-  'Macro-00-Start-Here.html',
-  'Macro-01-GDP-Prices-Inflation.html',
-  'Macro-02-National-Income.html',
-  'Macro-03-Money-Inflation.html',
-  'Macro-04-Unemployment.html',
-  'Macro-05-IS-LM.html',
-  'Macro-06-AD-AS.html',
-  'Macro-07-Phillips-Curve.html',
-  'Macro-Exam-Room.html',
+  'Poli-00-Start-Here.html',
+  'Poli-01-Politics-and-Political-Science.html',
+  'Poli-02-The-State.html',
+  'Poli-03-Democracy.html',
+  'Poli-04-Autocracy.html',
+  'Poli-05-Constitutions.html',
+  'Poli-06-Executives-Parliaments-Bureaucracies.html',
+  'Poli-07-Elections-and-Referendums.html',
+  'Poli-08-Political-Attitudes-and-Behaviour.html',
+  'Poli-09-Parties-and-Pressure-Groups.html',
+  'Poli-10-Media-and-Political-Communication.html',
+  'Poli-11-Populism.html',
+  'Poli-12-Globalization-and-Global-Governance.html',
+  'Poli-13-Political-Trust.html',
+  'Poli-Exam-Room.html',
   'manifest.webmanifest',
   'assets/lesson-kit.css',
   'assets/lesson-kit.js',
-  'assets/img/fig-barter.webp',
-  'assets/img/fig-chain.webp',
-  'assets/img/fig-chairs.webp',
-  'assets/img/fig-counter.webp',
-  'assets/img/fig-handshake.webp',
-  'assets/img/fig-jars.webp',
-  'assets/img/fig-queue.webp',
-  'assets/img/fig-wheelbarrow.webp',
   'assets/img/hero-00.webp',
   'assets/img/hero-01.webp',
   'assets/img/hero-02.webp',
@@ -36,6 +34,12 @@ var FILES = [
   'assets/img/hero-05.webp',
   'assets/img/hero-06.webp',
   'assets/img/hero-07.webp',
+  'assets/img/hero-08.webp',
+  'assets/img/hero-09.webp',
+  'assets/img/hero-10.webp',
+  'assets/img/hero-11.webp',
+  'assets/img/hero-12.webp',
+  'assets/img/hero-13.webp',
   'assets/img/hero-exam.webp',
   'assets/img/hero-index.webp',
   'assets/img/icon-180.png',
@@ -55,7 +59,7 @@ self.addEventListener('activate', function (e) {
   e.waitUntil(
     caches.keys()
       .then(function (keys) {
-        return Promise.all(keys.filter(function (k) { return k !== CACHE && k.indexOf('politics-') !== 0; })
+        return Promise.all(keys.filter(function (k) { return k !== CACHE && k.indexOf('politics-') === 0; })
           .map(function (k) { return caches.delete(k); }));
       })
       .then(function () { return self.clients.claim(); })
