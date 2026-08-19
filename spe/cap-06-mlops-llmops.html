@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 6 — MLOps and LLMOps · SPE</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-05-model-driven-development.html">&larr; Ch. 5 — Model-Driven Development</a>
+    <a href="index.html">Index</a>
+    <a href="cap-07-chatflow-case-study.html">Ch. 7 — The ChatFlow case study &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part IV — Operations · Chapter 6</div>
+    <h1>Structuring and automating AI workflows</h1>
+    <div class="lk-meta"><span>~50 min read</span><span>6 interactive widgets</span><span>5 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The goal and the outcome of an ML workflow</a></li>
+      <li><a href="#s2">The phases of an ML workflow</a></li>
+      <li><a href="#s3">Notebooks, and the pitfalls of manual work</a></li>
+      <li><a href="#s4">ML projects versus ordinary software projects</a></li>
+      <li><a href="#s5">MLOps</a></li>
+      <li><a href="#s6">MLflow: components and set-ups</a></li>
+      <li><a href="#s7">The Tracking API</a></li>
+      <li><a href="#s8">Autologging</a></li>
+      <li><a href="#s9">Serving, containerization and the model registry</a></li>
+      <li><a href="#s10">MLflow Projects</a></li>
+      <li><a href="#s11">Generative AI workflows</a></li>
+      <li><a href="#s12">LLMOps</a></li>
+      <li><a href="#s13">MLflow for LLM applications</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="mlops-llmops.html#s5,mlops-llmops.html#s7,mlops-llmops.html#s9">
+    <h2>1. The goal and the outcome of an ML workflow</h2>
+    <p>The goal of a machine learning workflow is <strong>training a model from data</strong>, in order to <strong>do prediction on unseen data</strong> (a spam filter), or <strong>mine information from it</strong> (profiling customers), or <strong>automate some operation which is hard to code explicitly</strong> (NPCs in video games).</p>
+
+    <p>The word <em>model</em> here means something different from Chapter 5. In statistics and machine learning, <strong>a model is a mathematical representation of a real-world process</strong>, commonly attained by <em>fitting a parametric function over a sample of data describing the process</em> &mdash; for instance <var>f(x) = &beta;<sub>0</sub> + &beta;<sub>1</sub>x</var>. Neural networks are a popular family of models: a feed-forward network is a <em>cascade of layers</em>, and many admissible architectures serve disparate purposes.</p>
+
+    <p>The <strong>outcome</strong> of the workflow is described in five clauses, and each one carries an operational consequence:</p>
+    <table>
+      <tr><th>The outcome is...</th><th>Consequence for the process</th></tr>
+      <tr><td>A software module (e.g. a Python object) implementing a mathematical function, e.g. <code>predict(input_data) -&gt; output_data</code></td><td>It is code, so all of software engineering applies to it</td></tr>
+      <tr><td>Commonly tailored on a <strong>specific data schema</strong></td><td>The schema is part of the artefact and must be recorded with it</td></tr>
+      <tr><td>Which works <strong>sufficiently well with respect to test data</strong></td><td>"Sufficiently well" is a measurement, hence something to track</td></tr>
+      <tr><td>Which must commonly be <strong>integrated into a much larger software system</strong></td><td>Deployment and interfaces matter as much as accuracy</td></tr>
+      <tr><td>Which may need to be <strong>re-trained upon data changes</strong></td><td>The workflow is a loop, not a project with an end date</td></tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Nothing in that table mentions algorithms. The five clauses describe a <em>deliverable with a lifecycle</em>, and that is precisely why the course treats machine learning as a process-engineering problem rather than as a modelling one.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="mlops-llmops.html#s11,mlops-llmops.html#s12,mlops-llmops.html#s13">
+    <h2>2. The phases of an ML workflow</h2>
+    <p>The slide states the shape of the process before its content: <strong>the process of producing an ML model is not linear nor simple</strong>. There could be many iterations, up to reaching a satisfactory evaluation; the whole workflow may be re-started upon data changes; and updates in the model imply further integration and deployment efforts in downstream systems.</p>
+
+    <table>
+      <tr><th>Activity</th><th>What happens</th></tr>
+      <tr><td><strong>Problem framing</strong></td><td>Define the business or technical goal</td></tr>
+      <tr><td><strong>Data collection</strong></td><td>Acquire raw data</td></tr>
+      <tr><td><strong>Data preparation</strong></td><td>Clean, label and transform data</td></tr>
+      <tr><td><strong>Feature engineering</strong></td><td>Extract useful variables from data</td></tr>
+      <tr><td><strong>Model training</strong></td><td>Apply ML algorithms to produce candidate models</td></tr>
+      <tr><td><strong>Experimentation &amp; evaluation</strong></td><td>Compare models, tune hyperparameters, measure performance</td></tr>
+      <tr><td><strong>Model packaging &amp; deployment</strong></td><td>Turn the best model into a service or product</td></tr>
+      <tr><td><strong>Monitoring &amp; feedback</strong></td><td>Check performance in production, detect drift, gather new data, trigger retraining</td></tr>
+    </table>
+    <p><strong>These steps are cyclical, not linear</strong>: one often revisits data, retrains, or refines features.</p>
+
+    <h3>The worked example</h3>
+    <p>The lecture instantiates all eight activities on one problem: <strong>forecast footfall/visits to some office by day and time</strong>, useful for staffing and opening-hours planning. Problem framing asks whether to model it as a <em>regression</em> task or a <em>time-series forecasting</em> task. Data collection gathers historical footfall data, calendar events, weather data. Data preparation cleans and preprocesses, handling missing values. Feature engineering creates relevant features such as day of week, holidays, weather conditions. Then training, evaluation, packaging &mdash; and monitoring, with a pointed observation: <strong>new offices or online services may change footfall patterns</strong>. The world moves, so the model expires.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The eight activities of an ML workflow arranged as a cycle with two feedback loops">
+      <svg viewBox="0 0 700 380" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="ml" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="mlv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-vermilion)"/>
+          </marker>
+        </defs>
+
+        <rect x="14" y="60" width="120" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="74" y="80" text-anchor="middle" fill="var(--lk-ink)" font-size="10">1. PROBLEM</text>
+        <text x="74" y="96" text-anchor="middle" fill="var(--lk-ink)" font-size="10">FRAMING</text>
+
+        <rect x="152" y="60" width="120" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="212" y="80" text-anchor="middle" fill="var(--lk-ink)" font-size="10">2. DATA</text>
+        <text x="212" y="96" text-anchor="middle" fill="var(--lk-ink)" font-size="10">COLLECTION</text>
+
+        <rect x="290" y="60" width="120" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="350" y="80" text-anchor="middle" fill="var(--lk-ink)" font-size="10">3. DATA</text>
+        <text x="350" y="96" text-anchor="middle" fill="var(--lk-ink)" font-size="10">PREPARATION</text>
+
+        <rect x="428" y="60" width="120" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="488" y="80" text-anchor="middle" fill="var(--lk-ink)" font-size="10">4. FEATURE</text>
+        <text x="488" y="96" text-anchor="middle" fill="var(--lk-ink)" font-size="10">ENGINEERING</text>
+
+        <rect x="566" y="60" width="120" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="626" y="80" text-anchor="middle" fill="var(--lk-cobalt)" font-size="10">5. MODEL</text>
+        <text x="626" y="96" text-anchor="middle" fill="var(--lk-cobalt)" font-size="10">TRAINING</text>
+
+        <line x1="138" y1="84" x2="148" y2="84" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+        <line x1="276" y1="84" x2="286" y2="84" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+        <line x1="414" y1="84" x2="424" y2="84" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+        <line x1="552" y1="84" x2="562" y2="84" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+
+        <rect x="566" y="180" width="120" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="626" y="200" text-anchor="middle" fill="var(--lk-cobalt)" font-size="10">6. EXPERIMENT</text>
+        <text x="626" y="216" text-anchor="middle" fill="var(--lk-cobalt)" font-size="10">&amp; EVALUATE</text>
+        <line x1="626" y1="112" x2="626" y2="176" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+
+        <path d="M 566 192 C 520 192, 520 130, 566 106" fill="none" stroke="var(--lk-vermilion)" stroke-dasharray="4 3" marker-end="url(#mlv)"/>
+        <text x="470" y="152" fill="var(--lk-vermilion)" font-size="10">many iterations: tune, retrain</text>
+
+        <rect x="290" y="180" width="200" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="390" y="200" text-anchor="middle" fill="var(--lk-ink)" font-size="10">7. PACKAGING &amp; DEPLOYMENT</text>
+        <text x="390" y="216" text-anchor="middle" fill="var(--lk-ink)" font-size="10">turn the best model into a service</text>
+        <line x1="562" y1="204" x2="494" y2="204" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+
+        <rect x="60" y="180" width="180" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="150" y="200" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">8. MONITORING &amp; FEEDBACK</text>
+        <text x="150" y="216" text-anchor="middle" fill="var(--lk-ink)" font-size="10">drift, new data, retraining</text>
+        <line x1="286" y1="204" x2="244" y2="204" stroke="var(--lk-cobalt)" marker-end="url(#ml)"/>
+
+        <path d="M 150 176 C 150 130, 100 120, 74 112" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.5" marker-end="url(#mlv)"/>
+        <text x="96" y="140" fill="var(--lk-vermilion)" font-size="10">data changed</text>
+
+        <rect x="60" y="270" width="626" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="76" y="292" fill="var(--lk-vermilion)" font-size="11">WHAT MAKES THIS DIFFERENT FROM AN ORDINARY SOFTWARE PROJECT</text>
+        <text x="76" y="312" fill="var(--lk-ink)" font-size="10">it depends on data, which changes over time &nbsp;&middot;&nbsp; models need training and retraining, not just coding</text>
+        <text x="76" y="328" fill="var(--lk-ink)" font-size="10">performance may degrade in production &nbsp;&middot;&nbsp; many different expertises are involved</text>
+      </svg>
+      <figcaption><b>Plate 6.1</b> &mdash; The ML workflow as a cycle. The two vermilion arrows are the ones that make MLOps necessary: the inner loop that repeats until evaluation is satisfactory, and the outer loop that restarts everything when the data changes.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="mlops-llmops.html#s14,mlops-llmops.html#s15,mlops-llmops.html#s16">
+    <h2>3. Notebooks, and the pitfalls of manual work</h2>
+    <p>How are ML workflows typically performed? <strong>Via notebooks</strong>, for instance Jupyter. The lecture is balanced about it &mdash; four advantages and one decisive disadvantage:</p>
+    <table>
+      <tr><th>&#10003;</th><th>&#10007;</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Interleave code, textual description and visualizations</li>
+            <li>Interactive usage, allowing real-time feedback and adjustments</li>
+            <li>Uniform and easy interface to workstations</li>
+            <li>Easy to save, restore and share</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li><strong>Incentivises manual activities over automatic ones</strong></li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <h3>The six pitfalls</h3>
+    <ul>
+      <li><strong>Non-reproducibility</strong>: hidden state, out-of-order execution, forgotten seeds.</li>
+      <li><strong>Weak provenance</strong>: params, code version, data slice and metrics not logged.</li>
+      <li><strong>Human-in-the-loop gating</strong>: <em>print accuracy &rarr; eyeball &rarr; tweak &rarr; rerun</em>.</li>
+      <li><strong>Fragile artifacts</strong>: models overwritten, files named <code>final_v3.ipynb</code>.</li>
+      <li><strong>Environment drift</strong>: "works on my machine" dependencies and data paths.</li>
+      <li><strong>Collaboration pain</strong>: merge conflicts, opaque diffs, reviewability issues.</li>
+    </ul>
+
+    <h3>Why manual runs mislead</h3>
+    <p>The worked failure is four lines long and every reader recognises it:</p>
+    <ol>
+      <li>Run 1: random split &rarr; train &rarr; print accuracy = <strong>0.82</strong></li>
+      <li>Tweak hyperparams &rarr; rerun <em>only the training cell</em> &rarr; accuracy = <strong>0.86</strong></li>
+      <li>Forgot to fix the seed / re-run the split &rarr; <strong>different data, different metric</strong></li>
+      <li>No record of params, code, data &rarr; <strong>the "best" model cannot be justified</strong></li>
+    </ol>
+    <p>Consequences: <strong>incomparable results, irreproducible models</strong>; <strong>hard to automate, schedule, or roll back</strong>; <strong>no trace from model &rarr; code &rarr; data &rarr; metrics</strong>.</p>
+
+    <div id="repro-audit"></div>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>Notice that the failure in that sequence is not a bug in anybody's code: every individual step was reasonable. The defect is <em>procedural</em>, and procedural defects cannot be fixed by being more careful &mdash; only by moving the record-keeping out of the human and into the tooling. That is the entire argument for MLOps in one example.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="mlops-llmops.html#s17">
+    <h2>4. ML projects versus ordinary software projects</h2>
+    <table>
+      <tr><th>Analogies</th><th>Differences</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Both produce <strong>software modules</strong> in the end</li>
+            <li>Both involve <strong>iterative processes</strong>, where feedback is used to improve the product</li>
+            <li>Both are <strong>driven by tests/evaluations</strong></li>
+            <li>Both may benefit from <strong>automation</strong>, and may lose efficiency when activities are performed manually</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>ML projects <strong>depend on data</strong>, which changes over time</li>
+            <li>Models need <strong>training and retraining</strong>, not just coding</li>
+            <li>Performance may <strong>degrade in production</strong> (data drift, bias, new environments)</li>
+            <li><strong>Many different expertises</strong> are involved: data engineers, software engineers, domain experts, operations</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+    <p>And the conclusion, stated as an implication: <strong>no structured process &rArr; ML projects may fail to move from notebooks to real-world use.</strong></p>
+  </section>
+
+  <section id="s5" data-src="mlops-llmops.html#s18,mlops-llmops.html#s19,mlops-llmops.html#s20">
+    <h2>5. MLOps</h2>
+    <blockquote><p><strong>Machine Learning Operations (MLOps)</strong>: the practice of organizing and automating the end-to-end process of building, training, deploying, and maintaining machine-learning models.</p></blockquote>
+
+    <table>
+      <tr><th>Expected benefit</th><th>Meaning</th></tr>
+      <tr><td><strong>Reproducibility</strong></td><td>The same code + same data always gives the same model</td></tr>
+      <tr><td><strong>Automation</strong></td><td>Repetitive steps (training, testing, deployment) are handled by pipelines</td></tr>
+      <tr><td><strong>Scalability</strong></td><td>Easier to scale up training to more data, bigger models, more computing resources</td></tr>
+      <tr><td><strong>Monitoring &amp; governance</strong></td><td>Models are tracked, evaluated and kept under control</td></tr>
+      <tr><td><strong>Collaboration</strong></td><td>Teams work on shared infrastructure, with clear responsibilities</td></tr>
+      <tr><td><strong>Versioning</strong></td><td>Models, data and code are versioned and traceable</td></tr>
+    </table>
+
+    <p>MLOps <strong>adds infrastructure + processes + automation</strong> to make each step more reliable:</p>
+    <ul>
+      <li><strong>Data</strong> &rarr; version control for datasets, metadata, lineage tracking</li>
+      <li><strong>Training</strong> &rarr; automated pipelines that reproduce experiments on demand</li>
+      <li><strong>Evaluation</strong> &rarr; systematic tracking of metrics, logs and artifacts</li>
+      <li><strong>Deployment</strong> &rarr; continuous integration and delivery for ML models, often with <em>model registries</em></li>
+      <li><strong>Monitoring</strong> &rarr; automated checks for performance, drift, fairness, anomalies</li>
+      <li><strong>Collaboration</strong> &rarr; shared repositories, environments and documentation</li>
+    </ul>
+
+    <h3>What may happen without MLOps</h3>
+    <p>Data in ad-hoc spreadsheets or local files, with no version control. Training in personal notebooks, hard to reproduce later. Model evaluation manual and undocumented, hard to compare. Deployment as copy-paste code or manual sharing of a model file. Monitoring much harder, so <strong>models silently degrade</strong>. Collaboration as <em>"send me your notebook by email"</em>. The consequences listed are fragile non-reproducible workflows, long delays when models need updating, difficulty scaling beyond a single researcher, and <strong>low trust from stakeholders</strong> &mdash; <em>"why did accuracy drop?"</em>.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>MLOps is defined in one sentence &mdash; <em>organizing and automating the end-to-end process of building, training, deploying and maintaining ML models</em> &mdash; and defended with six benefits. The exam-worthy move is to pair each benefit with the pitfall it removes: reproducibility answers forgotten seeds and hidden state; versioning answers <code>final_v3.ipynb</code>; automation answers human-in-the-loop gating; monitoring answers silent degradation.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="mlops-llmops.html#s34,mlops-llmops.html#s35,mlops-llmops.html#s37,mlops-llmops.html#s38,mlops-llmops.html#s39,mlops-llmops.html#s40">
+    <h2>6. MLflow: components and set-ups</h2>
+    <p><strong>MLflow</strong> (<code>mlflow.org</code>) is <em>an open-source Python framework for MLOps and, most recently, LLMOps</em>. It is usable either in-cloud (for instance via Databricks) or on-premises (self-hosted) &mdash; the lecture uses the latter.</p>
+
+    <table>
+      <tr><th>It provides</th><th>How</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>A <strong>UI</strong> to visualize and monitor experiments</li>
+            <li>Facilities to <strong>evaluate</strong> ML models (metrics and charts)</li>
+            <li>A <strong>Python API</strong> and command-line support for ML operations</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>By <strong>tracking metadata</strong> about datasets, experiments and models</li>
+            <li>By <strong>serializing and storing</strong> models, charts, predictions, metrics</li>
+            <li>By <strong>facilitating deployment</strong> of models as services</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <h3>The three common set-ups</h3>
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">1. Solo (serverless)</button>
+        <button class="lk-tab">2. Solo + remote store</button>
+        <button class="lk-tab">3. Team work (remote server)</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Solo development, serverless.</strong> Everything lands on the local file system: this is what happens when you simply <code>import mlflow</code> and run a script, and it is why an <code>mlruns/</code> folder appears next to it. The UI is started on demand with <code>mlflow ui</code>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Solo development with a local server and a remote store.</strong> The tracking server runs locally while metadata and artifacts are pushed to remote storage.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Team work, remote server.</strong> In this set-up there could be <strong>up to three servers</strong> involved:</p>
+        <ul>
+          <li>the <strong>Backend Store server</strong> &mdash; a relational DBMS (PostgreSQL, MySQL, SQLite) storing <em>metadata</em>;</li>
+          <li>the <strong>Artifact Store server</strong> &mdash; e.g. S3 or Azure Blob Storage, storing <em>artifacts</em> through a file-system interface;</li>
+          <li>the <strong>MLflow Tracking Server</strong> &mdash; providing the UI and the API endpoints, and <em>mediating the interaction between users and the two stores</em>.</li>
+        </ul>
+        <p>Clients point at it through an environment variable, for instance <code>export MLFLOW_TRACKING_URI="http://my.mlflow.server.it:5000"</code>.</p>
+      </div>
+    </div>
+
+    <h3>How MLflow works, in one loop</h3>
+    <p>Two assumptions: some Python code is in place to perform ML tasks (via scikit-learn, TensorFlow, PyTorch), and <em>the code uses MLflow's Python API to log metadata about experiments, datasets, models, metrics</em>. Then: start the Python code; the MLflow API invoked in the code <strong>logs all relevant metadata and artifacts as the code runs</strong>; and metadata and artifacts are stored, depending on the configuration, on the local file system or on a remote backend and artifact store. Where <em>metadata &#8776; experiment id, run id, timings, data schemas, input parameters, hyper-parameters, metric values</em> and <em>artifact &#8776; dataset, model, chart</em>.</p>
+
+    <p>Two usage remarks temper the requirement. The second assumption <strong>may require additional effort from the developers</strong>, but <em>this is kept minimal via auto-logging</em> available for most common ML libraries. And there is <strong>no big constraint on how to organize the Python code itself</strong> &mdash; though many benefits (automation, reproducibility) come from organizing it as an <strong>MLflow Project</strong>, which implies decomposing the code into multiple scripts, thinking about the parametric aspects of the experiment and accounting for command-line arguments, and thinking about the environment where the code will run.</p>
+
+    <figure class="lk-fig" role="img" aria-label="MLflow architecture with client code, tracking server, backend store and artifact store">
+      <svg viewBox="0 0 700 320" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="mf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+        </defs>
+
+        <rect x="16" y="60" width="170" height="120" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="101" y="84" text-anchor="middle" fill="var(--lk-ink)" font-size="12">YOUR PYTHON CODE</text>
+        <text x="30" y="106" fill="var(--lk-ink)" font-size="10">scikit-learn / PyTorch ...</text>
+        <text x="30" y="126" fill="var(--lk-cobalt)" font-size="10">mlflow.set_experiment()</text>
+        <text x="30" y="142" fill="var(--lk-cobalt)" font-size="10">mlflow.start_run()</text>
+        <text x="30" y="158" fill="var(--lk-cobalt)" font-size="10">log_param / log_metric</text>
+        <text x="30" y="174" fill="var(--lk-cobalt)" font-size="10">log_artifact / autolog</text>
+
+        <rect x="266" y="60" width="170" height="120" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <text x="351" y="88" text-anchor="middle" fill="var(--lk-cobalt)" font-size="12">TRACKING SERVER</text>
+        <text x="351" y="110" text-anchor="middle" fill="var(--lk-ink)" font-size="10">UI + API endpoints</text>
+        <text x="351" y="130" text-anchor="middle" fill="var(--lk-ink)" font-size="10">mediates between users</text>
+        <text x="351" y="146" text-anchor="middle" fill="var(--lk-ink)" font-size="10">and the two stores</text>
+        <text x="351" y="168" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">port 5000</text>
+
+        <rect x="516" y="30" width="170" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="601" y="54" text-anchor="middle" fill="var(--lk-ink)" font-size="12">BACKEND STORE</text>
+        <text x="601" y="74" text-anchor="middle" fill="var(--lk-ink)" font-size="10">relational DBMS</text>
+        <text x="601" y="92" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">metadata: ids, params, metrics</text>
+
+        <rect x="516" y="130" width="170" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="601" y="154" text-anchor="middle" fill="var(--lk-ink)" font-size="12">ARTIFACT STORE</text>
+        <text x="601" y="174" text-anchor="middle" fill="var(--lk-ink)" font-size="10">S3, Azure Blob, file system</text>
+        <text x="601" y="192" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">artifacts: models, charts, datasets</text>
+
+        <line x1="190" y1="120" x2="262" y2="120" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#mf)"/>
+        <text x="226" y="112" text-anchor="middle" fill="var(--lk-cobalt)" font-size="9">MLFLOW_</text>
+        <text x="226" y="140" text-anchor="middle" fill="var(--lk-cobalt)" font-size="9">TRACKING_URI</text>
+        <line x1="440" y1="100" x2="512" y2="76" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#mf)"/>
+        <line x1="440" y1="150" x2="512" y2="168" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#mf)"/>
+
+        <rect x="16" y="230" width="670" height="72" fill="none" stroke="var(--lk-rule-soft)"/>
+        <text x="30" y="252" fill="var(--lk-vermilion)" font-size="11">THE THREE SET-UPS ARE THREE PLACEMENTS OF THE SAME THREE BOXES</text>
+        <text x="30" y="272" fill="var(--lk-ink)" font-size="10">1. solo, serverless: everything collapses onto the local file system (the mlruns/ folder)</text>
+        <text x="30" y="290" fill="var(--lk-ink)" font-size="10">2. solo + remote store &nbsp;&middot;&nbsp; 3. team work: all three boxes are separate servers, and the tracking server is the only one clients talk to</text>
+      </svg>
+      <figcaption><b>Plate 6.2</b> &mdash; MLflow architecture. The client never addresses the stores directly: the tracking server mediates, which is what makes the same script work unchanged in all three set-ups.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s7" data-src="mlops-llmops.html#s42,mlops-llmops.html#s43,mlops-llmops.html#s44,mlops-llmops.html#s45,mlops-llmops.html#s47">
+    <h2>7. The Tracking API</h2>
+    <p>Install with <code>pip install mlflow</code>, then consider the dummy script the lecture uses to introduce every concept at once:</p>
+
+    <pre><code class="language-python">import sys        # to read command-line arguments
+import tempfile   # to save generated files into temporary directories
+import mlflow     # to use MLflow functionalities
+from random import Random
+
+# Set the experiment name (creates it if it does not exist)
+mlflow.set_experiment(experiment_name="logging_example")
+# Read a seed from command-line arguments (default: 42)
+seed = int(sys.argv[1]) if len(sys.argv) &gt; 1 else 42
+rand = Random(seed)
+# Start an MLflow run, naming it "example_run"
+with mlflow.start_run(run_name="example_run") as run:
+    print(f"Started MLflow run with ID: {run.info.run_id} in experiment ID: {run.info.experiment_id}")
+    mlflow.log_param("seed", seed)
+    for i in range(5):
+        mlflow.log_metric(f"random_{i}", rand.random())
+    mlflow.log_metric("random_4", rand.randint(1, 10))  # overwrite last metric
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = f"{tmpdir}/example.txt"
+        with open(file_path, "w") as f:
+            f.write("This is an example artifact.")
+        mlflow.log_artifact(file_path, artifact_path="examples")
+    # Simulate an error in the run if the seed parameter is odd
+    if seed % 2 == 1:
+        raise ValueError("Let the run fail for odd seeds!")
+    print("Run completed successfully.")</code></pre>
+
+    <p>Run it twice, <code>python logging_example.py 42</code> and <code>python logging_example.py 43</code>: the first succeeds, the second raises. Note the sentence in the comments &mdash; <em>experiments and runs are identified by their numeric IDs</em> &mdash; and note that the seed is a <strong>command-line argument</strong> rather than a literal, which is the first step towards an MLflow Project.</p>
+
+    <p>Afterwards an <code>mlruns/</code> folder appears next to the script, and its shape <em>is</em> the data model of MLflow:</p>
+
+    <pre><code class="language-text">mlruns
+└── 931233098002846893                        &lt;- experiment id
+    ├── 378f18735f6d4abd8abeba76f4029bea      &lt;- run id
+    │   ├── artifacts/examples/example.txt
+    │   ├── meta.yaml
+    │   ├── metrics/{random_0 ... random_4}
+    │   ├── params/seed
+    │   └── tags/{mlflow.runName, mlflow.source.git.commit,
+    │             mlflow.source.name, mlflow.source.type, mlflow.user}
+    └── 9b52b7b7416e423ca9c878fba9b5c667      &lt;- the failing run, recorded all the same</code></pre>
+
+    <p>Start the web UI with <code>mlflow ui</code> and browse to <code>http://127.0.0.1:5000</code>. Clicking the experiment name shows the two runs, and <strong>the latest run is marked as failing while the earliest one is successful: the exit code of the run is registered automatically</strong>. The <em>Chart view</em> compares logged metrics across all runs; clicking a run shows its parameters, metrics and metadata &mdash; <em>the same information logged via the Python API plus some automatically-inferred metadata</em>, and <em>the same data stored on the file system in <code>mlruns/</code></em>. The <em>Artifacts</em> tab shows <code>example.txt</code> inside the virtual <code>examples/</code> folder, exactly as requested in the code.</p>
+
+    <p>Look at the tags in the tree once more: <code>mlflow.source.git.commit</code>, <code>mlflow.source.name</code>, <code>mlflow.user</code>. That is the trace <em>model &rarr; code &rarr; data &rarr; metrics</em> whose absence was the fourth consequence in &sect;3, materialised without anyone writing it.</p>
+
+    <div id="step-mlflow"></div>
+  </section>
+
+  <section id="s8" data-src="mlops-llmops.html#s51,mlops-llmops.html#s52,mlops-llmops.html#s56,mlops-llmops.html#s57,mlops-llmops.html#s58">
+    <h2>8. Autologging</h2>
+    <p>The effort objection is answered by one line of code. Consider a script training a decision tree classifier on the Iris dataset:</p>
+
+    <pre><code class="language-python">from sklearn.datasets import load_iris
+from sklearn.tree import DecisionTreeClassifier
+import mlflow
+import sys
+
+mlflow.set_experiment("autologging-example")
+# Enable autologging for scikit-learn (and other ML libraries in general)
+mlflow.autolog(log_datasets=True, log_models=True,
+               log_model_signatures=True, log_input_examples=True)
+seed = int(sys.argv[1]) if len(sys.argv) &gt; 1 else 42
+with mlflow.start_run(run_name="autologging_run"):
+    X, y = load_iris(return_X_y=True)
+    model = DecisionTreeClassifier(random_state=seed)
+    model.fit(X, y)
+    training_score = model.score(X, y)
+    print("Training accuracy:", training_score)
+    if training_score &lt; 0.9:
+        raise ValueError("Training accuracy is too low: " + str(training_score))</code></pre>
+
+    <p>The run logs <em>many more information automatically</em> &mdash; dataset, model, parameters, metrics &mdash; and the recurring comment on the slides is the point: <strong>recall that we did not log any of these explicitly in the Python code</strong>. What appears:</p>
+    <ul>
+      <li>Automatically computed metrics on training data: <strong>accuracy, f1-score, precision, AUC ROC</strong>.</li>
+      <li>The actual parameters of the scikit-learn class.</li>
+      <li>The <strong>training dataset schema</strong>, that is, the input schema expected by the model.</li>
+      <li>Artifacts: <code>estimator.html</code> (HTML representation of the processing pipeline), <code>metric_info.json</code>, <code>training_confusion_matrix.png</code>.</li>
+      <li>A model id such as <code>m-cbc72d11f1e6405bbaa77889f08b92dd</code>, meaning the model URI is <code>mlflow://m-cbc72d11f1e6405bbaa77889f08b92dd</code>.</li>
+      <li>Inside the logged model: <strong><code>MLmodel</code></strong> (YAML description), <strong><code>model.pkl</code></strong> (the serialized model, Python pickle), <strong><code>requirements.txt</code></strong> (the Python environment, pip format), <strong><code>serving_input_example.json</code></strong> (example input for serving).</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Those four files are the deployable unit. A serialized model without its input schema and its <code>requirements.txt</code> is not a deliverable but a souvenir &mdash; it cannot be rebuilt or served elsewhere. Autologging produces the whole bundle as a side effect of training, which is what closes the gap between "the notebook printed 0.86" and "the service returns predictions".</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="mlops-llmops.html#s59,mlops-llmops.html#s61,mlops-llmops.html#s62,mlops-llmops.html#s63,mlops-llmops.html#s65,mlops-llmops.html#s67">
+    <h2>9. Serving, containerization and the model registry</h2>
+    <p>MLflow <strong>assists in model deployment by mediating the interaction between logged models and their clients</strong>, where clients are assumed to use the models <em>in inference mode</em> (prediction serving) and may be either command-line tools or Web API consumers. It also <strong>automates the creation of container images</strong>, deployable on common cloud platforms (AWS SageMaker, Azure ML, Google Cloud AI Platform) or on-premises via Docker or Kubernetes.</p>
+
+    <h3>Three ways to obtain the same predictions</h3>
+    <pre><code class="language-bash"># 1. command line, against a logged model
+mlflow models predict --env-manager local \
+  -m "models:/m-1abbea58e1cf442ab9412b7eae572523" \
+  -i path/to/serving_input_example.json
+
+# 2. as a web service
+mlflow models serve --env-manager local \
+  -m "models:/m-1abbea58e1cf442ab9412b7eae572523" -p 1234
+curl http://localhost:1234/invocations -H "Content-Type:application/json" --data '{
+    "inputs": [[5.1, 3.5, 1.4, 0.2], [7.0, 3.2, 4.7, 1.4], [6.3, 3.3, 6.0, 2.5]]
+}'
+
+# 3. as a container image
+mlflow models build-docker \
+  -m "models:/m-1abbea58e1cf442ab9412b7eae572523" -n iris-classifier-dt:latest
+docker run --rm -it --network host iris-classifier-dt:latest
+curl http://localhost:8000/invocations -H "Content-Type:application/json" --data '{
+    "inputs": [[5.1, 3.5, 1.4, 0.2], [7.0, 3.2, 4.7, 1.4], [6.3, 3.3, 6.0, 2.5]]
+}'</code></pre>
+    <p>All three answer <code>{"predictions": [0, 1, 2]}</code>. The build log of the third is instructive: the generated Dockerfile starts from a slim Python image, installs nginx, copies the model directory to <code>/opt/ml/model</code>, installs the pinned MLflow version and the model dependencies. That is the <em>deploy automation via containerization</em> demanded by the exam, obtained from a model URI.</p>
+
+    <h3>The model registry</h3>
+    <p>One may <strong>register a model</strong>, which means <em>give it a human-friendly name plus versioning</em>: in the UI, visit a logged model page and click <em>Register</em>. Afterwards:</p>
+    <ul>
+      <li>The model appears in the <strong>Models</strong> section with its symbolic name.</li>
+      <li><strong>Multiple versions of the same model may coexist.</strong></li>
+      <li>Each version is referred to via the URI <code>models:/&lt;model-name&gt;/&lt;version&gt;</code> &mdash; for instance <code>models:/iris-classifier/1</code>.</li>
+      <li>The latest version is referred to via <code>models:/&lt;model-name&gt;@latest</code>.</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="From a tracked run to a registered model to three deployment targets">
+      <svg viewBox="0 0 700 300" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="dp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+        </defs>
+        <rect x="16" y="110" width="140" height="76" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="86" y="134" text-anchor="middle" fill="var(--lk-ink)" font-size="12">RUN</text>
+        <text x="86" y="152" text-anchor="middle" fill="var(--lk-ink)" font-size="10">params, metrics,</text>
+        <text x="86" y="168" text-anchor="middle" fill="var(--lk-ink)" font-size="10">git commit, user</text>
+
+        <rect x="196" y="90" width="160" height="116" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="276" y="114" text-anchor="middle" fill="var(--lk-cobalt)" font-size="12">LOGGED MODEL</text>
+        <text x="208" y="136" fill="var(--lk-ink)" font-size="10">MLmodel (YAML)</text>
+        <text x="208" y="154" fill="var(--lk-ink)" font-size="10">model.pkl</text>
+        <text x="208" y="172" fill="var(--lk-ink)" font-size="10">requirements.txt</text>
+        <text x="208" y="190" fill="var(--lk-ink)" font-size="10">serving_input_example.json</text>
+
+        <rect x="396" y="110" width="150" height="76" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="471" y="134" text-anchor="middle" fill="var(--lk-vermilion)" font-size="12">REGISTRY</text>
+        <text x="471" y="154" text-anchor="middle" fill="var(--lk-ink)" font-size="10">name + versions</text>
+        <text x="471" y="172" text-anchor="middle" fill="var(--lk-ink)" font-size="9">models:/name/1 &nbsp; @latest</text>
+
+        <rect x="580" y="40" width="106" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="633" y="62" text-anchor="middle" fill="var(--lk-ink)" font-size="10">CLI predict</text>
+        <text x="633" y="80" text-anchor="middle" fill="var(--lk-ink)" font-size="9">batch</text>
+        <rect x="580" y="122" width="106" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="633" y="144" text-anchor="middle" fill="var(--lk-ink)" font-size="10">models serve</text>
+        <text x="633" y="162" text-anchor="middle" fill="var(--lk-ink)" font-size="9">/invocations</text>
+        <rect x="580" y="204" width="106" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="633" y="226" text-anchor="middle" fill="var(--lk-cobalt)" font-size="10">build-docker</text>
+        <text x="633" y="244" text-anchor="middle" fill="var(--lk-ink)" font-size="9">image, then k8s</text>
+
+        <line x1="160" y1="148" x2="192" y2="148" stroke="var(--lk-cobalt)" marker-end="url(#dp)"/>
+        <line x1="360" y1="148" x2="392" y2="148" stroke="var(--lk-cobalt)" marker-end="url(#dp)"/>
+        <path d="M 550 140 C 560 110, 566 80, 576 68" fill="none" stroke="var(--lk-cobalt)" marker-end="url(#dp)"/>
+        <line x1="550" y1="148" x2="576" y2="148" stroke="var(--lk-cobalt)" marker-end="url(#dp)"/>
+        <path d="M 550 158 C 560 190, 566 218, 576 228" fill="none" stroke="var(--lk-cobalt)" marker-end="url(#dp)"/>
+
+        <text x="16" y="284" fill="var(--lk-ink)" font-size="10">The URI is the whole trick: everything to the right of the registry consumes models:/name/version, so promoting a new version changes what is served without touching the consumers.</text>
+      </svg>
+      <figcaption><b>Plate 6.3</b> &mdash; From experiment to deployment. The registry inserts a stable, human-readable name between a run id nobody can remember and the three deployment mechanisms.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s10" data-src="mlops-llmops.html#s74,mlops-llmops.html#s75,mlops-llmops.html#s76,mlops-llmops.html#s77,mlops-llmops.html#s78,mlops-llmops.html#s81,mlops-llmops.html#s82">
+    <h2>10. MLflow Projects</h2>
+    <p>The lecture first builds a realistic scenario &mdash; a classifier for the <strong>Adult Income (census) dataset</strong> via a scikit-learn pipeline, with train-test split, missing value imputation, categorical encoding, feature scaling, model selection via cross-validation between logistic regression and random forests, and hyper-parameter tuning via grid search &mdash; implemented as a Jupyter notebook plus MLflow, explicitly <em>to discuss shortcomings and possible improvements</em>. The winner in the demo is a Random Forest Classifier, registered as <code>adult-best-random-forest</code>.</p>
+
+    <h3>The problems with the notebook</h3>
+    <ul>
+      <li>Notebooks are <strong>interactive by nature</strong>, making it hard to automate the workflow execution.</li>
+      <li>Executing the code is <strong>time-consuming and requires a human operator</strong> to start the notebook and run all cells, making it hard to schedule periodic runs (for instance for retraining).</li>
+      <li>Pictures are commonly <strong>embedded in the notebook</strong> itself.</li>
+      <li><strong>No code decomposition, poor version control</strong>, making it hard to maintain and extend.</li>
+      <li><strong>[Critical] Parameters are hard-coded in the notebook</strong>, making it hard to tune the workflow without modifying the code, and hard to reproduce past runs with different parameter settings.</li>
+    </ul>
+
+    <p><strong>Solution: organize the code as an MLflow Project</strong> &mdash; <em>a standard format for packaging and sharing reproducible data science code</em>, resting on five assumptions.</p>
+
+    <table>
+      <tr><th>#</th><th>Assumption</th></tr>
+      <tr><td>1</td><td>Files are structured in a specific way, decomposing the code into multiple scripts: <code>MLproject</code>, <code>train.py</code>, <code>test.py</code>, optionally <code>conda.yaml</code> or <code>python_env.yaml</code>, optionally <code>data/</code>. Each script is responsible for a specific task and may be invoked independently</td></tr>
+      <tr><td>2</td><td>Environmental dependencies are declared in <code>python_env.yaml</code> (or <code>conda.yaml</code>)</td></tr>
+      <tr><td>3</td><td>ML tasks and their parameters are declared via the <code>MLproject</code> file</td></tr>
+      <tr><td>4</td><td>Entry-point scripts read all relevant parameters <strong>from the command line</strong> (for instance via <code>argparse</code>)</td></tr>
+      <tr><td>5</td><td>Entry-point scripts use MLflow's Tracking API accordingly</td></tr>
+    </table>
+
+    <div id="ac-mlproject"></div>
+
+    <p>With that in place, a training run and a test run are two commands, and the experiment name can carry a timestamp so that runs group themselves:</p>
+    <pre><code class="language-bash">EXPERIMENT_NAME="adult-classifier-$(date +'%Y-%m-%d-%H-%M')"
+mlflow run -e train --env-manager=local --experiment-name "$EXPERIMENT_NAME" . -P model_type=both
+
+# re-run with different parameters, no code edits
+mlflow run -e train --env-manager=local --experiment-name "$EXPERIMENT_NAME" . \
+    -P model_type=random_forest -P test_size=0.25 -P cv_splits=5 -P random_state=123
+
+# then test the best model (the training logs print the exact command)
+mlflow run -e test --env-manager=local --experiment-name $EXPERIMENT_NAME . \
+    -P run_id=&lt;TRAINING_RUN_ID&gt; -P model_uri=models:/&lt;BEST_MODEL_ID&gt;</code></pre>
+
+    <p>Compare this with the notebook it replaces. The <em>[Critical]</em> problem &mdash; hard-coded parameters &mdash; is gone by construction: every knob is a declared parameter with a default, so a past run can be reproduced by replaying its parameters, and a new run needs no code edit. The remaining commands are exactly the kind of thing a CI pipeline or a scheduler can execute at 3 a.m.</p>
+  </section>
+
+  <section id="s11" data-src="mlops-llmops.html#s22,mlops-llmops.html#s23,mlops-llmops.html#s24,mlops-llmops.html#s26,mlops-llmops.html#s27,mlops-llmops.html#s28,mlops-llmops.html#s29">
+    <h2>11. Generative AI workflows</h2>
+    <p>The second half of the lecture asks what changes when the model is not trained but rented. The goal of a GenAI workflow is <strong>engineering prompts, tools, vector stores, and agents to constrain and govern the behavior of pre-trained (foundation) models</strong>, in order to: <em>generate contents</em> (bring unstructured data into a particular format, produce summaries, reports, highlights); <em>interpret unstructured data</em> (extract entities, relations, sentiments, answer questions about a document); <em>automate data-processing tasks which are hard to code explicitly</em>; and <em>interact with users via natural language</em>.</p>
+
+    <p>The third bullet deserves its three sub-cases, because they are a criterion for when a GenAI approach is even appropriate: the task is <strong>ill-defined</strong> (write an evaluation paragraph for each student's work); the task <strong>requires mining information from unstructured data</strong> (find the parties involved in this contract); the task is <strong>complex yet too narrow to allow for general purpose coding</strong> (plan a vacation itinerary based on user preferences).</p>
+
+    <h3>The nomenclature</h3>
+    <table>
+      <tr><th>Term</th><th>Definition</th></tr>
+      <tr><td><strong>Pre-trained foundation models (PFM)</strong></td><td>Large neural networks trained on massive datasets to learn general skills (understanding and generating text, images, code) &mdash; e.g. GPT, PaLM, LLaMA</td></tr>
+      <tr><td><strong>Prompts</strong></td><td>Carefully crafted textual inputs that guide a PFM to produce desired outputs. <strong>Prompt templates</strong> are prompts with <em>named placeholders</em> filled with specific data at runtime, e.g. <code>Write a summary of the following article: {article_text}</code></td></tr>
+      <tr><td><strong>Tools</strong></td><td>External software components (APIs, databases, search engines) that can be invoked by PFMs to perform tasks or retrieve information</td></tr>
+      <tr><td><strong>Vector stores</strong></td><td>Specialized databases storing and retrieving high-dimensional vectors (embeddings) for information retrieval via similarity search &mdash; e.g. to support <strong>retrieval-augmented generation (RAG)</strong></td></tr>
+      <tr><td><strong>Agents</strong></td><td>Software systems that <strong>orchestrate the interaction between PFMs and tools</strong>, enabling dynamic decision-making and task execution based on context and user input</td></tr>
+    </table>
+
+    <h3>The outcomes</h3>
+    <ul>
+      <li><strong>Foundation models are commonly not produced in-house</strong> but accessed via APIs &mdash; yet the choice of which model(s) to use is crucial: they must be available, configured, and most commonly imply <strong>costs</strong> (per call, per token).</li>
+      <li>A set of <strong>prompt templates</strong> known to work well for the tasks at hand, commonly assessed via semi-automatic evaluations on a validation set of inputs.</li>
+      <li>A set of <strong>tool servers implementing the MCP protocol</strong> so that tools can be invoked by PFMs &mdash; software modules somewhat similar to ordinary web services, offering one endpoint per tool.</li>
+      <li>A set of <strong>agents</strong> implementing the orchestration logic, commonly via libraries such as LangChain or LlamaIndex.</li>
+      <li>A set of <strong>vector stores</strong> if needed, populated with relevant data &mdash; software modules similar to a DBMS, offering CRUD operations on data chunks indexed by their embeddings.</li>
+    </ul>
+
+    <p>The phases are <em>similar to the ML workflow in the sense that the goal is to process data, but different in many details, e.g. no training is involved</em>. There may be many iterations for PFM selection and prompt tuning; the workflow may restart upon data changes, task changes, or <strong>new PFM availability</strong>; the interplay between prompts, models, tasks and data <strong>needs continuous monitoring</strong>; and <strong>the data-flow between components must be tracked</strong> for debugging and monitoring.</p>
+
+    <h3>The peculiar activities</h3>
+    <ul>
+      <li><strong>Foundation model selection</strong>: choose the most suitable pre-trained model(s) based on task requirements, performance, cost, data protection and availability &mdash; which implies trying out prompts, even manually, on different models.</li>
+      <li><strong>Prompt engineering</strong>: design, test and refine prompt templates &mdash; engineering variables, lengths, formats, contents.</li>
+      <li><strong>Evaluations</strong>: establish assertions and metrics to assess PFM responses, obtained by instantiating templates over actual data. <em>Somewhat similar to unit tests in ordinary software</em>, and <strong>important when automatic</strong>, because they allow quick evaluations on prompt/model combinations.</li>
+      <li><strong>Tracking the data-flow</strong> between components (agents, PFM, tools, vector stores) to monitor costs and latency and to debug unexpected behaviours &mdash; also useful for auditing and governance.</li>
+    </ul>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note &mdash; the tender example</span>
+      <p>The lecture works the whole GenAI workflow on one case: <em>support public officers in managing tenders through a GenAI assistant that understands and compares procurement decisions transparently</em>. Problem framing splits into content generation (draft and justify comparisons among suppliers' offers against technical specs), interpretation (understand regulatory documents), automation (retrieve laws, norms and prior tenders) and interaction (query and validate through natural language). Data preparation devises a schema, <strong>anonymizes sensitive info</strong> and segments documents by topic. Prompt engineering designs templates for comparison, justification and Q&amp;A, uses <em>role-based system prompts</em> and allocates placeholders for RAG-retrieved chunks. Vector stores need a choice of embedding model, chunking strategy and retrieval strategy. Tools include a regulation lookup API and a tender database query API. Agents extract structured check-lists from technical specs and orchestrate RAG, tools and templates to score each offer.</p>
+    </div>
+
+    <figure class="lk-fig" role="img" aria-label="A GenAI application as an agent orchestrating a foundation model, tools and a vector store, with tracking around it">
+      <svg viewBox="0 0 700 360" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="ga" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+        </defs>
+
+        <ellipse cx="70" cy="170" rx="52" ry="32" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="70" y="168" text-anchor="middle" fill="var(--lk-ink)">USER</text>
+        <text x="70" y="184" text-anchor="middle" fill="var(--lk-ink)" font-size="9">natural language</text>
+
+        <rect x="180" y="130" width="150" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <text x="255" y="156" text-anchor="middle" fill="var(--lk-cobalt)" font-size="13">AGENT</text>
+        <text x="255" y="176" text-anchor="middle" fill="var(--lk-ink)" font-size="10">orchestrates PFM</text>
+        <text x="255" y="192" text-anchor="middle" fill="var(--lk-ink)" font-size="10">and tools</text>
+
+        <rect x="400" y="40" width="160" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="480" y="66" text-anchor="middle" fill="var(--lk-ink)" font-size="12">PFM (via API)</text>
+        <text x="480" y="86" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">cost per call / per token</text>
+        <text x="480" y="102" text-anchor="middle" fill="var(--lk-ink)" font-size="9">+ prompt template, temperature</text>
+
+        <rect x="400" y="135" width="160" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="480" y="161" text-anchor="middle" fill="var(--lk-ink)" font-size="12">TOOLS</text>
+        <text x="480" y="181" text-anchor="middle" fill="var(--lk-ink)" font-size="10">one endpoint per tool</text>
+        <text x="480" y="197" text-anchor="middle" fill="var(--lk-ink)" font-size="9">MCP protocol, e.g. web search</text>
+
+        <rect x="400" y="230" width="160" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="480" y="256" text-anchor="middle" fill="var(--lk-ink)" font-size="12">VECTOR STORE</text>
+        <text x="480" y="276" text-anchor="middle" fill="var(--lk-ink)" font-size="10">embeddings, chunks</text>
+        <text x="480" y="292" text-anchor="middle" fill="var(--lk-ink)" font-size="9">retrieval for RAG</text>
+
+        <line x1="124" y1="164" x2="176" y2="158" stroke="var(--lk-cobalt)" marker-end="url(#ga)"/>
+        <line x1="176" y1="186" x2="124" y2="180" stroke="var(--lk-cobalt)" marker-end="url(#ga)"/>
+        <line x1="334" y1="152" x2="396" y2="86" stroke="var(--lk-cobalt)" marker-end="url(#ga)"/>
+        <line x1="396" y1="100" x2="334" y2="162" stroke="var(--lk-cobalt)" marker-end="url(#ga)"/>
+        <line x1="334" y1="170" x2="396" y2="170" stroke="var(--lk-cobalt)" marker-end="url(#ga)"/>
+        <line x1="334" y1="192" x2="396" y2="256" stroke="var(--lk-cobalt)" marker-end="url(#ga)"/>
+
+        <rect x="150" y="250" width="220" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="260" y="274" text-anchor="middle" fill="var(--lk-vermilion)" font-size="12">TRACKING (LLMOps)</text>
+        <text x="260" y="292" text-anchor="middle" fill="var(--lk-ink)" font-size="10">prompts, responses, tool calls,</text>
+        <text x="260" y="308" text-anchor="middle" fill="var(--lk-ink)" font-size="10">tokens, latency, cost</text>
+        <line x1="255" y1="214" x2="255" y2="246" stroke="var(--lk-vermilion)" stroke-dasharray="3 3" marker-end="url(#ga)"/>
+
+        <text x="16" y="30" fill="var(--lk-vermilion)" font-size="11">NO TRAINING IS INVOLVED</text>
+        <text x="16" y="48" fill="var(--lk-ink)" font-size="10">what is engineered are prompts,</text>
+        <text x="16" y="64" fill="var(--lk-ink)" font-size="10">tools, vector stores and agents</text>
+        <text x="16" y="344" fill="var(--lk-ink)" font-size="10">The workflow may restart on data changes, task changes, or the mere availability of a new foundation model.</text>
+      </svg>
+      <figcaption><b>Plate 6.4</b> &mdash; A GenAI application. The agent is the only component you fully own; the model is rented, the tools are services, the store is a database &mdash; which is why tracking the data-flow between them is the thing that makes the system debuggable.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s12" data-src="mlops-llmops.html#s30,mlops-llmops.html#s31,mlops-llmops.html#s32">
+    <h2>12. LLMOps</h2>
+    <blockquote><p><strong>LLM Operations (LLMOps)</strong>: the practice of organizing and automating the end-to-end process of building, evaluating, deploying, and maintaining GenAI applications. <em>In a nutshell: MLOps for GenAI.</em></p></blockquote>
+
+    <p>Compare the two definitions word by word. MLOps says <em>building, <strong>training</strong>, deploying, maintaining</em>; LLMOps says <em>building, <strong>evaluating</strong>, deploying, maintaining</em>. Training is replaced by evaluation, which is the whole difference between the two halves of this chapter.</p>
+
+    <table>
+      <tr><th>Expected benefit</th><th>Meaning</th></tr>
+      <tr><td><strong>Systematicity</strong></td><td>Structured processes to manage prompts, tools and agents</td></tr>
+      <tr><td><strong>Efficiency</strong></td><td>Reuse of components, templates and evaluations</td></tr>
+      <tr><td><strong>Scalability</strong></td><td>Easier to test and update individual components (prompt templates, tools, agents)</td></tr>
+      <tr><td><strong>Monitoring &amp; governance</strong></td><td>Components are tracked, evaluated and kept under control</td></tr>
+    </table>
+
+    <h3>What LLMOps adds, component by component</h3>
+    <ul>
+      <li><strong>Foundation models</strong> &rarr; catalogs of available models, with metadata on capabilities, costs and usage policies.</li>
+      <li><strong>Provider gateways</strong> &rarr; standardized APIs to access different PFM providers (OpenAI, HuggingFace) uniformly, <em>without code rewrites</em>.</li>
+      <li><strong>Prompt engineering</strong> &rarr; version control for prompt templates, systematic testing frameworks.</li>
+      <li><strong>Tool integration</strong> &rarr; standardized protocols (e.g. MCP) and libraries, plus gateway technologies to aggregate multiple tools.</li>
+      <li><strong>Agents</strong> &rarr; provider-agnostic libraries and frameworks (e.g. LangChain) to build, manage and orchestrate agents.</li>
+      <li><strong>Vector stores</strong> &rarr; standardized interfaces to store and retrieve chunks via embeddings, with support for multiple backend DBMS.</li>
+      <li><strong>Evaluation &amp; monitoring</strong> &rarr; automated frameworks to run evaluations, track performance and monitor costs.</li>
+    </ul>
+
+    <h3>What happens without LLMOps</h3>
+    <ul>
+      <li>Foundation models are <strong>hard-coded in the application</strong>, making it difficult to switch providers or models.</li>
+      <li>Prompt templates are <strong>scattered in code or documents</strong>, making it hard to track changes or reuse them.</li>
+      <li>Tools are manually integrated, leading to <strong>brittle connections, lack of observability, maintenance challenges</strong>.</li>
+      <li>Agents are <strong>ad-hoc scripts</strong> mixing logic, PFM calls and tool invocations, hard to debug, extend or compose.</li>
+      <li>Vector stores are <strong>tightly coupled with specific DBMS</strong>, making it hard to migrate or scale.</li>
+      <li>Evaluation and monitoring are <strong>manual and sporadic</strong>, leading to undetected issues, cost overruns and loss of trust.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Read that list next to Chapter 4 and it becomes familiar: a hard-coded provider is a missing <strong>anti-corruption layer</strong>; a vector store coupled to one DBMS is a missing <strong>repository</strong>; an ad-hoc agent mixing logic and calls is a missing <strong>service</strong>. LLMOps does not introduce new architectural ideas &mdash; it applies the old ones to components that happen to be probabilistic.</p>
+    </div>
+  </section>
+
+  <section id="s13" data-src="mlops-llmops.html#s87,mlops-llmops.html#s88,mlops-llmops.html#s90,mlops-llmops.html#s91,mlops-llmops.html#s92,mlops-llmops.html#s93,mlops-llmops.html#s98,mlops-llmops.html#s99,mlops-llmops.html#s100">
+    <h2>13. MLflow for LLM applications</h2>
+    <p>MLflow may be used to track experiments involving LLMs. Its Tracking API logs <strong>prompts</strong> used for queries, <strong>responses</strong> obtained, <strong>metrics</strong> (tokens used, latency), <strong>artifacts</strong> (generated text files, images), <strong>metadata</strong> (model name, version) and <strong>parameters</strong> (temperature, max tokens). Beyond that:</p>
+    <ul>
+      <li>An ad-hoc API lets Python programmers express <strong>evaluation metrics for LLM responses</strong> &mdash; LLM-as-a-Judge for correctness scoring, or custom user-defined metrics as Python functions.</li>
+      <li>Support for <strong>multiple LLM providers</strong> and their client libraries, including auto-logging for some of them (OpenAI, LangChain, HuggingFace).</li>
+      <li>Support for annotating LLM responses with <strong>human feedback</strong>.</li>
+      <li>Support for <strong>profiling the data-flow</strong> back and forth between clients and providers, agents using tools included, e.g. to monitor costs and latency.</li>
+    </ul>
+
+    <h3>LLM-as-a-Judge</h3>
+    <p>The idea: <strong>use an LLM to evaluate the quality of responses generated by another LLM</strong>, possibly via custom criteria defined by the user, <em>where the criteria are expressed in natural language</em>. And the framing that makes it engineering rather than magic:</p>
+    <blockquote><p><strong>Think of criteria as unit tests for LLM prompt-response pairs</strong> &mdash; correctness, relevance, completeness, conciseness, formatting.</p></blockquote>
+    <p>Examples given: <em>the response must be in English</em>; <em>the response must contain at least 3 examples</em>; <em>if the user question is asking for sensitive code, then the response must kindly decline to answer</em>.</p>
+
+    <h3>The running example</h3>
+    <p>For the final exam of a Software Engineering course, students must answer open questions about the course topics. The questions are known (a CSV with category, question text and weight/difficulty: <em>What is computer science?</em>, <em>What is an algorithm?</em>, <em>What were software crises?</em>, and so on) but <strong>students are missing examples of good answers</strong>. Idea: <em>generate examples of good answers via LLMs and provide students with them</em> &mdash; possibly enhanced with RAG over the course material to guarantee coherence with it, and possibly with search-engine tools to enrich the answers with up-to-date references. <strong>MLflow may help in (1) selecting the best models and (2) the best prompts, assuming that (3) evaluation metrics are defined for generated answers.</strong></p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">system</button>
+        <button class="lk-tab">basic</button>
+        <button class="lk-tab">practical</button>
+        <button class="lk-tab">academic</button>
+        <button class="lk-tab">tools addendum</button>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-text">You are a university professor preparing model answers
+for a software engineering examination.</code></pre>
+        <p>The role-based system prompt, shared by all variants: it fixes the persona once so that the user prompts can vary independently.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-text">Category: {category}
+
+Question: {question}
+
+Difficulty: {weight}/4
+
+Provide a clear and accurate answer suitable for an exam context.
+Be concise but comprehensive.</code></pre>
+        <p>Note the three named placeholders: this is a <em>prompt template</em>, instantiated over the rows of <code>questions.csv</code>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-text">Provide an answer that:
+1. Explains the concept clearly
+2. Includes at least one concrete example or use case
+3. Relates to real-world software development scenarios
+4. Is easy to understand for someone learning the subject</code></pre>
+        <p>An enumerated rubric inside the prompt. Compare it with the evaluation criteria: what the prompt requests, the scorers must verify.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-text">Instructions:
+- Provide a rigorous, academically sound answer
+- Include relevant technical terminology
+- Reference key concepts and principles where appropriate
+- Structure your answer clearly with proper explanations
+- Aim for a comprehensive yet focused response suitable for academic evaluation</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <pre><code class="language-text">Always use the provided web search tool to complement your answers
+with relevant and up-to-date links or references.
+In calling the tool, you should automatically infer the most relevant
+query based on the conversation so far.</code></pre>
+        <p>Appended to the system prompt when running the agent variant; the tool itself is a decorated Python function returning markdown-formatted search results.</p>
+      </div>
+    </div>
+
+    <h3>The criteria, as code</h3>
+    <p>General criteria used in the example: <strong>english</strong> (the answer should be in English); <strong>software_engineering_related</strong> (the answer correctly contextualizes the question within the domain of software engineering); <strong>reference_to_definition</strong> (the answer should reference or quote relevant definitions); <strong>relevance_to_query</strong>; plus two custom scores, <strong>enough_words</strong> (more than 10 words) and <strong>not_too_many_words</strong> (less than 1000 words). Question-specific correctness criteria are added on top &mdash; for <em>What is computer science?</em> the answer should mention <em>study of computation, algorithms, data structures, software, hardware</em> and <strong>should not</strong> argue that computer science is the study of computers.</p>
+
+    <pre><code class="language-python">import mlflow
+from mlflow.entities import Feedback
+from mlflow.genai.scorers import Guidelines, scorer, RelevanceToQuery
+
+@scorer
+def enough_words(outputs: dict) -&gt; Feedback:
+    text = outputs['choices'][-1]['message']['content']
+    word_count = len(text.split())
+    score = word_count &gt;= 10
+    rationale = (
+        f"The response has more than 10 words: {word_count}"
+        if score
+        else f"The response does not have enough words because it has less than 10 words: {word_count}."
+    )
+    return Feedback(value=score, rationale=rationale)
+
+def guidelines_model(model: str = None):
+    yield Guidelines(model=model, name="english",
+        guidelines="The answer should be in English.")
+    yield Guidelines(model=model, name="software_engineering_related",
+        guidelines="The answer is correctly contextualizing the question within the domain of software engineering.")
+    yield Guidelines(model=model, name="reference_to_definition",
+        guidelines="The answer should reference and/or quote relevant definitions for the concepts mentioned in the question.")
+    yield RelevanceToQuery(model=model)
+    yield enough_words
+    yield not_too_many_words</code></pre>
+
+    <p>Two kinds of scorer sit side by side in that generator: <strong>guidelines</strong>, evaluated by a judge model from a natural-language criterion, and <strong>custom scores</strong>, ordinary Python returning a <code>Feedback</code> with a value and a rationale. Deterministic checks stay deterministic; only the judgments that genuinely need language go to a model.</p>
+
+    <div id="judge-lab"></div>
+
+    <h3>The project</h3>
+    <p>The example repository (<code>github.com/gciatto/example-llmops</code>) is an MLflow Project like the one in &sect;10 &mdash; same descriptor, different domain:</p>
+    <pre><code class="language-text">example-llmops/
+├── MLproject                        # MLflow Project descriptor
+├── register_all_prompts.py          # register prompt templates
+├── generate_answers.py              # generate answers, no agents/tools
+├── generate_answers_with_agent.py   # generate answers with agents/tools
+├── evaluate_responses.py            # evaluate generated responses
+├── prompts/                         # academic.txt basic.txt concise.txt
+│                                    # practical.txt system.txt tools.txt
+├── python_env.yaml
+└── questions.csv</code></pre>
+
+    <pre><code class="language-bash">EXPERIMENT_ID="se-answers-$(date +'%Y-%m-%d-%H-%M')"
+mlflow run -e register_all_prompts --env-manager=local --experiment-name $EXPERIMENT_ID .
+mlflow run -e generate_answers      --env-manager=local --experiment-name $EXPERIMENT_ID . -P max_questions=4
+mlflow run -e evaluate_responses    --env-manager=local --experiment-id  $EXPERIMENT_ID . -P generation_run_id=&lt;GENERATION_RUN_ID&gt;</code></pre>
+
+    <p>In the UI, the <strong>Prompts</strong> section lists the registered templates with their versioning and content; the <strong>Experiments</strong> section lists generation and evaluation runs; clicking a <strong>trace</strong> shows the interactions with the provider, and for the agent variant it shows <em>which and how many tool invocations were performed</em>, with a <em>Details &amp; Timeline</em> tab profiling the entire data-flow back and forth between client and provider. Two practical notes from the slides: the runs cap the number of questions <em>to save time and costs</em>, and evaluation <em>may take some time, as Guidelines evaluations are performed via further LLM queries</em> &mdash; judging is itself a metered operation.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The LLM-as-a-judge evaluation loop, from prompt template and model choice to scored feedback">
+      <svg viewBox="0 0 700 340" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="jd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="jdv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-vermilion)"/>
+          </marker>
+        </defs>
+
+        <rect x="16" y="40" width="150" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="91" y="64" text-anchor="middle" fill="var(--lk-ink)" font-size="11">questions.csv</text>
+        <text x="91" y="82" text-anchor="middle" fill="var(--lk-ink)" font-size="9">category, text, weight</text>
+
+        <rect x="16" y="120" width="150" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+        <text x="91" y="144" text-anchor="middle" fill="var(--lk-vermilion)" font-size="11">prompt template</text>
+        <text x="91" y="162" text-anchor="middle" fill="var(--lk-ink)" font-size="9">basic | concise | practical | academic</text>
+
+        <rect x="16" y="200" width="150" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="91" y="224" text-anchor="middle" fill="var(--lk-ink)" font-size="11">model choice</text>
+        <text x="91" y="242" text-anchor="middle" fill="var(--lk-ink)" font-size="9">+ temperature, max tokens</text>
+
+        <rect x="230" y="120" width="150" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+        <text x="305" y="146" text-anchor="middle" fill="var(--lk-cobalt)" font-size="12">GENERATION</text>
+        <text x="305" y="166" text-anchor="middle" fill="var(--lk-ink)" font-size="9">one answer per question</text>
+
+        <line x1="170" y1="72" x2="226" y2="132" stroke="var(--lk-cobalt)" marker-end="url(#jd)"/>
+        <line x1="170" y1="150" x2="226" y2="150" stroke="var(--lk-cobalt)" marker-end="url(#jd)"/>
+        <line x1="170" y1="228" x2="226" y2="170" stroke="var(--lk-cobalt)" marker-end="url(#jd)"/>
+
+        <rect x="444" y="120" width="150" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+        <text x="519" y="146" text-anchor="middle" fill="var(--lk-cobalt)" font-size="12">EVALUATION</text>
+        <text x="519" y="166" text-anchor="middle" fill="var(--lk-ink)" font-size="9">scorers over the answers</text>
+        <line x1="384" y1="150" x2="440" y2="150" stroke="var(--lk-cobalt)" marker-end="url(#jd)"/>
+
+        <rect x="404" y="30" width="230" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+        <text x="519" y="52" text-anchor="middle" fill="var(--lk-vermilion)" font-size="11">GUIDELINES (LLM-as-a-judge)</text>
+        <text x="519" y="70" text-anchor="middle" fill="var(--lk-ink)" font-size="9">criteria in natural language, judged by a model</text>
+        <line x1="519" y1="94" x2="519" y2="116" stroke="var(--lk-vermilion)" marker-end="url(#jdv)"/>
+
+        <rect x="404" y="210" width="230" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="519" y="232" text-anchor="middle" fill="var(--lk-ink)" font-size="11">CUSTOM SCORERS (Python)</text>
+        <text x="519" y="250" text-anchor="middle" fill="var(--lk-ink)" font-size="9">enough_words, not_too_many_words</text>
+        <line x1="519" y1="206" x2="519" y2="184" stroke="var(--lk-cobalt)" marker-end="url(#jd)"/>
+
+        <path d="M 444 176 C 380 230, 200 240, 100 190" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#jdv)"/>
+        <text x="290" y="290" text-anchor="middle" fill="var(--lk-vermilion)" font-size="11">feedback: change the template, or the model, and re-run</text>
+        <text x="16" y="322" fill="var(--lk-ink)" font-size="10">Criteria are unit tests for prompt-response pairs. Automating them is what turns "this prompt felt better" into a comparison you can defend.</text>
+      </svg>
+      <figcaption><b>Plate 6.5</b> &mdash; The LLMOps loop. Two families of scorers judge the same answers &mdash; natural-language guidelines evaluated by a judge model, and deterministic Python scorers &mdash; and the verdict feeds back into the choice of template and model.</figcaption>
+    </figure>
+  </section>
+
+  <section id="quiz" data-src="mlops-llmops.html#quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Define MLOps and LLMOps, and state the single word that separates the two definitions.</summary>
+        <p><strong>MLOps</strong>: the practice of organizing and automating the end-to-end process of building, <strong>training</strong>, deploying and maintaining machine-learning models. <strong>LLMOps</strong>: the practice of organizing and automating the end-to-end process of building, <strong>evaluating</strong>, deploying and maintaining GenAI applications &mdash; in a nutshell, <em>MLOps for GenAI</em>. Training becomes evaluation, because foundation models are not produced in-house.</p>
+      </details>
+
+      <details>
+        <summary>List the eight activities of a typical ML workflow.</summary>
+        <p>Problem framing, data collection, data preparation, feature engineering, model training, experimentation and evaluation, model packaging and deployment, monitoring and feedback. <strong>They are cyclical, not linear.</strong></p>
+      </details>
+
+      <details>
+        <summary>Notebooks have four advantages and one disadvantage. What is the disadvantage, and what are its six symptoms?</summary>
+        <p>They <strong>incentivise manual activities over automatic ones</strong>. Symptoms: non-reproducibility (hidden state, out-of-order execution, forgotten seeds); weak provenance (params, code version, data slice, metrics not logged); human-in-the-loop gating; fragile artifacts (<code>final_v3.ipynb</code>); environment drift; collaboration pain.</p>
+      </details>
+
+      <details>
+        <summary>How do ML projects differ from ordinary software projects?</summary>
+        <p>They <strong>depend on data</strong>, which changes over time; models need <strong>training and retraining</strong>, not just coding; performance may <strong>degrade in production</strong> (data drift, bias, new environments); and <strong>many different expertises</strong> are involved. The analogies are that both produce software modules, both are iterative, both are driven by tests or evaluations, and both benefit from automation.</p>
+      </details>
+
+      <details>
+        <summary>Which three servers may be involved in a team MLflow set-up, and what does each hold?</summary>
+        <p>The <strong>Backend Store</strong> (a relational DBMS such as PostgreSQL, MySQL or SQLite) for <em>metadata</em> &mdash; experiment id, run id, timings, data schemas, input parameters, hyper-parameters, metric values; the <strong>Artifact Store</strong> (S3, Azure Blob Storage) for <em>artifacts</em> &mdash; datasets, models, charts &mdash; through a file-system interface; and the <strong>Tracking Server</strong>, which provides the UI and API endpoints and <em>mediates the interaction between users and the two stores</em>. The <code>mlruns/</code> tree shows the same split on a single machine: <code>params/</code>, <code>metrics/</code>, <code>tags/</code> and <code>meta.yaml</code> on one side, <code>artifacts/</code> on the other.</p>
+      </details>
+
+      <details>
+        <summary>What does autologging add that manual logging typically forgets?</summary>
+        <p>The dataset, the model itself, the model signature and an input example, plus automatically computed metrics (accuracy, f1-score, precision, AUC ROC), the actual parameters of the library class, and the <strong>training dataset schema</strong>. Inside the logged model it produces <code>MLmodel</code>, <code>model.pkl</code>, <code>requirements.txt</code> and <code>serving_input_example.json</code> &mdash; the complete bundle needed to serve the model elsewhere.</p>
+      </details>
+
+      <details>
+        <summary>How do you serve a logged model three different ways?</summary>
+        <p><code>mlflow models predict -m models:/&lt;id&gt; -i input.json</code> from the command line; <code>mlflow models serve -m models:/&lt;id&gt; -p 1234</code> and then POST to <code>/invocations</code>; or <code>mlflow models build-docker -m models:/&lt;id&gt; -n name:latest</code> and run the container. All three return the same <code>{"predictions": [...]}</code>.</p>
+      </details>
+
+      <details>
+        <summary>What does registering a model buy you, and how are versions referenced?</summary>
+        <p>A <strong>human-friendly name plus versioning</strong>. Multiple versions of the same model may coexist; each is referenced by the URI <code>models:/&lt;model-name&gt;/&lt;version&gt;</code>, and the most recent one by <code>models:/&lt;model-name&gt;@latest</code>. Consumers therefore depend on a stable name rather than on a run id.</p>
+      </details>
+
+      <details>
+        <summary>State the five assumptions behind an MLflow Project, and the critical problem it solves.</summary>
+        <p>(1) Files structured in a specific way, with the code decomposed into multiple scripts; (2) environment dependencies declared in <code>python_env.yaml</code> or <code>conda.yaml</code>; (3) tasks and parameters declared in the <code>MLproject</code> file via entry points; (4) entry-point scripts reading all relevant parameters from the command line; (5) those scripts using the Tracking API. The critical problem solved is <strong>parameters hard-coded in the notebook</strong>, which made runs impossible to tune or reproduce without editing code.</p>
+      </details>
+
+      <details>
+        <summary>Define prompt template, tool, vector store and agent.</summary>
+        <p><strong>Prompt template</strong>: a prompt with named placeholders filled with specific data at runtime. <strong>Tool</strong>: an external software component (API, database, search engine) invocable by a PFM. <strong>Vector store</strong>: a specialized database storing and retrieving embeddings for similarity search, supporting RAG. <strong>Agent</strong>: a software system orchestrating the interaction between PFMs and tools, enabling dynamic decision-making based on context and user input.</p>
+      </details>
+
+      <details>
+        <summary>What is LLM-as-a-Judge, why do automatic evaluations matter, and how do the two kinds of scorer differ?</summary>
+        <p><strong>LLM-as-a-Judge</strong> means using an LLM to evaluate the quality of responses generated by another LLM, according to criteria <strong>expressed in natural language</strong>. The mental model: <em>criteria are unit tests for prompt-response pairs</em> &mdash; correctness, relevance, completeness, conciseness, formatting. Automatic evaluations matter because <strong>they allow quick evaluations on prompt/model combinations</strong>: since both the model and the prompt are variables, only cheap repeatable evaluation makes the search over that space tractable, or defensible. In the example script two kinds of scorer coexist: a <strong>Guidelines</strong> scorer states a criterion in natural language and delegates the judgment to a judge model, while a <strong>custom <code>@scorer</code></strong> is plain Python returning a <code>Feedback</code> with a value and a rationale (<code>enough_words</code> simply counts words). Deterministic checks stay in Python; only genuinely linguistic judgments go to a model &mdash; which also costs time and money, since guideline evaluations are further LLM queries.</p>
+      </details>
+
+      <details>
+        <summary>What may happen without LLMOps?</summary>
+        <p>Models hard-coded in the application (hard to switch provider); prompt templates scattered in code or documents (hard to track or reuse); tools manually integrated (brittle, unobservable, hard to maintain); agents as ad-hoc scripts mixing logic, PFM calls and tool invocations (hard to debug, extend, compose); vector stores tightly coupled to one DBMS (hard to migrate or scale); evaluation and monitoring manual and sporadic, leading to undetected issues, cost overruns and loss of trust.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-05-model-driven-development.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-07-chatflow-case-study.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <code>mlops-llmops.html</code> &mdash; "Structure and Automate AI Workflows with MLOps and LLMOps" (G. Ciatto, DISI Cesena) &middot; example code at <code>github.com/gciatto/example-mlops</code> and <code>github.com/gciatto/example-llmops</code></p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Bespoke widget: reproducibility audit (from mlops-llmops, slides 15-16, 20) ---- */
+(function () {
+  var host = document.getElementById('repro-audit');
+  if (!host) return;
+  var items = [
+    { k: 'seed', t: 'The random seed is fixed and logged', pit: 'Non-reproducibility: forgotten seeds mean a different split, hence a different metric.' },
+    { k: 'order', t: 'The whole pipeline is re-run from scratch, not cell by cell', pit: 'Non-reproducibility: hidden state and out-of-order execution.' },
+    { k: 'params', t: 'Parameters are recorded for every run', pit: 'Weak provenance: the best model cannot be justified.' },
+    { k: 'code', t: 'The code version (git commit) is recorded', pit: 'Weak provenance: no trace from model to code.' },
+    { k: 'data', t: 'The data slice or dataset version is recorded', pit: 'Weak provenance: no trace from model to data.' },
+    { k: 'metrics', t: 'Metrics are logged rather than printed', pit: 'Human-in-the-loop gating: print accuracy, eyeball, tweak, rerun.' },
+    { k: 'artifacts', t: 'Model files are versioned instead of overwritten', pit: 'Fragile artifacts: models overwritten, files named final_v3.ipynb.' },
+    { k: 'env', t: 'Dependencies and paths are declared in a file', pit: 'Environment drift: it works on my machine.' }
+  ];
+  host.className = 'lk-step';
+  host.innerHTML = '<h4>Reproducibility audit</h4>' +
+    '<p class="lk-step-sub">Tick what is true of your current workflow. Every unticked line maps onto one of the six pitfalls listed above, and onto the MLflow feature that removes it.</p>';
+  var list = document.createElement('div');
+  var boxes = {};
+  items.forEach(function (it) {
+    var lab = document.createElement('label');
+    lab.style.display = 'block';
+    lab.style.fontSize = '.92rem';
+    lab.style.margin = '.2rem 0';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.style.marginRight = '.5rem';
+    cb.addEventListener('change', render);
+    boxes[it.k] = cb;
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(it.t));
+    list.appendChild(lab);
+  });
+  host.appendChild(list);
+  var out = document.createElement('div');
+  out.className = 'lk-step-verdict';
+  host.appendChild(out);
+  function render() {
+    var missing = items.filter(function (i) { return !boxes[i.k].checked; });
+    if (!missing.length) {
+      out.className = 'lk-step-verdict ok';
+      out.textContent = 'Same code plus same data gives the same model: this is the first expected benefit of MLOps. Note that mlflow.autolog() plus an MLflow Project delivers most of these lines for free.';
+      return;
+    }
+    out.className = 'lk-step-verdict bad';
+    out.textContent = missing.length + ' gap(s). ' + missing[0].pit + (missing.length > 1 ? ' (and ' + (missing.length - 1) + ' more)' : '');
+  }
+  render();
+})();
+
+/* ---- Stepper: the lifecycle of an MLflow run (from mlops-llmops, slides 42-45) ---- */
+LessonKit.stepper('#step-mlflow', {
+  title: 'Anatomy of a tracked run',
+  sub: 'Advance the training script and the tracking server. The script is the dummy example: it fails for odd seeds, and the exit code is registered automatically.',
+  shared: { experiment: '-', run: '-', params: 0, metrics: 0, artifacts: 0, status: 'not started' },
+  watch: ['experiment', 'run', 'params', 'metrics', 'artifacts', 'status'],
+  threads: {
+    S: {
+      name: 'Python script (seed = 43)',
+      steps: [
+        { label: 'mlflow.set_experiment("logging_example")', run: function (s, l) { s.experiment = '9312...893'; } },
+        { label: 'with mlflow.start_run(run_name="example_run")', run: function (s, l) { if (s.experiment === '-') return 'block'; s.run = '378f...bea'; s.status = 'RUNNING'; } },
+        { label: 'mlflow.log_param("seed", seed)', run: function (s, l) { if (s.run === '-') return 'block'; s.params += 1; } },
+        { label: 'log_metric x5 in a loop', run: function (s, l) { if (s.run === '-') return 'block'; s.metrics += 5; } },
+        { label: 'log_metric("random_4", ...) again', run: function (s, l) { if (s.run === '-') return 'block'; } },
+        { label: 'mlflow.log_artifact(file, "examples")', run: function (s, l) { if (s.run === '-') return 'block'; s.artifacts += 1; } },
+        { label: 'raise ValueError (seed is odd)', run: function (s, l) { if (s.run === '-') return 'block'; s.status = 'FAILED'; } }
+      ]
+    },
+    T: {
+      name: 'Tracking store',
+      steps: [
+        { label: 'create experiment folder in mlruns/', run: function (s, l) { if (s.experiment === '-') return 'block'; } },
+        { label: 'create run folder + meta.yaml', run: function (s, l) { if (s.run === '-') return 'block'; } },
+        { label: 'write params/, metrics/, artifacts/', run: function (s, l) { if (s.params === 0 || s.metrics === 0) return 'block'; } },
+        { label: 'write tags: git commit, source, user', run: function (s, l) { if (s.run === '-') return 'block'; } },
+        { label: 'record the exit status', run: function (s, l) { if (s.status === 'RUNNING') return 'block'; } }
+      ]
+    }
+  },
+  verdict: function (s, done) {
+    if (s.metrics === 5) {
+      return { status: '', text: 'Five metrics logged, but the sixth call overwrites random_4 rather than adding a metric: metric names are keys, not an append-only list.' };
+    }
+    if (done && s.status === 'FAILED') {
+      return { status: 'ok', text: 'The run failed and the failure is recorded: params, metrics, artifacts and tags all survive, and the UI marks the run as failing. A failed run that leaves no trace is the pitfall; a failed run that leaves a full trace is data.' };
+    }
+    if (s.status === 'RUNNING' && s.artifacts > 0) {
+      return { status: '', text: 'Artifacts land inside a virtual folder named by artifact_path, exactly as requested in the code.' };
+    }
+    return { status: '', text: 'Advance either column. The store can only record what the script has already declared, so some steps block until then.' };
+  }
+});
+
+/* ---- Annotated code: the MLproject descriptor (from mlops-llmops, slides 77 and 81) ---- */
+LessonKit.annotatedCode('#ac-mlproject', {
+  lang: 'yaml',
+  lines: [
+    ['name: Census Income Prediction Demo', 'The project has a name, so runs from it are recognisable regardless of who launched them.'],
+    ['', ''],
+    ['python_env: python_env.yaml', 'Assumption 2: the environment is declared, not assumed. The alternatives on the slides are conda_env or a docker_env with an image, which is how environment drift is eliminated.'],
+    ['', ''],
+    ['entry_points:', 'Assumption 3: tasks and their parameters are declared here. Each entry point is one invocable step of the workflow.'],
+    ['    train:', 'The training step. Invoked as: mlflow run -e train .'],
+    ['        parameters:', 'Every knob that used to be hard-coded in the notebook becomes a declared parameter.'],
+    ['            model_type: {type: string, default: "both"}', 'Typed with a default, so a run is reproducible from its parameter values alone. Here: logistic, random_forest, or both.'],
+    ['            test_size: {type: float, default: 0.2}', 'The train/test split ratio: previously a literal buried in a cell, now part of the run record.'],
+    ['            cv_splits: {type: int, default: 3}', 'Cross-validation folds for model selection.'],
+    ['            random_state: {type: int, default: 42}', 'The seed, promoted to a first-class parameter. This single line answers the first pitfall of manual notebooks.'],
+    ['            rf_n_estimators: {type: string, default: \'[150, 300]\'}', 'A grid of hyper-parameter values, passed as a string and parsed by the script: the grid search itself is parameterised.'],
+    ['        command: |', 'The command template. MLflow substitutes {param} placeholders before executing it.'],
+    ['            python train.py \\', 'Assumption 1: the code is decomposed into scripts, each responsible for one task and independently invocable.'],
+    ['                --model-type {model_type} \\', 'Assumption 4: the script reads its parameters from the command line, typically with argparse.'],
+    ['                --test-size {test_size} \\', 'Same for every other parameter, so nothing needs editing between runs.'],
+    ['                --random-state {random_state}', 'Assumption 5 is invisible here: inside train.py, the Tracking API logs what this run did.'],
+    ['', ''],
+    ['    test:', 'A second entry point, invoked as: mlflow run -e test .'],
+    ['        parameters:', 'Testing is parameterised over what to test.'],
+    ['            run_id: {type: string}', 'Which training run this evaluation refers to: this is what keeps the lineage explicit.'],
+    ['            model_uri: {type: string}', 'Which model to test, given as models:/<id> or models:/<name>/<version>.'],
+    ['        command: "python test.py --run-id {run_id} --model-uri {model_uri}"', 'The training logs print the exact command to use, so the handover between the two steps needs no guesswork.']
+  ]
+});
+
+/* ---- Bespoke widget: LLM-as-a-judge scorecard (from mlops-llmops, slides 92-93) ---- */
+(function () {
+  var host = document.getElementById('judge-lab');
+  if (!host) return;
+  var answers = [
+    {
+      label: 'gpt-4.1-mini, prompt "basic"',
+      text: 'Computer science is the systematic study of computers and computational systems. It involves understanding algorithms, data structures, software design, programming languages, and the theoretical foundations of computation, as well as the practical aspects of developing and applying software and hardware solutions to solve problems.',
+      scores: {
+        english: [true, 'The answer is in English.'],
+        software_engineering_related: [false, 'Does not mention software engineering: the question is not contextualised within that domain.'],
+        reference_to_definition: [false, 'Does not quote any definition.'],
+        relevance_to_query: [true, 'The answer addresses the question asked.'],
+        enough_words: [true, 'More than 10 words.'],
+        not_too_many_words: [true, 'Fewer than 1000 words.'],
+        correctness: [true, 'Mentions computation, algorithms, data structures, software and hardware, and does not claim that computer science is merely the study of computers.']
+      },
+      note: 'This is the evaluation reported on the slides: a fluent answer that still fails two criteria. Without automated scorers, nobody would have noticed.'
+    },
+    {
+      label: 'a very short answer',
+      text: 'The study of computers.',
+      scores: {
+        english: [true, 'The answer is in English.'],
+        software_engineering_related: [false, 'No software engineering context at all.'],
+        reference_to_definition: [false, 'No definition referenced or quoted.'],
+        relevance_to_query: [true, 'It does attempt to answer the question.'],
+        enough_words: [false, 'Fewer than 10 words: the custom scorer enough_words fails.'],
+        not_too_many_words: [true, 'Fewer than 1000 words.'],
+        correctness: [false, 'The question-specific criterion explicitly rejects arguing that computer science is the study of computers.']
+      },
+      note: 'Two different kinds of failure at once: a deterministic Python scorer (word count) and a natural-language guideline judged by a model.'
+    },
+    {
+      label: 'a definition-quoting answer',
+      text: 'In software engineering terms, computer science is commonly defined as the study of computation, information and automation: it covers algorithms, data structures, programming languages, software design and the hardware that executes them. Software engineering is then the branch concerned with the systematic construction of software, and this framing matters for exam answers.',
+      scores: {
+        english: [true, 'The answer is in English.'],
+        software_engineering_related: [true, 'The question is explicitly contextualised within software engineering.'],
+        reference_to_definition: [true, 'It quotes a definition of the concept mentioned in the question.'],
+        relevance_to_query: [true, 'Directly relevant.'],
+        enough_words: [true, 'More than 10 words.'],
+        not_too_many_words: [true, 'Fewer than 1000 words.'],
+        correctness: [true, 'Mentions computation, algorithms, data structures, software and hardware without the forbidden claim.']
+      },
+      note: 'All criteria pass. Note what changed: not the model, but the prompt. This is exactly the search that MLflow is meant to make cheap and comparable.'
+    }
+  ];
+  var names = ['english', 'software_engineering_related', 'reference_to_definition', 'relevance_to_query', 'enough_words', 'not_too_many_words', 'correctness'];
+  var kind = { english: 'Guideline', software_engineering_related: 'Guideline', reference_to_definition: 'Guideline', relevance_to_query: 'Guideline', enough_words: 'Custom score', not_too_many_words: 'Custom score', correctness: 'Guideline (question-specific)' };
+
+  host.className = 'lk-step';
+  host.innerHTML = '<h4>Judge scorecard: "What is computer science?"</h4>' +
+    '<p class="lk-step-sub">The same question, three candidate answers, the criteria of the example. Guidelines are judged by a model; custom scores are plain Python.</p>';
+  var btns = document.createElement('div');
+  btns.className = 'lk-step-btns';
+  host.appendChild(btns);
+  var quote = document.createElement('pre');
+  quote.style.whiteSpace = 'pre-wrap';
+  quote.style.margin = '.7rem 0';
+  host.appendChild(quote);
+  var table = document.createElement('div');
+  host.appendChild(table);
+  var out = document.createElement('div');
+  out.className = 'lk-step-verdict';
+  host.appendChild(out);
+
+  answers.forEach(function (a, i) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = a.label;
+    b.addEventListener('click', function () { show(i); });
+    btns.appendChild(b);
+  });
+
+  function show(i) {
+    var a = answers[i];
+    [].slice.call(btns.children).forEach(function (b, j) { b.className = (i === j) ? '' : 'lk-step-reset'; });
+    quote.textContent = a.text;
+    table.innerHTML = '';
+    var passed = 0;
+    names.forEach(function (n) {
+      var s = a.scores[n];
+      if (s[0]) passed++;
+      var row = document.createElement('div');
+      row.className = 'lk-step-box';
+      row.style.display = 'block';
+      row.style.margin = '.25rem 0';
+      row.style.borderLeft = '3px solid ' + (s[0] ? 'var(--lk-forest)' : 'var(--lk-vermilion)');
+      var head = document.createElement('b');
+      head.textContent = (s[0] ? 'PASS  ' : 'FAIL  ') + n + '  [' + kind[n] + ']';
+      head.style.color = s[0] ? 'var(--lk-forest)' : 'var(--lk-vermilion)';
+      row.appendChild(head);
+      var p = document.createElement('div');
+      p.style.fontSize = '.85rem';
+      p.textContent = s[1];
+      row.appendChild(p);
+      table.appendChild(row);
+    });
+    out.className = 'lk-step-verdict ' + (passed === names.length ? 'ok' : 'bad');
+    out.textContent = passed + '/' + names.length + ' criteria passed. ' + a.note;
+  }
+  show(0);
+})();
+</script>
+</body>
+</html>

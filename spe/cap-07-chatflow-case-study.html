@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 7 — Case study: the ChatFlow middleware · SPE</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-06-mlops-llmops.html">&larr; Ch. 6 — MLOps and LLMOps</a>
+    <a href="index.html">Index</a>
+    <a href="index.html">Index &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part V — Case study · Chapter 7</div>
+    <h1>ChatFlow: a middleware brief</h1>
+    <div class="lk-meta"><span>~25 min read</span><span>3 interactive widgets</span><span>3 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The brief and its general objective</a></li>
+      <li><a href="#s2">General architecture</a></li>
+      <li><a href="#s3">The five required components</a></li>
+      <li><a href="#s4">Security constraints and requirements</a></li>
+      <li><a href="#s5">Expected deliverables</a></li>
+      <li><a href="#s6">The complete cycle, end to end</a></li>
+      <li><a href="#s7">Implementation suggestions and optional extensions</a></li>
+      <li><a href="#s8">Reading the brief through the course lenses</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="ChatFlow.txt">
+    <h2>1. The brief and its general objective</h2>
+    <p>The last document of the course materials is not a lecture but a <strong>project brief</strong>: <em>Traccia Progetto &mdash; ChatFlow Middleware</em>. It is written in the language of a client rather than of an engineer, it is two pages long, and it is exactly the kind of artefact that Chapter 1 described when it introduced the <em>project work</em> option &mdash; a set of requirements provided by a commissioner, to be turned into a domain model and a delivery pipeline by the students.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>The original brief is in Italian. This chapter reports its content in English, keeping verbatim the strings that are <em>data</em> rather than prose &mdash; the command <code>/riepilogo 2025</code>, the tenant name <code>ComuneXYZ</code>, the JSON keys <code>ore_totali</code> and <code>assente</code>, and the reply text &mdash; because an identifier that gets translated stops being an identifier. Sections 1 to 7 report the brief; section 8 is explicitly an <em>exercise</em>: it applies the criteria of Chapters 2 to 6 to the brief, and says so wherever it goes beyond what the document states.</p>
+    </div>
+
+    <h3>General objective</h3>
+    <p>Build a middleware system that:</p>
+    <ul>
+      <li><strong>Receives messages from messaging systems</strong> (WhatsApp and Telegram);</li>
+      <li><strong>Translates the messages into an intermediate language</strong> (meta-commands);</li>
+      <li><strong>Forwards the requests to a REST management backend</strong> (multi-tenant) <strong>through secure APIs</strong>;</li>
+      <li><strong>Returns the response to the original sender, on the correct channel.</strong></li>
+    </ul>
+
+    <p>Four verbs, four responsibilities. Notice that the middleware is defined entirely by what passes through it: it owns no business data of its own, it holds no user accounts, and its value is the translation and the routing. That observation will do a lot of work in section 8.</p>
+  </section>
+
+  <section id="s2" data-src="ChatFlow.txt">
+    <h2>2. General architecture</h2>
+    <p>The brief gives the architecture as a single line:</p>
+
+    <pre><code class="language-text">[Telegram/WhatsApp] ⇄ [Middleware BridgeBot] ⇄ [Gestionale REST Multi-Tenant]</code></pre>
+
+    <p>That is: <em>messaging channels</em> &hArr; <em>the BridgeBot middleware</em> &hArr; <em>a multi-tenant REST management system</em>. Both arrows are bidirectional, which is the whole difficulty: the response must find its way back not merely to "the user", but to the <strong>correct channel</strong> of the <strong>original sender</strong>.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The ChatFlow architecture with the five required components inside the middleware">
+      <svg viewBox="0 0 700 380" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="cf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="cfv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-vermilion)"/>
+          </marker>
+        </defs>
+
+        <rect x="14" y="120" width="120" height="110" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="74" y="150" text-anchor="middle" fill="var(--lk-ink)" font-size="12">CHANNELS</text>
+        <text x="74" y="176" text-anchor="middle" fill="var(--lk-ink)" font-size="10">Telegram Bot API</text>
+        <text x="74" y="196" text-anchor="middle" fill="var(--lk-ink)" font-size="10">WhatsApp Cloud API</text>
+        <text x="74" y="214" text-anchor="middle" fill="var(--lk-ink)" font-size="9">(or simulation)</text>
+
+        <rect x="186" y="40" width="330" height="290" fill="none" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <text x="351" y="66" text-anchor="middle" fill="var(--lk-cobalt)" font-size="13">MIDDLEWARE &mdash; BridgeBot</text>
+
+        <rect x="206" y="82" width="290" height="42" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="218" y="100" fill="var(--lk-cobalt)" font-size="10">1. CHANNEL INPUT</text>
+        <text x="218" y="116" fill="var(--lk-ink)" font-size="10">integration with the two messaging APIs</text>
+
+        <rect x="206" y="132" width="290" height="42" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="218" y="150" fill="var(--lk-vermilion)" font-size="10">2. META-LANGUAGE + PARSER</text>
+        <text x="218" y="166" fill="var(--lk-ink)" font-size="10">intermediate language, parsed into standard JSON objects</text>
+
+        <rect x="206" y="182" width="290" height="42" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="218" y="200" fill="var(--lk-cobalt)" font-size="10">3. ROUTING</text>
+        <text x="218" y="216" fill="var(--lk-ink)" font-size="10">one API key per tenant, Authorization header</text>
+
+        <rect x="206" y="232" width="290" height="42" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="218" y="250" fill="var(--lk-cobalt)" font-size="10">4. RESPONSE</text>
+        <text x="218" y="266" fill="var(--lk-ink)" font-size="10">formatting, and delivery on the originating channel</text>
+
+        <rect x="206" y="282" width="290" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="218" y="300" fill="var(--lk-cobalt)" font-size="10">5. CONFIGURATION AND SECURITY</text>
+        <text x="218" y="314" fill="var(--lk-ink)" font-size="10">chatId to tenant/API key mapping, safe logging, rate limiting</text>
+
+        <rect x="568" y="120" width="118" height="110" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="627" y="150" text-anchor="middle" fill="var(--lk-ink)" font-size="12">BACKEND</text>
+        <text x="627" y="174" text-anchor="middle" fill="var(--lk-ink)" font-size="10">REST management</text>
+        <text x="627" y="192" text-anchor="middle" fill="var(--lk-ink)" font-size="10">system,</text>
+        <text x="627" y="210" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">multi-tenant</text>
+
+        <line x1="138" y1="160" x2="182" y2="160" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#cf)"/>
+        <line x1="182" y1="196" x2="138" y2="196" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#cf)"/>
+        <line x1="520" y1="160" x2="564" y2="160" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#cf)"/>
+        <line x1="564" y1="196" x2="520" y2="196" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#cf)"/>
+
+        <text x="14" y="30" fill="var(--lk-vermilion)" font-size="11">NOT IN SCOPE</text>
+        <text x="14" y="48" fill="var(--lk-ink)" font-size="10">the middleware does not</text>
+        <text x="14" y="64" fill="var(--lk-ink)" font-size="10">handle end-user</text>
+        <text x="14" y="80" fill="var(--lk-ink)" font-size="10">authentication</text>
+        <line x1="90" y1="92" x2="130" y2="116" stroke="var(--lk-vermilion)" stroke-dasharray="3 3" marker-end="url(#cfv)"/>
+
+        <text x="14" y="350" fill="var(--lk-ink)" font-size="10">Both arrows are bidirectional: the hard requirement is that the reply comes back on the channel the request arrived from.</text>
+      </svg>
+      <figcaption><b>Plate 7.1</b> &mdash; The ChatFlow architecture with the five required components inside the middleware. In vermilion, the component that is a language design problem, and the property of the backend that forces per-tenant routing.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="ChatFlow.txt">
+    <h2>3. The five required components</h2>
+
+    <table>
+      <tr><th>#</th><th>Component</th><th>Requirements</th></tr>
+      <tr>
+        <td>1</td>
+        <td><strong>Handling input from messaging channels</strong></td>
+        <td>Integration with the <strong>Telegram Bot API</strong>; integration with the <strong>WhatsApp Cloud API</strong> (or a simulation of it)</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><strong>Definition and parsing of a meta-language</strong></td>
+        <td>An <strong>intermediate language for commands</strong>; a <strong>parser that produces standardised JSON objects</strong></td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><strong>Routing requests to the management backends</strong></td>
+        <td><strong>Each tenant has an API key</strong>; requests are forwarded over REST with an <strong><code>Authorization</code> header</strong></td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><strong>Returning the response to the user</strong></td>
+        <td><strong>Formatting</strong> of the response; <strong>delivery on the originating channel</strong></td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td><strong>Configuration and security</strong></td>
+        <td>Mapping <strong><code>chatId</code> &rarr; tenant / API key</strong>; <strong>safe logging</strong> and <strong>rate limiting</strong></td>
+      </tr>
+    </table>
+
+    <p>Component 2 is the one worth pausing on, because the course has a whole chapter about it. An <em>intermediate language for commands</em> with <em>a parser producing standardised JSON objects</em> is, in the vocabulary of Chapter 5, an <strong>external DSL</strong>: a custom syntax, hence a custom parser, whose output is a model. The choice the brief leaves open &mdash; how rich that language should be &mdash; is precisely the DSL-versus-GPL trade-off: few and static constructs, a clear domain boundary, a small and reachable user base, fast-paced evolution.</p>
+
+    <p>Component 5 is what makes the system multi-tenant in practice. A <code>chatId</code> arrives from a messaging platform and means nothing to the backend; the mapping turns it into a tenant identity and the credential to act on that tenant's behalf. Everything else in the flow depends on that lookup being correct.</p>
+  </section>
+
+  <section id="s4" data-src="ChatFlow.txt">
+    <h2>4. Security constraints and requirements</h2>
+    <p>Four constraints, stated flatly:</p>
+    <ul>
+      <li><strong>No sensitive data must be stored in clear.</strong></li>
+      <li><strong>Each tenant has a dedicated API key.</strong></li>
+      <li><strong>The middleware does not handle end-user authentication.</strong></li>
+      <li><strong>Logging only for debug, with obfuscated data.</strong></li>
+    </ul>
+
+    <p>Read as a set, they describe a deliberate <em>narrowing of responsibility</em>. The third constraint is the strongest: by refusing to authenticate end users, the middleware also refuses to hold user credentials, which removes an entire class of risk from the system &mdash; and simultaneously shifts weight onto the <code>chatId</code> mapping, since that mapping becomes the only thing deciding on whose behalf a request is made.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The identity chain from a chat conversation to a tenant, with the trust boundaries of the brief">
+      <svg viewBox="0 0 700 340" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="id1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+        </defs>
+
+        <text x="14" y="26" fill="var(--lk-vermilion)" font-size="11">CHANNEL SIDE</text>
+        <text x="270" y="26" fill="var(--lk-vermilion)" font-size="11">MIDDLEWARE</text>
+        <text x="540" y="26" fill="var(--lk-vermilion)" font-size="11">BACKEND SIDE</text>
+        <line x1="248" y1="34" x2="248" y2="300" stroke="var(--lk-ink)" stroke-width="1.2" stroke-dasharray="6 4"/>
+        <line x1="516" y1="34" x2="516" y2="300" stroke="var(--lk-ink)" stroke-width="1.2" stroke-dasharray="6 4"/>
+
+        <rect x="14" y="60" width="210" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="28" y="84" fill="var(--lk-ink)" font-size="11">chatId: 654321</text>
+        <text x="28" y="104" fill="var(--lk-ink)" font-size="10">identifies a conversation</text>
+        <text x="28" y="118" fill="var(--lk-ink)" font-size="10">on a platform</text>
+
+        <rect x="272" y="60" width="220" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+        <text x="286" y="84" fill="var(--lk-cobalt)" font-size="11">MAPPING (component 5)</text>
+        <text x="286" y="104" fill="var(--lk-ink)" font-size="10">chatId &rarr; tenant / API key</text>
+        <text x="286" y="118" fill="var(--lk-ink)" font-size="10">config file (JSON/YAML) or SQLite</text>
+
+        <rect x="540" y="60" width="146" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="554" y="84" fill="var(--lk-ink)" font-size="11">tenant ComuneXYZ</text>
+        <text x="554" y="104" fill="var(--lk-ink)" font-size="10">identifies the</text>
+        <text x="554" y="118" fill="var(--lk-ink)" font-size="10">organisation</text>
+
+        <line x1="228" y1="93" x2="268" y2="93" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#id1)"/>
+        <line x1="496" y1="93" x2="536" y2="93" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#id1)"/>
+
+        <rect x="14" y="160" width="210" height="76" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="28" y="182" fill="var(--lk-vermilion)" font-size="11">NO END-USER AUTH</text>
+        <text x="28" y="202" fill="var(--lk-ink)" font-size="10">the middleware does not</text>
+        <text x="28" y="216" fill="var(--lk-ink)" font-size="10">handle end-user</text>
+        <text x="28" y="230" fill="var(--lk-ink)" font-size="10">authentication</text>
+
+        <rect x="272" y="160" width="220" height="76" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="286" y="182" fill="var(--lk-vermilion)" font-size="11">NOTHING IN CLEAR</text>
+        <text x="286" y="202" fill="var(--lk-ink)" font-size="10">no sensitive data stored in clear</text>
+        <text x="286" y="216" fill="var(--lk-ink)" font-size="10">logging only for debug,</text>
+        <text x="286" y="230" fill="var(--lk-ink)" font-size="10">with obfuscated data &nbsp;+&nbsp; rate limiting</text>
+
+        <rect x="540" y="160" width="146" height="76" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="554" y="182" fill="var(--lk-vermilion)" font-size="11">ONE KEY PER TENANT</text>
+        <text x="554" y="202" fill="var(--lk-ink)" font-size="10">a dedicated API key,</text>
+        <text x="554" y="216" fill="var(--lk-ink)" font-size="10">sent in the</text>
+        <text x="554" y="230" fill="var(--lk-ink)" font-size="10">Authorization header</text>
+
+        <text x="14" y="276" fill="var(--lk-ink)" font-size="10">Consequence of refusing end-user authentication: the mapping in the middle is the only thing that decides on whose behalf a request is made,</text>
+        <text x="14" y="292" fill="var(--lk-ink)" font-size="10">so an unmapped chatId has no identity at all and the request must stop rather than fall back to a default tenant.</text>
+      </svg>
+      <figcaption><b>Plate 7.2</b> &mdash; The identity chain and the four security constraints. A conversation id on the left, an organisation on the right, and one lookup in the middle carrying the entire weight of authorisation.</figcaption>
+    </figure>
+
+    <div id="sec-audit"></div>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>Two of the four constraints concern <em>logs</em>, not features: nothing sensitive in clear, and debug logging with obfuscated data. Logs are the most frequently forgotten copy of the data &mdash; they are written by everybody, read by anybody, and rarely reviewed. The brief pairs them with <strong>rate limiting</strong> in component 5, which is the other operational concern that only shows up under real traffic.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="ChatFlow.txt">
+    <h2>5. Expected deliverables</h2>
+    <table>
+      <tr><th>Deliverable</th><th>Note</th></tr>
+      <tr><td><strong>Documented source code</strong></td><td>Documentation is part of the delivery, not an afterthought</td></tr>
+      <tr><td><strong>Configuration file (JSON/YAML)</strong></td><td>The <code>chatId</code>-to-tenant mapping and the rest of the configuration live outside the code</td></tr>
+      <tr><td><strong>Startup script or Dockerfile</strong></td><td>The deployment story is an explicit deliverable</td></tr>
+      <tr><td><strong>Technical README</strong></td><td>The entry point for whoever inherits the system</td></tr>
+      <tr><td><strong>Optional extension: a web UI for configuration</strong></td><td>Listed as optional here, and again among the extensions</td></tr>
+    </table>
+
+    <p>Two of the five items are about running the thing rather than writing it. That is the same emphasis the course places everywhere: a configuration file separated from the code is what allowed an MLflow Project to be re-run with different parameters in Chapter 6, and a Dockerfile is the <em>deploy automation via containerization</em> that Chapter 1 listed among the exam requirements.</p>
+  </section>
+
+  <section id="s6" data-src="ChatFlow.txt">
+    <h2>6. The complete cycle, end to end</h2>
+    <p>The brief closes its functional part with one worked example. It is six lines long and it exercises every component listed in section 3.</p>
+
+    <pre><code class="language-text">User (Telegram):  /riepilogo 2025
+
+→ BridgeBot receives the message with chatId: 654321
+→ maps chatId to tenant 'ComuneXYZ'
+→ retrieves the API key and sends the REST request
+→ receives JSON: { 'ore_totali': 124, 'assente': false }
+→ replies to the user:
+  'Nel 2025 hai totalizzato 124 ore. Nessuna assenza registrata.'</code></pre>
+
+    <p>In English, the command means <em>summary 2025</em>, the JSON keys mean <em>total hours</em> and <em>absent</em>, and the reply reads <em>"In 2025 you accumulated 124 hours. No absence recorded."</em> The tenant name <code>ComuneXYZ</code> stands for a municipality.</p>
+
+    <p>Follow the responsibilities through the six lines: parsing (a command with one argument becomes a structured request), identification (a channel-level <code>chatId</code> becomes a tenant), authorisation (the tenant's API key goes into the <code>Authorization</code> header), invocation (REST), formatting (a JSON payload becomes a sentence a human wants to read), and delivery (back on Telegram, because that is where the message came from). <strong>The response is not the JSON: it is prose generated from the JSON</strong>, which is why "formatting the response" is a named component and not an implementation detail.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The complete request cycle drawn as a numbered sequence across user, middleware and backend">
+      <svg viewBox="0 0 700 400" width="700" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-mono)" font-size="11">
+        <defs>
+          <marker id="sq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+        </defs>
+
+        <rect x="30" y="20" width="140" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="100" y="42" text-anchor="middle" fill="var(--lk-ink)" font-size="11">USER (Telegram)</text>
+        <line x1="100" y1="54" x2="100" y2="376" stroke="var(--lk-rule-soft)" stroke-dasharray="4 4"/>
+
+        <rect x="270" y="20" width="160" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="350" y="42" text-anchor="middle" fill="var(--lk-cobalt)" font-size="11">BridgeBot</text>
+        <line x1="350" y1="54" x2="350" y2="376" stroke="var(--lk-rule-soft)" stroke-dasharray="4 4"/>
+
+        <rect x="530" y="20" width="150" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="605" y="42" text-anchor="middle" fill="var(--lk-ink)" font-size="11">REST backend</text>
+        <line x1="605" y1="54" x2="605" y2="376" stroke="var(--lk-rule-soft)" stroke-dasharray="4 4"/>
+
+        <line x1="100" y1="86" x2="344" y2="86" stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#sq)"/>
+        <text x="110" y="78" fill="var(--lk-ink)" font-size="10">1 &nbsp;/riepilogo 2025 &nbsp;(chatId: 654321)</text>
+
+        <rect x="248" y="104" width="204" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+        <text x="350" y="125" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">2 &nbsp;parse into a meta-command (JSON)</text>
+
+        <rect x="248" y="150" width="204" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="350" y="171" text-anchor="middle" fill="var(--lk-ink)" font-size="10">3 &nbsp;chatId 654321 &rarr; tenant ComuneXYZ</text>
+
+        <rect x="248" y="196" width="204" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+        <text x="350" y="217" text-anchor="middle" fill="var(--lk-ink)" font-size="10">4 &nbsp;retrieve that tenant API key</text>
+
+        <line x1="350" y1="248" x2="599" y2="248" stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#sq)"/>
+        <text x="360" y="240" fill="var(--lk-ink)" font-size="10">5 &nbsp;REST request + Authorization header</text>
+
+        <line x1="605" y1="286" x2="356" y2="286" stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#sq)"/>
+        <text x="366" y="278" fill="var(--lk-ink)" font-size="10">6 &nbsp;{ ore_totali: 124, assente: false }</text>
+
+        <rect x="248" y="300" width="204" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+        <text x="350" y="321" text-anchor="middle" fill="var(--lk-vermilion)" font-size="10">7 &nbsp;format the response as prose</text>
+
+        <line x1="350" y1="360" x2="106" y2="360" stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#sq)"/>
+        <text x="116" y="352" fill="var(--lk-ink)" font-size="10">8 &nbsp;reply on the originating channel</text>
+        <text x="116" y="378" fill="var(--lk-ink)" font-size="9">"Nel 2025 hai totalizzato 124 ore. Nessuna assenza registrata."</text>
+      </svg>
+      <figcaption><b>Plate 7.3</b> &mdash; The complete cycle of the brief, as a sequence. The two vermilion boxes are the translations that give the middleware its purpose: text into a meta-command on the way in, JSON into prose on the way out.</figcaption>
+    </figure>
+
+    <div id="route-sim"></div>
+  </section>
+
+  <section id="s7" data-src="ChatFlow.txt">
+    <h2>7. Implementation suggestions and optional extensions</h2>
+    <p>The brief suggests, without prescribing:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Python stack</button>
+        <button class="lk-tab">Node.js stack</button>
+        <button class="lk-tab">Storage &amp; teamwork</button>
+        <button class="lk-tab">Optional extensions</button>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li><strong>FastAPI</strong> &mdash; the HTTP surface (webhooks in, configuration UI if any)</li>
+          <li><strong>httpx</strong> &mdash; the REST client towards the management backend</li>
+          <li><strong>python-telegram-bot</strong> &mdash; the Telegram channel integration</li>
+        </ul>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li><strong>Express.js</strong> &mdash; the HTTP surface</li>
+          <li><strong>axios</strong> &mdash; the REST client</li>
+          <li><strong>node-telegram-bot-api</strong> &mdash; the Telegram channel integration</li>
+        </ul>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li><strong>Optional DB (SQLite)</strong> for logs and configuration &mdash; note the word <em>optional</em>: the mapping may equally live in the JSON/YAML configuration file listed among the deliverables.</li>
+          <li><strong>Modularity, to divide the work among students</strong> &mdash; the brief states this as an implementation suggestion, which makes the module decomposition a project-management requirement as much as a technical one.</li>
+        </ul>
+      </div>
+      <div class="lk-tabpanel">
+        <ul>
+          <li><strong>Web UI for tenant management</strong></li>
+          <li><strong>Support for voice messages &rarr; transcription</strong></li>
+          <li><strong>Telegram interactive buttons</strong></li>
+          <li><strong>Replies in multiple languages</strong></li>
+        </ul>
+      </div>
+    </div>
+
+    <p>The last suggestion in the third tab is the one with teeth. <em>Modularity, to divide the work among students</em> is the brief asking for a decomposition whose seams match the team &mdash; which is the same argument that Chapter 4 made about contexts, where the boundary is organizational as well as technical, and where the best practice reads <em>one responsible person or team for each context</em>.</p>
+  </section>
+
+  <section id="s8" data-src="ChatFlow.txt,00-intro.html#s9,10-ddd.html#s25,11-mdd.html#s22">
+    <h2>8. Reading the brief through the course lenses</h2>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note &mdash; this section is an exercise</span>
+      <p>Everything up to here reported the brief. What follows applies the criteria taught in Chapters 1 to 6 to that text. The brief itself does <strong>not</strong> mention DDD, DSLs, hexagonal architecture or CI/CD: the mapping below is the work the students are expected to do, and it is presented as one defensible reading, not as the answer.</p>
+    </div>
+
+    <h3>Which words belong to the ubiquitous language?</h3>
+    <p>The brief hands over a vocabulary with almost no noise: <em>message</em>, <em>channel</em>, <em>chatId</em>, <em>meta-command</em>, <em>tenant</em>, <em>API key</em>, <em>request</em>, <em>response</em>. Following Chapter 2, these are the words that should appear in the code, and the workflow prescribes recording their meaning in a glossary rather than assuming it. Two of them repay the discipline immediately:</p>
+    <ul>
+      <li><strong>chatId</strong> belongs to the <em>channel</em> vocabulary. It identifies a conversation on a platform, not a person and not an organisation.</li>
+      <li><strong>tenant</strong> belongs to the <em>backend</em> vocabulary. It identifies an organisation on whose behalf requests are made.</li>
+    </ul>
+    <p>Component 5 of the brief exists precisely because those two words live in different contexts, and the mapping is the point of contact between them &mdash; the sort of junction a context map is meant to record.</p>
+
+    <h3>Which building blocks would the concepts become?</h3>
+    <p>Applying the decision procedure of Chapter 3 &mdash; identity or interchangeability, thing or capability &mdash; gives a plausible first classification:</p>
+    <table>
+      <tr><th>Concept from the brief</th><th>Candidate block</th><th>Why</th></tr>
+      <tr><td><code>ChatId</code>, <code>ApiKey</code>, <code>TenantId</code></td><td>Value objects</td><td>They are their content: two chat ids with the same value are the same chat id. Immutability also helps with the "nothing sensitive in clear" constraint, since a value object is easy to wrap in a type that controls its own rendering</td></tr>
+      <tr><td><code>Tenant</code></td><td>Entity</td><td>It has an identity that survives changes to its attributes (name, key rotation)</td></tr>
+      <tr><td><code>MetaCommand</code> (the parsed request)</td><td>Value object</td><td>A standardised JSON object describing one request; two identical requests are indistinguishable</td></tr>
+      <tr><td>The <code>chatId</code>&rarr;tenant/API-key mapping</td><td>Repository</td><td>It mediates persistent storage and retrieval, and its implementation may be the JSON/YAML configuration file or the optional SQLite database &mdash; a swap the rest of the system should not notice</td></tr>
+      <tr><td>Parsing, routing, replying</td><td>Services</td><td>Stateless capabilities that wire the other objects together for one use case each</td></tr>
+    </table>
+    <p>The repository row is the interesting one, because the brief itself offers two storage options &mdash; a configuration file, or an optional SQLite database. Chapter 4 has a name for an interface designed so that both fit behind it without leaking: an <strong>anti-corruption layer</strong>, and the third DDD exercise (the CSV one) is exactly the drill for it, down to the test that must pass unchanged against two implementations.</p>
+
+    <h3>The meta-language is a DSL</h3>
+    <p>Component 2 asks for <em>an intermediate language for commands</em> plus <em>a parser producing standardised JSON objects</em>. In the vocabulary of Chapter 5 this is an <strong>external DSL</strong>: a custom concrete syntax with a custom parser, whose output is a model instance. The design questions the chapter supplies transfer directly:</p>
+    <ul>
+      <li><strong>How much expressiveness?</strong> The DSL/GPL table recommends <em>few and static</em> constructs and accepts <em>possibly less than Turing-complete</em>. A command language for a chat interface has no business having loops.</li>
+      <li><strong>Syntax versus semantics.</strong> The parser gives syntax; the meaning is whatever the routing and formatting components do with the JSON. As in Chapter 5, the grammar is the cheap half.</li>
+      <li><strong>Validation is not parsing.</strong> <code>/riepilogo 3025</code> parses. Whether a year in the future is meaningful is a validation rule &mdash; the same distinction that made <code>ClockTime</code> need a validator in the Sheduler language.</li>
+    </ul>
+
+    <h3>How the project would meet the exam requirements</h3>
+    <table>
+      <tr><th>Exam requirement (Ch. 1)</th><th>What the brief already provides</th><th>What the team must add</th></tr>
+      <tr><td>Domain-driven design</td><td>A domain description in the client's own words, and a vocabulary</td><td>Glossary, context map, model named after the language, building-block choices</td></tr>
+      <tr><td>Clear process and DevOps practices</td><td>Documented source and a technical README among the deliverables</td><td>A visible workflow in the repository</td></tr>
+      <tr><td>Full-scale automation, including CI/CD</td><td>&mdash;</td><td>The whole pipeline: this is not requested by the brief and is required by the exam</td></tr>
+      <tr><td>Deploy automation via containerization</td><td><strong>A startup script or Dockerfile</strong> is an expected deliverable</td><td>Wiring the image into the pipeline</td></tr>
+      <tr><td>Two or more target platforms</td><td>The brief suggests <em>either</em> a Python stack <em>or</em> a Node.js stack</td><td>Note the criterion: CPython and NodeJS are <strong>different runtimes</strong>, so a system whose components genuinely run on both satisfies the rule &mdash; choosing one stack for everything does not</td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>A brief like this one is the natural object of the oral discussion, because every course topic has a foothold in it. Be ready to say: which words you put in the glossary and why; which concepts became entities rather than value objects; where you drew the context boundary between the channel side and the backend side; why the command language is a DSL and where its validation rules live; how the <code>chatId</code>-to-tenant mapping is stored and how you kept that decision swappable; and how the four security constraints are enforced by construction rather than by discipline.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="ChatFlow.txt">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>State the four things the ChatFlow middleware must do.</summary>
+        <p>Receive messages from messaging systems (WhatsApp and Telegram); translate the messages into an intermediate language of <strong>meta-commands</strong>; forward the requests to a <strong>multi-tenant REST management backend</strong> through secure APIs; and return the response to the <strong>original sender, on the correct channel</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Name the five required components.</summary>
+        <p>(1) Handling input from the messaging channels (Telegram Bot API, WhatsApp Cloud API or a simulation); (2) definition and parsing of the meta-language, with a parser producing standardised JSON objects; (3) routing the requests to the management backends, with one API key per tenant and an <code>Authorization</code> header; (4) returning the response, formatted, on the originating channel; (5) configuration and security, with the <code>chatId</code>-to-tenant/API-key mapping, safe logging and rate limiting.</p>
+      </details>
+
+      <details>
+        <summary>What are the four security constraints, and which is the most consequential?</summary>
+        <p>No sensitive data stored in clear; a dedicated API key per tenant; <strong>the middleware does not handle end-user authentication</strong>; logging only for debug, with obfuscated data. The third is the most consequential: it removes user credentials from the system entirely, and in exchange makes the <code>chatId</code> mapping the sole determinant of whose data is being accessed.</p>
+      </details>
+
+      <details>
+        <summary>Why is the <code>chatId</code>-to-tenant mapping the heart of the system?</summary>
+        <p>Because <code>chatId</code> is a <em>channel</em>-side identifier that means nothing to the backend, while <em>tenant</em> is a backend-side identity with an API key attached. The mapping is the point of contact between two contexts, and it is what decides on whose behalf every request is made &mdash; especially given that the middleware performs no end-user authentication of its own.</p>
+      </details>
+
+      <details>
+        <summary>Walk through the complete cycle of the example.</summary>
+        <p>The user sends <code>/riepilogo 2025</code> on Telegram; BridgeBot receives the message with <code>chatId: 654321</code>; it maps that id to the tenant <code>ComuneXYZ</code>; it retrieves the API key and sends the REST request; it receives <code>{ 'ore_totali': 124, 'assente': false }</code>; and it replies to the user with the sentence <em>"Nel 2025 hai totalizzato 124 ore. Nessuna assenza registrata."</em></p>
+      </details>
+
+      <details>
+        <summary>Why is "formatting the response" listed as a component rather than left implicit?</summary>
+        <p>Because the deliverable to the user is <strong>prose, not JSON</strong>. The backend answers with a data structure; the user receives a sentence. That transformation is a named responsibility of the middleware, and it is also where the optional extension "replies in multiple languages" would attach.</p>
+      </details>
+
+      <details>
+        <summary>What are the expected deliverables?</summary>
+        <p>Documented source code; a configuration file in JSON or YAML; a startup script or Dockerfile; a technical README; and, optionally, a web UI for configuration.</p>
+      </details>
+
+      <details>
+        <summary>In the vocabulary of Chapter 5, what kind of language is the meta-language, and what follows from that?</summary>
+        <p>An <strong>external DSL</strong>: a fully custom syntax, hence requiring a custom parser, producing a model (the standardised JSON objects). It follows that its constructs should be <em>few and static</em>, that it need not be Turing-complete, and that <strong>parsing and validation are different jobs</strong> &mdash; a syntactically valid command may still be meaningless, and rejecting it is the validator's task.</p>
+      </details>
+
+      <details>
+        <summary>Which storage options does the brief leave open, and how should the design react?</summary>
+        <p>The mapping and the logs may live in the <strong>JSON/YAML configuration file</strong> that is an expected deliverable, or in an <strong>optional SQLite database</strong>. Since the brief itself offers two, the design should hide the choice behind an interface &mdash; a repository acting as an anti-corruption layer &mdash; so that switching does not perturb the rest of the model.</p>
+      </details>
+
+      <details>
+        <summary>Does building ChatFlow automatically satisfy the exam requirements?</summary>
+        <p>No. It supplies a real domain to model, and a Dockerfile is already among its deliverables, but the brief says nothing about <strong>continuous integration and delivery</strong> or about a visible development process &mdash; those must be added. On platforms, note that the brief suggests either a Python stack or a Node.js stack: since CPython and NodeJS are different <em>runtimes</em>, genuinely targeting both satisfies the two-platform rule, while picking one stack for everything does not.</p>
+      </details>
+
+      <details>
+        <summary>Why does the brief mention modularity, and how does it connect to Chapter 4?</summary>
+        <p>It lists <em>modularity, to divide the work among students</em> among the implementation suggestions. That makes the decomposition an organizational matter as much as a technical one &mdash; exactly the third perspective from which Chapter 4 says a context boundary is real, and the reason for the best practice <em>one responsible person or team for each context</em>.</p>
+      </details>
+
+      <details>
+        <summary>Which optional extensions are listed, and which one changes the input pipeline most?</summary>
+        <p>A web UI for tenant management; support for voice messages with transcription; Telegram interactive buttons; and replies in multiple languages. <strong>Voice-to-transcription</strong> changes the input pipeline most: it inserts a new, fallible stage before parsing, and produces text that no longer necessarily conforms to the command syntax.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-06-mlops-llmops.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="index.html">Back to the index &rarr;</a>
+    </nav>
+    <p>Sources: the project brief <em>Traccia Progetto &mdash; ChatFlow Middleware</em> &middot; cross-references to <code>00-intro.html</code>, <code>10-ddd.html</code>, <code>11-mdd.html</code> &middot; Software Process Engineering, UniBo Cesena</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Bespoke widget: security constraint auditor (from the ChatFlow brief) ---- */
+(function () {
+  var host = document.getElementById('sec-audit');
+  if (!host) return;
+  var choices = [
+    {
+      k: 'store',
+      q: 'How are the tenant API keys kept?',
+      opts: [
+        ['encrypted / in a secret store', true, 'Consistent with: no sensitive data must be stored in clear.'],
+        ['plain text in the config file committed to git', false, 'Violates the first constraint: no sensitive data must be stored in clear. It also leaks every tenant at once, since each tenant has a dedicated key.']
+      ]
+    },
+    {
+      k: 'keys',
+      q: 'How many API keys does the middleware use towards the backend?',
+      opts: [
+        ['one dedicated key per tenant', true, 'Consistent with: each tenant has a dedicated API key.'],
+        ['one shared key for all tenants', false, 'Violates the second constraint. A shared key also destroys the only per-tenant boundary the system has.']
+      ]
+    },
+    {
+      k: 'auth',
+      q: 'Does the middleware authenticate end users?',
+      opts: [
+        ['no: it maps chatId to a tenant and forwards', true, 'Consistent with: the middleware does not handle end-user authentication. Note the consequence: the chatId mapping carries the whole weight of deciding on whose behalf a request is made.'],
+        ['yes: it stores usernames and passwords', false, 'Violates the third constraint, and reintroduces credential storage that the brief deliberately kept out of scope.']
+      ]
+    },
+    {
+      k: 'log',
+      q: 'What goes into the logs?',
+      opts: [
+        ['debug entries with obfuscated data', true, 'Consistent with: logging only for debug, with obfuscated data.'],
+        ['full request and response payloads', false, 'Violates the fourth constraint, and usually the first one too: payloads such as { ore_totali: 124 } are exactly the personal data the system is meant to protect.']
+      ]
+    },
+    {
+      k: 'rate',
+      q: 'Is there any rate limiting?',
+      opts: [
+        ['yes, as required by component 5', true, 'Component 5 lists safe logging AND rate limiting.'],
+        ['no', false, 'Component 5 of the brief explicitly requires rate limiting alongside safe logging.']
+      ]
+    }
+  ];
+  var state = {};
+  choices.forEach(function (c) { state[c.k] = 0; });
+
+  host.className = 'lk-step';
+  host.innerHTML = '<h4>Security auditor</h4><p class="lk-step-sub">Five design decisions. Each one is checked against the constraints stated in the brief.</p>';
+  var body = document.createElement('div');
+  choices.forEach(function (c) {
+    var q = document.createElement('div');
+    q.style.margin = '.5rem 0';
+    var label = document.createElement('div');
+    label.style.fontSize = '.9rem';
+    label.style.fontWeight = '700';
+    label.textContent = c.q;
+    q.appendChild(label);
+    var row = document.createElement('div');
+    row.className = 'lk-step-btns';
+    c.opts.forEach(function (o, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = o[0];
+      b.dataset.k = c.k;
+      b.dataset.i = String(i);
+      b.addEventListener('click', function () { state[c.k] = i; render(); });
+      row.appendChild(b);
+    });
+    q.appendChild(row);
+    body.appendChild(q);
+  });
+  host.appendChild(body);
+  var out = document.createElement('div');
+  out.className = 'lk-step-verdict';
+  host.appendChild(out);
+
+  function render() {
+    [].slice.call(host.querySelectorAll('button')).forEach(function (b) {
+      var on = state[b.dataset.k] === parseInt(b.dataset.i, 10);
+      b.className = on ? '' : 'lk-step-reset';
+    });
+    var bad = [];
+    choices.forEach(function (c) {
+      var chosen = c.opts[state[c.k]];
+      if (!chosen[1]) bad.push(chosen[2]);
+    });
+    if (!bad.length) {
+      out.className = 'lk-step-verdict ok';
+      out.textContent = 'All five decisions are consistent with the brief. Note that three of them are about what the system refuses to keep: keys in clear, user credentials, and full payloads in the logs.';
+    } else {
+      out.className = 'lk-step-verdict bad';
+      out.textContent = bad.length + ' violation(s). ' + bad[0];
+    }
+  }
+  render();
+})();
+
+/* ---- Bespoke widget: routing simulator (from the ChatFlow brief, complete cycle example) ---- */
+(function () {
+  var host = document.getElementById('route-sim');
+  if (!host) return;
+  var mapping = { '654321': { tenant: 'ComuneXYZ', key: 'ak_live_9f2c...e41' } };
+  host.className = 'lk-step';
+  host.innerHTML = '<h4>Routing simulator</h4>' +
+    '<p class="lk-step-sub">Type a command and a chatId. The only mapping configured is the one given in the brief; anything else is an unknown chat, which is a case the design must handle.</p>';
+
+  var row = document.createElement('div');
+  row.className = 'lk-step-state';
+  function field(labelText, value, width) {
+    var box = document.createElement('div');
+    box.className = 'lk-step-box';
+    box.appendChild(document.createTextNode(labelText + ' '));
+    var inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = value;
+    inp.style.width = width;
+    inp.style.font = 'inherit';
+    inp.style.fontFamily = 'var(--lk-mono)';
+    inp.addEventListener('input', render);
+    box.appendChild(inp);
+    row.appendChild(box);
+    return inp;
+  }
+  var cmd = field('message', '/riepilogo 2025', '11rem');
+  var cid = field('chatId', '654321', '6rem');
+  var chan = document.createElement('select');
+  ['Telegram', 'WhatsApp'].forEach(function (c) {
+    var o = document.createElement('option');
+    o.value = c; o.textContent = c; chan.appendChild(o);
+  });
+  chan.style.font = 'inherit';
+  chan.style.fontFamily = 'var(--lk-mono)';
+  chan.addEventListener('change', render);
+  var cbox = document.createElement('div');
+  cbox.className = 'lk-step-box';
+  cbox.appendChild(document.createTextNode('channel '));
+  cbox.appendChild(chan);
+  row.appendChild(cbox);
+  host.appendChild(row);
+
+  var trace = document.createElement('pre');
+  trace.style.margin = '.7rem 0 .4rem';
+  trace.style.whiteSpace = 'pre-wrap';
+  host.appendChild(trace);
+  var out = document.createElement('div');
+  out.className = 'lk-step-verdict';
+  host.appendChild(out);
+
+  function render() {
+    var text = cmd.value.trim();
+    var id = cid.value.trim();
+    var lines = [];
+    lines.push('1  in  [' + chan.value + '] ' + text + '   (chatId: ' + id + ')');
+
+    var m = text.match(/^\/([a-zA-Z_]+)(?:\s+(.*))?$/);
+    if (!m) {
+      trace.textContent = lines.join('\n') + '\n2  parse  FAILED: the message does not match the command syntax';
+      out.className = 'lk-step-verdict bad';
+      out.textContent = 'The parser could not build a meta-command. Not every message on a chat channel is a command, so this branch needs a defined behaviour: a help reply, or silence. Note that this is a syntax failure, distinct from a command that parses but is meaningless.';
+      return;
+    }
+    var verb = m[1];
+    var arg = (m[2] || '').trim();
+    var meta = { command: verb, args: arg ? [arg] : [] };
+    lines.push('2  parse   ' + JSON.stringify(meta) + '   <- standardised JSON object');
+
+    var t = mapping[id];
+    if (!t) {
+      trace.textContent = lines.join('\n') + '\n3  map     chatId ' + id + ' -> (no tenant configured)';
+      out.className = 'lk-step-verdict bad';
+      out.textContent = 'Unknown chatId: no tenant, therefore no API key, therefore no request. Since the middleware performs no end-user authentication, an unmapped chat has no identity at all and the request must stop here.';
+      return;
+    }
+    lines.push('3  map     chatId ' + id + ' -> tenant ' + t.tenant);
+    lines.push('4  key     Authorization: Bearer ' + t.key.slice(0, 6) + '****   <- never logged in clear');
+    lines.push('5  REST    GET /api/' + verb + (arg ? '?year=' + encodeURIComponent(arg) : '') + '   (tenant ' + t.tenant + ')');
+
+    if (verb === 'riepilogo' && arg === '2025') {
+      lines.push('6  JSON    { "ore_totali": 124, "assente": false }');
+      lines.push('7  format  "Nel 2025 hai totalizzato 124 ore. Nessuna assenza registrata."');
+      lines.push('8  out  [' + chan.value + '] reply delivered on the originating channel');
+      trace.textContent = lines.join('\n');
+      out.className = 'lk-step-verdict ok';
+      out.textContent = 'The complete cycle of the brief. Every step belongs to one of the five required components, and the reply goes back on the channel the message came from — not on a default one.';
+      return;
+    }
+    lines.push('6  JSON    (backend response depends on the tenant data)');
+    lines.push('7  format  the payload must be rendered as prose, not returned as JSON');
+    lines.push('8  out  [' + chan.value + '] reply delivered on the originating channel');
+    trace.textContent = lines.join('\n');
+    out.className = 'lk-step-verdict';
+    out.textContent = 'Parsed and routed. Only /riepilogo 2025 has a canned response here, because that is the one worked example the brief provides — inventing others would be inventing requirements.';
+  }
+  render();
+})();
+</script>
+</body>
+</html>
