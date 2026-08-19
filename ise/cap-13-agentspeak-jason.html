@@ -1,0 +1,1164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 13 — AgentSpeak(L) &amp; Jason · ISE</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-12-simple-agents-jade.html">&larr; Ch. 12 — Simple agents in Jade</a>
+    <a href="index.html">Index</a>
+    <a href="cap-14-scientific-literature.html">Ch. 14 — What is scientific literature? &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part V — Tools, artefacts and case studies · Chapter 13</div>
+    <h1>Intentional agents in AgentSpeak(L) &amp; Jason</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>7 interactive widgets</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Implementing BDI architectures</a></li>
+      <li><a href="#s2">PRS: the first BDI architecture</a></li>
+      <li><a href="#s3">AgentSpeak(L): the language</a></li>
+      <li><a href="#s4">Syntax: beliefs, goals and events</a></li>
+      <li><a href="#s5">Syntax: plans</a></li>
+      <li><a href="#s6">An AgentSpeak(L) example</a></li>
+      <li><a href="#s7">Semantics: the agent configuration</a></li>
+      <li><a href="#s8">Semantics: deliberation steps</a></li>
+      <li><a href="#s9">Jason: the interpreter</a></li>
+      <li><a href="#s10">The Jason reasoning cycle</a></li>
+      <li><a href="#s11">The Jason programming language</a></li>
+      <li><a href="#s12">Internal actions and message passing</a></li>
+      <li><a href="#s13">Environments and hierarchical planning</a></li>
+      <li><a href="#s14">Conclusion</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <div class="callout note">
+    <span class="callout-label">Editor&rsquo;s note</span>
+    <p>This chapter is the case-study deck <strong>C2 &mdash; Programming Intentional Agents in AgentSpeak(L) &amp; Jason</strong>, the second concrete platform of the course. Chapter 12 gave us Jade: a <em>weak</em> agent platform where autonomy is engineered through threads and behaviours, and where goals never appear. Here the course goes the other way: <strong>AgentSpeak(L)</strong> is an abstract language for programming <em>intentional</em> agents &mdash; agents built out of beliefs, goals and plans &mdash; and <strong>Jason</strong> is the platform that executes it. This is Chapter 7&rsquo;s BDI architecture made into a programming language: beliefs, desires and intentions stop being a conceptual shelf and become syntax with an operational semantics. The chapter closes the case-study arc of Part V: the lab repository is the intended hands-on follow-up.</p>
+  </div>
+
+  <section id="s1" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>1. Implementing BDI architectures</h2>
+    <p>The deck opens where Chapter 7 ended: the BDI architecture is a theory of practical reasoning, and the question now is how to <em>implement</em> it. The abstract control loop of BDI agents [Rao and Georgeff, 1995] gives the skeleton that every concrete architecture &mdash; PRS, dMARS, AgentSpeak(L), Jason &mdash; will fill in its own way:</p>
+    <pre><code class="language-plaintext">1. initialize-state();
+2. while true do
+3.   options := option-generator(event-queue);
+4.   selected-options := deliberate(options);
+5.   update-intentions(selected-options);
+6.   execute();
+7.   get-new-external-events();
+8.   drop-successful-attitudes();
+9.   drop-impossible-attitudes();
+10. end-while</code></pre>
+    <p>The loop is the bridge between perception and action: events enter, options are generated from them, deliberation filters the options into intentions, intentions are executed, and the loop cleans up after itself &mdash; dropping attitudes that have been fulfilled (successful) or that can no longer be pursued (impossible). Notice what never appears in the loop: a global planner. Deliberation is a <em>repeated, cheap</em> step, not an expensive one-shot search &mdash; this is the deliberate/reactive tension of Chapter 7, resolved by interleaving.</p>
+
+    <p>Concrete BDI systems are built out of six constructs:</p>
+    <ul>
+      <li>a set of <strong>beliefs</strong>;</li>
+      <li>a set of <strong>desires</strong> (or goals);</li>
+      <li>a set of <strong>intentions</strong> &mdash; better, a subset of the goals with an associated stack of plans for achieving them; these are the <em>intended actions</em>;</li>
+      <li>a set of <strong>internal events</strong> &mdash; elicited by a belief change (updates, addition, deletion) or by goal events (a goal achievement, or a new goal adoption);</li>
+      <li>a set of <strong>external events</strong> &mdash; perceptive events coming from the interaction with external entities (message arrival, signals, etc.);</li>
+      <li>a <strong>plan library</strong> (repertoire of actions) as a further, static component.</li>
+    </ul>
+    <p>The architecture of a BDI agent [Wooldridge, 2009] wires these constructs together: sensors feed a <em>belief revision function</em> (BRF) that updates beliefs; an <em>option generator</em> produces options (desires) from beliefs and events; a <em>filter</em> turns desires into intentions; intentions drive action through effectors. The agent is literally the loop around that pipeline.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" role="img" aria-label="Basic architecture of a BDI agent: sensors feed belief revision, option generator produces desires, the filter selects intentions, effectors act">
+        <defs>
+          <marker id="p13a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--lk-cobalt)"></path></marker>
+        </defs>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink-soft)">
+          <text x="30" y="28">ENVIRONMENT</text>
+          <text x="30" y="44" style="font-size:9px">situated agent: perceives and acts</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-ink);stroke-width:1.4">
+          <rect x="30" y="60" width="130" height="54" rx="3"></rect>
+          <rect x="220" y="60" width="150" height="54" rx="3"></rect>
+          <rect x="400" y="60" width="120" height="54" rx="3"></rect>
+          <rect x="550" y="60" width="120" height="54" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)">
+          <text x="46" y="82">SENSORS</text>
+          <text x="46" y="98" style="font-size:9px;fill:var(--lk-ink-soft)">perception</text>
+          <text x="240" y="82">BRF</text>
+          <text x="240" y="98" style="font-size:9px;fill:var(--lk-ink-soft)">belief revision</text>
+          <text x="418" y="82">OPTION</text>
+          <text x="418" y="98" style="font-size:9px;fill:var(--lk-ink-soft)">generator</text>
+          <text x="566" y="82">EFFECTORS</text>
+          <text x="566" y="98" style="font-size:9px;fill:var(--lk-ink-soft)">action</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-cobalt);stroke-width:1.3">
+          <rect x="240" y="150" width="120" height="50" rx="3"></rect>
+          <rect x="400" y="150" width="120" height="50" rx="3"></rect>
+          <rect x="400" y="230" width="120" height="50" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt-dark)">
+          <text x="256" y="172">BELIEFS</text>
+          <text x="420" y="172">DESIRES</text>
+          <text x="414" y="252">INTENTIONS</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9px;fill:var(--lk-ink-soft)">
+          <text x="228" y="236">FILTER</text>
+          <text x="212" y="250" style="font-size:9px">deliberation</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-cobalt);stroke-width:1.5" marker-end="url(#p13a)">
+          <path d="M160 87 C 190 87, 195 87, 214 87"></path>
+          <path d="M370 87 C 380 87, 388 87, 394 87"></path>
+          <path d="M520 87 C 530 87, 536 87, 544 87"></path>
+          <path d="M300 150 C 300 130, 445 120, 460 120"></path>
+          <path d="M460 150 C 460 175, 460 205, 460 224"></path>
+          <path d="M460 230 C 460 210, 610 120, 610 118"></path>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-vermilion)">
+          <text x="322" y="120">beliefs &rarr; options</text>
+          <text x="466" y="205">filter selects intentions</text>
+          <text x="560" y="140">intentions &rarr; action</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-vermilion);stroke-width:1.4" stroke-dasharray="5 4" marker-end="url(#p13a)">
+          <path d="M610 180 C 640 230, 120 230, 120 120"></path>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-vermilion)">
+          <text x="300" y="262">action changes the environment &mdash; the loop closes</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)">
+          <text x="30" y="290">BRF = belief revision function &middot; the cycle repeats: perceive, revise, generate options, deliberate, execute.</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 13.1</b> &mdash; Basic architecture of a BDI agent [Wooldridge, 2009]. Sensors feed the belief revision function; the option generator produces desires from beliefs and events; the filter selects intentions; intentions drive the effectors, and the environment feeds back.</figcaption>
+    </figure>
+
+    <div id="w-loop"></div>
+  </section>
+
+  <section id="s2" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>2. PRS: the first BDI architecture</h2>
+    <p>Before AgentSpeak(L), the deck places the ancestor: the <strong>Procedural Reasoning System (PRS)</strong> [Georgeff and Lansky, 1987], one of the first BDI architectures. PRS is a <em>goal-directed and reactive planning system</em>:</p>
+    <ul>
+      <li><strong>goal-directedness</strong> allows reasoning about and performing complex tasks;</li>
+      <li><strong>reactiveness</strong> allows handling real-time behaviour in dynamic environments.</li>
+    </ul>
+    <p>PRS was applied for high-level reasoning of robots, airport traffic control systems, and the like. Its architecture is the blueprint that AgentSpeak(L) will simplify into a language:</p>
+    <ul>
+      <li>a <strong>Data Base</strong> of beliefs &mdash; the agent&rsquo;s model of the world;</li>
+      <li>a <strong>KAS</strong> (Knowledge Area Set) of plans &mdash; the procedural know-how;</li>
+      <li>a <strong>Goals</strong> structure of desires;</li>
+      <li>a <strong>Stack</strong> of intentions &mdash; the currently selected plans;</li>
+      <li>an <strong>Interpreter</strong> (the reasoner) that runs the cycle;</li>
+      <li>a <strong>Monitor</strong> feeding perceptions from sensors, and a <strong>Command Generator</strong> emitting actions to effectors.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" role="img" aria-label="PRS architecture: data base of beliefs, KAS of plans, goals, intention stack, interpreter, monitor and command generator">
+        <defs>
+          <marker id="p13b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--lk-cobalt)"></path></marker>
+        </defs>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.5">
+          <rect x="200" y="50" width="300" height="200" rx="4"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)">
+          <text x="330" y="36">AGENT</text>
+          <text x="60" y="36">ENVIRONMENT</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-cobalt);stroke-width:1.3">
+          <rect x="60" y="60" width="110" height="52" rx="3"></rect>
+          <rect x="60" y="150" width="110" height="52" rx="3"></rect>
+          <rect x="225" y="70" width="115" height="44" rx="3"></rect>
+          <rect x="360" y="70" width="115" height="44" rx="3"></rect>
+          <rect x="225" y="140" width="115" height="44" rx="3"></rect>
+          <rect x="360" y="140" width="115" height="44" rx="3"></rect>
+          <rect x="250" y="205" width="200" height="34" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="74" y="78">SENSORS</text>
+          <text x="74" y="168">EFFECTORS</text>
+          <text x="240" y="88">DATA BASE</text>
+          <text x="240" y="102" style="font-size:8.5px;fill:var(--lk-ink-soft)">(beliefs)</text>
+          <text x="378" y="88">KAS</text>
+          <text x="378" y="102" style="font-size:8.5px;fill:var(--lk-ink-soft)">(plans)</text>
+          <text x="240" y="158">GOALS</text>
+          <text x="240" y="172" style="font-size:8.5px;fill:var(--lk-ink-soft)">(desires)</text>
+          <text x="378" y="158">STACK</text>
+          <text x="378" y="172" style="font-size:8.5px;fill:var(--lk-ink-soft)">(intentions)</text>
+          <text x="266" y="225">INTERPRETER (REASONER)</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-vermilion);stroke-width:1.3">
+          <rect x="225" y="205" width="70" height="34" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-vermilion)">
+          <text x="228" y="225">MONITOR</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-cobalt);stroke-width:1.4" marker-end="url(#p13b)">
+          <path d="M170 86 C 195 86, 205 86, 219 86"></path>
+          <path d="M170 176 C 195 176, 205 176, 219 176"></path>
+          <path d="M283 114 C 283 125, 283 130, 283 134"></path>
+          <path d="M418 114 C 418 125, 418 130, 418 134"></path>
+          <path d="M340 184 C 340 190, 340 195, 340 199"></path>
+          <path d="M460 160 C 520 160, 540 160, 540 176"></path>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink-soft)">
+          <text x="30" y="120">percepts</text>
+          <text x="30" y="210">actions</text>
+          <text x="350" y="246">one interpreter drives all four structures</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)">
+          <text x="30" y="280">PRS = goal-directed (complex tasks) + reactive (real-time) &mdash; the ancestor of AgentSpeak(L).</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 13.2</b> &mdash; The PRS architecture [Georgeff and Lansky, 1987]. Beliefs, plans (KAS), desires (goals) and intentions (stack) are four structures interpreted by one reasoner; a monitor feeds perceptions, a command generator emits actions.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>3. AgentSpeak(L): the language</h2>
+    <p><strong>AgentSpeak(L)</strong> is an abstract language used for describing and programming BDI agents. Its pedigree is explicit:</p>
+    <ul>
+      <li>inspired by <strong>PRS</strong>, <strong>dMARS</strong> [d&rsquo;Inverno et al., 1998] and <strong>BDI Logics</strong> [Rao and Georgeff, 1995];</li>
+      <li>originally proposed by <strong>Anand S. Rao</strong> [Rao, 1996];</li>
+      <li>extended so as to make it a <em>practical</em> agent programming language [Bordini and Hübner, 2006];</li>
+      <li>programs can be executed by the <strong>Jason</strong> platform [Bordini et al., 2007];</li>
+      <li>it has an <strong>operational semantics</strong> for extensions of AgentSpeak(L), providing a computational semantics for BDI concepts.</li>
+    </ul>
+    <p>The main language constructs are three, mapping directly onto the BDI ontology:</p>
+    <ul>
+      <li><strong>beliefs</strong> &mdash; current state of the agent: information about the environment and about other agents;</li>
+      <li><strong>goals</strong> &mdash; states the agent desires to achieve and about which it reasons (practical reasoning) based on internal and external stimuli;</li>
+      <li><strong>plans</strong> &mdash; recipes of procedural means the agent has to change the world and achieve its goals.</li>
+    </ul>
+    <p>The architecture of an AgentSpeak agent has four main components: a <strong>belief base</strong>, a <strong>plan library</strong>, a <strong>set of events</strong>, and a <strong>set of intentions</strong>. Everything else in the language &mdash; syntax and semantics &mdash; is a disciplined answer to the question: how do these four components interact?</p>
+  </section>
+
+  <section id="s4" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>4. Syntax: beliefs, goals and events</h2>
+    <p>AgentSpeak(L) borrows the logical vocabulary the course already built in Chapters 8 and 9. <strong>Beliefs</strong>: if <code>b</code> is a predicate symbol and <code>t1, ..., tn</code> are (first-order) terms, then <code>b(t1, ..., tn)</code> is a <em>belief atom</em>; ground belief atoms are <em>base beliefs</em>; if &Phi; is a belief atom, then &Phi; and &not;&Phi; are <em>belief literals</em>.</p>
+    <p><strong>Goals</strong>: if <code>g</code> is a predicate symbol and <code>t1, ..., tn</code> are terms, then <code>!g(t1, ..., tn)</code> and <code>?g(t1, ..., tn)</code> are goals:</p>
+    <ul>
+      <li><strong>&lsquo;!&rsquo; marks achievement goals</strong> (goal to <em>do</em>) &mdash; pointing at <em>practical actions</em>;</li>
+      <li><strong>&lsquo;?&rsquo; marks test goals</strong> (goal to <em>know</em>) &mdash; pointing at <em>epistemic actions</em>.</li>
+    </ul>
+    <p>This single distinction encodes two kinds of questions an agent can pursue: &ldquo;bring it about that&hellip;&rdquo; (achievement) versus &ldquo;find out whether&hellip;&rdquo; (test). It is the language-level counterpart of Chapter 3&rsquo;s distinction between acting on the world and knowing the world.</p>
+    <p><strong>Events</strong> occur as a consequence of changes in the agent belief base or goal states. Events signal to the agent that some situation is requiring servicing (<em>triggering events</em>), and the agent is supposed to react to such events by finding a suitable plan &mdash; or plans. Because of events and goal processing, AgentSpeak(L) architectures are both <strong>reactive</strong> (they answer to external and internal change) and <strong>proactive</strong> (they pursue goals).</p>
+    <p>If <code>b(t)</code> is a belief atom and <code>!g(t)</code>, <code>?g(t)</code> are goals, the six triggering events are:</p>
+    <ul>
+      <li><code>+b(t)</code> &mdash; <strong>belief addition</strong>;</li>
+      <li><code>&minus;b(t)</code> &mdash; <strong>belief deletion</strong>;</li>
+      <li><code>+!g(t)</code> &mdash; <strong>achievement-goal addition</strong>;</li>
+      <li><code>&minus;!g(t)</code> &mdash; <strong>achievement-goal deletion</strong>;</li>
+      <li><code>+?g(t)</code> &mdash; <strong>test-goal addition</strong>;</li>
+      <li><code>&minus;?g(t)</code> &mdash; <strong>test-goal deletion</strong>.</li>
+    </ul>
+    <p>Let &Phi; be a literal: the triggering events are <code>+&Phi;</code>, <code>&minus;&Phi;</code>, <code>+!&Phi;</code>, <code>&minus;!&Phi;</code>, <code>+?&Phi;</code>, <code>&minus;?&Phi;</code>. The key intuition: <em>change itself is an event</em>. Adding a belief, dropping a goal &mdash; each such change generates an event that can trigger a plan.</p>
+
+    <div id="w-events"></div>
+  </section>
+
+  <section id="s5" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>5. Syntax: plans</h2>
+    <p>Plans are <strong>recipes for achieving goals</strong>. They declaratively define a workflow of actions; they come along with the <em>triggering</em> and the <em>context</em> conditions that must hold in order to initiate the execution; they represent the agent&rsquo;s means to achieve goals &mdash; its <em>know-how</em>.</p>
+    <p>If <code>e</code> is a triggering event, <code>b1, ..., bn</code> are belief literals (the <em>plan context</em>), and <code>h1, ..., hn</code> are goals or actions (the <em>plan body</em>), then</p>
+    <pre><code class="language-plaintext">e : b1 &and; ... &and; bn &larr; h1 ; ... ; hn</code></pre>
+    <p>is a plan, where <code>e : c</code> is called the plan&rsquo;s <strong>head</strong>. The general structure of an AgentSpeak plan is therefore:</p>
+    <pre><code class="language-plaintext">triggering_event : context &lt;- body.</code></pre>
+    <ul>
+      <li>the <strong>triggering event</strong> denotes the events the plan is meant to handle;</li>
+      <li>the <strong>context</strong> represents the circumstances in which the plan can be used &mdash; a logical expression, typically a conjunction of literals to be checked whether they follow from the current state of the belief base (belief formulae);</li>
+      <li>the <strong>body</strong> is the course of action to be used to handle the event if the context is believed true at the time a plan is being chosen to handle the event &mdash; a sequence of actions and (sub)goals to achieve that goal.</li>
+    </ul>
+    <p>Let &Phi; be a literal: the plan body (i.e., intentions in AgentSpeak) can include the following elements:</p>
+    <ul>
+      <li><code>!&Phi;</code> &mdash; <strong>achievement goals</strong>;</li>
+      <li><code>?&Phi;</code> &mdash; <strong>test goals</strong>;</li>
+      <li><code>+&Phi;</code> &mdash; <strong>belief addition</strong>;</li>
+      <li><code>&minus;&Phi;</code> &mdash; <strong>belief deletion</strong>;</li>
+      <li><code>&Phi;</code> &mdash; <strong>actions</strong>;</li>
+      <li><code>.&Phi;</code> &mdash; <strong>internal actions</strong> (not actually here &mdash; this is Jason&hellip;).</li>
+    </ul>
+    <p>An intention is thus a <em>stack of partially instantiated plans</em> &mdash; the body of one plan pushes subgoals that resolve into further plans, and the stack grows and shrinks as the agent executes.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" role="img" aria-label="Anatomy of an AgentSpeak plan: triggering event, context, body made of goals and actions">
+        <defs>
+          <marker id="p13c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--lk-cobalt)"></path></marker>
+        </defs>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.5">
+          <rect x="30" y="60" width="640" height="90" rx="4"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:16px;fill:var(--lk-ink)">
+          <text x="50" y="112">+!book_tickets(A,D,V)</text>
+          <text x="300" y="112" style="fill:var(--lk-vermilion)">:</text>
+          <text x="320" y="112">not busy(phone)</text>
+          <text x="470" y="112" style="fill:var(--lk-vermilion)">&lt;-</text>
+          <text x="495" y="112" style="font-size:12px;fill:var(--lk-ink-soft)">?phone_number(V,N);</text>
+          <text x="50" y="134" style="font-size:12px;fill:var(--lk-ink-soft)">!call(N); !choose_seats(A,D,V).</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-cobalt);stroke-width:1.3">
+          <rect x="40" y="170" width="200" height="40" rx="3"></rect>
+          <rect x="250" y="170" width="200" height="40" rx="3"></rect>
+          <rect x="460" y="170" width="200" height="40" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-cobalt-dark)">
+          <text x="60" y="194">TRIGGERING EVENT</text>
+          <text x="272" y="194">CONTEXT</text>
+          <text x="490" y="194">BODY (INTENTION)</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink-soft)">
+          <text x="55" y="160">what to handle</text>
+          <text x="300" y="160">when usable</text>
+          <text x="500" y="160">course of action</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)">
+          <text x="30" y="236">head = triggering event : context &middot; body = goals &amp; actions &mdash; the plan&rsquo;s know-how.</text>
+          <text x="30" y="254">?&Phi; test goal &middot; !&Phi; achievement goal &middot; +&Phi;/&minus;&Phi; belief update &middot; &Phi; action &middot; .&Phi; internal action (Jason)</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 13.3</b> &mdash; Anatomy of an AgentSpeak plan. The head couples the triggering event with the context; the body is the sequence of goals and actions that becomes part of the agent&rsquo;s intentions.</figcaption>
+    </figure>
+
+    <div id="w-plan"></div>
+  </section>
+
+  <section id="s6" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>6. An AgentSpeak(L) example</h2>
+    <p>The deck&rsquo;s running example shows how all the pieces fit &mdash; beliefs, plans, triggering events, test and achievement goals:</p>
+    <pre><code class="language-plaintext">/* Initial Beliefs */
+likes(radiohead).
+phone_number(covo,"05112345").
+
+/* Belief addition */
++concert(Artist, Date, Venue)
+  : likes(Artist)
+  &lt;- !book_tickets(Artist, Date, Venue).
+
+/* Plan to book tickets */
++!book_tickets(A,D,V)
+  : not busy(phone)
+  &lt;- ?phone_number(V,N);   /* Test Goal to Retrieve a Belief */
+     !call(N);
+     ...;
+     !choose_seats(A,D,V).</code></pre>
+    <p>The example reads as a story. The agent initially believes it likes Radiohead and knows Covo&rsquo;s phone number. When a new belief arrives &mdash; a concert of an artist the agent likes, at a date and venue &mdash; the <em>belief addition</em> event <code>+concert(...)</code> fires, the context <code>likes(Artist)</code> is checked against the belief base, and the plan body launches the achievement goal <code>!book_tickets(...)</code>. Booking tickets, in turn, is a plan whose context is <code>not busy(phone)</code>; its body first asks a <em>test goal</em> &mdash; <code>?phone_number(V,N)</code> retrieves the venue&rsquo;s number from the beliefs &mdash; then calls, and finally chooses seats. Each <code>!</code> pushes a sub-intention; the stack of plans grows and shrinks as the agent proceeds.</p>
+    <p>Three details are worth stressing because they reappear in Jason. First, the <em>same predicate can be both a belief and a goal</em>: <code>phone_number/2</code> is a belief here, and the test goal queries it. Second, <em>contexts are belief formulae</em>: <code>not busy(phone)</code> is checked against the belief base at plan-selection time, not when the plan was written. Third, the <em>body is an intention</em>: when the plan is selected, its body becomes part of the agent&rsquo;s intention stack, and sub-goals are handled by finding further plans.</p>
+
+    <div id="w-example"></div>
+  </section>
+
+  <section id="s7" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>7. Semantics: the agent configuration</h2>
+    <p>AgentSpeak(L) has an <strong>operational semantics</strong> defined in terms of an agent configuration</p>
+    <pre><code class="language-plaintext">&lang;B, P, E, A, I, Se, So, SI&rang;</code></pre>
+    <p>where:</p>
+    <ul>
+      <li><code>B</code> is a set of <strong>beliefs</strong>;</li>
+      <li><code>P</code> is a set of <strong>plans</strong>;</li>
+      <li><code>E</code> is a set of <strong>events</strong> (external and internal);</li>
+      <li><code>A</code> is a set of <strong>actions</strong> that can be performed in the environment;</li>
+      <li><code>I</code> is a set of <strong>intentions</strong>, each of which is a stack of partially instantiated plans;</li>
+      <li><code>Se</code>, <code>So</code>, <code>SI</code> are <strong>selection functions</strong> for events, options, and intentions.</li>
+    </ul>
+    <p>The selection functions are the knobs where agent-specificity enters the semantics:</p>
+    <ul>
+      <li><code>Se</code> selects an event from <code>E</code> &mdash; the set of events is generated either by requests from users, by observing the environment, or by executing an intention;</li>
+      <li><code>So</code> selects an option from <code>P</code> for a given event &mdash; an <em>option</em> is an applicable plan for an event, i.e. a plan whose triggering event is unifiable with the event and whose condition is derivable from the belief base;</li>
+      <li><code>SI</code> selects an intention from <code>I</code> to execute.</li>
+    </ul>
+    <p>The semantics of intention execution is given by transition rules on the body of the currently executing plan. Each rule says what happens when the body starts with a given element:</p>
+    <ul>
+      <li><code>tr : ct &larr; +&phi;; ...</code> &rArr; generates event <code>+&phi;</code> and updates beliefs. If there is no applicable plan for <code>+&phi;</code>, discard the event;</li>
+      <li><code>tr : ct &larr; &minus;&phi;; ...</code> &rArr; generates event <code>&minus;&phi;</code> and updates beliefs. If there is no applicable plan for <code>&minus;&phi;</code>, discard the event;</li>
+      <li><code>tr : ct &larr; !&phi;; ...</code> &rArr; generates event <code>+!&phi;</code>. If there is no applicable plan for <code>+!&phi;</code>, remove the plan and generate <code>&minus;!&psi;</code> if <code>tr = +!&psi;</code> (or <code>&minus;?&psi;</code> if <code>tr = +?&psi;</code>);</li>
+      <li><code>tr : ct &larr; ?&phi;; ...</code> &rArr; generates event <code>+?&phi;</code>. If there is no applicable plan for <code>+?&phi;</code>, remove the plan and generate <code>&minus;!&psi;</code> (or <code>&minus;?&psi;</code>);</li>
+      <li><code>tr : ct &larr; &phi;; ...</code> &rArr; if the action fails, remove the plan and generate <code>&minus;!&psi;</code> (or <code>&minus;?&psi;</code>);</li>
+      <li><code>tr : ct &larr; .&phi;; ...</code> &rArr; if the internal action fails, remove the plan and generate <code>&minus;!&psi;</code> (or <code>&minus;?&psi;</code>).</li>
+    </ul>
+    <p>If no plan is applicable for a generated <code>&minus;!&psi;</code> or <code>&minus;?&psi;</code>, then the whole intention is disregarded and an error message is printed. Failure handling is thus <em>semantic</em>: a failing sub-goal propagates a goal-deletion event up to the plan that generated it.</p>
+    <p>The configuration is then refined into a richer tuple <code>&lang;ag, C, M, T, s&rang;</code>, where:</p>
+    <ul>
+      <li><code>ag</code> is an AgentSpeak program consisting of a set of beliefs and plans;</li>
+      <li><code>C = &lang;I, E, A&rang;</code> is the <strong>agent circumstance</strong>: <code>I</code> is a set of intentions (each a stack of partially instantiated plans); <code>E</code> is a set of events, each a pair <code>(tr, i)</code> where <code>tr</code> is a triggering event and <code>i</code> is an intention (a stack of plans in case of an internal event, or <code>T</code> representing an external event); <code>A</code> is a set of actions to be performed in the environment &mdash; an action expression in this set tells other architecture components to actually perform the action, thus changing the environment;</li>
+      <li><code>M = &lang;In, Out, SI&rang;</code> is the <strong>communication component</strong>: <code>In</code> is the mail inbox (all messages addressed to this agent), <code>Out</code> is where the agent posts all messages it wishes to send, and <code>SI</code> keeps track of intentions suspended due to the processing of communication messages. A message is a tuple <code>&lang;messageid, agentid, ilf, content&rang;</code>;</li>
+      <li><code>T = &lang;R, Ap, &iota;, &epsilon;, &rho;&rang;</code> is the <strong>temporary information component</strong>: <code>R</code> for the set of relevant plans (for the event being handled), <code>Ap</code> for the set of applicable plans (the relevant plans whose contexts are true), and <code>&iota;</code>, <code>&epsilon;</code>, <code>&rho;</code> keep record of a particular intention, event and applicable plan being considered along the execution of the agent;</li>
+      <li><code>s</code> is the current step within an agent reasoning cycle.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 280" role="img" aria-label="AgentSpeak agent configuration: program, circumstance, communication and temporary information components">
+        <g style="font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink-soft)">
+          <text x="30" y="30">CONFIGURATION &lang;ag, C, M, T, s&rang;</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.4">
+          <rect x="30" y="50" width="150" height="180" rx="4"></rect>
+          <rect x="200" y="50" width="150" height="180" rx="4"></rect>
+          <rect x="370" y="50" width="150" height="180" rx="4"></rect>
+          <rect x="540" y="50" width="130" height="180" rx="4"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt-dark)">
+          <text x="52" y="74">ag</text>
+          <text x="222" y="74">C</text>
+          <text x="392" y="74">M</text>
+          <text x="562" y="74">T</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink)">
+          <text x="46" y="98">beliefs</text>
+          <text x="46" y="114">plans</text>
+          <text x="216" y="98">I = intentions</text>
+          <text x="216" y="114">E = events (tr,i)</text>
+          <text x="216" y="130">A = actions</text>
+          <text x="386" y="98">In = inbox</text>
+          <text x="386" y="114">Out = outbox</text>
+          <text x="386" y="130">SI = suspended</text>
+          <text x="386" y="146">intentions</text>
+          <text x="556" y="98">R = relevant</text>
+          <text x="556" y="114">Ap = applicable</text>
+          <text x="556" y="130">&iota; &epsilon; &rho; =</text>
+          <text x="556" y="146">current items</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink-soft)">
+          <text x="46" y="160" style="fill:var(--lk-ink-soft)">program =</text>
+          <text x="46" y="176">static beliefs</text>
+          <text x="46" y="192">+ plan library</text>
+          <text x="216" y="160" style="fill:var(--lk-ink-soft)">circumstance =</text>
+          <text x="216" y="176">the agent&rsquo;s</text>
+          <text x="216" y="192">runtime state</text>
+          <text x="386" y="160" style="fill:var(--lk-ink-soft)">communication =</text>
+          <text x="386" y="176">messages &lang;id,</text>
+          <text x="386" y="192">agent, ilf,</text>
+          <text x="386" y="208">content&rang;</text>
+          <text x="556" y="160" style="fill:var(--lk-ink-soft)">temporary =</text>
+          <text x="556" y="176">one cycle&rsquo;s</text>
+          <text x="556" y="192">working sets</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)">
+          <text x="30" y="256">s = current step within the agent reasoning cycle &middot; Se, So, SI = selection functions</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 13.4</b> &mdash; The AgentSpeak agent configuration &lang;ag, C, M, T, s&rang;. The program provides beliefs and the plan library; the circumstance holds runtime intentions, events and actions; the communication component manages the mailbox; the temporary component holds the working sets of one reasoning cycle.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s8" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>8. Semantics: deliberation steps</h2>
+    <p>The current step <code>s</code> within an agent reasoning cycle is one of the following:</p>
+    <ul>
+      <li><strong>ProcMsg</strong> &mdash; processing a message from the agent mail inbox;</li>
+      <li><strong>SelEv</strong> &mdash; selecting an event from the set of events;</li>
+      <li><strong>RelPl</strong> &mdash; retrieving all relevant plans;</li>
+      <li><strong>ApplPl</strong> &mdash; checking which of those are applicable;</li>
+      <li><strong>SelAppl</strong> &mdash; selecting one particular applicable plan (the <em>intended means</em>);</li>
+      <li><strong>AddIM</strong> &mdash; adding the new intended means to the set of intentions;</li>
+      <li><strong>SelInt</strong> &mdash; selecting an intention;</li>
+      <li><strong>ExecInt</strong> &mdash; executing the selected intention;</li>
+      <li><strong>ClrInt</strong> &mdash; clearing an intention or intended means that may have finished in the previous step.</li>
+    </ul>
+    <p>Read the list as a pipeline: the mailbox is drained first, then one event is picked, its relevant plans are collected from the library, their contexts are checked (applicable plans), one of them is selected as the intended means and pushed onto the intentions, an intention is chosen for execution, one step of it runs, and finished intentions are cleared. The next cycle starts again from the mailbox &mdash; this is the BDI control loop of section 1, made into a precise state machine.</p>
+
+    <div id="w-delib"></div>
+  </section>
+
+  <section id="s9" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>9. Jason: the interpreter</h2>
+    <p><strong>Jason</strong> [Bordini et al., 2007], developed by <strong>Jomi F. Hübner and Rafael H. Bordini</strong>, implements the operational semantics of a variant of AgentSpeak [Bordini and Hübner, 2006]. Its design is a two-level deal:</p>
+    <ul>
+      <li><strong>AgentSpeak as the high-level language</strong> to define agents&rsquo; goal-oriented behaviour;</li>
+      <li><strong>Java as the low-level language</strong> to realise mechanisms &mdash; e.g. agent internal functions &mdash; and customise the architecture.</li>
+    </ul>
+    <p>Jason extends AgentSpeak with a set of powerful mechanisms to improve agent abilities, aimed at making it a more practical programming language; and it comes with a framework for developing multi-agent systems (jason.sourceforge.net). In the course&rsquo;s terms: AgentSpeak is the theory &mdash; an abstract language with an operational semantics &mdash; and Jason is the engineering &mdash; a working interpreter plus a MAS framework. Chapter 12&rsquo;s Jade was a FIPA platform for weak agents; Jason is a platform for intentional agents, where the ACL machinery of Chapter 11 becomes the <code>M</code> component of the configuration.</p>
+  </section>
+
+  <section id="s10" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>10. The Jason reasoning cycle</h2>
+    <p>The Jason reasoning cycle makes the semantics operational in ten steps:</p>
+    <ol>
+      <li><strong>perceiving</strong> the environment;</li>
+      <li><strong>updating the belief base</strong>;</li>
+      <li><strong>receiving communication</strong> from other agents;</li>
+      <li><strong>selecting &lsquo;socially acceptable&rsquo; messages</strong>;</li>
+      <li><strong>selecting an event</strong>;</li>
+      <li><strong>retrieving all relevant plans</strong>;</li>
+      <li><strong>determining the applicable plans</strong>;</li>
+      <li><strong>selecting one applicable plan</strong>;</li>
+      <li><strong>selecting an intention</strong> for further execution;</li>
+      <li><strong>executing one step of an intention</strong>.</li>
+    </ol>
+    <p>Steps 1&ndash;2 are perception and belief revision (the BRF of the abstract architecture); 3&ndash;4 handle the mailbox with a social-acceptance filter; 5&ndash;8 are event selection and means&ndash;end reasoning; 9&ndash;10 are intention selection and execution. The cycle repeats; an action produced in step 10 is dispatched to the environment.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" role="img" aria-label="Jason reasoning cycle: perceive, belief revision, check mail, social acceptance, select event, relevant plans, applicable plans, select option, select intention, execute">
+        <defs>
+          <marker id="p13d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--lk-cobalt)"></path></marker>
+        </defs>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="30" y="50" width="130" height="44" rx="3"></rect>
+          <rect x="200" y="50" width="130" height="44" rx="3"></rect>
+          <rect x="370" y="50" width="130" height="44" rx="3"></rect>
+          <rect x="540" y="50" width="130" height="44" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="44" y="76">1 PERCEIVE</text>
+          <text x="214" y="76">2 BRF</text>
+          <text x="384" y="76">3 CHECKMAIL</text>
+          <text x="554" y="76">4 SOCACC</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-vermilion);stroke-width:1.4">
+          <rect x="30" y="140" width="130" height="44" rx="3"></rect>
+          <rect x="200" y="140" width="130" height="44" rx="3"></rect>
+          <rect x="370" y="140" width="130" height="44" rx="3"></rect>
+          <rect x="540" y="140" width="130" height="44" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="44" y="166">5 SELEV</text>
+          <text x="200" y="166">6 RELPL</text>
+          <text x="370" y="166">7 APPLPL</text>
+          <text x="540" y="166">8 SELAPPL</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-cobalt);stroke-width:1.3">
+          <rect x="200" y="230" width="130" height="44" rx="3"></rect>
+          <rect x="370" y="230" width="130" height="44" rx="3"></rect>
+          <rect x="540" y="230" width="130" height="44" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-cobalt-dark)">
+          <text x="214" y="256">9 SELINT</text>
+          <text x="384" y="256">10 EXECINT</text>
+          <text x="554" y="256">ACT</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9px;fill:var(--lk-ink-soft)">
+          <text x="40" y="120">percepts</text>
+          <text x="215" y="120">belief base</text>
+          <text x="385" y="120">messages</text>
+          <text x="545" y="120">accepted</text>
+          <text x="40" y="205">event</text>
+          <text x="215" y="205">library</text>
+          <text x="380" y="205">contexts</text>
+          <text x="545" y="205">intended means</text>
+          <text x="215" y="290">intention</text>
+          <text x="370" y="290">one step</text>
+          <text x="550" y="290">action to env</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-cobalt);stroke-width:1.5" marker-end="url(#p13d)">
+          <path d="M160 72 C 175 72, 182 72, 194 72"></path>
+          <path d="M330 72 C 345 72, 352 72, 364 72"></path>
+          <path d="M500 72 C 515 72, 522 72, 534 72"></path>
+          <path d="M95 94 C 95 115, 95 120, 95 134"></path>
+          <path d="M265 94 C 265 115, 265 120, 265 134"></path>
+          <path d="M435 94 C 435 115, 435 120, 435 134"></path>
+          <path d="M605 94 C 605 115, 605 120, 605 134"></path>
+          <path d="M160 162 C 175 162, 182 162, 194 162"></path>
+          <path d="M330 162 C 345 162, 352 162, 364 162"></path>
+          <path d="M500 162 C 515 162, 522 162, 534 162"></path>
+          <path d="M265 184 C 265 205, 265 210, 265 224"></path>
+          <path d="M435 184 C 435 205, 435 210, 435 224"></path>
+          <path d="M605 184 C 605 205, 605 210, 605 224"></path>
+          <path d="M330 252 C 345 252, 352 252, 364 252"></path>
+          <path d="M500 252 C 515 252, 522 252, 534 252"></path>
+        </g>
+        <g style="fill:none;stroke:var(--lk-vermilion);stroke-width:1.4" stroke-dasharray="5 4" marker-end="url(#p13d)">
+          <path d="M605 274 C 640 300, 95 300, 95 100"></path>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="280" y="315">one cycle: perceive &rarr; revise &rarr; deliberate &rarr; execute &rarr; repeat</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 13.5</b> &mdash; The Jason reasoning cycle in ten steps. Steps 1&ndash;4 handle perception and the mailbox; 5&ndash;8 are event selection and plan selection (means&ndash;end reasoning); 9&ndash;10 select and execute an intention. The cycle repeats forever.</figcaption>
+    </figure>
+
+    <p>In the interpreter, the cycle is literally a Java method, <code>reasoningCycle()</code> in <code>jason.asSemantics.TransitionSystem</code>:</p>
+    <pre><code class="language-java">public void reasoningCycle() {
+    try {
+        C.reset();    // C is the actual Circumstance
+        if (nrcslbr >= setts.nrcbp()) {
+            nrcslbr = 0;
+            ag.buf(agArch.perceive());
+            agArch.checkMail();
+        }
+        nrcslbr++;        // counting number of cycles
+        if (canSleep()) {
+            if (ag.pl.getIdlePlans() != null) {
+                logger.fine("generating idle event");
+                C.addExternalEv(PlanLibrary.TE_IDLE);
+            } else {
+                agArch.sleep();
+                return;
+            }
+        }
+        step = State.StartRC;
+        do {
+            if (!agArch.isRunning()) return;
+            applySemanticRule();
+        } while (step != State.StartRC);
+        ActionExec action = C.getAction();
+        if (action != null) {
+            C.getPendingActions().put(action.getIntention().getId(), action);
+            agArch.act(action, C.getFeedbackActions());
+        }
+    } catch (Exception e) {
+        conf.C.create(); // ERROR in the transition system, creating a new C
+    }
+}</code></pre>
+    <p>Three engineering details stand out. Perception and mail checking happen only every <code>nrcbp</code> cycles (a configurable budget &mdash; the environment is sampled, not polled). If nothing can be done, the agent <em>sleeps</em> &mdash; autonomy includes the right to be idle. And the inner <code>do&hellip;while</code> applies semantic rules until the step returns to <code>StartRC</code>: the cycle is a sequence of semantic-rule applications, exactly as the operational semantics dictates.</p>
+
+    <div id="w-cycle"></div>
+  </section>
+
+  <section id="s11" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>11. The Jason programming language</h2>
+    <p>Jason includes all the syntax and the semantics already defined for AgentSpeak, plus the operators a programmer expects: boolean operators <code>==</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>&amp;</code>, <code>|</code>, <code>\==</code>, <code>not</code>; arithmetic <code>+</code>, <code>&minus;</code>, <code>/</code>, <code>*</code>, <code>**</code>, <code>mod</code>, <code>div</code>.</p>
+    <p>Then Jason includes several extensions. Let &Phi; be a literal: a Jason plan body can include the following additional elements:</p>
+    <ul>
+      <li><code>!!&Phi;</code> &mdash; to launch a given plan &Phi; as a <strong>new intention</strong> (the new intention will not be related to the current one; its execution will be as if it is in a new thread);</li>
+      <li><code>&minus;+&Phi;</code> &mdash; to <strong>update a belief</strong> &Phi; in an atomic fashion (atomic deletion and update).</li>
+    </ul>
+    <p><strong>Belief annotations.</strong> Jason introduces the notion of <em>annotated predicates</em>:</p>
+    <pre><code class="language-plaintext">ps(t1, ..., tn)[a1, ..., am]</code></pre>
+    <p>where the <code>ai</code> are first-order terms. All predicates in the belief base have a special annotation <code>source(si)</code>, where <code>si &isin; {self, percept} &cup; AgId</code>:</p>
+    <pre><code class="language-plaintext">myLocation(6,5)[source(self)].
+red(box1)[source(percept)].
+blue(box1)[source(ag1)].</code></pre>
+    <p>The developer can define customised annotations too &mdash; e.g. a degree of certainty on a belief:</p>
+    <pre><code class="language-plaintext">colourblind(ag1)[source(self),doc(0.7)].
+lier(ag1)[source(self),doc(0.2)].</code></pre>
+    <p><strong>Strong negation</strong> (operator <code>~</code>) is another Jason extension to AgentSpeak, allowing both closed-world and open-world assumptions. The distinction is between &ldquo;not believed&rdquo; (<code>not</code>) and &ldquo;believed to be false&rdquo; (<code>~</code>). The deck&rsquo;s pit-stop example shows all three cases:</p>
+    <pre><code class="language-plaintext">+!pit_stop(fuel(T), tires(_))
+  : not raining &amp; not ~raining   /* Lack of knowledge: no belief of raining, no belief of ~raining */
+  &lt;- -+tires(intermediate);        /* Atomic Belief Update */
+     !fuel(T+2); ...</code></pre>
+    <pre><code class="language-plaintext">+!pit_stop(fuel(T), tires(_))
+  : raining                       /* There is a belief indicating raining */
+  &lt;- -+tires(rain);
+     !fuel(T+5); ...</code></pre>
+    <pre><code class="language-plaintext">+!pit_stop(fuel(T), tires(_))
+  : ~raining                      /* There is a belief indicating ~raining */
+  &lt;- -+tires(slick);
+     !fuel(T); ...</code></pre>
+    <p>Three different plans for the same goal <code>pit_stop</code>, distinguished only by context: rain tyres when it is believed raining, slick tyres when it is believed not raining, intermediate tyres when the agent simply does not know. Open world: <em>absence of evidence is a third case</em>, not a fallback.</p>
+    <p><strong>Belief rules.</strong> In Jason, beliefs (and their annotations) can be pre-processed with Prolog-like rules &mdash; Chapter 8&rsquo;s logic meets Chapter 13&rsquo;s annotations:</p>
+    <pre><code class="language-plaintext">likely_color(Obj,C)
+  :- colour(Obj,C)[degOfCert(D1)]
+     &amp; not (
+        colour(Obj,_)[degOfCert(D2)]
+        &amp; D2 &gt; D1 )
+     &amp; not ~colour(Obj,C).</code></pre>
+
+    <div id="w-annot"></div>
+  </section>
+
+  <section id="s12" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>12. Internal actions and message passing</h2>
+    <p><strong>Internal actions</strong> (<code>.&Phi;</code>) are self-contained actions whose code is packed and atomically executed as part of the agent reasoning cycle. They can be used for special-purpose activities: to interact with Java objects, to invoke legacy systems elegantly, and &mdash; as the rest of the course will show &mdash; to use artefacts in A&amp;A systems. An example of a user-defined internal action:</p>
+    <pre><code class="language-plaintext">userLibrary.userAction(X,Y,R)</code></pre>
+    <p>can be used to manipulate parameters <code>X</code> and <code>Y</code> and unify the result of that manipulation in <code>R</code> &mdash; exactly the input/output discipline of a Prolog predicate, Chapter 8 again.</p>
+    <p>Defining a new internal action is writing a Java class. The deck&rsquo;s example, <code>myLib.randomInt(M, N)</code>, unifies <code>N</code> with a random int between 0 and <code>M</code>:</p>
+    <pre><code class="language-java">package myLib;
+
+import jason.JasonException;
+import jason.asSemantics.*;
+import jason.asSyntax.*;
+
+public class randomInt extends DefaultInternalAction {
+
+    private java.util.Random random = new java.util.Random();
+
+    @Override
+    public Object execute(TransitionSystem ts, Unifier un, Term[] args) throws Exception {
+        if (!args[0].isNumeric() || !args[1].isVar())
+                throw new JasonException("check arguments");
+        try {
+            int R = random.nextInt( ((NumberTerm)args[0]).solve() );
+            return
+                 un.unifies(args[1], new NumberTermImpl(R));
+        } catch (Exception e) {
+            throw new JasonException("Error in internal action 'randomInt'", e);
+        }
+    }
+}</code></pre>
+    <p>Many internal actions are available for printing, sorting, list/string operations, manipulating beliefs/annotations/plan library, waiting/generating events, etc. (see <code>jason.stdlib</code>). Predefined internal actions have an empty library name:</p>
+    <ul>
+      <li><code>.print(1,X,"bla")</code> &mdash; prints out to the console the concatenation of the string representations of <code>1</code>, of the value of variable <code>X</code>, and of the string <code>"bla"</code>;</li>
+      <li><code>.union(S1,S2,S3)</code> &mdash; <code>S3</code> is the union of the sets <code>S1</code> and <code>S2</code> (represented by lists); the result set is sorted;</li>
+      <li><code>.desire(D)</code> &mdash; checks whether <code>D</code> is a desire: <code>D</code> is a desire either if there is an event with <code>+!D</code> as triggering event or it is a goal in one of the agent intentions;</li>
+      <li><code>.intend(I)</code> &mdash; checks if <code>I</code> is an intention: <code>I</code> is an intention if there is a triggering event <code>+!I</code> in any plan within an intention; intentions can be suspended and appear in <code>E</code>, <code>PA</code> (intentions with pending actions), and <code>PI</code> (intentions waiting for something) as well;</li>
+      <li><code>.drop_desire(I)</code> &mdash; removes events that are goal additions with a literal that unifies with the one given as parameter;</li>
+      <li><code>.drop_intention(I)</code> &mdash; drops all intentions which would make <code>.intend</code> true.</li>
+    </ul>
+    <p><strong>Message passing</strong> uses internal actions. A sender agent <code>A</code> sends a message to agent <code>B</code> via:</p>
+    <pre><code class="language-plaintext">.send(B, ilf, m(X))
+.broadcast(ilf, m(X))</code></pre>
+    <ul>
+      <li><code>B</code> is the unique name of the agent that will receive the message (or a list of names);</li>
+      <li><code>ilf &isin; {tell, untell, achieve, unachieve, askOne, askAll, askHow, tellHow, untellHow}</code>;</li>
+      <li><code>m(X)</code> is the content of the message.</li>
+    </ul>
+    <p>The receiver agent <code>B</code> receives the message from <code>A</code> as a triggering event, and handles it by customising a reaction:</p>
+    <pre><code class="language-plaintext">+m(X)[source(A)] : true
+&lt;- dosomething; ...</code></pre>
+    <p>The annotation <code>[source(A)]</code> is how the receiver knows who sent the message &mdash; the source annotation of section 11, used at runtime. The <code>ilf</code> performatives are Chapter 10&rsquo;s FIPA communicative acts, repurposed: <code>tell</code> informs, <code>achieve</code> asks the receiver to adopt a goal, <code>askOne</code>/<code>askAll</code> request information, <code>tellHow</code> shares plans.</p>
+
+    <div id="w-ia"></div>
+  </section>
+
+  <section id="s13" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>13. Environments and hierarchical planning</h2>
+    <p>To build and deploy a MAS you need to rely on some sort of <strong>environment</strong> where the agents are situated; the environment has to be designed and implemented as well. There are two ways to do this:</p>
+    <ol>
+      <li><strong>Defining perceptions and actions</strong> so as to operate on specific environments &mdash; done in Java by defining lower-level mechanisms and by specialising the <em>Agent Architecture</em> and <em>Agent</em> classes;</li>
+      <li><strong>Creating a &lsquo;simulated&rsquo; environment</strong> &mdash; done in Java by extending Jason&rsquo;s <code>Environment</code> class and using methods such as <code>addPercept(String Agent, Literal Percept)</code>.</li>
+    </ol>
+    <pre><code class="language-java">import jason.*;
+import ...;
+public class myEnv extends Environment {
+
+   public myEnv() {
+      Literal loc = Literal.parseLiteral("location(3,5)");
+      addPercept(loc);
+   }
+
+   public boolean executeAction(String ag, Term action) {
+      if (action.equals(...)) {
+          addPercept(ag,
+                     Literal.parseLiteral("location(table,c(3,4))"));
+      }
+      ...
+      return true;
+   }
+}</code></pre>
+    <p>The environment is where Chapter 4&rsquo;s situatedness becomes code: the agent perceives what the environment publishes (<code>addPercept</code>), and the environment reacts to the actions the agents execute (<code>executeAction</code>).</p>
+    <p><strong>Hierarchical planning.</strong> The deck closes the language tour with an advanced BDI aspect. Hierarchical abstraction is a well-known principle, exhibiting great effectiveness in planning: it is used to reduce a composite intention &mdash; or a given task &mdash; to a greater number of independent sub-intentions &mdash; or sub-tasks &mdash; placed at a lower level of abstraction. An agent can manage at runtime an alternating hierarchy of (meta)goals and plans, emerging from top-level goals over plans to subgoals and so forth. This highly simplifies the structure of plans, and allows plans to be conceived around self-contained actions &mdash; the leaves of the goal hierarchy &mdash; which can be reused for different purposes too. The hierarchy is defined having in mind the problem domain (the goal to be achieved) and trying to imagine those fine-grained actions which in turn are supposed to accomplish the required activities.</p>
+    <p>The crucial contrast is with traditional planning systems: they mainly make <em>offline</em> planning &mdash; creating plans to achieve goals by composing actions in a repertoire. Intentional systems, differently, need to plan in <em>dynamic</em> environments and cope with changing contexts and situations [Sardina et al., 2006]. BDI planning is a <em>hybrid</em> approach: plans are defined at design time and at the language level, but their execution is ruled by the architecture (means&ndash;end reasoning) according to context conditions &mdash; as in Jason and Jadex &mdash; or planning rules, as in 2APL.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 270" role="img" aria-label="Hierarchical planning: a composite intention reduced to sub-intentions down to leaf actions">
+        <g style="font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)">
+          <text x="30" y="28">GOAL HIERARCHY &mdash; composite intention &rarr; sub-intentions &rarr; leaf actions</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-ink);stroke-width:1.4">
+          <rect x="300" y="50" width="110" height="40" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="316" y="74">!TOP_GOAL</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-cobalt);stroke-width:1.3">
+          <rect x="120" y="130" width="110" height="40" rx="3"></rect>
+          <rect x="295" y="130" width="110" height="40" rx="3"></rect>
+          <rect x="470" y="130" width="110" height="40" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-cobalt-dark)">
+          <text x="136" y="154">!SUB_GOAL_1</text>
+          <text x="311" y="154">!SUB_GOAL_2</text>
+          <text x="486" y="154">!SUB_GOAL_3</text>
+        </g>
+        <g style="fill:var(--lk-paper);stroke:var(--lk-vermilion);stroke-width:1.3">
+          <rect x="40" y="210" width="100" height="36" rx="3"></rect>
+          <rect x="175" y="210" width="100" height="36" rx="3"></rect>
+          <rect x="350" y="210" width="100" height="36" rx="3"></rect>
+          <rect x="485" y="210" width="100" height="36" rx="3"></rect>
+          <rect x="620" y="210" width="60" height="36" rx="3"></rect>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink)">
+          <text x="52" y="232">action a1</text>
+          <text x="187" y="232">action a2</text>
+          <text x="362" y="232">action a3</text>
+          <text x="497" y="232">action a4</text>
+          <text x="628" y="232">...</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-cobalt);stroke-width:1.5">
+          <path d="M340 90 C 250 105, 200 110, 175 124"></path>
+          <path d="M355 90 C 355 105, 355 110, 355 124"></path>
+          <path d="M370 90 C 460 105, 510 110, 525 124"></path>
+        </g>
+        <g style="fill:none;stroke:var(--lk-vermilion);stroke-width:1.3">
+          <path d="M150 170 C 120 185, 110 190, 95 204"></path>
+          <path d="M180 170 C 200 185, 210 190, 220 204"></path>
+          <path d="M350 170 C 350 185, 350 190, 350 204"></path>
+          <path d="M400 170 C 440 185, 460 190, 530 204"></path>
+          <path d="M520 170 C 560 185, 580 190, 650 204"></path>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink-soft)">
+          <text x="30" y="260">plans are defined at design time; execution is ruled at runtime by means&ndash;end reasoning (Jason, Jadex) or planning rules (2APL).</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 13.6</b> &mdash; Hierarchical planning in BDI languages. A composite intention reduces to sub-intentions, down to reusable leaf actions; the hierarchy is defined at design time, the selection is done at runtime by the architecture.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s14" data-src="C2 _ Programming Intentional Agents in AgentSpeak(L) _ Jason.pdf">
+    <h2>14. Conclusion</h2>
+    <p>The deck concludes by positioning the two artefacts of the chapter:</p>
+    <ul>
+      <li><strong>AgentSpeak</strong> &mdash; a goal-oriented notion of agency; mentalistic notions as building blocks; agent programming; logic + BDI; operational semantics;</li>
+      <li><strong>Jason</strong> &mdash; an AgentSpeak interpreter; implements the operational semantics; support for an Agent Communication Language; highly customisable, open source.</li>
+    </ul>
+    <p>Two books anchor the literature: <em>Programming Multi-Agent Systems in AgentSpeak using Jason</em> [Bordini et al., 2007] and <em>Multi-Agent Oriented Programming</em> [Boissier et al., 2020] &mdash; the latter opening the road toward JaCaMo, the A&amp;A (agents &amp; artefacts) framework the course&rsquo;s later modules build upon.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Chapter 12&rsquo;s Jade engineered autonomy without mental states; AgentSpeak(L) does the opposite &mdash; it makes mental states the <em>syntax</em>: beliefs are literals, goals are <code>!</code> and <code>?</code> prefixes, plans are <code>triggering_event : context &lt;- body</code> rules, and the whole machine has an operational semantics (configuration &lang;ag, C, M, T, s&rang;, selection functions, deliberation steps). Jason is that semantics made executable: a ten-step reasoning cycle, belief annotations with sources, strong negation, internal actions, ACL-style message passing, and Java as the escape hatch for environments and custom mechanisms. For the exams: <em>an AgentSpeak plan is &ldquo;triggering event : context &lt;- body&rdquo;, the body is an intention, and the cycle is perceive &rarr; revise &rarr; deliberate &rarr; execute</em>.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Write the BDI abstract control loop.</summary>
+        <p>initialize-state(); then, while true: options := option-generator(event-queue); selected-options := deliberate(options); update-intentions(selected-options); execute(); get-new-external-events(); drop-successful-attitudes(); drop-impossible-attitudes() [Rao and Georgeff, 1995].</p>
+      </details>
+
+      <details>
+        <summary>List the six constructs BDI architectures are based on.</summary>
+        <p>A set of beliefs; a set of desires (or goals); a set of intentions (a subset of the goals with an associated stack of plans for achieving them &mdash; the intended actions); a set of internal events (elicited by belief or goal changes); a set of external events (perceptive events from interaction with external entities); and a plan library (repertoire of actions) as a further static component.</p>
+      </details>
+
+      <details>
+        <summary>What is PRS and why is it relevant?</summary>
+        <p>PRS (Procedural Reasoning System) [Georgeff and Lansky, 1987] is one of the first BDI architectures: a goal-directed and reactive planning system. Goal-directedness allows reasoning about and performing complex tasks; reactiveness allows handling real-time behaviour in dynamic environments. It was applied to robots, airport traffic control, etc. Its architecture (beliefs data base, KAS of plans, goals, intention stack, interpreter) is the blueprint of AgentSpeak(L).</p>
+      </details>
+
+      <details>
+        <summary>What is AgentSpeak(L)? Give its pedigree.</summary>
+        <p>An abstract language used for describing and programming BDI agents. Inspired by PRS, dMARS and BDI Logics; originally proposed by Anand S. Rao [Rao, 1996]; extended to a practical agent programming language [Bordini and Hübner, 2006]; programs can be executed by the Jason platform [Bordini et al., 2007]; it has an operational semantics providing a computational semantics for BDI concepts.</p>
+      </details>
+
+      <details>
+        <summary>What are the main constructs of AgentSpeak, and the four components of its agent architecture?</summary>
+        <p>Beliefs (current state of the agent, information about the environment and other agents), goals (states the agent desires to achieve, about which it reasons based on internal and external stimuli), plans (recipes of procedural means to change the world and achieve goals). The architecture has four components: belief base, plan library, set of events, set of intentions.</p>
+      </details>
+
+      <details>
+        <summary>Define beliefs, goals and triggering events in AgentSpeak(L) syntax.</summary>
+        <p>If b is a predicate symbol and t1..tn are first-order terms, b(t1..tn) is a belief atom; ground atoms are base beliefs; &Phi; and &not;&Phi; are belief literals. If g is a predicate symbol, !g(t1..tn) is an achievement goal (goal to do, pointing at practical actions) and ?g(t1..tn) a test goal (goal to know, pointing at epistemic actions). Triggering events: +&Phi; belief addition, &minus;&Phi; belief deletion, +!&Phi; achievement-goal addition, &minus;!&Phi; achievement-goal deletion, +?&Phi; test-goal addition, &minus;?&Phi; test-goal deletion.</p>
+      </details>
+
+      <details>
+        <summary>Give the general structure of an AgentSpeak plan and the elements a plan body can include.</summary>
+        <p>triggering_event : context &lt;- body. The triggering event denotes the events the plan handles; the context is a logical expression, typically a conjunction of literals checked against the belief base; the body is the course of action (a sequence of actions and sub-goals). The body can include: !&Phi; achievement goals, ?&Phi; test goals, +&Phi; belief addition, &minus;&Phi; belief deletion, &Phi; actions, .&Phi; internal actions (a Jason extension).</p>
+      </details>
+
+      <details>
+        <summary>Explain the semantics of intention execution for a failing sub-goal.</summary>
+        <p>When the body starts with !&phi; (or ?&phi;), event +!&phi; (or +?&phi;) is generated; if there is no applicable plan for it, the plan is removed and a &minus;!&psi; (or &minus;?&psi;) event is generated if tr = +!&psi; (or +?&psi;). If an action &phi; or internal action .&phi; fails, the plan is removed and the same goal-deletion event is generated. If no plan is applicable for the generated &minus;!&psi; or &minus;?&psi;, the whole intention is disregarded and an error message is printed.</p>
+      </details>
+
+      <details>
+        <summary>Describe the AgentSpeak agent configuration &lang;ag, C, M, T, s&rang;.</summary>
+        <p>ag is the AgentSpeak program (beliefs and plans). C = &lang;I, E, A&rang; is the circumstance: intentions (stacks of partially instantiated plans), events (pairs (tr, i), with i an intention or T for external events), actions to be performed in the environment. M = &lang;In, Out, SI&rang; is the communication component: inbox, outbox, suspended intentions; messages are &lang;messageid, agentid, ilf, content&rang;. T = &lang;R, Ap, &iota;, &epsilon;, &rho;&rang; is temporary information: relevant plans, applicable plans, and the current intention/event/applicable plan. s is the current step within the reasoning cycle.</p>
+      </details>
+
+      <details>
+        <summary>List the deliberation steps of an AgentSpeak reasoning cycle.</summary>
+        <p>ProcMsg (process a message from the inbox), SelEv (select an event), RelPl (retrieve relevant plans), ApplPl (check which are applicable), SelAppl (select one applicable plan, the intended means), AddIM (add the intended means to the intentions), SelInt (select an intention), ExecInt (execute the selected intention), ClrInt (clear finished intentions or intended means).</p>
+      </details>
+
+      <details>
+        <summary>What is Jason, and what is its two-level design?</summary>
+        <p>Jason [Bordini et al., 2007], developed by Jomi F. Hübner and Rafael H. Bordini, implements the operational semantics of a variant of AgentSpeak. Design: AgentSpeak as the high-level language to define goal-oriented agent behaviour; Java as the low-level language to realise mechanisms (internal functions) and customise the architecture. It comes with a framework for developing multi-agent systems and is highly customisable and open source.</p>
+      </details>
+
+      <details>
+        <summary>Enumerate the ten steps of the Jason reasoning cycle.</summary>
+        <p>1. Perceiving the environment; 2. updating the belief base; 3. receiving communication from other agents; 4. selecting 'socially acceptable' messages; 5. selecting an event; 6. retrieving all relevant plans; 7. determining the applicable plans; 8. selecting one applicable plan; 9. selecting an intention for further execution; 10. executing one step of an intention.</p>
+      </details>
+
+      <details>
+        <summary>What are belief annotations in Jason, and what is the source annotation?</summary>
+        <p>Annotated predicates: ps(t1,...,tn)[a1,...,am] where ai are first-order terms. All predicates in the belief base have a special annotation source(si) with si &isin; {self, percept} &cup; AgId &mdash; e.g. red(box1)[source(percept)], blue(box1)[source(ag1)]. Developers can define customised annotations, e.g. doc(0.7) for a degree of certainty. The source annotation is also how message receivers know the sender: +m(X)[source(A)].</p>
+      </details>
+
+      <details>
+        <summary>Explain strong negation (~) and the three pit_stop contexts.</summary>
+        <p>Strong negation allows both closed-world and open-world assumptions: not p means no belief of p; ~p means a belief of p being false. The pit_stop example has three plans for +!pit_stop: context "not raining &amp; not ~raining" (lack of knowledge &rarr; intermediate tyres), context "raining" (&rarr; rain tyres), context "~raining" (&rarr; slick tyres). Absence of evidence is a third case, not a fallback.</p>
+      </details>
+
+      <details>
+        <summary>What are internal actions? Give examples of predefined ones and of message-passing ones.</summary>
+        <p>Internal actions (.&Phi;) are self-contained actions packed and atomically executed as part of the reasoning cycle; they interact with Java objects, invoke legacy systems, and (later in the course) use A&amp;A artefacts. Predefined (jason.stdlib): .print, .union, .desire, .intend, .drop_desire, .drop_intention. Message passing: .send(B, ilf, m(X)) and .broadcast(ilf, m(X)) with ilf &isin; {tell, untell, achieve, unachieve, askOne, askAll, askHow, tellHow, untellHow}; the receiver handles +m(X)[source(A)].</p>
+      </details>
+
+      <details>
+        <summary>What are the two ways to build an environment in Jason?</summary>
+        <p>1. Defining perceptions and actions to operate on specific environments, by defining Java lower-level mechanisms and specialising the Agent Architecture and Agent classes; 2. creating a 'simulated' environment by extending Jason's Environment class and using methods such as addPercept(String Agent, Literal Percept).</p>
+      </details>
+
+      <details>
+        <summary>How does BDI hierarchical planning differ from traditional planning?</summary>
+        <p>Traditional planning systems mainly make offline planning, composing actions in a repertoire to create plans. BDI planning is a hybrid approach: plans are defined at design time and at the language level, but execution is ruled by the architecture (means&ndash;end reasoning) according to context conditions (Jason, Jadex) or planning rules (2APL). A composite intention reduces to independent sub-intentions at lower abstraction levels, down to self-contained, reusable leaf actions.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-12-simple-agents-jade.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-14-scientific-literature.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Source: deck C2 (Programming Intentional Agents in AgentSpeak(L) &amp; Jason) &mdash; case study &middot; Intelligent Systems Engineering, University of Bologna, A.Y. 2025/2026 &middot; Prof. A. Omicini (Module 1), Prof. G. Ciatto (Module 2)</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- shared helper: put the LessonKit widget chrome into English ---- */
+function lkEnglish(root){
+  root = root || document;
+  var cur = root.querySelectorAll('.lk-se-cur');
+  for (var i = 0; i < cur.length; i++) { if (cur[i].firstChild) cur[i].firstChild.nodeValue = 'Current state: '; }
+  var lbl = root.querySelectorAll('.lk-se-panel > strong');
+  for (var j = 0; j < lbl.length; j++) { lbl[j].textContent = 'Outgoing transitions:'; }
+  var btn = root.querySelectorAll('.lk-step .lk-step-btns button');
+  for (var k = 0; k < btn.length; k++) { btn[k].textContent = btn[k].textContent.replace(/^Passo /, 'Step '); }
+}
+
+/* ---- Widget: the BDI abstract control loop, annotated code ---- */
+LessonKit.annotatedCode('#w-loop', {
+  lines: [
+    ['initialize-state();', 'The agent sets up its initial beliefs and the initial set of intentions. One-time preamble of the BDI control loop [Rao and Georgeff, 1995].'],
+    ['while true do', 'The loop never ends: BDI agents are situated and reactive &mdash; they keep perceiving, deliberating and acting for their whole lifetime.'],
+    ['options := option-generator(event-queue);', 'The option generator turns the current events (external percepts, internal goal changes) into candidate options &mdash; the desires the agent might pursue.'],
+    ['selected-options := deliberate(options);', 'Deliberation filters the options: which desires are worth adopting given the current beliefs? This is where the agent decides what to intend.'],
+    ['update-intentions(selected-options);', 'The selected options become intentions &mdash; a subset of the goals, each with an associated stack of plans for achieving them: the intended actions.'],
+    ['execute();', 'One step of the selected intention is executed: an action is performed in the environment. Execution is interleaved with deliberation &mdash; this is what makes the agent reactive.'],
+    ['get-new-external-events();', 'New percepts from the environment are collected into the event queue; they will feed the next cycle&rsquo;s option generation.'],
+    ['drop-successful-attitudes();', 'Attitudes that have been fulfilled are dropped: a goal that has been achieved no longer needs to be intended.'],
+    ['drop-impossible-attitudes();', 'Attitudes that can no longer be pursued are dropped too: a goal that is impossible to achieve is released rather than kept forever.'],
+    ['end-while', 'The cycle repeats. No global planner anywhere: deliberation is a repeated, cheap step, not a one-shot expensive search.']
+  ]
+});
+
+/* ---- Widget: the six triggering events ---- */
+(function(){
+  var host = document.getElementById('w-events');
+  if (!host) return;
+  var evs = [
+    { name: '+&Phi;', title: 'belief addition', body: 'A new belief entered the belief base &mdash; e.g. +concert(Artist,Date,Venue). The agent reacts by looking for a plan whose triggering event unifies with this addition.' },
+    { name: '&minus;&Phi;', title: 'belief deletion', body: 'A belief was removed from the belief base. The agent can react by revising its intentions &mdash; dropping plans that relied on the deleted belief.' },
+    { name: '+!&Phi;', title: 'achievement-goal addition', body: 'The agent adopted a new achievement goal (goal to do, practical action): +!book_tickets(...). This is proactivity entering the system as an event.' },
+    { name: '&minus;!&Phi;', title: 'achievement-goal deletion', body: 'An achievement goal was dropped &mdash; typically generated by the semantics when a plan fails. The agent may react by trying the goal again or giving up.' },
+    { name: '+?&Phi;', title: 'test-goal addition', body: 'The agent adopted a new test goal (goal to know, epistemic action): ?phone_number(V,N). The plan for a test goal retrieves information from the belief base.' },
+    { name: '&minus;?&Phi;', title: 'test-goal deletion', body: 'A test goal was dropped. As with achievement goals, the deletion itself is an event the agent may handle.' }
+  ];
+  var box = document.createElement('div');
+  box.className = 'lk-se';
+  box.innerHTML = '<h4 style="margin:0 0 .3rem;color:var(--lk-cobalt)">The six triggering events</h4>' +
+    '<p class="lk-step-sub" style="margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)">Change itself is an event: every belief or goal change generates a triggering event a plan can react to.</p>' +
+    '<div class="lk-se-grid" id="ev-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))"></div><div class="lk-se-panel" id="ev-panel"></div>';
+  host.appendChild(box);
+  var grid = box.querySelector('#ev-grid'), panel = box.querySelector('#ev-panel'), btns = [];
+  function show(e, i){
+    for (var j = 0; j < btns.length; j++) { btns[j].setAttribute('aria-pressed', j === i ? 'true' : 'false'); }
+    panel.innerHTML = '<p class="lk-se-cur">Event <b>' + (i + 1) + ' of ' + evs.length + '</b></p>' +
+      '<h4 style="margin:.2rem 0 .3rem;font-family:var(--lk-mono)">' + e.name + ' &mdash; ' + e.title + '</h4>' +
+      '<p style="margin-bottom:0">' + e.body + '</p>';
+  }
+  for (var i = 0; i < evs.length; i++) {
+    (function(e, i){
+      var b = document.createElement('button');
+      b.className = 'lk-se-node'; b.type = 'button';
+      b.style.fontSize = '.78rem';
+      b.innerHTML = e.name;
+      b.addEventListener('click', function(){ show(e, i); });
+      grid.appendChild(b); btns.push(b);
+    })(evs[i], i);
+  }
+  show(evs[0], 0);
+})();
+
+/* ---- Widget: plan anatomy ---- */
+(function(){
+  var host = document.getElementById('w-plan');
+  if (!host) return;
+  var parts = [
+    { name: 'triggering_event', title: 'what to handle', body: 'The events the plan is meant to handle: a belief/goal change such as +!book_tickets(A,D,V). A plan is selected only when its triggering event unifies with the event being processed.' },
+    { name: 'context', title: 'when usable', body: 'The circumstances in which the plan can be used: a logical expression, typically a conjunction of belief literals checked against the belief base at selection time &mdash; e.g. not busy(phone).' },
+    { name: 'body', title: 'course of action', body: 'The sequence of goals and actions used to handle the event: ?phone_number(V,N); !call(N); !choose_seats(A,D,V). The body becomes an intention: a stack of partially instantiated plans.' }
+  ];
+  var box = document.createElement('div');
+  box.className = 'lk-se';
+  box.innerHTML = '<h4 style="margin:0 0 .3rem;color:var(--lk-cobalt)">Anatomy of a plan</h4>' +
+    '<p class="lk-step-sub" style="margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)">triggering_event : context &lt;- body.</p>' +
+    '<div class="lk-se-grid" id="pl-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))"></div><div class="lk-se-panel" id="pl-panel"></div>';
+  host.appendChild(box);
+  var grid = box.querySelector('#pl-grid'), panel = box.querySelector('#pl-panel'), btns = [];
+  function show(p, i){
+    for (var j = 0; j < btns.length; j++) { btns[j].setAttribute('aria-pressed', j === i ? 'true' : 'false'); }
+    panel.innerHTML = '<p class="lk-se-cur">Part <b>' + (i + 1) + ' of ' + parts.length + '</b></p>' +
+      '<h4 style="margin:.2rem 0 .3rem;font-family:var(--lk-mono)">' + p.name + ' &mdash; ' + p.title + '</h4>' +
+      '<p style="margin-bottom:0">' + p.body + '</p>';
+  }
+  for (var i = 0; i < parts.length; i++) {
+    (function(p, i){
+      var b = document.createElement('button');
+      b.className = 'lk-se-node'; b.type = 'button';
+      b.innerHTML = p.name;
+      b.addEventListener('click', function(){ show(p, i); });
+      grid.appendChild(b); btns.push(b);
+    })(parts[i], i);
+  }
+  show(parts[0], 0);
+})();
+
+/* ---- Widget: the concert example, annotated code ---- */
+LessonKit.annotatedCode('#w-example', {
+  lines: [
+    ['likes(radiohead).', 'Initial belief: the agent likes Radiohead. Ground belief atom &mdash; it is true in the agent&rsquo;s belief base from the start.'],
+    ['phone_number(covo,"05112345").', 'Initial belief: the venue Covo can be reached at this phone number. This belief is what the test goal ?phone_number(V,N) will retrieve later.'],
+    ['+concert(Artist, Date, Venue)', 'Triggering event of the first plan: a belief addition. When the agent learns about a concert, this event fires.'],
+    [': likes(Artist)', 'Context: the artist must be liked. Checked against the belief base when the plan is selected &mdash; not when the plan was written.'],
+    ['&lt;- !book_tickets(Artist, Date, Venue).', 'Body: adopt the achievement goal to book tickets. A sub-goal: the agent will look for a plan whose triggering event unifies with +!book_tickets(...).'],
+    ['+!book_tickets(A,D,V)', 'Second plan, triggered by the achievement-goal addition generated by the first plan&rsquo;s body.'],
+    [': not busy(phone)', 'Context: the phone must not be busy. If it were, this plan would not be applicable and another means would have to be found.'],
+    ['&lt;- ?phone_number(V,N);', 'Test goal: retrieve the venue&rsquo;s number from the belief base. This is an epistemic action &mdash; the agent asks what it knows.'],
+    ['!call(N);', 'Achievement goal: call that number. Practical action, delegated to a further plan.'],
+    ['!choose_seats(A,D,V).', 'Final achievement goal of this plan: choose the seats. The intention stack grows and shrinks as sub-goals resolve.']
+  ]
+});
+
+/* ---- Widget: deliberation steps, one at a time ---- */
+(function(){
+  var host = document.getElementById('w-delib');
+  if (!host) return;
+  var steps = [
+    { label: 'ProcMsg', main: 'process a message from the mail inbox', note: 'The communication component M is drained first: incoming messages become events. If a message asks for something (e.g. achieve), it generates the corresponding goal event.' },
+    { label: 'SelEv', main: 'select an event from the set of events', note: 'The selection function Se picks one event among the external and internal events waiting to be serviced.' },
+    { label: 'RelPl', main: 'retrieve all relevant plans', note: 'From the plan library, collect every plan whose triggering event unifies with the selected event: the set R of relevant plans.' },
+    { label: 'ApplPl', main: 'check which plans are applicable', note: 'Among the relevant plans, keep those whose context is derivable from the belief base: the set Ap of applicable plans.' },
+    { label: 'SelAppl', main: 'select one applicable plan (intended means)', note: 'The selection function So chooses one applicable plan for the event &mdash; the intended means the agent commits to.' },
+    { label: 'AddIM', main: 'add the intended means to the intentions', note: 'The chosen plan is pushed onto the set of intentions, as a new intended means. Its body is now part of the agent&rsquo;s commitment.' },
+    { label: 'SelInt', main: 'select an intention', note: 'The selection function SI picks which intention to advance. Intentions may be suspended (waiting for messages or actions); only runnable ones are candidates.' },
+    { label: 'ExecInt', main: 'execute the selected intention', note: 'One step of the intention is executed: an action may be dispatched to the environment, or a sub-goal may generate new events for the next cycle.' },
+    { label: 'ClrInt', main: 'clear finished intentions', note: 'Intentions that completed in the previous step are removed. The cycle then restarts from the mailbox.' }
+  ];
+  var box = document.createElement('div');
+  box.className = 'lk-se';
+  box.innerHTML = '<h4 style="margin:0 0 .3rem;color:var(--lk-cobalt)">Deliberation steps of a reasoning cycle</h4>' +
+    '<p class="lk-step-sub" style="margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)">The step s of the configuration &lang;ag, C, M, T, s&rang; &mdash; one cycle, nine steps.</p>' +
+    '<div class="lk-se-panel" id="dl-panel"></div>' +
+    '<div class="lk-step-btns" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.6rem">' +
+    '<button type="button" id="dl-prev">Back</button><button type="button" id="dl-next">Next step</button><button type="button" id="dl-reset">Reset</button></div>';
+  host.appendChild(box);
+  var panel = box.querySelector('#dl-panel'), i = 0;
+  var on = 'font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)';
+  var off = 'font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;border-radius:3px;border:1px solid var(--lk-rule);background:var(--lk-paper-light);color:var(--lk-ink-soft)';
+  box.querySelector('#dl-prev').style.cssText = on;
+  box.querySelector('#dl-next').style.cssText = on;
+  box.querySelector('#dl-reset').style.cssText = off;
+  function render(){
+    var s = steps[i];
+    panel.innerHTML = '<p class="lk-se-cur">Step <b>' + (i + 1) + ' of ' + steps.length + '</b> &mdash; ' + s.label + '</p>' +
+      '<h4 style="margin:.2rem 0 .3rem;font-family:var(--lk-mono);color:var(--lk-cobalt)">' + s.main + '</h4>' +
+      '<p style="margin-bottom:0">' + s.note + '</p>';
+  }
+  box.querySelector('#dl-next').addEventListener('click', function(){ if (i < steps.length - 1) { i++; render(); } });
+  box.querySelector('#dl-prev').addEventListener('click', function(){ if (i > 0) { i--; render(); } });
+  box.querySelector('#dl-reset').addEventListener('click', function(){ i = 0; render(); });
+  render();
+})();
+
+/* ---- Widget: the reasoning cycle in code, annotated ---- */
+LessonKit.annotatedCode('#w-cycle', {
+  lines: [
+    ['C.reset();    // C is the actual Circumstance', 'The circumstance (intentions, events, actions) is reset at the start of each cycle: the temporary sets R, Ap, and the current-item records are cleared.'],
+    ['if (nrcslbr >= setts.nrcbp()) {', 'Perception is budgeted: the environment is sampled only every nrcbp cycles, not on every cycle. A configurable trade-off between responsiveness and cost.'],
+    ['ag.buf(agArch.perceive());', 'The percepts produced by the agent architecture are buffered into the belief base &mdash; step 1 (perceive) and step 2 (belief revision) of the cycle.'],
+    ['agArch.checkMail();', 'Incoming messages are moved from the mailbox into the event set &mdash; step 3 (receive communication).'],
+    ['if (canSleep()) { ... agArch.sleep(); return; }', 'If there is nothing to do &mdash; no events, no runnable intentions &mdash; the agent sleeps instead of spinning: autonomy includes the right to be idle.'],
+    ['step = State.StartRC;', 'The semantic-rule engine is started from the initial step of the transition system.'],
+    ['do { applySemanticRule(); } while (step != State.StartRC);', 'Semantic rules are applied until the step returns to StartRC: one full reasoning cycle is a sequence of semantic-rule applications, exactly as the operational semantics dictates.'],
+    ['ActionExec action = C.getAction();', 'If executing an intention produced an action, it is retrieved from the circumstance&rsquo;s action set.'],
+    ['C.getPendingActions().put(...); agArch.act(action, ...);', 'The action is registered as pending (the intention is suspended until feedback) and dispatched to the environment through the agent architecture.'],
+    ['} catch (Exception e) { conf.C.create(); }', 'On an error in the transition system, a fresh circumstance is created: the agent recovers rather than crashing.']
+  ]
+});
+
+/* ---- Widget: belief annotations and strong negation ---- */
+(function(){
+  var host = document.getElementById('w-annot');
+  if (!host) return;
+  var items = [
+    { name: 'source(self)', title: 'own belief', body: 'myLocation(6,5)[source(self)] &mdash; the agent derived this belief itself (e.g. by reasoning). Every predicate in the belief base carries a source annotation.' },
+    { name: 'source(percept)', title: 'from the environment', body: 'red(box1)[source(percept)] &mdash; the belief comes from a perception. The environment is the source: the belief is as reliable as the sensor.' },
+    { name: 'source(ag1)', title: 'from another agent', body: 'blue(box1)[source(ag1)] &mdash; the belief was communicated by agent ag1. The source is an agent id, so the receiver can decide how much to trust it.' },
+    { name: 'custom: doc(0.7)', title: 'degree of certainty', body: 'colourblind(ag1)[source(self),doc(0.7)] &mdash; a developer-defined annotation. Here doc is a degree of certainty: the agent is fairly (0.7) convinced ag1 is colourblind.' },
+    { name: 'strong negation ~', title: 'believed false', body: '~raining means there is a belief indicating raining is false. Distinct from not raining (no belief at all). Three pit_stop plans use the three cases: raining, ~raining, neither.' },
+    { name: 'belief rules', title: 'Prolog-like derivation', body: 'likely_color(Obj,C) :- colour(Obj,C)[degOfCert(D1)] &amp; not(...) &amp; not ~colour(Obj,C). Annotations can be read and compared inside rules: derived beliefs inherit the machinery of Chapter 8&rsquo;s logic.' }
+  ];
+  var box = document.createElement('div');
+  box.className = 'lk-se';
+  box.innerHTML = '<h4 style="margin:0 0 .3rem;color:var(--lk-cobalt)">Belief annotations and strong negation</h4>' +
+    '<p class="lk-step-sub" style="margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)">ps(t1,...,tn)[a1,...,am] &mdash; every belief carries metadata; the source annotation is mandatory.</p>' +
+    '<div class="lk-se-grid" id="an-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div><div class="lk-se-panel" id="an-panel"></div>';
+  host.appendChild(box);
+  var grid = box.querySelector('#an-grid'), panel = box.querySelector('#an-panel'), btns = [];
+  function show(it, i){
+    for (var j = 0; j < btns.length; j++) { btns[j].setAttribute('aria-pressed', j === i ? 'true' : 'false'); }
+    panel.innerHTML = '<p class="lk-se-cur">Annotation <b>' + (i + 1) + ' of ' + items.length + '</b></p>' +
+      '<h4 style="margin:.2rem 0 .3rem;font-family:var(--lk-mono)">' + it.name + ' &mdash; ' + it.title + '</h4>' +
+      '<p style="margin-bottom:0">' + it.body + '</p>';
+  }
+  for (var i = 0; i < items.length; i++) {
+    (function(it, i){
+      var b = document.createElement('button');
+      b.className = 'lk-se-node'; b.type = 'button';
+      b.style.fontSize = '.74rem';
+      b.innerHTML = it.name;
+      b.addEventListener('click', function(){ show(it, i); });
+      grid.appendChild(b); btns.push(b);
+    })(items[i], i);
+  }
+  show(items[0], 0);
+})();
+
+/* ---- Widget: internal actions and message passing ---- */
+(function(){
+  var host = document.getElementById('w-ia');
+  if (!host) return;
+  var items = [
+    { name: '.print(1,X,"bla")', title: 'console output', body: 'Prints the concatenation of the string representations of the number 1, of the value of variable X, and of the string "bla". The workhorse for debugging.' },
+    { name: '.union(S1,S2,S3)', title: 'set union', body: 'S3 is the union of the sets S1 and S2 (represented by lists); the result set is sorted. Lists and sets are first-class citizens in Jason.' },
+    { name: '.desire(D)', title: 'intention introspection', body: 'Checks whether D is a desire: either there is an event with +!D as triggering event, or D is a goal in one of the agent intentions. Mental states become queryable.' },
+    { name: '.intend(I)', title: 'intention introspection', body: 'Checks if I is an intention: there is a triggering event +!I in any plan within an intention. Intentions can be suspended and appear in E, PA (pending actions), and PI (waiting) as well.' },
+    { name: '.drop_desire(I)', title: 'goal management', body: 'Removes events that are goal additions with a literal unifying with the parameter: the agent actively gives up a desire.' },
+    { name: '.drop_intention(I)', title: 'commitment management', body: 'Drops all intentions which would make .intend true: the agent releases its commitment to a course of action.' },
+    { name: '.send(B,ilf,m(X))', title: 'message passing', body: 'Agent A sends message m(X) to agent B (a unique name or a list). ilf &isin; {tell, untell, achieve, unachieve, askOne, askAll, askHow, tellHow, untellHow} &mdash; the ACL performatives of Chapter 10.' },
+    { name: '.broadcast(ilf,m(X))', title: 'message passing', body: 'Same as .send but to every agent. The receiver handles the message as a triggering event: +m(X)[source(A)] &lt;- dosomething; ...' }
+  ];
+  var box = document.createElement('div');
+  box.className = 'lk-se';
+  box.innerHTML = '<h4 style="margin:0 0 .3rem;color:var(--lk-cobalt)">Internal actions and message passing</h4>' +
+    '<p class="lk-step-sub" style="margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)">Self-contained actions executed atomically within the reasoning cycle; user-defined ones are Java classes extending DefaultInternalAction.</p>' +
+    '<div class="lk-se-grid" id="ia-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div><div class="lk-se-panel" id="ia-panel"></div>';
+  host.appendChild(box);
+  var grid = box.querySelector('#ia-grid'), panel = box.querySelector('#ia-panel'), btns = [];
+  function show(it, i){
+    for (var j = 0; j < btns.length; j++) { btns[j].setAttribute('aria-pressed', j === i ? 'true' : 'false'); }
+    panel.innerHTML = '<p class="lk-se-cur">Action <b>' + (i + 1) + ' of ' + items.length + '</b></p>' +
+      '<h4 style="margin:.2rem 0 .3rem;font-family:var(--lk-mono)">' + it.name + ' &mdash; ' + it.title + '</h4>' +
+      '<p style="margin-bottom:0">' + it.body + '</p>';
+  }
+  for (var i = 0; i < items.length; i++) {
+    (function(it, i){
+      var b = document.createElement('button');
+      b.className = 'lk-se-node'; b.type = 'button';
+      b.style.fontSize = '.72rem';
+      b.innerHTML = it.name;
+      b.addEventListener('click', function(){ show(it, i); });
+      grid.appendChild(b); btns.push(b);
+    })(items[i], i);
+  }
+  show(items[0], 0);
+})();
+
+lkEnglish();
+</script>
+</body>
+</html>
