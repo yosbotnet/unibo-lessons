@@ -208,17 +208,131 @@ function check(name, ok) {
   await page.locator('#wp-check').click();
   check('cap-15: work package matcher correct', /Tutte le risposte sono corrette/.test(await page.locator('#wp-v').textContent()));
 
-  // ---------- nav chain integrity ----------
-  const chain = ['cap-07-analisi-e-pos.html', 'cap-08-planning-jpps.html', 'cap-09-wbs-e-stime.html', 'cap-10-risorse-e-costi.html', 'cap-11-network-e-approvazione.html', 'cap-12-team-e-kickoff.html', 'cap-13-regole-operative.html', 'cap-14-riunioni-e-scope.html', 'cap-15-comunicazioni-e-work-package.html'];
+  // ---------- cap-16 ----------
+  await fresh('cap-16-monitoring-e-controllo.html');
+  // report matcher: Stoplight, Cumulative, Current period, Exception, Variance
+  const rpt = ['Stoplight', 'Cumulative', 'Current period', 'Exception', 'Variance'];
+  for (let i = 0; i < rpt.length; i++) await page.locator('#rpt-rows .pm-row').nth(i).locator('select').selectOption(rpt[i]);
+  await page.locator('#rpt-check').click();
+  check('cap-16: report matcher correct', /Tutti i tipi sono corretti/.test(await page.locator('#rpt-v').textContent()));
+  // EVA calculator defaults PV=100 EV=80 AC=110 -> SPI 0.80 CPI 0.73
+  check('cap-16: EVA SPI default 0.80', (await page.locator('#eva-spi').textContent()) === '0.80');
+  check('cap-16: EVA CPI default 0.73', (await page.locator('#eva-cpi').textContent()) === '0.73');
+  check('cap-16: EVA verdict behind schedule + over budget', /in ritardo/.test(await page.locator('#eva-v').textContent()) && /oltre il budget/.test(await page.locator('#eva-v').textContent()));
+  await page.locator('#eva-pv').fill('100'); await page.locator('#eva-ev').fill('120'); await page.locator('#eva-ac').fill('100');
+  await page.locator('#eva-go').click();
+  check('cap-16: EVA recomputes SPI 1.20', (await page.locator('#eva-spi').textContent()) === '1.20');
+  // issues log: 8 Sì + 2 No
+  const iss = ['Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'No', 'No'];
+  for (let i = 0; i < iss.length; i++) await page.locator('#iss-rows .pm-row').nth(i).locator('select').selectOption(iss[i]);
+  await page.locator('#iss-check').click();
+  check('cap-16: issues log matcher correct', /Le otto informazioni del corso/.test(await page.locator('#iss-v').textContent()));
+  // scope bank stepper: 3 withdrawals exhausts the 6-day deposit
+  const bankBtn = page.locator('#w-bank .lk-step-btns button').nth(0);
+  for (let i = 0; i < 3; i++) await bankBtn.click();
+  check('cap-16: scope bank nearly exhausted', /quasi esaurita/.test(await page.locator('#w-bank .lk-step-verdict').textContent()));
+  const bankBtnB = page.locator('#w-bank .lk-step-btns button').nth(1);
+  await bankBtnB.click(); await bankBtnB.click();
+  check('cap-16: scope bank recovers to 3 days', /Saldo Scope Bank: 3 giorni/.test(await page.locator('#w-bank .lk-step-verdict').textContent()));
+  // escalation state explorer: first transition -> examine FS dependencies
+  await page.locator('#w-esc .lk-se-trans button').first().click();
+  check('cap-16: escalation advances to FS dependencies', /2 · Esaminare le dipendenze FS/.test(await page.locator('#w-esc .lk-se-cur').textContent()));
+  await page.locator('#w-esc .lk-se-trans button').first().click();
+  await page.locator('#w-esc .lk-se-trans button').first().click();
+  check('cap-16: escalation reaches resource negotiation', /4 · Negoziare risorse aggiuntive/.test(await page.locator('#w-esc .lk-se-cur').textContent()));
+
+  // ---------- cap-17 ----------
+  await fresh('cap-17-closing-e-chiusura.html');
+  const inst = ['Phased', 'By Business Unit', 'Cut-Over', 'Parallel'];
+  for (let i = 0; i < inst.length; i++) await page.locator('#inst-rows .pm-row').nth(i).locator('select').selectOption(inst[i]);
+  await page.locator('#inst-check').click();
+  check('cap-17: installation approach matcher correct', /Tutti gli approcci sono corretti/.test(await page.locator('#inst-v').textContent()));
+  const not = ['Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'No', 'No', 'Sì', 'Sì'];
+  for (let i = 0; i < not.length; i++) await page.locator('#not-rows .pm-row').nth(i).locator('select').selectOption(not[i]);
+  await page.locator('#not-check').click();
+  check('cap-17: notebook matcher correct', /Corretto: il Project Notebook/.test(await page.locator('#not-v').textContent()));
+  const aud = ['Sì', 'Sì', 'Sì', 'Sì', 'No', 'No'];
+  for (let i = 0; i < aud.length; i++) await page.locator('#aud-rows .pm-row').nth(i).locator('select').selectOption(aud[i]);
+  await page.locator('#aud-check').click();
+  check('cap-17: audit reasons matcher correct', /Tutte le ragioni del corso/.test(await page.locator('#aud-v').textContent()));
+  await page.locator('#w-rep .lk-ac-line').nth(1).click();
+  check('cap-17: final report line explains performance', /performance|performato/.test(await page.locator('#w-rep .lk-ac-expl').textContent()));
+
+  // ---------- cap-18 ----------
+  await fresh('cap-18-kanban-e-devops.html');
+  const card = t => page.locator('.kan-card').filter({ hasText: new RegExp('^' + t) });
+  // US-1 full path to done: lead 4 passi
+  for (let i = 0; i < 4; i++) await card('US-1').click();
+  check('cap-18: kanban US-1 delivered with lead 4', (await card('US-1').textContent()).indexOf('lead 4 passi') !== -1);
+  // fill In lavorazione (WIP 2) with US-2 and US-3
+  for (let i = 0; i < 2; i++) await card('US-2').click();
+  for (let i = 0; i < 2; i++) await card('US-3').click();
+  await card('US-4').click();
+  check('cap-18: kanban WIP limit blocks US-4', /WIP limit raggiunto/.test(await page.locator('#board-v').textContent()));
+  // unblock: swarm US-2 through review to done, then US-4 can enter the work lane
+  await card('US-2').click();
+  await card('US-2').click();
+  await card('US-4').click();
+  check('cap-18: kanban unblocks after swarm', !/WIP limit raggiunto/.test(await page.locator('#board-v').textContent()));
+  // complete the board: clear the review column before US-5 passes through it
+  for (let i = 0; i < 2; i++) await card('US-3').click();
+  for (let i = 0; i < 2; i++) await card('US-4').click();
+  for (let i = 0; i < 4; i++) await card('US-5').click();
+  check('cap-18: kanban board complete', /Tutte le card sono al delivery point/.test(await page.locator('#board-v').textContent()));
+  // kanban vs scrum matcher
+  const cmp = ['Kanban', 'Scrum', 'Scrum', 'Kanban', 'Scrum', 'Kanban'];
+  for (let i = 0; i < cmp.length; i++) await page.locator('#cmp-rows .pm-row').nth(i).locator('select').selectOption(cmp[i]);
+  await page.locator('#cmp-check').click();
+  check('cap-18: kanban vs scrum matcher correct', /Tutte le affermazioni sono corrette/.test(await page.locator('#cmp-v').textContent()));
+  // uso matcher
+  const uso = ['Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'No'];
+  for (let i = 0; i < uso.length; i++) await page.locator('#uso-rows .pm-row').nth(i).locator('select').selectOption(uso[i]);
+  await page.locator('#uso-check').click();
+  check('cap-18: kanban usage matcher correct', /Tutte le scelte sono corrette/.test(await page.locator('#uso-v').textContent()));
+
+  // ---------- cap-19 ----------
+  await fresh('cap-19-caso-pdq-ed-esercitazioni.html');
+  const ss = ['Factory Locator', 'Order Entry', 'Order Submit', 'Logistics', 'Routing', 'Inventory'];
+  for (let i = 0; i < ss.length; i++) await page.locator('#ss-rows .pm-row').nth(i).locator('select').selectOption(ss[i]);
+  await page.locator('#ss-check').click();
+  check('cap-19: PDQ subsystem classifier correct', /Tutti i sottosistemi sono riconosciuti/.test(await page.locator('#ss-v').textContent()));
+  const pos = ['Sì', 'Sì', 'Sì', 'Sì', 'Sì', 'No', 'No'];
+  for (let i = 0; i < pos.length; i++) await page.locator('#pos-rows .pm-row').nth(i).locator('select').selectOption(pos[i]);
+  await page.locator('#pos-check').click();
+  check('cap-19: POS sections matcher correct', /Corretto: le buone pratiche/.test(await page.locator('#pos-v').textContent()));
+  const del = ['Sì', 'Sì', 'No', 'Sì', 'Sì', 'No'];
+  for (let i = 0; i < del.length; i++) await page.locator('#del-rows .pm-row').nth(i).locator('select').selectOption(del[i]);
+  await page.locator('#del-check').click();
+  check('cap-19: elaborato deliverables matcher correct', /Tutte le scelte sono coerenti/.test(await page.locator('#del-v').textContent()));
+  // terminal chapter: no forward link
+  check('cap-19: terminal chapter has no forward link', await page.locator('.lk-chnav a[href^="cap-20-"]').count() === 0);
+  check('cap-19: terminal chapter keeps prev link', await page.locator('.lk-chnav a[href="cap-18-kanban-e-devops.html"]').count() === 2);
+
+  // ---------- nav chain integrity (bidirectional, cap-07..cap-19) ----------
+  const chain = ['cap-07-analisi-e-pos.html', 'cap-08-planning-jpps.html', 'cap-09-wbs-e-stime.html', 'cap-10-risorse-e-costi.html', 'cap-11-network-e-approvazione.html', 'cap-12-team-e-kickoff.html', 'cap-13-regole-operative.html', 'cap-14-riunioni-e-scope.html', 'cap-15-comunicazioni-e-work-package.html', 'cap-16-monitoring-e-controllo.html', 'cap-17-closing-e-chiusura.html', 'cap-18-kanban-e-devops.html', 'cap-19-caso-pdq-ed-esercitazioni.html'];
   for (let i = 0; i < chain.length; i++) {
     await fresh(chain[i]);
     const next = await page.locator('.lk-chnav a[href^="cap-"]').last().getAttribute('href');
     if (i < chain.length - 1) {
       check('nav: ' + chain[i] + ' -> ' + chain[i + 1], next === chain[i + 1]);
     } else {
-      check('nav: last chapter has no forward link', await page.locator('.lk-chnav a[href^="cap-16-"]').count() === 0);
+      check('nav: last chapter has no forward link', await page.locator('.lk-chnav a[href^="cap-20-"]').count() === 0);
+    }
+    if (i > 0) {
+      const prev = await page.locator('.lk-chnav a[href^="cap-"]').first().getAttribute('href');
+      check('nav: ' + chain[i] + ' <- ' + chain[i - 1], prev === chain[i - 1]);
     }
   }
+
+  // ---------- course index ----------
+  await fresh('index.html');
+  check('index: hero roadmap plate present', (await page.locator('.idx-hero svg').count()) === 1);
+  check('index: links all 19 chapters', (await page.locator('.idx-list a').count()) === 19);
+  const idxHrefs = await page.locator('.idx-list a').evaluateAll(as => as.map(a => a.getAttribute('href')));
+  for (const f of chain) {
+    check('index: links ' + f, idxHrefs.includes(f));
+  }
+  check('index: corpus-exhaustion footer', /esaurisce integralmente/.test(await page.locator('.lk-foot').textContent()));
 
   check('NO PAGE ERRORS across all chapters', errors.length === 0);
   if (errors.length) { console.log('  errors:'); errors.forEach(e => console.log('   - ' + e)); }

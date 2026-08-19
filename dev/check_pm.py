@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate PM lesson chapters: HTML structure, anchors, data-src, nav links, inline JS syntax."""
+"""Validate PM lesson chapters: HTML structure, anchors, data-src, nav links, inline JS syntax.
+
+Covers the full corpus (19 chapters) plus the course index (index.html), which
+links every chapter and exhausts all 11 sources + case study + exercises.
+"""
 import html.parser
 import re
 import subprocess
@@ -15,7 +19,13 @@ CHAPTERS = [
     "cap-10-risorse-e-costi.html", "cap-11-network-e-approvazione.html",
     "cap-12-team-e-kickoff.html", "cap-13-regole-operative.html",
     "cap-14-riunioni-e-scope.html", "cap-15-comunicazioni-e-work-package.html",
+    "cap-16-monitoring-e-controllo.html", "cap-17-closing-e-chiusura.html",
+    "cap-18-kanban-e-devops.html", "cap-19-caso-pdq-ed-esercitazioni.html",
 ]
+INDEX = "index.html"
+# The authoritative corpus: 11 numbered decks + case study (two identical copies) +
+# esercitazione + gruppi + linee guida. Data-src tokens must match one of these stems.
+SOURCE_STEMS = [f"{n} - " for n in range(1, 12)] + ["Case Study", "Esercitazione", "Gruppi", "Progetto"]
 
 
 class Balance(html.parser.HTMLParser):
@@ -50,6 +60,15 @@ class Balance(html.parser.HTMLParser):
             self.errors.append(f"unmatched </{tag}> at {self.getpos()}")
 
 
+def check_balance(name, text, problems):
+    b = Balance()
+    b.feed(text)
+    for e in b.errors:
+        problems.append(f"{name}: {e}")
+    for tag, pos in b.stack:
+        problems.append(f"{name}: unclosed <{tag}> at end of file (opened {pos})")
+
+
 def main():
     problems = []
     existing = set(p.name for p in PM.glob("*.html"))
@@ -61,12 +80,7 @@ def main():
         html = path.read_text(encoding="utf-8")
 
         # 1. tag balance
-        b = Balance()
-        b.feed(html)
-        for e in b.errors:
-            problems.append(f"{name}: {e}")
-        for tag, pos in b.stack:
-            problems.append(f"{name}: unclosed <{tag}> at end of file (opened {pos})")
+        check_balance(name, html, problems)
 
         # 2. internal anchors
         ids = set(re.findall(r'id="([^"]+)"', html))
@@ -74,7 +88,7 @@ def main():
             if anchor not in ids:
                 problems.append(f"{name}: broken anchor #{anchor}")
 
-        # 3. data-src on every section
+        # 3. data-src on every section, tokens match the authoritative corpus stems
         sections = re.findall(r"<section[^>]*>", html)
         no_src = [s for s in sections if 'data-src' not in s]
         if no_src:
@@ -83,18 +97,18 @@ def main():
         for attr in re.findall(r'data-src="([^"]+)"', html):
             for t in attr.split(","):
                 t = t.strip()
-                if not t.startswith(("1 - ", "2 - ", "3 - ", "4 - ", "5 - ", "6 - ", "7 - ", "8 - ", "9 - ", "10 - ", "11 - ", "Case Study", "Esercitazione", "Gruppi", "Progetto")):
+                if not t.startswith(tuple(SOURCE_STEMS)):
                     problems.append(f"{name}: suspicious data-src token: {t}")
                 srcs.add(t)
         if not srcs:
             problems.append(f"{name}: no data-src tokens at all")
 
-        # 4. nav links resolve (file: relative); index.html is deferred by design
+        # 4. nav links resolve (file: relative); index.html is validated separately
         for href in re.findall(r'href="([^"#][^"]*)"', html):
             if href.startswith(("http", "mailto:", "tel:", "//")):
                 continue
             if href.endswith("index.html"):
-                continue  # course index deferred until all authoritative material is covered
+                continue  # course index validated as its own file
             target = (path.parent / href).resolve()
             if href.endswith(".html") and target.name not in existing:
                 problems.append(f"{name}: link to missing file {href}")
@@ -115,17 +129,47 @@ def main():
         # 6. widget count sanity (host divs vs init calls)
         hosts = len(re.findall(r'id="w-[a-z0-9-]+"', html))
         calls = len(re.findall(r'LessonKit\.(?:stateExplorer|stepper|annotatedCode)\(', html))
-        iifes = len(re.findall(r"\(function \(\) \{", html))
-        if hosts == 0:
+        if hosts == 0 and "board-host" not in html and "rows" not in html:
             problems.append(f"{name}: no widget hosts")
+        interactive = hosts + len(re.findall(r'id="[a-z]+-rows"', html)) + len(re.findall(r'id="board-host"', html))
+        if interactive == 0:
+            problems.append(f"{name}: no interactive widgets at all")
+
+    # ---- course index ----
+    idx = PM / INDEX
+    if not idx.exists():
+        problems.append(f"MISSING FILE: {INDEX}")
+    else:
+        text = idx.read_text(encoding="utf-8")
+        check_balance(INDEX, text, problems)
+        linked = set()
+        for href in re.findall(r'href="([^"#][^"]*)"', text):
+            if href.startswith(("http", "mailto:", "tel:", "//")):
+                continue
+            if not href.endswith(".html"):
+                continue
+            target = (idx.parent / href).resolve()
+            if target.name not in existing:
+                problems.append(f"{INDEX}: link to missing file {href}")
+            linked.add(target.name)
+        for name in CHAPTERS:
+            if name not in linked:
+                problems.append(f"{INDEX}: chapter {name} not linked from the index")
+        for name in linked:
+            if name not in CHAPTERS and name != INDEX:
+                problems.append(f"{INDEX}: unexpected link to {name}")
+        if len(re.findall(r"<li>", text)) < len(CHAPTERS):
+            problems.append(f"{INDEX}: fewer list rows than chapters")
 
     if problems:
         print(f"{len(problems)} problem(s):")
         for p in problems:
             print("  " + p)
         sys.exit(1)
-    print(f"OK: {len(CHAPTERS)} chapters, all structural checks passed")
-    for name in CHAPTERS:
+    print(f"OK: {len(CHAPTERS)} chapters + {INDEX}, all structural checks passed")
+    for name in CHAPTERS + [INDEX]:
+        if name == INDEX:
+            continue
         html = (PM / name).read_text(encoding="utf-8")
         figs = len(re.findall(r"<figure class=\"lk-fig\"", html))
         quizes = len(re.findall(r"<details>", html))
