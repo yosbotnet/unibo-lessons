@@ -13,6 +13,8 @@ CHAPTERS = [
     "cap-04-pmlc-e-approcci.html", "cap-05-processi-e-aree.html", "cap-06-scoping-requisiti.html",
     "cap-07-analisi-e-pos.html", "cap-08-planning-jpps.html", "cap-09-wbs-e-stime.html",
     "cap-10-risorse-e-costi.html", "cap-11-network-e-approvazione.html",
+    "cap-12-team-e-kickoff.html", "cap-13-regole-operative.html",
+    "cap-14-riunioni-e-scope.html", "cap-15-comunicazioni-e-work-package.html",
 ]
 
 

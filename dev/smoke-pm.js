@@ -1,4 +1,4 @@
-// Smoke suite for the PM course chapters 7-11. Runs over file:// with Playwright.
+// Smoke suite for the PM course chapters 7-15. Runs over file:// with Playwright.
 // cd dev && node smoke-pm.js
 const { chromium } = require('playwright');
 const path = require('path');
@@ -120,15 +120,103 @@ function check(name, ok) {
   await page.locator('#w-proposta .lk-ac-line').nth(2).click();
   check('cap-11: proposal line explains Objective', /L'obiettivo/.test(await page.locator('#w-proposta .lk-ac-expl').textContent()));
 
+  // ---------- cap-12 ----------
+  await fresh('cap-12-team-e-kickoff.html');
+  // Kolb style matcher
+  const kolb = ['Assimilating', 'Diverging', 'Accommodating', 'Converging'];
+  for (let i = 0; i < kolb.length; i++) await page.locator('#kb-rows .pm-row').nth(i).locator('select').selectOption(kolb[i]);
+  await page.locator('#kb-check').click();
+  check('cap-12: Kolb matcher correct', /Tutti gli stili sono corretti/.test(await page.locator('#kb-v').textContent()));
+  // kick-off agenda ordering: click the 10 items in course order
+  for (let i = 0; i < 10; i++) await page.locator('#ko-grid .pm-opt').nth(i).click();
+  check('cap-12: kick-off agenda complete', /Agenda completa in 10 punti/.test(await page.locator('#ko-v').textContent()));
+  // RASCI matcher
+  const rasci = ['R', 'A', 'S', 'C', 'I'];
+  for (let i = 0; i < rasci.length; i++) await page.locator('#rs-rows .pm-row').nth(i).locator('select').selectOption(rasci[i]);
+  await page.locator('#rs-check').click();
+  check('cap-12: RASCI matcher correct', /Tutti i ruoli sono corretti/.test(await page.locator('#rs-v').textContent()));
+
+  // ---------- cap-13 ----------
+  await fresh('cap-13-regole-operative.html');
+  // Couger stepper: 6 clicks to reach verification
+  for (let i = 0; i < 6; i++) await page.locator('#cg-next').click();
+  check('cap-13: Couger reaches verification', /Fase 7 di 7/.test(await page.locator('#cg-v').textContent()));
+  // decision-making styles
+  const styles = ['Directive', 'Participative / Collaborative', 'Consultative'];
+  for (let i = 0; i < styles.length; i++) await page.locator('#st-rows .pm-row').nth(i).locator('select').selectOption(styles[i]);
+  await page.locator('#st-check').click();
+  check('cap-13: decision styles correct', /Tutti gli stili sono corretti/.test(await page.locator('#st-v').textContent()));
+  // Wysocki phases: each row maps to its own description index
+  for (let i = 0; i < 6; i++) await page.locator('#fs-rows .pm-row').nth(i).locator('select').selectOption(String(i));
+  await page.locator('#fs-check').click();
+  check('cap-13: Wysocki phases matched', /Tutte le fasi sono abbinate/.test(await page.locator('#fs-v').textContent()));
+  // meeting tabs
+  await page.locator('.lk-tab').nth(1).click();
+  check('cap-13: meeting during-tab opens', /durata della riunione/.test(await page.locator('.lk-tabpanel:not([hidden])').textContent()));
+
+  // ---------- cap-14 ----------
+  await fresh('cap-14-riunioni-e-scope.html');
+  // daily status matcher
+  const ds = [
+    'Sono in schedula',
+    'Sono in ritardo di x ore, ma prevedo di rientrare in schedula entro y giorni',
+    'Sono in ritardo di x ore e ho bisogno di aiuto per recuperare',
+    'Sono in anticipo di x ore e posso aiutare chi ha bisogno'
+  ];
+  for (let i = 0; i < ds.length; i++) await page.locator('#ds-rows .pm-row').nth(i).locator('select').selectOption(ds[i]);
+  await page.locator('#ds-check').click();
+  check('cap-14: daily status matcher correct', /Tutti gli stati sono corretti/.test(await page.locator('#ds-v').textContent()));
+  // scope change process stepper
+  for (let i = 0; i < 5; i++) await page.locator('#sc-next').click();
+  check('cap-14: scope change reaches approval', /approvata per l'implementazione/.test(await page.locator('#sc-v').textContent()));
+  // impact statement questions
+  const imp = [
+    'Come impatterà il cambiamento sui costi?',
+    'Come impatterà il cambiamento sulla schedula del progetto?',
+    'Come impatterà il cambiamento sulla qualità della soluzione?',
+    'Come impatterà il cambiamento sull\'allocazione delle risorse?'
+  ];
+  for (let i = 0; i < imp.length; i++) await page.locator('#im-rows .pm-row').nth(i).locator('select').selectOption(imp[i]);
+  await page.locator('#im-check').click();
+  check('cap-14: impact questions correct', /Tutte le domande sono corrette/.test(await page.locator('#im-v').textContent()));
+  // possible outcomes
+  const esiti = [
+    'Applicabile entro le risorse e i tempi previsti',
+    'Applicabile, ma richiederà un\'estensione della schedula',
+    'Applicabile entro la schedula prevista, ma sono richieste ulteriori risorse',
+    'Non applicabile senza modifiche sostanziali del progetto'
+  ];
+  for (let i = 0; i < esiti.length; i++) await page.locator('#es-rows .pm-row').nth(i).locator('select').selectOption(esiti[i]);
+  await page.locator('#es-check').click();
+  check('cap-14: outcomes coherent', /Tutti gli esiti sono coerenti/.test(await page.locator('#es-v').textContent()));
+
+  // ---------- cap-15 ----------
+  await fresh('cap-15-comunicazioni-e-work-package.html');
+  // communication type matcher
+  const comms = ['One-to-one', 'One-to-one', 'Elettronica', 'Elettronica', 'Scritta', 'Scritta'];
+  for (let i = 0; i < comms.length; i++) await page.locator('#cm-rows .pm-row').nth(i).locator('select').selectOption(comms[i]);
+  await page.locator('#cm-check').click();
+  check('cap-15: communication types correct', /Tutte le classificazioni sono corrette/.test(await page.locator('#cm-v').textContent()));
+  // resource criticality responses
+  const rr = ['Utilizzare gli «slack» disponibili', 'Far slittare la data di fine del progetto', 'Ricorrere allo straordinario', 'Utilizzare gli «slack» disponibili'];
+  for (let i = 0; i < rr.length; i++) await page.locator('#rr-rows .pm-row').nth(i).locator('select').selectOption(rr[i]);
+  await page.locator('#rr-check').click();
+  check('cap-15: resource responses correct', /Tutte le risposte sono corrette/.test(await page.locator('#rr-v').textContent()));
+  // work package matcher
+  const wp = ['Sì', 'Sì', 'Sì', 'No', 'Sì', 'Sì'];
+  for (let i = 0; i < wp.length; i++) await page.locator('#wp-rows .pm-row').nth(i).locator('select').selectOption(wp[i]);
+  await page.locator('#wp-check').click();
+  check('cap-15: work package matcher correct', /Tutte le risposte sono corrette/.test(await page.locator('#wp-v').textContent()));
+
   // ---------- nav chain integrity ----------
-  const chain = ['cap-07-analisi-e-pos.html', 'cap-08-planning-jpps.html', 'cap-09-wbs-e-stime.html', 'cap-10-risorse-e-costi.html', 'cap-11-network-e-approvazione.html'];
+  const chain = ['cap-07-analisi-e-pos.html', 'cap-08-planning-jpps.html', 'cap-09-wbs-e-stime.html', 'cap-10-risorse-e-costi.html', 'cap-11-network-e-approvazione.html', 'cap-12-team-e-kickoff.html', 'cap-13-regole-operative.html', 'cap-14-riunioni-e-scope.html', 'cap-15-comunicazioni-e-work-package.html'];
   for (let i = 0; i < chain.length; i++) {
     await fresh(chain[i]);
     const next = await page.locator('.lk-chnav a[href^="cap-"]').last().getAttribute('href');
     if (i < chain.length - 1) {
       check('nav: ' + chain[i] + ' -> ' + chain[i + 1], next === chain[i + 1]);
     } else {
-      check('nav: last chapter has no forward link', await page.locator('.lk-chnav a[href^="cap-12-"]').count() === 0);
+      check('nav: last chapter has no forward link', await page.locator('.lk-chnav a[href^="cap-16-"]').count() === 0);
     }
   }
 
