@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 7 — SQL-on-Hadoop, Spark SQL and Catalyst · Big Data</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bd-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .bd-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .bd-w .bd-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .bd-ctl{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.82rem}
+  .bd-ctl label{display:flex;gap:.4rem;align-items:center}
+  .bd-ctl input[type=range]{accent-color:var(--lk-cobalt)}
+  .bd-btn{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;
+    border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .bd-btn:hover{background:var(--lk-cobalt-dark)}
+  .bd-btn.bd-alt{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .bd-btn:disabled{opacity:.4;cursor:not-allowed}
+  .bd-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0}
+  .bd-out{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .8rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.82rem;margin-top:.6rem;overflow-x:auto}
+  .bd-grid{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:.6rem 0}
+  .bd-cell{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.45rem .6rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.8rem}
+  .bd-cell b{color:var(--lk-cobalt-dark)}
+  .bd-ok{color:var(--lk-forest);font-weight:600} .bd-bad{color:var(--lk-vermilion);font-weight:600}
+  .bd-bar{height:14px;border:1px solid var(--lk-rule-soft);background:var(--lk-paper);position:relative;border-radius:2px;overflow:hidden}
+  .bd-bar i{display:block;height:100%;background:var(--lk-cobalt)}
+  .bd-lin{font-family:var(--lk-mono);font-size:.8rem;padding:.2rem .5rem;border-radius:2px;margin:.15rem 0}
+  .bd-lin.bd-pend{color:var(--lk-ink-soft);border-left:3px solid var(--lk-rule-soft)}
+  .bd-lin.bd-run{background:var(--lk-hl);color:var(--lk-cobalt-dark);border-left:3px solid var(--lk-cobalt);font-weight:600}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-06-spark.html">&larr; Ch. 6 — Apache Spark: RDDs, DAG and architecture</a>
+    <a href="index.html">Index</a>
+    <a href="cap-08-spark-tuning.html">Ch. 8 — Tuning Spark: partitioning, shuffling and caching &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Batch processing · Chapter 7</div>
+    <h1>SQL-on-Hadoop, Spark SQL and Catalyst</h1>
+    <div class="lk-meta"><span>~40 min read</span><span>6 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">SQL-on-Hadoop: what it is</a></li>
+      <li><a href="#s2">Three flavours: batch, interactive, operational</a></li>
+      <li><a href="#s3">Apache Hive: a warehouse over HDFS</a></li>
+      <li><a href="#s4">Hive data units: database, table, partition, bucket</a></li>
+      <li><a href="#s5">Spark SQL: DataFrames and DataSets</a></li>
+      <li><a href="#s6">Why structure? The pros and the cons</a></li>
+      <li><a href="#s7">Catalyst: logical and physical plans</a></li>
+      <li><a href="#s8">Logical optimization: rules to a fixed point</a></li>
+      <li><a href="#s9">Physical optimization: the cost model</a></li>
+      <li><a href="#s10">Join methods and their selection</a></li>
+      <li><a href="#s11">What the cost model does not see</a></li>
+      <li><a href="#s12">Adaptive Query Execution</a></li>
+      <li><a href="#quiz">Test your knowledge</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="BigData 5 Batch applications.pdf">
+    <h2>1. SQL-on-Hadoop: what it is</h2>
+    <p>Chapter 6 ended with a promise: Spark&rsquo;s third original goal &mdash; <em>unifying real time and batch</em> &mdash; is why the same engine later grows a streaming module and a <strong>SQL module</strong>. This chapter is that module, and it starts one step earlier, with the family of tools it belongs to.</p>
+
+    <p><strong>SQL-on-Hadoop</strong> is a class of application tools that combine <strong>established SQL-style querying</strong> with <strong>newer Hadoop data framework elements</strong>. The two ingredients exist for two different reasons:</p>
+    <ul>
+      <li><strong>MapReduce-style programming is the native and most comprehensive way to design jobs</strong> &mdash; nothing is out of reach, but everything costs effort.</li>
+      <li><strong>SQL is a simple and widely understood language</strong> &mdash; declarative, familiar to analysts, and expressive enough for most real queries.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the bet of this whole family</span>
+      <p>Every tool in this chapter is a wager that the <em>common case</em> matters more than the general case: most jobs are selections, projections, aggregations and joins over structured data, and a declarative statement of those jobs is enough for an optimiser to do the hard work. The RDD remains the escape hatch for everything else &mdash; the deck puts it as &ldquo;whereas RDDs enable any computation through user defined functions&rdquo;. SQL-on-Hadoop never claims to replace MapReduce; it claims that <em>most</em> computations do not need MapReduce&rsquo;s full power.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="BigData 5 Batch applications.pdf">
+    <h2>2. Three flavours: batch, interactive, operational</h2>
+    <p>SQL-on-Hadoop is not one thing. The deck splits the tools into <strong>three categories</strong>, and the split is worth memorising because it predicts everything else about a tool &mdash; latency, storage, engine, and how resources are allocated:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Batch SQL</button>
+        <button class="lk-tab">Interactive SQL</button>
+        <button class="lk-tab">Operational SQL</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Examples: <strong>Apache Hive</strong>, <strong>Apache Spark</strong>.</p>
+        <p>SQL(-like) queries are <strong>translated into MapReduce/Spark jobs</strong>; they run on <strong>very large datasets and large ETL jobs</strong>, with latencies of <strong>minutes to hours</strong>. The Spark flavour adds <strong>in-memory SQL</strong>: load the datasets in memory, then query them.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Examples: <strong>Impala</strong>, <strong>Apache Drill</strong>.</p>
+        <p><strong>Interactive queries</strong> to enable traditional BI and analytics, with latencies of <strong>milliseconds to minutes</strong>. They <strong>require always-on daemons</strong> &mdash; the price of interactivity is that the engines are running before any query arrives.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Examples: <strong>Apache HBase</strong>, <strong>NoSQL databases</strong>.</p>
+        <p><strong>OLTP workloads and web applications</strong> that operate over smaller datasets, typically with <strong>insert, update, and deletes</strong> at millisecond latency. Note that HBase&rsquo;s SQL support is limited compared to the other families &mdash; it earns its place in the table through the query workload, not through full SQL.</p>
+      </div>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 370" width="100%" role="img" aria-labelledby="p71t p71d">
+        <title id="p71t">The three SQL-on-Hadoop families on a latency axis</title>
+        <desc id="p71d">Three horizontal bands ordered by latency: operational SQL at milliseconds, interactive SQL at milliseconds to minutes, batch SQL at minutes to hours, each listing example tools and how resources are allocated.</desc>
+        <text x="20" y="22" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">THE THREE SQL FAMILIES ON HADOOP — one axis, three workloads</text>
+
+        <line x1="70" y1="58" x2="70" y2="308" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <text x="18" y="96" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">ms</text>
+        <text x="14" y="180" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">ms–min</text>
+        <text x="16" y="264" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">min–h</text>
+
+        <rect x="110" y="56" width="560" height="72" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="126" y="76" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">OPERATIONAL SQL — HBase · NoSQL databases</text>
+        <text x="126" y="96" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">OLTP workloads and web applications over smaller datasets — insert, update, delete</text>
+        <text x="126" y="114" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">data storage: own · execution engine: own · allocation of resources: per service</text>
+
+        <rect x="110" y="140" width="560" height="72" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="126" y="160" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">INTERACTIVE SQL — Impala · Apache Drill</text>
+        <text x="126" y="180" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">interactive queries for traditional BI and analytics — milliseconds to minutes</text>
+        <text x="126" y="198" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">require always-on daemons · MPP-style engines · allocation of resources: per service</text>
+
+        <rect x="110" y="224" width="560" height="72" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+        <text x="126" y="244" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-forest)">BATCH SQL — Apache Hive · Apache Spark</text>
+        <text x="126" y="264" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">SQL(-like) queries translated into MapReduce/Spark jobs — minutes to hours</text>
+        <text x="126" y="282" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">allocation of resources: per job · in-memory SQL loads the dataset in memory, then queries it</text>
+
+        <text x="20" y="340" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">Hive pushes execution to other tools (MapReduce, Tez, Spark) — the only engine-less tool in the table; Spark owns its engine and runs on YARN.</text>
+      </svg>
+      <figcaption><b>Plate 7.1</b> — The families arranged by latency. Everything downstream follows from this axis: interactive and operational tools must be standing by (per-service resources), while batch tools are spun up per job — which is exactly the resource-negotiation story of Chapter 5, now applied to query engines.</figcaption>
+    </figure>
+
+    <p>The deck condenses all of this into one comparison table. Read it as a table of <em>responsibilities</em>: who stores the data, who executes the queries, and who gets blamed for the resources:</p>
+
+    <table>
+      <tr><th>Category</th><th>Query tool</th><th>Data storage</th><th>Execution engine</th><th>Allocation of resources</th></tr>
+      <tr><td>Operational</td><td>NoSQL</td><td>Own</td><td>Own</td><td>Per service</td></tr>
+      <tr><td>Operational</td><td>HBase</td><td>DFS</td><td>Own</td><td>Per service</td></tr>
+      <tr><td>Interactive</td><td>Impala</td><td>DFS</td><td>Own (MPP-style)</td><td>Per service</td></tr>
+      <tr><td>Interactive</td><td>Drill</td><td>Any</td><td>Own (MPP-style)</td><td>Per service</td></tr>
+      <tr><td>Batch</td><td>Spark</td><td>Any</td><td>Own (YARN)</td><td>Per job</td></tr>
+      <tr><td>Batch</td><td>Hive</td><td>DFS</td><td>MapReduce, Tez, Spark</td><td>Per job</td></tr>
+    </table>
+
+    <ul>
+      <li><strong>Data storage</strong> &mdash; only (most) <strong>NoSQL databases directly handle data storage</strong>. Some tools (HBase, Impala, Hive) provide a <strong>relational abstraction over HDFS</strong>; others (Drill, Spark) are able to <strong>read/write from/to any source</strong>.</li>
+      <li><strong>Execution engine</strong> &mdash; most tools <strong>directly handle query execution</strong>, which requires many slave services on several nodes; some are inspired by the <strong>MPP data warehouse architecture</strong>; and Hive is the odd one out, because it <strong>pushes execution to other tools</strong> (MapReduce, Tez, Spark).</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The two cells that break the pattern are <strong>Hive</strong> (batch, storage on DFS, but <em>no engine of its own</em>) and <strong>Spark</strong> (batch, <em>any</em> storage, own engine on YARN). Both are allocated <em>per job</em> — that is the family trait of batch SQL, and it is why the interactive tools, with their always-on daemons, cost resources even when idle.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="BigData 5 Batch applications.pdf">
+    <h2>3. Apache Hive: a warehouse over HDFS</h2>
+    <p><strong>Apache Hive</strong> is the oldest and most influential member of the family: <em>a data warehouse software that facilitates reading, writing, and managing large datasets residing in distributed storage using SQL</em>.</p>
+
+    <p>Three properties define how it works:</p>
+    <ul>
+      <li><strong>Structure is projected onto data already in storage</strong> (the so-called <em>external tables</em>) <strong>through metadata</strong>. The data files themselves stay untouched in HDFS; the schema lives elsewhere. This is Chapter 5&rsquo;s <em>schema-on-read</em> idea, institutionalised.</li>
+      <li><strong>Metadata are stored in a Metastore, using an RDBMS on a single node</strong>. That single node is a <strong>single point of failure</strong> &mdash; although Hive supports High-Availability configurations for it.</li>
+      <li><strong>Data is queried via HiveQL, a subset of SQL</strong>, and <strong>queries are translated to MapReduce/Spark jobs</strong> &mdash; Hive does not execute anything itself; it compiles declarative queries into the frameworks from Chapters 4&ndash;6. It also supports a procedural language, <strong>HPL-SQL</strong>.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>Hive&rsquo;s best use is <strong>batch jobs over large sets of append-only data</strong>. It is explicitly <em>not</em> for real-time queries (high latency) and <em>not designed for OLTP</em>. When the slides say &ldquo;data warehouse&rdquo; they mean the analytic kind: many reads, few writes, no interactive expectations. This is the same boundary the interactive family exists to serve.</p>
+    </div>
+
+    <p>And the ecosystem note worth remembering: <strong>AWS Athena</strong> enables SQL querying over S3 data, <strong>relies on Apache Hive for data modeling</strong>, and <strong>relies on Presto (an MPP-like tool) to run queries</strong> — a managed service standing on the shoulders of the very tools this chapter describes.</p>
+  </section>
+
+  <section id="s4" data-src="BigData 5 Batch applications.pdf">
+    <h2>4. Hive data units: database, table, partition, bucket</h2>
+    <p>Hive organises data in four nested units, and each unit is <em>practically</em> a folder (or a set of files) in HDFS. The deck gives the exact paths, so the picture is worth drawing once:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 350" width="100%" role="img" aria-labelledby="p72t p72d">
+        <title id="p72t">Hive data units as folders in HDFS</title>
+        <desc id="p72d">A folder tree: the warehouse folder contains a database folder, which contains a table folder, which contains partition folders named column=value, each containing bucket files.</desc>
+        <text x="20" y="18" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">HIVE DATA UNITS — every unit is a folder (or a file) in HDFS</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="24" y="24" width="14" height="4" fill="var(--lk-ink-soft)"/>
+          <rect x="24" y="28" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="34" y="42" fill="var(--lk-ink-soft)">/user/hive/warehouse/</text>
+
+          <rect x="64" y="64" width="14" height="4" fill="var(--lk-cobalt)"/>
+          <rect x="64" y="68" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="74" y="82" fill="var(--lk-cobalt-dark)">dbname.db</text>
+
+          <rect x="104" y="104" width="14" height="4" fill="var(--lk-ink)"/>
+          <rect x="104" y="108" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="114" y="122" fill="var(--lk-ink)">tablename/</text>
+
+          <rect x="144" y="144" width="14" height="4" fill="var(--lk-vermilion)"/>
+          <rect x="144" y="148" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+          <text x="154" y="162" fill="var(--lk-vermilion)">department=IT/</text>
+
+          <rect x="184" y="184" width="14" height="4" fill="var(--lk-forest)"/>
+          <rect x="184" y="188" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/>
+          <text x="194" y="202" fill="var(--lk-forest)">bucket01</text>
+
+          <rect x="184" y="216" width="14" height="4" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="184" y="220" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" opacity=".8"/>
+          <text x="194" y="234" fill="var(--lk-forest)" opacity=".8">bucket02</text>
+
+          <rect x="144" y="256" width="14" height="4" fill="var(--lk-vermilion)" opacity=".85"/>
+          <rect x="144" y="260" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" opacity=".85"/>
+          <text x="154" y="274" fill="var(--lk-vermilion)" opacity=".85">department=Sales/</text>
+
+          <rect x="184" y="296" width="14" height="4" fill="var(--lk-forest)" opacity=".85"/>
+          <rect x="184" y="300" width="190" height="20" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" opacity=".85"/>
+          <text x="194" y="314" fill="var(--lk-forest)" opacity=".85">bucket01</text>
+        </g>
+
+        <g stroke="var(--lk-rule)" stroke-width="1.2" fill="none">
+          <path d="M38 48 L38 76 L62 76"/>
+          <path d="M78 88 L78 116 L102 116"/>
+          <path d="M118 128 L118 280"/>
+          <path d="M118 156 L142 156"/>
+          <path d="M118 268 L142 268"/>
+          <path d="M158 172 L158 232"/>
+          <path d="M158 196 L182 196"/>
+          <path d="M158 228 L182 228"/>
+          <path d="M158 280 L158 308 L182 308"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <text x="360" y="42" fill="var(--lk-cobalt-dark)">Database — container of tables</text>
+          <text x="360" y="58" fill="var(--lk-ink-soft)">practically, a folder: /user/hive/warehouse/dbname.db</text>
+
+          <text x="360" y="86" fill="var(--lk-ink)">Table — homogeneous records, same schema</text>
+          <text x="360" y="102" fill="var(--lk-ink-soft)">a set of files: .../tablename/* — the number of files</text>
+          <text x="360" y="118" fill="var(--lk-ink-soft)">depends on how the data was partitioned when inserted</text>
+
+          <text x="360" y="162" fill="var(--lk-vermilion)">Partition — one folder level per column value</text>
+          <text x="360" y="178" fill="var(--lk-ink-soft)">faster search on partitioning columns, but potential</text>
+          <text x="360" y="194" fill="var(--lk-ink-soft)">&ldquo;explosion&rdquo; of folders — ideal for low-cardinality</text>
+          <text x="360" y="210" fill="var(--lk-ink-soft)">columns (e.g., departments)</text>
+
+          <text x="360" y="274" fill="var(--lk-forest)">Bucket — fixed number of files from a hash column</text>
+          <text x="360" y="290" fill="var(--lk-ink-soft)">stored as a single file: .../tablename/bucket01</text>
+          <text x="360" y="306" fill="var(--lk-ink-soft)">faster search (and skipped shuffle) on bucketing columns</text>
+          <text x="360" y="322" fill="var(--lk-ink-soft)">— ideal for high-cardinality columns (e.g., IDs)</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 7.2</b> — The four units, nested like a file system because they <em>are</em> a file system. Partitioning adds folder levels by column value; bucketing fixes the number of files by hashing a column. The two techniques aim at the same goal &mdash; reading less data &mdash; and they target opposite cardinalities.</figcaption>
+    </figure>
+
+    <table>
+      <tr><th>Unit</th><th>What it is</th><th>HDFS location</th></tr>
+      <tr><td><strong>Database</strong></td><td>Container of tables</td><td><code>/user/hive/warehouse/dbname.db</code></td></tr>
+      <tr><td><strong>Table</strong></td><td>Homogeneous set of records with the same schema</td><td><code>/user/hive/warehouse/dbname.db/tablename/*</code></td></tr>
+      <tr><td><strong>Partition</strong> (optional)</td><td>Records split by the value of one or more columns &mdash; a further level of folders</td><td><code>.../tablename/column=value/*</code></td></tr>
+      <tr><td><strong>Bucket</strong> (optional)</td><td>Records grouped into a fixed number of files, based on the hash value of some column &mdash; one file per bucket</td><td><code>.../tablename/bucket01</code></td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The cardinality rule is the examinable nugget. <strong>Partition on low-cardinality columns</strong> (a handful of distinct values, e.g., departments) because each value is worth a whole folder; partitioning on a high-cardinality column would create thousands of near-empty folders &mdash; the &ldquo;explosion&rdquo; the slides warn about. <strong>Bucket on high-cardinality columns</strong> (e.g., IDs) because hashing spreads records evenly across a fixed number of files, and bucketing columns give faster search and a <em>skipped shuffle</em> on joins &mdash; a first taste of Chapter 8&rsquo;s partitioning logic, at the storage layer.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="BigData 5 Batch applications.pdf">
+    <h2>5. Spark SQL: DataFrames and DataSets</h2>
+    <p>Hive showed that structure can be bolted onto Hadoop. Spark SQL does it inside the engine itself. The definition in the deck is one sentence long, and it is a direct continuation of Chapter 6:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p><strong>RDDs are immutable distributed collection of objects. DataFrames and DataSets are immutable distributed collection of records organized into named columns (i.e., a table).</strong> Simply put: <strong>RDDs with a schema attached</strong>.</p>
+    </div>
+
+    <p>Everything else about them follows from that one sentence:</p>
+    <ul>
+      <li>They <strong>support both relational and procedural processing</strong> &mdash; e.g., SQL and Scala in the same program.</li>
+      <li>They <strong>support complex data types</strong> (struct, array, etc.) <strong>and user defined types</strong>.</li>
+      <li>They are <strong>cached using columnar storage</strong> &mdash; the columnar layout is what makes IO optimisations such as <em>skipping blocks in Parquet files</em> possible (Parquet was Chapter 3&rsquo;s format of choice).</li>
+      <li>They <strong>can be built from many different sources</strong>: DBMSs, files, other tools (e.g., Hive), RDDs.</li>
+    </ul>
+
+    <p>The one difference between the two APIs is <strong>when type conformity is checked</strong>:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">DataFrame</button>
+        <button class="lk-tab">DataSet</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Records organized into named columns, with the schema <strong>checked at runtime</strong>. This is the more permissive, dynamically-typed feel &mdash; and the slide explicitly connects it to Chapter 6&rsquo;s warning: type inference is a Scala feature and is <em>different from dynamic typing</em>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>The same collection of records with named columns, but type conformity is <strong>checked at compile time</strong> (the DataSet is the typed API). Checking earlier <strong>avoids querying columns that do not really exist</strong> &mdash; the error is caught before the job is even submitted, which is exactly the &ldquo;anticipate programming errors&rdquo; benefit of Chapter 6&rsquo;s type inference.</p>
+      </div>
+    </div>
+
+    <p>And then the sentence that carries the chapter: they are <strong>still lazily evaluated</strong> &mdash; nothing from Chapter 6 is thrown away &mdash; <strong>but they support under-the-hood optimizations and code generation</strong>:</p>
+    <ul>
+      <li><strong>The Catalyst optimizer creates optimized execution plans</strong> &mdash; IO optimisations such as skipping blocks in Parquet files, and the logical push-down of selection predicates.</li>
+      <li><strong>JVM code generation for all supported languages</strong> &mdash; even non-native JVM languages such as Python. It <strong>consists in clubbing multiple physical operations together to form a single Java function</strong>, so the per-record work no longer bounces through the interpreter.</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Three one-line distinctions to keep ready: <strong>RDD = collection of objects, DataFrame/DataSet = collection of records with named columns (an RDD with a schema)</strong>; <strong>DataFrame checks types at runtime, DataSet at compile time</strong>; <strong>RDDs are lazily evaluated and so are DataFrames/DataSets &mdash; but the latter get Catalyst optimizations and JVM code generation on top</strong>. The laziness is the same laziness; the difference is that the schema gives the optimiser something to work with.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="BigData 5 Batch applications.pdf">
+    <h2>6. Why structure? The pros and the cons</h2>
+    <p>The deck stops to justify the whole design, and the honesty is refreshing: structure is a trade, not a gift. The slides put it as a balanced list:</p>
+
+    <table>
+      <tr><th></th><th>Argument</th></tr>
+      <tr>
+        <td><strong>Cons</strong></td>
+        <td><strong>Structure imposes some limits</strong> &mdash; whereas RDDs enable <em>any</em> computation through user defined functions, a schema only fits computations that can be expressed on top of it.</td>
+      </tr>
+      <tr>
+        <td rowspan="3"><strong>Pros</strong></td>
+        <td><strong>The most common computations are supported</strong> — selections, aggregations, joins cover the majority of real workloads.</td>
+      </tr>
+      <tr><td><strong>Language simplicity</strong> — SQL is widely understood, so analysts and developers share one language.</td></tr>
+      <tr><td><strong>It opens the room to optimizations</strong> — it is hard to optimize a user defined function, because the optimiser cannot see inside it; a declarative plan, it can.</td></tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the trade is the whole chapter</span>
+      <p>The cons column is exactly why RDDs still exist, and the pros column is exactly why Catalyst can exist. A user defined function is a black box: Spark cannot reorder it, prune columns through it, or push predicates into it. A relational plan is a tree of operators with known semantics, and a tree can be rewritten. <strong>Structure is not a restriction the user suffers; it is the information the optimiser needs.</strong> Chapter 6&rsquo;s laziness is what makes the rewriting possible &mdash; the plan exists before any data moves.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="BigData 5 Batch applications.pdf">
+    <h2>7. Catalyst: logical and physical plans</h2>
+    <p>The <strong>Catalyst optimizer creates optimized execution plans</strong> by working on two distinct representations of the query, and the deck draws the boundary sharply:</p>
+
+    <table>
+      <tr><th>Plan</th><th>It describes</th></tr>
+      <tr><td><strong>Logical Plan</strong></td><td><strong>Which computations must be done</strong> — the relational operations, independent of any algorithm.</td></tr>
+      <tr><td><strong>Physical Plan</strong></td><td><strong>Which computations must be done <em>and how to conduct them</em></strong> — i.e., <strong>which algorithms are used</strong>.</td></tr>
+    </table>
+
+    <p>This is the same split as Chapter 6 at one level up: the logical DAG of RDDs became a physical plan of stages and tasks; here, the logical query plan becomes a physical plan of algorithms. The whole journey of a query, from text to execution:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-labelledby="p73t p73d">
+        <title id="p73t">From SQL text to execution through Catalyst</title>
+        <desc id="p73d">SQL text is parsed into a logical plan, rewritten by rule-based logical optimization into an optimized logical plan, compiled into physical plans among which the cost model selects, and executed; AQE reviews the plan at stage boundaries.</desc>
+        <rect x="20" y="18" width="660" height="42" rx="3" fill="none" stroke="var(--lk-forest)" stroke-dasharray="5 4" stroke-width="1.5"/>
+        <text x="36" y="36" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-forest)">AQE (Spark 3.0) — a layer on top of Catalyst: the plan is not final,</text>
+        <text x="36" y="52" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-forest)">it reviews the plan at each stage boundary using actual intermediate data</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="86" width="100" height="38" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="36" y="110" fill="var(--lk-ink)">SQL text</text>
+
+          <rect x="140" y="86" width="90" height="38" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="158" y="110" fill="var(--lk-ink)">Parser</text>
+
+          <rect x="250" y="86" width="190" height="38" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+          <text x="266" y="102" fill="var(--lk-cobalt-dark)">Logical plan</text>
+          <text x="266" y="118" fill="var(--lk-ink-soft)">which computations must be done</text>
+
+          <rect x="470" y="86" width="200" height="38" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt-dark)" stroke-width="1.6"/>
+          <text x="486" y="110" fill="var(--lk-cobalt-dark)">Optimized logical plan</text>
+        </g>
+
+        <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a7)"><path d="M120 105 L138 105"/><path d="M230 105 L248 105"/><path d="M440 105 L468 105"/></g>
+
+        <rect x="250" y="152" width="190" height="80" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-dasharray="5 4"/>
+        <text x="266" y="170" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">LOGICAL OPTIMIZATION</text>
+        <text x="266" y="186" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">rules (Scala functions): constant folding,</text>
+        <text x="266" y="202" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">predicate pushdown, column pruning,</text>
+        <text x="266" y="218" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">join reordering — applied recursively</text>
+        <text x="266" y="234" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">and iteratively until a fixed point</text>
+
+        <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a7)">
+          <path d="M345 124 L345 150"/>
+          <path d="M440 182 L566 126"/>
+        </g>
+
+        <rect x="470" y="238" width="200" height="52" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="486" y="258" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">Physical plans</text>
+        <text x="486" y="274" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">which algorithms are used — the</text>
+        <text x="486" y="290" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">cost model selects the best one</text>
+
+        <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a7)"><path d="M570 124 L570 236"/></g>
+
+        <text x="250" y="272" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">Cost = α · costCPU + (1−α) · costIO</text>
+        <text x="250" y="288" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">     = α · cardinality + (1−α) · size</text>
+
+        <rect x="470" y="310" width="200" height="26" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/>
+        <text x="486" y="328" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-forest)">Execution — stages &amp; tasks</text>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a7)"><path d="M570 290 L570 308"/></g>
+
+        <text x="20" y="136" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">LOGICAL — what to compute</text>
+        <text x="20" y="262" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">PHYSICAL — how to compute it</text>
+
+        <defs>
+          <marker id="a7" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-cobalt)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 7.3</b> — The journey of a query. The logical plan says <em>what</em>; rules rewrite it until a fixed point; the physical layer says <em>how</em> and the cost model chooses; AQE then sits on top of the whole thing, revising the plan between stages. Each arrow is a moment where Chapter 6&rsquo;s laziness pays off — nothing has moved yet.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s8" data-src="BigData 5 Batch applications.pdf">
+    <h2>8. Logical optimization: rules to a fixed point</h2>
+    <p>Logical optimization is <strong>based on rules</strong>: a rule is <em>a function that can be applied on a portion of the logical plan</em>, implemented as a Scala function. The deck lists <strong>several types of rules</strong>:</p>
+
+    <table>
+      <tr><th>Rule</th><th>What it does</th></tr>
+      <tr><td><strong>Constant folding</strong></td><td>Resolve constant expressions <strong>at compile time</strong> — e.g., <code>WHERE price &gt; 10 AND 1 = 1</code> is simplified before any data is read.</td></tr>
+      <tr><td><strong>Predicate pushdown</strong></td><td>Push selection predicates <strong>close to the sources</strong> — the filter happens as early (and as cheaply) as possible, ideally during the physical scan.</td></tr>
+      <tr><td><strong>Column pruning</strong></td><td>Project <strong>only the required column</strong> — drop every column the query never uses.</td></tr>
+      <tr><td><strong>Join reordering</strong></td><td>Change <strong>the order of join operations</strong> — joining small inputs first beats joining large ones first.</td></tr>
+    </table>
+
+    <p>The rules are <strong>applied recursively and iteratively until the plan reaches a fixed point</strong> — run them until none of them changes anything anymore. Each application may enable another: pruning columns makes a join cheaper, which may make reordering it worthwhile, and so on.</p>
+
+    <div class="bd-w">
+      <h4>One query through the rules</h4>
+      <p class="bd-sub">Select each line to see what Catalyst does at that step. The SQL is the same query from the exam material &mdash; only the plan underneath it changes.</p>
+      <div id="ac-catalyst"></div>
+    </div>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — rules are the reason for the schema</span>
+      <p>None of these rules could exist on plain RDDs, because an RDD carries no information about what its elements mean. The moment records have named columns, a rule can ask &ldquo;is this predicate applicable here?&rdquo; and answer with the schema. <em>Constant folding, predicate pushdown, column pruning and join reordering</em> are four small rewrites, but they are applied until fixed point &mdash; and the combination is where the real gains come from, exactly as with Chapter 6&rsquo;s pipelining of narrow dependencies.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="BigData 5 Batch applications.pdf">
+    <h2>9. Physical optimization: the cost model</h2>
+    <p>Once the logical plan is optimized, <strong>one or more physical execution plans are defined</strong> &mdash; each a concrete choice of algorithms &mdash; and <strong>a cost model is used to select the best one</strong>. The model in the slides is deliberately simple:</p>
+
+<pre><code class="language-text">Cost(table) = α · costCPU + (1−α) · costIO
+            = α · cardinality + (1−α) · size</code></pre>
+
+    <p>Two components, one knob: <strong>costCPU is the cardinality</strong> (how many records), <strong>costIO is the size</strong> (how many bytes), and <strong>α</strong> decides how much each matters. On top of the cost model there are also <strong>rule-based physical optimizations</strong>:</p>
+    <ul>
+      <li><strong>Operation pipelining</strong> — similarly to RDDs: narrow operations are fused so records flow through them without materialisation (Chapter 6&rsquo;s stages, again).</li>
+      <li><strong>Predicate push-down</strong> — e.g., filtering is performed <em>during the physical scan</em>, so the engine never materialises records that the filter will drop.</li>
+    </ul>
+
+    <div class="bd-w">
+      <h4>The cost model, live</h4>
+      <p class="bd-sub">Slide α and the two components, and watch the cost table move. The model only ever sees these two numbers — that is its strength and, as section 11 shows, its blind spot.</p>
+      <div id="w-cost"></div>
+    </div>
+  </section>
+
+  <section id="s10" data-src="BigData 5 Batch applications.pdf">
+    <h2>10. Join methods and their selection</h2>
+    <p>The most visible effect of physical optimization is <strong>join method selection</strong>: the same join can be executed by three different algorithms, and the cost model picks one. All three are worth drawing because the exam routinely asks for their conditions:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 380" width="100%" role="img" aria-labelledby="p74t p74d">
+        <title id="p74t">The three join methods of Spark SQL</title>
+        <desc id="p74d">Broadcast Hash join replicates the small table to every executor and joins locally; Shuffle Hash join repartitions both sides by join key and hashes the smaller partition; Shuffle Sort Merge join repartitions both sides, sorts keys per partition, and iterates the sorted lists.</desc>
+        <text x="20" y="22" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">THREE JOIN STRATEGIES — the cost model picks one per join</text>
+
+        <text x="20" y="58" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-forest)">BROADCAST HASH JOIN — no shuffle</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="72" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="84" fill="var(--lk-ink-soft)">A1</text>
+          <rect x="40" y="92" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="104" fill="var(--lk-ink-soft)">A2</text>
+          <rect x="40" y="112" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="124" fill="var(--lk-ink-soft)">A3</text>
+          <rect x="230" y="88" width="60" height="34" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="246" y="110" fill="var(--lk-forest)">HJ</text>
+          <rect x="430" y="82" width="220" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/>
+          <text x="446" y="102" fill="var(--lk-forest)">Table B — the small table,</text>
+          <text x="446" y="118" fill="var(--lk-forest)">fully loaded into each executor</text>
+        </g>
+        <g stroke="var(--lk-forest)" stroke-width="1.4" fill="none" marker-end="url(#a7f)">
+          <path d="M84 100 L228 100"/><path d="M290 105 L428 100"/>
+        </g>
+        <text x="40" y="140" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">no shuffle at all: the small table is replicated like a broadcast variable (Chapter 8), and each executor joins its local A partition against it.</text>
+
+        <line x1="20" y1="156" x2="680" y2="156" stroke="var(--lk-rule-soft)"/>
+
+        <text x="20" y="176" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">SHUFFLE HASH JOIN — repartition by join key</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="190" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="202" fill="var(--lk-ink-soft)">A1</text>
+          <rect x="40" y="210" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="222" fill="var(--lk-ink-soft)">A2</text>
+          <rect x="40" y="230" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="242" fill="var(--lk-ink-soft)">A3</text>
+          <rect x="230" y="206" width="60" height="34" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+          <text x="246" y="228" fill="var(--lk-cobalt-dark)">HJ</text>
+          <rect x="560" y="190" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="570" y="202" fill="var(--lk-ink-soft)">B1</text>
+          <rect x="560" y="210" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="570" y="222" fill="var(--lk-ink-soft)">B2</text>
+          <rect x="560" y="230" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="570" y="242" fill="var(--lk-ink-soft)">B3</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a7c)">
+          <path d="M84 218 L228 218"/><path d="M290 223 L558 218"/>
+        </g>
+        <text x="40" y="258" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">shuffle: both tables are repartitioned by the join key (a wide dependency — stage boundary, Chapter 6). The hash table of the smaller partition is loaded</text>
+        <text x="40" y="274" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">into memory; for each record of the bigger partition, matching records are found by using the hash table.</text>
+
+        <line x1="20" y1="290" x2="680" y2="290" stroke="var(--lk-rule-soft)"/>
+
+        <text x="20" y="310" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">SHUFFLE SORT MERGE JOIN — repartition by join key</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="324" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="336" fill="var(--lk-ink-soft)">A1</text>
+          <rect x="40" y="344" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="50" y="356" fill="var(--lk-ink-soft)">A2</text>
+          <rect x="230" y="334" width="66" height="34" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="240" y="356" fill="var(--lk-vermilion)">SMJ</text>
+          <rect x="560" y="324" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="570" y="336" fill="var(--lk-ink-soft)">B1</text>
+          <rect x="560" y="344" width="44" height="16" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="570" y="356" fill="var(--lk-ink-soft)">B2</text>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none" marker-end="url(#a7v)">
+          <path d="M84 352 L228 352"/><path d="M296 351 L558 352"/>
+        </g>
+        <defs>
+          <marker id="a7f" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-forest)"/></marker>
+          <marker id="a7c" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-cobalt)"/></marker>
+          <marker id="a7v" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 7.4</b> — The three algorithms. Broadcast avoids the shuffle entirely; the two shuffle methods differ in what happens after the repartition — hash probing for one, sorted-merge iteration for the other. The arrows into the operators are the shuffles, and a shuffle is a Chapter 6 wide dependency: it is where the stage boundary goes.</figcaption>
+    </figure>
+
+    <p>Formally, the deck defines them as:</p>
+    <ul>
+      <li><strong>Shuffle Sort Merge join</strong> — each table is repartitioned based on the join key; then Sort Merge join is applied: <strong>the keys on each partition are sorted</strong>, and <strong>the join is carried out by iterating on the sorted lists</strong>.</li>
+      <li><strong>Shuffle Hash join</strong> — each table is repartitioned based on the join key; then Hash join is applied: <strong>the hash table of the smaller partition is loaded into memory</strong>, and <strong>for each record of the bigger partition the matching records are found by using the hash table</strong>.</li>
+      <li><strong>Broadcast Hash join</strong> — <strong>the smaller table is fully loaded into each executor&rsquo;s memory</strong>, similar to the mechanism of broadcast variables.</li>
+    </ul>
+
+    <h3>When is each one selected?</h3>
+    <p>The selection is a small decision tree, and the conditions are exact:</p>
+    <ul>
+      <li><strong>Broadcast Hash join</strong> — one RDD is smaller than a certain threshold: <code>spark.sql.autoBroadcastJoinThreshold</code>, <strong>default 10MB</strong> (some people increase it to GB levels).</li>
+      <li><strong>Shuffle Hash join</strong> — the conditions for Broadcast do not apply; <strong>one RDD is 3 times smaller than the other</strong>; and <strong>the partitions of the smaller RDD are small enough for their hash tables to fit into memory</strong>.</li>
+      <li><strong>Shuffle Sort Merge join</strong> — the conditions for Broadcast and Shuffle Hash do not apply. It is the default fallback.</li>
+    </ul>
+    <p>The deck closes with a caveat that matters for the exam&rsquo;s tone: <strong>join methods are under continuous refinement</strong>, and a few more exist for certain situations (e.g., cartesian product).</p>
+
+    <div class="bd-w">
+      <h4>Which join method?</h4>
+      <p class="bd-sub">Toggle the three conditions and apply the decision tree. The verdict is what Catalyst&rsquo;s cost model would conclude.</p>
+      <div id="w-join"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The three conditions, verbatim: <strong>Broadcast</strong> if one RDD is smaller than the threshold (<code>autoBroadcastJoinThreshold</code>, default 10MB); <strong>Shuffle Hash</strong> if Broadcast does not apply <em>and</em> one RDD is 3&times; smaller <em>and</em> the smaller partitions fit in memory as hash tables; <strong>Shuffle Sort Merge</strong> otherwise. Notice the logic is exclusion-based: Broadcast first, then Shuffle Hash, then Sort Merge as the residual case &mdash; the same &ldquo;conditions that do not apply&rdquo; phrasing appears in the slides, and the exam mirrors it.</p>
+    </div>
+  </section>
+
+  <section id="s11" data-src="BigData 5 Batch applications.pdf">
+    <h2>11. What the cost model does not see</h2>
+    <p>The deck is candid about the model&rsquo;s limits: <strong>Catalyst only considers the size and the cardinality of tables</strong>. Everything else that determines a query&rsquo;s real cost is missing from the formula:</p>
+    <ul>
+      <li><strong>Network throughput</strong>;</li>
+      <li><strong>Disk throughput</strong>;</li>
+      <li><strong>Allocation of resources</strong> — the number of executors, the number of cores per executor;</li>
+      <li><strong>Allocation of tasks</strong> — the data locality probability (Chapter 5&rsquo;s principle, now as a cost factor).</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — why the simplification exists</span>
+      <p>A cost model is only useful if it can be evaluated <em>before</em> the query runs, with information the optimiser already has. Cardinality and size are known at planning time; network and disk throughput are properties of a cluster that can change between jobs, and data locality is a scheduling decision made after the plan is fixed. The simplification is not ignorance — it is a choice of which costs are <em>plannable</em>. What the deck calls <em>research work</em> is precisely the attempt to make the model probabilistic and accurate anyway.</p>
+    </div>
+
+    <p>And the research is from the course&rsquo;s own group &mdash; worth citing, because it is the visible frontier of this chapter&rsquo;s topic:</p>
+    <ul>
+      <li><strong>Baldacci, L., &amp; Golfarelli, M. (2018). <em>A cost model for Spark SQL.</em></strong> IEEE Transactions on Knowledge and Data Engineering, 31(5), 819&ndash;832.</li>
+      <li><strong>Gallinucci, E., &amp; Golfarelli, M. (2019). <em>SparkTune: tuning Spark SQL through query cost modeling.</em></strong> EDBT 2019: 546&ndash;549.</li>
+    </ul>
+    <p>Both attack the same gap: <em>defining a more accurate, probabilistic cost model</em> — one that turns Chapter 8&rsquo;s tuning knobs into something the optimiser itself can reason about.</p>
+  </section>
+
+  <section id="s12" data-src="BigData 5 Batch applications.pdf">
+    <h2>12. Adaptive Query Execution</h2>
+    <p>The chapter ends where the current version of Spark ends: <strong>Adaptive Query Execution (AQE)</strong>, <strong>introduced with version 3.0</strong>. Its main idea in one sentence:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the plan is not final</span>
+      <p><strong>The execution plan is not final.</strong> Reviews are made <strong>at each stage boundary</strong>, and additional optimizations are possibly applied, given the information available on the <strong>intermediate data</strong>. AQE can be defined as <strong>a layer on top of Spark Catalyst which will modify the Spark plan on the fly</strong>.</p>
+    </div>
+
+    <p>Why does this make sense? The cost model of section 9 works on <em>estimates</em>. Once a stage has actually run, Spark knows the <em>real</em> cardinalities and sizes — so the plan can be revised with facts instead of guesses. The deck lists the two drawbacks with equal honesty:</p>
+    <ul>
+      <li><strong>The execution stops at each stage boundary</strong> for Spark to review its plan — but the gain in performance is usually worth the time spent to revisit the plan.</li>
+      <li><strong>The execution plan is more difficult to read</strong> — the original multi-stage job becomes a set of single-stage jobs, and the UI shows the revised pieces rather than one clean plan.</li>
+    </ul>
+
+    <p>And four concrete optimizations, each fixing one specific planning blind spot:</p>
+    <table>
+      <tr><th>AQE optimization</th><th>What it does</th></tr>
+      <tr><td><strong>Adaptive number of shuffle partitions</strong></td><td>Spark SQL used to set a default number of <strong>200 partitions at each stage</strong>; AQE <strong>automatically adjusts it at runtime</strong> based on the actual data volume.</td></tr>
+      <tr><td><strong>Dynamically converting Sort Merge joins to Broadcast joins</strong></td><td>A <strong>dynamic switch of join strategies based on actual table sizes</strong> — a table estimated as large but actually small becomes a Broadcast join mid-flight.</td></tr>
+      <tr><td><strong>Dynamically coalesce shuffle partitions</strong></td><td>Merge the partitions that ended up nearly empty, so the next stage does not schedule tiny tasks.</td></tr>
+      <tr><td><strong>Dynamically optimize skewed joins</strong></td><td>Split the partitions dominated by a single popular key, so one straggler no longer dictates the join&rsquo;s runtime.</td></tr>
+    </table>
+
+    <div class="bd-w">
+      <h4>AQE, stage by stage</h4>
+      <p class="bd-sub">Step through a two-stage query and watch the plan change at the stage boundary. Each review uses data the planner could only guess before.</p>
+      <div id="w-aqe"></div>
+    </div>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>AQE is not a fourth join method and not a new optimizer — it is <em>a layer on top of Catalyst</em> that re-runs parts of the optimization with real statistics. And its drawback list is examinable too: the stop-at-each-boundary pause, and the plan that is harder to read because the original multi-stage job becomes a set of single-stage jobs.</p>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Chapter 6 said stages&rsquo; boundaries are defined by shuffle operations; AQE is exactly what makes those boundaries useful: they are the points where the engine may stop, look at real intermediate data, and re-plan. If you are asked why AQE exists, answer in two clauses: <strong>the cost model plans from estimates, and the stage boundary is where the estimates become facts</strong>.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="BigData 5 Batch applications.pdf">
+    <h2>Test your knowledge</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What is SQL-on-Hadoop, and why does it exist?</summary>
+        <p>SQL-on-Hadoop is a class of application tools that combine established SQL-style querying with newer Hadoop data framework elements. It exists because <strong>MapReduce-style programming is the native and most comprehensive way to design jobs</strong>, but <strong>SQL is a simple and widely understood language</strong> — so most computations can be expressed declaratively and let an optimiser do the hard work, while RDDs remain the escape hatch for everything a schema cannot express.</p>
+      </details>
+
+      <details>
+        <summary>Distinguish batch, interactive and operational SQL on Hadoop, with examples.</summary>
+        <p><strong>Batch SQL</strong> (Apache Hive, Apache Spark): SQL(-like) queries translated into MapReduce/Spark jobs, on very large datasets and large ETL jobs, minutes to hours; Spark adds in-memory SQL (load datasets in memory, then query them). <strong>Interactive SQL</strong> (Impala, Apache Drill): interactive queries for traditional BI and analytics, milliseconds to minutes, requiring always-on daemons. <strong>Operational SQL</strong> (Apache HBase, NoSQL databases): OLTP workloads and web applications over smaller datasets, typically with insert, update and deletes at millisecond latency.</p>
+      </details>
+
+      <details>
+        <summary>In the SQL-on-Hadoop comparison table, which tools break the pattern, and how?</summary>
+        <p><strong>Hive</strong> breaks the execution-engine column: it stores on DFS but pushes execution to other tools (MapReduce, Tez, Spark), being the only engine-less tool. <strong>Spark</strong> breaks the storage column: it can read/write from/to <em>any</em> source and runs its own engine on YARN. Both are batch tools with <strong>per-job</strong> allocation of resources, unlike the interactive/operational families which are allocated <strong>per service</strong>.</p>
+      </details>
+
+      <details>
+        <summary>What is Apache Hive, and what does its Metastore do?</summary>
+        <p>Hive is a data warehouse software that facilitates reading, writing, and managing large datasets residing in distributed storage using SQL. <strong>Structure is projected onto data already in storage (external tables) through metadata</strong>, and that metadata is stored in a <strong>Metastore using an RDBMS on a single node</strong> — a single point of failure, although High-Availability is supported. Data is queried via <strong>HiveQL (a subset of SQL)</strong>, queries are <strong>translated to MapReduce/Spark jobs</strong>, and a procedural language (HPL-SQL) is supported.</p>
+      </details>
+
+      <details>
+        <summary>Which workloads is Hive best for, and which is it not designed for?</summary>
+        <p>Best use: <strong>batch jobs over large sets of append-only data</strong>. It is not for real-time queries (high latency) and <strong>not designed for OLTP</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Describe the four Hive data units and their HDFS locations.</summary>
+        <p><strong>Database</strong>: container of tables, practically a folder — <code>/user/hive/warehouse/dbname.db</code>. <strong>Table</strong>: homogeneous set of records with the same schema, stored as a set of files — <code>.../tablename/*</code>. <strong>Partition</strong> (optional): records split by the value of one or more columns, implemented as a further level of folders — <code>.../tablename/column=value/*</code>. <strong>Bucket</strong> (optional): records grouped into a fixed number of files based on the hash value of some column — <code>.../tablename/bucket01</code>.</p>
+      </details>
+
+      <details>
+        <summary>When do you partition, when do you bucket, and why?</summary>
+        <p><strong>Partition</strong> on <strong>low-cardinality columns</strong> (e.g., departments): each value deserves a folder, and search on partitioning columns is faster — but there is a potential &ldquo;explosion&rdquo; of folders if cardinality is high. <strong>Bucket</strong> on <strong>high-cardinality columns</strong> (e.g., IDs): hashing spreads records evenly across a fixed number of files, giving faster search and a skipped shuffle on bucketing columns.</p>
+      </details>
+
+      <details>
+        <summary>What are DataFrames/DataSets, and how do they differ from RDDs?</summary>
+        <p>RDDs are immutable distributed collections of objects; <strong>DataFrames and DataSets are immutable distributed collections of records organized into named columns (i.e., a table)</strong> — simply put, RDDs with a schema attached. They support both relational and procedural processing (e.g., SQL and Scala), complex data types (struct, array) and user defined types, are cached using columnar storage, and can be built from DBMSs, files, other tools (e.g., Hive) and RDDs.</p>
+      </details>
+
+      <details>
+        <summary>Where is type conformity checked for DataFrames versus DataSets, and what does that prevent?</summary>
+        <p><strong>At compile time for DataSets; at runtime for DataFrames.</strong> Checking earlier — as the DataSet API does — avoids querying columns that do not really exist, catching the error before the job is submitted.</p>
+      </details>
+
+      <details>
+        <summary>What optimizations does the Catalyst optimizer bring, and what is JVM code generation?</summary>
+        <p>Catalyst <strong>creates optimized execution plans</strong> for the still-lazily-evaluated DataFrames/DataSets: IO optimizations such as <strong>skipping blocks in Parquet files</strong> and <strong>logical push-down of selection predicates</strong>. JVM code generation produces code <strong>for all supported languages, even non-native JVM ones such as Python</strong>, and <strong>consists in clubbing multiple physical operations together to form a single Java function</strong> — so records flow through fused operations without interpreter round-trips.</p>
+      </details>
+
+      <details>
+        <summary>What are the pros and cons of structured processing versus RDDs?</summary>
+        <p><strong>Con:</strong> structure imposes some limits — whereas RDDs enable any computation through user defined functions. <strong>Pros:</strong> the most common computations are supported; language simplicity; and structure opens the room to optimizations — it is hard to optimize a user defined function, because the optimiser cannot see inside it.</p>
+      </details>
+
+      <details>
+        <summary>Distinguish the logical plan from the physical plan, and name the four logical optimization rules.</summary>
+        <p>The <strong>logical plan describes which computations must be done</strong>; the <strong>physical plan describes which computations must be done and how to conduct them (i.e., which algorithms are used)</strong>. The four logical rules: <strong>constant folding</strong> (resolve constant expressions at compile time), <strong>predicate pushdown</strong> (push selection predicates close to the sources), <strong>column pruning</strong> (project only the required column), <strong>join reordering</strong> (change the order of join operations). Rules are implemented as Scala functions, applied recursively and iteratively until the plan reaches a fixed point.</p>
+      </details>
+
+      <details>
+        <summary>State the physical cost model and what it ignores.</summary>
+        <p><strong>Cost(table) = α·costCPU + (1−α)·costIO = α·cardinality + (1−α)·size</strong>. The model <strong>only considers the size and the cardinality of tables</strong>; it ignores network throughput, disk throughput, the allocation of resources (number of executors, cores per executor) and the allocation of tasks (data locality probability). Rule-based physical optimizations (operation pipelining, predicate push-down during the physical scan) run alongside it.</p>
+      </details>
+
+      <details>
+        <summary>Describe the three join methods and the conditions for selecting each.</summary>
+        <p><strong>Broadcast Hash join</strong>: the smaller table is fully loaded into each executor&rsquo;s memory, similar to broadcast variables — selected when one RDD is smaller than the threshold <code>spark.sql.autoBroadcastJoinThreshold</code> (default 10MB). <strong>Shuffle Hash join</strong>: both tables repartitioned by join key; the hash table of the smaller partition is loaded into memory and the bigger partition probes it — selected when Broadcast does not apply, one RDD is 3 times smaller than the other, and the smaller partitions fit in memory as hash tables. <strong>Shuffle Sort Merge join</strong>: both tables repartitioned by join key, keys sorted within each partition, join by iterating on the sorted lists — selected when neither of the previous conditions applies.</p>
+      </details>
+
+      <details>
+        <summary>What is AQE, when was it introduced, and what are its four optimizations and its drawbacks?</summary>
+        <p>Adaptive Query Execution, <strong>introduced with Spark 3.0</strong>: the execution plan is not final; reviews are made <strong>at each stage boundary</strong> and additional optimizations are applied given the information on the intermediate data. It is <strong>a layer on top of Catalyst that modifies the Spark plan on the fly</strong>. Optimizations: <strong>adaptive number of shuffle partitions</strong> (the default 200 per stage is adjusted at runtime), <strong>dynamically converting Sort Merge joins to Broadcast joins</strong> (a dynamic switch of join strategies based on actual table sizes), <strong>dynamically coalescing shuffle partitions</strong>, and <strong>dynamically optimizing skewed joins</strong>. Drawbacks: execution stops at each stage boundary for the review (usually worth it), and the execution plan is harder to read — the original multi-stage job becomes a set of single-stage jobs.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-06-spark.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-08-spark-tuning.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>BigData 5 Batch applications</em> · Big Data — University of Bologna · Prof. Enrico Gallinucci</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+if (window.hljs) { hljs.highlightAll(); }
+
+/* ---- Annotated code: one query through Catalyst ---- */
+LessonKit.annotatedCode('#ac-catalyst', {
+  lang: 'sql',
+  lines: [
+    ['spark.sql("SELECT dept, SUM(salary) FROM emp JOIN dept ON emp.did = dept.id WHERE year = 2023 GROUP BY dept")', 'The entry point: a SQL string becomes a DataFrame. Nothing is computed yet — DataFrames, like RDDs, are lazily evaluated (Chapter 6).'],
+    ['// 1. Parser -> unresolved logical plan', 'The SQL text is parsed into a tree of relational operators (Scan, Join, Aggregate). At this stage the plan is unresolved: Spark does not yet know the schemas of emp and dept.'],
+    ['// 2. Analysis: resolve names, check types', 'The catalog attaches a schema to every table and column and checks type conformity — at compile time for DataSets, at runtime for DataFrames. A query on a column that does not exist fails exactly here.'],
+    ['// 3. Logical optimization: rules to a fixed point', 'Constant folding resolves constant expressions; predicate pushdown moves WHERE year = 2023 close to the source; column pruning drops every column the query never reads; join reordering may swap the join order. Applied recursively and iteratively until the plan reaches a fixed point.'],
+    ['// 4. Physical planning: the cost model chooses', 'One or more physical plans are defined — differing in join methods and algorithms — and the best one is selected by Cost = α·cardinality + (1−α)·size.'],
+    ['// 5. Execution, with AQE reviews at stage boundaries', 'The chosen plan runs as stages and tasks (Chapter 6). At each stage boundary AQE (Spark 3.0) may revise the plan using real intermediate data; JVM code generation clubs multiple physical operations into a single Java function.']
+  ]
+});
+
+/* ---- Bespoke widget: cost model calculator ---- */
+(function () {
+  var host = document.getElementById('w-cost');
+  if (!host) return;
+  var alpha = 0.5, card = 50, size = 50;
+  var ctl = document.createElement('div');
+  ctl.className = 'bd-ctl';
+  ctl.innerHTML = '<label>α <input type="range" id="coA" min="0" max="100" step="1" value="50"> <b id="coAv">0.5</b></label>' +
+    '<label>cardinality (M records) <input type="range" id="coC" min="1" max="200" step="1" value="50"> <b id="coCv">50M</b></label>' +
+    '<label>size (GB) <input type="range" id="coS" min="1" max="200" step="1" value="50"> <b id="coSv">50 GB</b></label>';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  var bar = document.createElement('div'); bar.className = 'bd-bar'; bar.style.margin = '.7rem 0';
+  bar.innerHTML = '<i style="width:50%"></i>';
+  host.appendChild(ctl); host.appendChild(bar); host.appendChild(out);
+
+  function render() {
+    var a = alpha, c = card, s = size;
+    var costCPU = a * c, costIO = (1 - a) * s, cost = costCPU + costIO;
+    var cpuPct = cost === 0 ? 50 : Math.round(costCPU / cost * 100);
+    bar.querySelector('i').style.width = cpuPct + '%';
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['costCPU = α·cardinality', costCPU.toFixed(1)],
+     ['costIO = (1−α)·size', costIO.toFixed(1)],
+     ['Cost(table)', cost.toFixed(1)],
+     ['CPU share', cpuPct + '%']].forEach(function (c2) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c2[0] + ': <b></b>';
+      d.querySelector('b').textContent = c2[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var note = document.createElement('div');
+    note.style.color = 'var(--lk-ink-soft)'; note.style.marginTop = '.4rem';
+    note.textContent = "This is all Catalyst sees: size and cardinality. Network throughput, disk throughput, executor allocation and data locality probability are not in the formula — which is why the deck's research section proposes a more accurate, probabilistic cost model.";
+    out.appendChild(note);
+  }
+
+  ctl.addEventListener('input', function (e) {
+    var id = e.target.id;
+    if (id === 'coA') { alpha = +e.target.value / 100; document.getElementById('coAv').textContent = (alpha).toFixed(2); }
+    if (id === 'coC') { card = +e.target.value; document.getElementById('coCv').textContent = card + 'M'; }
+    if (id === 'coS') { size = +e.target.value; document.getElementById('coSv').textContent = size + ' GB'; }
+    render();
+  });
+  render();
+})();
+
+/* ---- Bespoke widget: join method selector ---- */
+(function () {
+  var host = document.getElementById('w-join');
+  if (!host) return;
+  var bcast = false, three = false, fits = false;
+  var ctl = document.createElement('div'); ctl.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+
+  function mk(label, get, set) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    function paint() { b.className = get() ? 'bd-btn' : 'bd-btn bd-alt'; b.textContent = label + ': ' + (get() ? 'yes' : 'no'); }
+    b.addEventListener('click', function () { set(!get()); paint(); render(); });
+    paint();
+    return b;
+  }
+  ctl.appendChild(mk('one table ≤ 10 MB (autoBroadcastJoinThreshold)', function () { return bcast; }, function (v) { bcast = v; }));
+  ctl.appendChild(mk('one table ≥ 3× smaller than the other', function () { return three; }, function (v) { three = v; }));
+  ctl.appendChild(mk('smaller table\'s partitions fit in memory as hash tables', function () { return fits; }, function (v) { fits = v; }));
+
+  function render() {
+    var method, why;
+    if (bcast) {
+      method = 'Broadcast Hash join';
+      why = "One RDD is smaller than the threshold (spark.sql.autoBroadcastJoinThreshold, default 10MB — some people increase it to GB levels). The smaller table is fully loaded into each executor's memory, similar to broadcast variables: no shuffle at all.";
+    } else if (three && fits) {
+      method = 'Shuffle Hash join';
+      why = "Broadcast does not apply; one RDD is 3 times smaller than the other; and the partitions of the smaller RDD are small enough for their hash tables to fit into memory. Both sides are repartitioned by join key, the hash table of the smaller partition is loaded into memory, and each record of the bigger partition probes it.";
+    } else {
+      method = 'Shuffle Sort Merge join';
+      why = "Neither the Broadcast nor the Shuffle Hash conditions apply. Both tables are repartitioned based on the join key, the keys on each partition are sorted, and the join is carried out by iterating on the sorted lists.";
+    }
+    out.innerHTML = '';
+    var t = document.createElement('div'); t.className = 'bd-ok'; t.textContent = method;
+    var w = document.createElement('div');
+    w.style.color = 'var(--lk-ink-soft)'; w.style.marginTop = '.35rem'; w.textContent = why;
+    out.appendChild(t); out.appendChild(w);
+  }
+  host.appendChild(ctl); host.appendChild(out);
+  render();
+})();
+
+/* ---- Bespoke widget: AQE step-through ---- */
+(function () {
+  var host = document.getElementById('w-aqe');
+  if (!host) return;
+  var steps = [
+    { t: 'Initial plan', d: 'Spark SQL sets a default of 200 shuffle partitions at each stage, and the join is planned as a Sort Merge join. The plan is not final: AQE is a layer on top of Catalyst that can modify it on the fly.' },
+    { t: 'Stage 1 executes', d: 'The engine stops at the stage boundary for Spark to review its plan — the first drawback, and usually worth the pause. The intermediate data is now real, not estimated.' },
+    { t: 'AQE review — shuffle partitions', d: 'Actual data volume shows far fewer partitions are needed: AQE automatically adjusts the number of shuffle partitions at runtime instead of the static 200.' },
+    { t: 'AQE review — join strategy', d: 'Actual table sizes show one side is small: AQE dynamically converts the Sort Merge join into a Broadcast join, skipping the shuffle of the big side.' },
+    { t: 'AQE review — skew and empty partitions', d: 'Some keys dominate their partitions: AQE dynamically optimizes the skewed joins, and coalesces shuffle partitions that ended up nearly empty.' },
+    { t: 'Stage 2 executes the revised plan', d: 'The original multi-stage job has become a set of single-stage jobs — the second drawback: the final plan is more difficult to read.' }
+  ];
+  var i = 0;
+  var log = document.createElement('div'); log.className = 'bd-out';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+
+  function render() {
+    log.innerHTML = '';
+    steps.forEach(function (s, idx) {
+      var d = document.createElement('div');
+      d.className = 'bd-lin ' + (idx <= i ? 'bd-run' : 'bd-pend');
+      d.textContent = (idx <= i ? 'DONE ' : 'next ') + s.t;
+      log.appendChild(d);
+    });
+    out.textContent = i < steps.length ? steps[i].d : 'All phases complete. The plan that actually ran is not the plan that was submitted.';
+  }
+
+  var next = document.createElement('button');
+  next.type = 'button'; next.className = 'bd-btn'; next.textContent = 'Next phase';
+  next.addEventListener('click', function () {
+    if (i < steps.length - 1) { i++; }
+    else { i = steps.length; next.disabled = true; }
+    render();
+  });
+
+  var rst = document.createElement('button');
+  rst.type = 'button'; rst.className = 'bd-btn bd-alt'; rst.textContent = 'Reset';
+  rst.addEventListener('click', function () { i = 0; next.disabled = false; render(); });
+
+  btns.appendChild(next); btns.appendChild(rst);
+  host.appendChild(log); host.appendChild(btns); host.appendChild(out);
+  render();
+})();
+</script>
+</body>
+</html>

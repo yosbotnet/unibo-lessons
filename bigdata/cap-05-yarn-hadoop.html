@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 5 — The Data Lake, YARN and Hadoop MapReduce · Big Data</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bd-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .bd-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .bd-w .bd-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .bd-ctl{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.82rem}
+  .bd-ctl label{display:flex;gap:.4rem;align-items:center}
+  .bd-ctl input[type=range]{accent-color:var(--lk-cobalt)}
+  .bd-btn{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;
+    border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .bd-btn:hover{background:var(--lk-cobalt-dark)}
+  .bd-btn.bd-alt{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .bd-btn:disabled{opacity:.4;cursor:not-allowed}
+  .bd-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0}
+  .bd-out{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .8rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.82rem;margin-top:.6rem;overflow-x:auto}
+  .bd-grid{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:.6rem 0}
+  .bd-cell{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.45rem .6rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.8rem}
+  .bd-cell b{color:var(--lk-cobalt-dark)}
+  .bd-ok{color:var(--lk-forest);font-weight:600} .bd-bad{color:var(--lk-vermilion);font-weight:600}
+  .bd-actor{display:inline-block;font-family:var(--lk-utility);font-size:.7rem;font-weight:700;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--lk-vermilion);margin-bottom:.3rem}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-04-mapreduce.html">&larr; Ch. 4 — The MapReduce paradigm</a>
+    <a href="index.html">Index</a>
+    <a href="cap-06-spark.html">Ch. 6 — Apache Spark: RDDs, DAG and architecture &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Batch processing · Chapter 5</div>
+    <h1>The Data Lake, YARN and Hadoop MapReduce</h1>
+    <div class="lk-meta"><span>~35 min read</span><span>6 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The Big Data flow and the Data Lake</a></li>
+      <li><a href="#s2">Organising the lake: areas and medallions</a></li>
+      <li><a href="#s3">Why you need a resource negotiator</a></li>
+      <li><a href="#s4">YARN: the two daemons and the application master</a></li>
+      <li><a href="#s5">Data locality</a></li>
+      <li><a href="#s6">The YARN walkthrough</a></li>
+      <li><a href="#s7">YARN schedulers</a></li>
+      <li><a href="#s8">Hadoop MapReduce: the job</a></li>
+      <li><a href="#s9">MapReduce execution in detail</a></li>
+      <li><a href="#s10">Coping with node failures</a></li>
+      <li><a href="#s11">The limitations that produced Spark</a></li>
+      <li><a href="#quiz">Test your knowledge</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="BigData 5 Batch applications.pdf">
+    <h2>1. The Big Data flow and the Data Lake</h2>
+    <p>Chapters 3 and 4 gave us a place to put bytes and a way to compute over them. This chapter is about everything in between: how the data is <em>organised</em> once it lands, and who decides <em>where and when</em> each task actually runs.</p>
+
+    <p>The deck opens with a map of the whole flow, and it is worth reading as a picture of the entire course. On the left, data enters either as <strong>near-real-time streams</strong> or through <strong>ETL</strong>. Streams pass through an <strong>event-driven service bus</strong> (e.g., Kafka) and a <strong>streaming</strong> engine (e.g., Spark Streaming, Storm) into <strong>real-time processing</strong>. In parallel, <strong>batch processing</strong> feeds <strong>analytics</strong> (e.g., Spark, Cloudera, Flink) and <strong>interactive applications</strong> (e.g., NoSQL, NewSQL). And underneath all of it, holding everything together, sits the <strong>Data Lake</strong> — a Distributed File System plus DBMSs.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note</span>
+      <p>Use that picture as a table of contents for the rest of these notes. The batch branch is Chapters 5 to 9; the streaming branch, with Kafka and the event bus, is Chapter 10; the interactive branch with NoSQL and NewSQL is Chapter 11; and the governance question that this whole diagram raises — who keeps it from becoming a mess — is Chapter 12.</p>
+    </div>
+
+    <h3>The original idea, and the swamp</h3>
+    <p>The Data Lake started as a deliberately minimal proposal:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the original definition</span>
+      <p>In the original idea, the Data Lake was just a <strong>central repository system for storage, processing and analysis of raw data</strong>, in which the data is kept <strong>in its original format</strong> and is processed to be queried <strong>only when needed</strong>.</p>
+    </div>
+
+    <p>The appeal is obvious: no schema to agree on before ingestion, no transformation cost paid for data nobody may ever query, no loss of information from an early normalisation. The catch is equally obvious in hindsight. <strong>Soon it became clear that — in the absence of organization and governance — the Data Lake could easily become a Swamp</strong> (Couto, Borges, Ruiz, Marczak, Prikladnicki, <em>A mapping study about data lakes: An improved definition and possible architectures</em>, Proc. SEKE, Lisbon, 2019).</p>
+
+    <p>A swamp is a lake in which the data is still all there and nobody can find, trust or interpret any of it. Deferring the schema does not delete the work of understanding the data; it just moves that work to the moment of the query, and multiplies it by the number of people who ask.</p>
+  </section>
+
+  <section id="s2" data-src="BigData 5 Batch applications.pdf">
+    <h2>2. Organising the lake: areas and medallions</h2>
+    <p>The remedy is structure. To facilitate data governance, <strong>the Data Lake can be partitioned into areas, representing the processing state of the data</strong>. Note the criterion carefully — the areas are not divided by <em>subject</em> or by <em>owner</em>, but by <em>how far along the pipeline</em> a dataset has travelled.</p>
+
+    <table>
+      <tr><th>Area</th><th>What it contains</th></tr>
+      <tr><td><strong>Landing</strong></td><td>Where data are stored immediately after ingestion</td></tr>
+      <tr><td><strong>Working</strong></td><td>Temporary tables and configuration data</td></tr>
+      <tr><td><strong>Harbor</strong></td><td>Data (completely or partially) processed from the landing area</td></tr>
+      <tr><td><strong>Discovery</strong></td><td>Data created by data scientists for experimental purposes; it serves as a <strong>safe sandbox</strong>, where data is only <em>taken from</em> (and not published to) other areas</td></tr>
+      <tr><td><strong>Access</strong></td><td>Data ready to be accessed by reporting and visualization tools</td></tr>
+    </table>
+    <p style="font-size:.9rem;color:var(--lk-ink-soft)">Francia, Gallinucci, Golfarelli, Leoni, Rizzi, Santolini, &ldquo;Making data platforms smarter with MOSES&rdquo;, <em>Future Generation Computer Systems</em> 125 (2021): 299&ndash;313.</p>
+
+    <p>The Discovery area is the interesting one. Its rule is a one-way valve: data scientists may <em>read</em> from any area, but what they produce stays inside Discovery and is never published back. That single constraint is what lets exploration be genuinely free without contaminating the datasets that reporting depends on — the experiment cannot leak into production by accident.</p>
+
+    <h3>The medallion architecture</h3>
+    <p><strong>A common reference today is the medallion architecture</strong>, which compresses the same idea into three named layers:</p>
+
+    <table>
+      <tr><th>Layer</th><th>Definition</th></tr>
+      <tr><td><strong>Bronze</strong></td><td>Where data are stored immediately after ingestion; a common practice here is to apply <em>only minimal transformations</em> on the data (e.g., type conversions)</td></tr>
+      <tr><td><strong>Silver</strong></td><td>Contains data processed from the bronze layer; it represents the point at which raw data is <strong>filtered, cleaned and &ldquo;dressed up&rdquo; (augmented)</strong> by joining across one or many other tables</td></tr>
+      <tr><td><strong>Gold</strong></td><td>Contains data ready to be accessed by reporting and visualization tools; it is <strong>purpose-built to solve explicit intended business goals</strong></td></tr>
+    </table>
+    <p style="font-size:.9rem;color:var(--lk-ink-soft)">Strengholt, P., <em>Building Medallion Architectures: Designing with Delta Lake and Spark</em>, O&rsquo;Reilly Media, 2025.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 420" width="100%" role="img" aria-labelledby="p51t p51d">
+        <title id="p51t">Data Lake areas and the medallion mapping</title>
+        <desc id="p51d">On the left, the five data lake areas stacked from Landing at the bottom to Access at the top, with Working alongside and Discovery as a sandbox that only receives data. On the right, the three medallion layers Bronze, Silver and Gold, aligned with Landing, Harbor and Access.</desc>
+
+        <text x="20" y="26" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">DATA LAKE AREAS</text>
+        <text x="470" y="26" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">MEDALLION</text>
+
+        <g style="font-family:var(--lk-mono);font-size:12px">
+          <rect x="30" y="330" width="230" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+          <text x="145" y="358" text-anchor="middle" fill="var(--lk-cobalt-dark)">Landing Area</text>
+
+          <rect x="30" y="226" width="105" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="82" y="254" text-anchor="middle" fill="var(--lk-ink-soft)">Working</text>
+
+          <rect x="155" y="226" width="105" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+          <text x="207" y="254" text-anchor="middle" fill="var(--lk-cobalt-dark)">Harbor</text>
+
+          <rect x="30" y="120" width="230" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+          <text x="145" y="148" text-anchor="middle" fill="var(--lk-cobalt-dark)">Access Area</text>
+
+          <rect x="30" y="56" width="230" height="40" rx="3" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="5 4"/>
+          <text x="145" y="81" text-anchor="middle" fill="var(--lk-vermilion)">Discovery Area</text>
+        </g>
+
+        <g stroke="var(--lk-cobalt)" stroke-width="1.6" fill="none" marker-end="url(#a5)">
+          <path d="M145 328 L145 276"/>
+          <path d="M207 224 L207 170"/>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#a5v)">
+          <path d="M292 340 L300 340 L300 78 L264 78"/>
+          <path d="M292 244 L300 244"/>
+          <path d="M292 138 L300 138"/>
+        </g>
+        <text x="308" y="200" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">a sandbox:</text>
+        <text x="308" y="216" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">reads from everywhere,</text>
+        <text x="308" y="232" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">publishes to nowhere</text>
+
+        <g style="font-family:var(--lk-mono);font-size:12px">
+          <rect x="470" y="330" width="200" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="570" y="358" text-anchor="middle" fill="var(--lk-forest)">Bronze</text>
+          <rect x="470" y="226" width="200" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="570" y="254" text-anchor="middle" fill="var(--lk-forest)">Silver</text>
+          <rect x="470" y="120" width="200" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="570" y="148" text-anchor="middle" fill="var(--lk-forest)">Gold</text>
+        </g>
+        <g stroke="var(--lk-forest)" stroke-width="1.6" fill="none" marker-end="url(#a5f)">
+          <path d="M570 328 L570 276"/>
+          <path d="M570 224 L570 170"/>
+        </g>
+
+        <g stroke="var(--lk-rule-soft)" stroke-width="1" stroke-dasharray="3 3">
+          <path d="M262 353 L468 353"/>
+          <path d="M262 249 L468 249"/>
+          <path d="M262 143 L468 143"/>
+        </g>
+
+        <text x="20" y="404" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">Landing = Bronze = Source layer &nbsp;·&nbsp; Harbor = Silver = Reconciled layer &nbsp;·&nbsp; Access = Gold = Warehouse layer</text>
+
+        <defs>
+          <marker id="a5" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-cobalt)"/></marker>
+          <marker id="a5v" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-vermilion)"/></marker>
+          <marker id="a5f" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-forest)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 5.1</b> — The same pipeline named twice. Both schemes sort data by <em>processing state</em>, not by subject: raw at the bottom, business-ready at the top. The dashed vermilion box is the one structural idea neither scheme can do without — a place where experiments cannot contaminate anything downstream.</figcaption>
+    </figure>
+
+    <h3>Is this just a data warehouse again?</h3>
+    <p>The deck asks the question directly: <em>is the medallion architecture just a &ldquo;revamped&rdquo; version of the 3-layer data warehouse architecture?</em> The correspondence is exact:</p>
+
+    <table>
+      <tr><th>Data Lake area</th><th>Medallion level</th><th>Data warehouse layer</th></tr>
+      <tr><td>Raw area</td><td>Bronze</td><td>Source layer</td></tr>
+      <tr><td>Harbor area</td><td>Silver</td><td>Reconciled layer</td></tr>
+      <tr><td>Access area</td><td>Gold</td><td>Warehouse layer</td></tr>
+    </table>
+    <p style="font-size:.9rem;color:var(--lk-ink-soft)">Golfarelli, M. and Rizzi, S., <em>Data Warehouse design: Modern principles and Methodologies</em>, McGraw-Hill, New York, 2009.</p>
+
+    <p>And the answer the slides give is honest: <strong>&ldquo;Perhaps. Ultimately, there is no universal number of areas/levels/layers.&rdquo;</strong> The basic philosophy is common; then <strong>you specialize it based on the complexities within your organization and data pipelines</strong>.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>If asked to compare the Data Lake with the Data Warehouse, do not fall into the &ldquo;lake = new, warehouse = old&rdquo; trap. The layered organisation is <em>the same idea</em> in both: raw &rarr; reconciled &rarr; ready-to-serve. What genuinely differs is <strong>when</strong> the structure is imposed — the warehouse transforms on ingestion (schema-on-write), the lake keeps the original format and transforms on query (schema-on-read) — and the discipline required to stop the second one from becoming a swamp.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="BigData 5 Batch applications.pdf">
+    <h2>3. Why you need a resource negotiator</h2>
+    <p>Chapter 4 described map and reduce tasks as though they simply happened. The deck now asks the three questions that were quietly postponed:</p>
+    <ul>
+      <li><strong>Where do I run them?</strong></li>
+      <li><strong>What if some tasks fail?</strong></li>
+      <li><strong>What if I want to run multiple jobs?</strong></li>
+    </ul>
+
+    <p>The answer is a component with a specific job description. The <strong>Resource Negotiator</strong>:</p>
+    <ul>
+      <li>has a <strong>global view</strong> of the resources available in the cluster;</li>
+      <li><strong>decides where and when</strong> each unit of work should be allocated, and with how many resources (CPU &amp; RAM);</li>
+      <li>uses a <strong>scheduling policy</strong> to manage concurrency;</li>
+      <li><strong>avoids over-instantiation</strong> of processes on the same worker;</li>
+      <li><strong>handles fault-tolerance</strong>.</li>
+    </ul>
+
+    <p><strong>Apache YARN</strong> — Yet Another Resource Negotiator — is Hadoop&rsquo;s cluster resource management. It was <strong>introduced in Hadoop 2 to improve the MapReduce implementation</strong>, and — this is the part that matters historically — <strong>it is general enough to support other distributed computing paradigms</strong>.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — why YARN outlived MapReduce</span>
+      <p>YARN provides APIs for requesting and working with cluster resources, and <strong>these APIs are typically used by distributed computing frameworks (e.g., MapReduce, Spark), NOT by user code</strong>. That single design decision is why Spark could later arrive and take over the computation layer without anyone having to replace the cluster underneath: YARN does not know what a map task is. It knows about containers with CPU and memory, and it will hand them to whoever asks.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="BigData 5 Batch applications.pdf">
+    <h2>4. YARN: the two daemons and the application master</h2>
+    <p>YARN provides its core services via <strong>two types of long-running daemons</strong>:</p>
+
+    <table>
+      <tr><th>Daemon</th><th>Scope</th><th>Responsibility</th></tr>
+      <tr>
+        <td><strong>Resource Manager (RM)</strong></td>
+        <td>Global — one per cluster</td>
+        <td>The <strong>ultimate authority that arbitrates resources</strong> among all the applications</td>
+      </tr>
+      <tr>
+        <td><strong>Node Manager (NM)</strong></td>
+        <td>Per-node slave</td>
+        <td>Responsible for <strong>containers</strong>. Monitors the resource usage of containers (e.g., CPU, memory) and reports them to the RM</td>
+      </tr>
+    </table>
+
+    <p>A <strong>container</strong> is an abstract entity, used to <strong>execute an application-specific process with a constrained set of resources</strong>. It is the unit of everything in YARN: allocation, isolation, accounting and failure.</p>
+
+    <h3>The application master process</h3>
+    <p>Upon request from a client, the RM finds a NM that can launch the <strong>application master process (AMP)</strong> in a container. The AMP:</p>
+    <ul>
+      <li>is a <strong>special process that controls the execution of an application</strong>;</li>
+      <li>is in charge of <strong>requesting further containers</strong> to actually run the distributed computation — and allocation/de-allocation requests can take place <strong>dynamically</strong>;</li>
+      <li><strong>offloads the burden from the RM</strong>.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 380" width="100%" role="img" aria-labelledby="p52t p52d">
+        <title id="p52t">YARN daemons, containers and application masters</title>
+        <desc id="p52d">A single Resource Manager above a grid of Node Managers. Two applications are colour-separated: each has one application master process running inside an ordinary container, plus several task containers spread over different nodes.</desc>
+
+        <rect x="270" y="18" width="160" height="46" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.8"/>
+        <text x="350" y="40" text-anchor="middle" style="font-family:var(--lk-mono);font-size:13px" fill="var(--lk-ink)">Resource Manager</text>
+        <text x="350" y="56" text-anchor="middle" style="font-family:var(--lk-mono);font-size:10px" fill="var(--lk-ink-soft)">one per cluster · arbitrates resources</text>
+
+        <g stroke="var(--lk-rule)" stroke-width="1" stroke-dasharray="3 3" fill="none">
+          <path d="M310 66 L120 108"/><path d="M330 66 L280 108"/><path d="M370 66 L440 108"/><path d="M390 66 L600 108"/>
+          <path d="M310 66 L120 244"/><path d="M340 66 L280 244"/><path d="M360 66 L440 244"/><path d="M390 66 L600 244"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="30" y="110" width="150" height="112" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="40" y="128" fill="var(--lk-ink-soft)">Node Manager</text>
+          <rect x="42" y="138" width="126" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+          <text x="52" y="158" fill="var(--lk-cobalt-dark)">Cont1 · AMP-A</text>
+          <rect x="42" y="178" width="126" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="52" y="198" fill="var(--lk-cobalt-dark)">Cont2 · Task A1</text>
+
+          <rect x="200" y="110" width="150" height="112" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="210" y="128" fill="var(--lk-ink-soft)">Node Manager</text>
+          <rect x="212" y="138" width="126" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="222" y="158" fill="var(--lk-cobalt-dark)">Cont1 · Task A2</text>
+          <rect x="212" y="178" width="126" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+          <text x="222" y="198" fill="var(--lk-vermilion)">Cont2 · Task B1</text>
+
+          <rect x="370" y="110" width="150" height="112" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="380" y="128" fill="var(--lk-ink-soft)">Node Manager</text>
+          <rect x="382" y="138" width="126" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+          <text x="392" y="158" fill="var(--lk-vermilion)">Cont1 · AMP-B</text>
+          <rect x="382" y="178" width="126" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="392" y="198" fill="var(--lk-cobalt-dark)">Cont2 · Task A3</text>
+
+          <rect x="540" y="110" width="130" height="112" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="550" y="128" fill="var(--lk-ink-soft)">Node Manager</text>
+          <rect x="552" y="138" width="106" height="32" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+          <text x="562" y="158" fill="var(--lk-vermilion)">Cont1 · Task B2</text>
+          <text x="562" y="198" fill="var(--lk-ink-soft)">(free capacity)</text>
+
+          <rect x="30" y="246" width="150" height="56" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="40" y="264" fill="var(--lk-ink-soft)">Node Manager</text>
+          <rect x="42" y="272" width="126" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/>
+          <text x="52" y="288" fill="var(--lk-vermilion)">Cont1 · Task B3</text>
+
+          <rect x="200" y="246" width="150" height="56" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="210" y="264" fill="var(--lk-ink-soft)">Node Manager</text>
+          <text x="222" y="288" fill="var(--lk-ink-soft)">(free capacity)</text>
+
+          <rect x="370" y="246" width="150" height="56" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="380" y="264" fill="var(--lk-ink-soft)">Node Manager</text>
+          <rect x="382" y="272" width="126" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="392" y="288" fill="var(--lk-cobalt-dark)">Cont1 · Task A4</text>
+
+          <rect x="540" y="246" width="130" height="56" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.3"/>
+          <text x="550" y="264" fill="var(--lk-ink-soft)">Node Manager</text>
+          <text x="562" y="288" fill="var(--lk-ink-soft)">(free capacity)</text>
+        </g>
+
+        <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none" stroke-dasharray="4 3">
+          <path d="M168 154 L212 154"/><path d="M168 160 L168 194 L212 194" opacity="0"/>
+          <path d="M105 172 L105 288 L380 288" opacity="0"/>
+          <path d="M168 152 L378 194"/>
+          <path d="M168 156 L378 284"/>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.3" fill="none" stroke-dasharray="4 3">
+          <path d="M382 152 L340 194"/>
+          <path d="M508 152 L552 152"/>
+          <path d="M382 158 L170 282"/>
+        </g>
+
+        <text x="20" y="330" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">application A: AMP-A requests and drives its own task containers</text>
+        <text x="20" y="348" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">application B: AMP-B does the same, independently</text>
+        <text x="20" y="368" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">note: an AMP is not a special machine — it is an ordinary container that happens to run the coordinator</text>
+      </svg>
+      <figcaption><b>Plate 5.2</b> — The Resource Manager hands out containers; everything else is containers. Each application gets its own application master, itself running in a container on some Node Manager, and that master — not the RM — negotiates and drives the containers of its own tasks. This is how one cluster runs many jobs without a central bottleneck.</figcaption>
+    </figure>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The most-missed point about YARN is <strong>why the AMP exists at all</strong>. If the RM scheduled every task of every job directly, it would become a bottleneck and a single point of failure for progress. Instead the RM does one coarse thing per application — start an AMP — and the per-application AMP does the fine-grained work of requesting, launching and monitoring containers. The RM arbitrates <em>between</em> applications; the AMP manages <em>within</em> one.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="BigData 5 Batch applications.pdf">
+    <h2>5. Data locality</h2>
+    <p>Where a container is placed is not an arbitrary choice. YARN <strong>exploits cluster topology and data block replication to apply the data locality principle</strong>:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the data locality principle</span>
+      <p><strong>When computations involve a large set of data, it is cheaper (i.e. faster) to move code to data rather than data to code.</strong></p>
+    </div>
+
+    <p>A map task is a few hundred kilobytes of JAR; its input split is 128 MB. Shipping the former is free, shipping the latter is the job. The following cases respect the order the resource manager prefers:</p>
+
+    <table>
+      <tr><th>#</th><th>Placement</th><th>What it costs</th></tr>
+      <tr><td><strong>1</strong></td><td>Process and data on the <strong>same node</strong></td><td>No network at all: a local disk read</td></tr>
+      <tr><td><strong>2</strong></td><td>Process and data on <strong>different nodes of the same rack</strong></td><td>One hop over the fast intra-rack link</td></tr>
+      <tr><td><strong>3</strong></td><td>Process and data on <strong>different racks of the same data center</strong></td><td>Crosses the aggregation layer, where bandwidth is scarcer</td></tr>
+      <tr><td><strong>4</strong></td><td>Process and data on <strong>different racks of different data centers</strong></td><td>The worst case: wide-area transfer of a whole split</td></tr>
+    </table>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 360" width="100%" role="img" aria-labelledby="p53t p53d">
+        <title id="p53t">The data locality preference ladder</title>
+        <desc id="p53d">Four nested scopes drawn as concentric rounded rectangles: same node innermost, then same rack, then same data center, then different data centers, with the transfer cost rising outward.</desc>
+
+        <rect x="30" y="30" width="560" height="300" rx="6" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="6 4"/>
+        <text x="46" y="52" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">4 · different racks, different data centers</text>
+
+        <rect x="70" y="70" width="480" height="222" rx="5" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <text x="86" y="92" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">3 · different racks, same data center</text>
+
+        <rect x="110" y="110" width="400" height="144" rx="4" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="126" y="132" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">2 · different nodes, same rack &nbsp;(rack-local)</text>
+
+        <rect x="150" y="150" width="320" height="76" rx="4" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="2"/>
+        <text x="310" y="178" text-anchor="middle" style="font-family:var(--lk-mono);font-size:13px" fill="var(--lk-forest)">1 · same node &nbsp;(data-local)</text>
+        <text x="310" y="200" text-anchor="middle" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">the code is moved to the data: no transfer</text>
+
+        <g stroke="var(--lk-ink)" stroke-width="1.4" fill="none" marker-end="url(#a5c)">
+          <path d="M620 300 L620 60"/>
+        </g>
+        <text x="640" y="290" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)" transform="rotate(-90 646 290)">preference</text>
+        <text x="668" y="290" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)" transform="rotate(-90 674 290)">cost of moving the data</text>
+
+        <text x="30" y="350" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">replication gives the scheduler three candidate nodes per block, so level 1 or 2 is usually reachable</text>
+
+        <defs>
+          <marker id="a5c" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-ink)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 5.3</b> — The locality ladder. Every step outward multiplies the transfer cost, following the bandwidth gradient of Chapter 2. The reason the scheduler usually succeeds is Chapter 3: because each block has three topology-aware replicas, there are three chances to land in the green box instead of one.</figcaption>
+    </figure>
+
+    <div class="bd-w">
+      <h4>Where did this task land?</h4>
+      <p class="bd-sub">Pick where the free container is, relative to the node holding the input split, and see how MapReduce classifies the placement.</p>
+      <div id="w-locality"></div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note</span>
+      <p>Data locality is the point where all three previous chapters meet. Chapter 2 said intra-rack bandwidth is much greater than inter-rack bandwidth — that is <em>why</em> the ladder has these rungs. Chapter 3 said replication is topology-aware and the NameNode knows which DataNodes hold each block — that is <em>what makes the choice possible</em>. Chapter 4 said the optimal split size equals the DFS block size — that is <em>what makes one task correspond to one local block</em>. Remove any of the three and locality stops working.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="BigData 5 Batch applications.pdf">
+    <h2>6. The YARN walkthrough</h2>
+    <p>Application execution consists of three movements: <strong>the client submits the application</strong>, <strong>the RM bootstraps the AMP instance</strong>, and <strong>the AMP instance manages the application execution</strong>. In eight steps:</p>
+
+    <ol>
+      <li>A <strong>client program submits the application</strong>, including the necessary specifications to launch the application-specific AMP itself.</li>
+      <li>The <strong>RM negotiates a specified container</strong> in which to start the AMP, and then <strong>launches it</strong>.</li>
+      <li>The <strong>AMP, on boot-up, registers with the RM</strong>. After asking details to the RM, the client program is able to communicate <em>directly</em> with its own AMP.</li>
+      <li>During normal operation, the <strong>AMP negotiates appropriate resource containers</strong>.</li>
+      <li>On successful container allocations, the <strong>AMP launches the container</strong> by providing the container launch specification to the NM, including information to enable communications with the AMP.</li>
+      <li>The <strong>application code executing within the container provides necessary information</strong> (progress, status, etc.) to its AMP.</li>
+      <li>During the application execution, the <strong>client communicates directly with the AMP</strong> to get status, progress updates, etc.</li>
+      <li>Once the application is complete, the <strong>AMP deregisters with the RM and shuts down</strong>, allowing its own container to be repurposed.</li>
+    </ol>
+
+    <div class="bd-w">
+      <h4>Walk the eight steps</h4>
+      <p class="bd-sub">Advance through the sequence and watch which component is acting at each moment. Notice how quickly the Resource Manager drops out of the picture.</p>
+      <div id="w-yarn"></div>
+    </div>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Follow the <em>client</em> through those eight steps. It talks to the RM exactly once, in step 1, and after step 3 it never talks to it again — all progress reporting goes directly to the AMP. Follow the <em>RM</em> and the pattern is the same: it launches one container per application and then steps aside. This is the architecture of a system designed for thousands of concurrent tasks: the global authority is deliberately kept out of every hot path.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="BigData 5 Batch applications.pdf">
+    <h2>7. YARN schedulers</h2>
+    <p>Deciding <em>which</em> application gets the next free container is a policy question, not a mechanism one, so <strong>YARN provides a choice of schedulers and configurable policies</strong>.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">FIFO Scheduler</button>
+        <button class="lk-tab">Capacity Scheduler</button>
+        <button class="lk-tab">Fair Scheduler</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Simple to understand, no configuration needed.</strong> Applications are served in the order they arrive.</p>
+        <p><strong>Not suitable for shared clusters.</strong> One long job at the head of the queue starves everything behind it — a five-hour ETL blocks a five-second query, which is intolerable the moment more than one team uses the cluster.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Reserves a fixed amount of capacity to each job.</strong> The cluster is carved into guaranteed shares, so a small interactive job always has somewhere to run, regardless of what else is queued.</p>
+        <p>The cost of a guarantee is rigidity: capacity reserved for a queue that is currently idle is capacity nobody is using.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Dynamically balances the available resources between all running jobs.</strong> Rather than reserving shares up front, it continuously redistributes: with one job running, that job gets everything; when a second arrives, resources are rebalanced between them.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s8" data-src="BigData 5 Batch applications.pdf">
+    <h2>8. Hadoop MapReduce: the job</h2>
+    <p>Now the implementation of the paradigm from Chapter 4. Recall the definition by Dean and Ghemawat (Google): <em>MapReduce is a programming model and an associated implementation for processing and generating large data sets</em> — and <strong>Hadoop MapReduce is an open-source implementation of the MapReduce programming model</strong>.</p>
+
+    <p>A MapReduce program, referred to as a <strong>job</strong>, consists of:</p>
+    <ul>
+      <li><strong>code for map and reduce</strong>;</li>
+      <li><strong>configuration parameters</strong> (input/output directories on the underlying distributed file system).</li>
+    </ul>
+
+    <p>Each MapReduce job is divided by the system into smaller units called <strong>tasks</strong> — map tasks and reduce tasks. <strong>The tasks are scheduled using YARN and run on nodes in the cluster</strong>, and <strong>if a task fails, it will be automatically rescheduled to run on a different node</strong>.</p>
+
+    <h3>A map in Java</h3>
+<pre><code class="language-java">public class WordCountMapper extends Mapper&lt;LongWritable, Text, Text, IntWritable&gt; {
+    private static final IntWritable one = new IntWritable(1);
+    private Text word = new Text();
+    public void map(LongWritable key, Text value, Context context)
+       throws IOException, InterruptedException {
+        String line = value.toString();
+        StringTokenizer tokenizer = new StringTokenizer(line);
+        while (tokenizer.hasMoreTokens()) {
+          word.set(tokenizer.nextToken());
+          context.write(word, one);
+        }
+    }
+}</code></pre>
+
+    <div id="ac-mapper"></div>
+
+    <h3>A reduce in Java</h3>
+<pre><code class="language-java">public class WordCountReducer extends Reducer&lt;Text, IntWritable, Text, IntWritable&gt; {
+    public void reduce(Text key, Iterable&lt;IntWritable&gt; values, Context context)
+       throws IOException, InterruptedException {
+        int sum = 0;
+        for (IntWritable value : values) {
+          sum += value.get();
+        }
+        context.write(key, new IntWritable(sum));
+    }
+}</code></pre>
+
+    <p>Compare this signature with the abstract one from Chapter 4: <code>reduce (k2, list(v2)) &rarr; list(k3, v3)</code>. The <code>Iterable&lt;IntWritable&gt; values</code> <em>is</em> the <code>list(v2)</code> — the framework has already collected, shuffled and sorted every value emitted for this key, from every map task in the cluster, before this method is called even once.</p>
+
+    <h3>The job in Java</h3>
+<pre><code class="language-java">public class WordCount {
+ public static void main(String[] args) throws Exception {
+        Job job = new Job(new Configuration(), "WordCount");
+        job.setJarByClass(WordCount.class);
+        job.setMapperClass(WordCountMapper.class);
+        job.setReducerClass(WordCountReducer.class);
+        FileInputFormat.addInputPath(job, new Path(args[0]));
+        FileOutputFormat.setOutputPath(job, new Path(args[1]));
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(IntWritable.class);
+        job.waitForCompletion(true);
+    }
+}</code></pre>
+
+    <div id="ac-job"></div>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Those three listings are the entire <strong>what</strong>. There is not one line about which machine runs what, how the intermediate pairs travel, or what happens when a node dies mid-job. All of that is the <strong>how</strong>, and it is the subject of the next section. This is the founding compromise of Chapter 1 made concrete: you write forty lines of domain logic, and you accept that you do not control the execution.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="BigData 5 Batch applications.pdf">
+    <h2>9. MapReduce execution in detail</h2>
+    <p>The important idea behind MapReduce is <strong>separating the <em>what</em> of distributed processing from the <em>how</em></strong>. We have seen the former; now the latter.</p>
+
+    <p>The developer launches the job on the <strong>client&rsquo;s JVM</strong>, which contacts the YARN RM to submit the application. The execution framework takes care of everything else: <strong>it transparently handles all aspects of distributed code execution, on clusters ranging from a single node to a few thousand nodes.</strong></p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 420" width="100%" role="img" aria-labelledby="p54t p54d">
+        <title id="p54t">The MapReduce job execution sequence</title>
+        <desc id="p54d">A swimlane diagram with five lanes — client, Resource Manager, Node Manager hosting the application master, Node Manager hosting a task, and the distributed file system — crossed by the numbered steps from job submission to task execution.</desc>
+
+        <g style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">
+          <text x="14" y="60">client JVM</text>
+          <text x="14" y="130">Resource Mgr</text>
+          <text x="14" y="210">NM · AMP</text>
+          <text x="14" y="290">NM · task</text>
+          <text x="14" y="368">DFS</text>
+        </g>
+        <g stroke="var(--lk-rule-soft)" stroke-width="1" stroke-dasharray="3 3">
+          <path d="M110 66 L680 66"/><path d="M110 136 L680 136"/><path d="M110 216 L680 216"/>
+          <path d="M110 296 L680 296"/><path d="M110 374 L680 374"/>
+        </g>
+        <path d="M110 30 L110 400" stroke="var(--lk-rule)" stroke-width="1.2"/>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="126" y="44" width="104" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="136" y="63" fill="var(--lk-cobalt-dark)">1 waitFor…()</text>
+
+          <rect x="252" y="114" width="96" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+          <text x="262" y="133" fill="var(--lk-ink)">2 app ID</text>
+
+          <rect x="252" y="352" width="150" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="262" y="371" fill="var(--lk-forest)">3 JAR, conf, splits</text>
+
+          <rect x="370" y="114" width="110" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+          <text x="380" y="133" fill="var(--lk-ink)">4 submit · 5a</text>
+
+          <rect x="418" y="194" width="112" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="428" y="213" fill="var(--lk-vermilion)">6 AMP starts</text>
+
+          <rect x="418" y="352" width="112" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4"/>
+          <text x="428" y="371" fill="var(--lk-forest)">7 read splits</text>
+
+          <rect x="548" y="194" width="122" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="558" y="213" fill="var(--lk-vermilion)">8 ask containers</text>
+
+          <rect x="548" y="274" width="122" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="558" y="293" fill="var(--lk-cobalt-dark)">9a·9b launch</text>
+
+          <rect x="548" y="352" width="122" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4"/>
+          <text x="558" y="371" fill="var(--lk-forest)">10 load · 11 run</text>
+        </g>
+
+        <g stroke="var(--lk-ink)" stroke-width="1.3" fill="none" marker-end="url(#a5m)">
+          <path d="M230 59 L250 59 L250 122"/>
+          <path d="M300 146 L300 350"/>
+          <path d="M348 129 L368 129"/>
+          <path d="M440 146 L440 192"/>
+          <path d="M474 224 L474 350"/>
+          <path d="M530 209 L546 209"/>
+          <path d="M609 226 L609 272"/>
+          <path d="M609 306 L609 350"/>
+        </g>
+
+        <text x="126" y="26" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">job submission</text>
+        <text x="370" y="26" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">job initialization</text>
+        <text x="548" y="26" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">task assignment &amp; execution</text>
+        <text x="126" y="410" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">the job JAR goes to the DFS with a default replication factor of 10</text>
+
+        <defs>
+          <marker id="a5m" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-ink)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 5.4</b> — The execution sequence across five actors. The client only submits; the Resource Manager only bootstraps; the application master does the negotiating; the task containers do the work — and the DFS is touched at three separate moments, for the job resources, the split metadata and the actual input data.</figcaption>
+    </figure>
+
+    <h3>Job submission</h3>
+    <table>
+      <tr><th>Step</th><th>What happens</th></tr>
+      <tr><td><strong>1</strong></td><td>The MapReduce program calls either the <code>submit()</code> or <code>waitForCompletion()</code> method to create the Job.</td></tr>
+      <tr><td><strong>2</strong></td><td>The Job contacts the RM to get an <strong>application ID</strong>.</td></tr>
+      <tr><td><strong>3</strong></td><td>The Job <strong>copies to the DFS the resources needed to run the job</strong>: configuration file, JAR file, input splits metadata. The job JAR is copied with a <strong>default replication factor of 10</strong>, so that NMs can easily access it.</td></tr>
+      <tr><td><strong>4</strong></td><td>The application is <strong>submitted to the RM</strong>.</td></tr>
+    </table>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note — why replication 10</span>
+      <p>Chapter 3 established that the default replication factor is 3. The job JAR gets <strong>10</strong> because its access pattern is the opposite of a data block: instead of one task reading one block, potentially <em>hundreds</em> of Node Managers need this same small file at almost the same instant. More replicas means more nodes that can serve it in parallel, and a much better chance that each NM finds a copy locally. It is replication used for read throughput, not for durability.</p>
+    </div>
+
+    <h3>Job initialization</h3>
+    <table>
+      <tr><th>Step</th><th>What happens</th></tr>
+      <tr><td><strong>5a</strong></td><td>The <strong>YARN Scheduler</strong> (called by the RM) allocates a container on a NM to host the AMP — called <code>MRAppMaster</code> in the reference picture.</td></tr>
+      <tr><td><strong>6</strong></td><td>The <strong>AMP is launched</strong> in the container.</td></tr>
+      <tr><td><strong>7</strong></td><td><strong>Input split data are identified</strong> on the DFS.</td></tr>
+    </table>
+
+    <p>At this point the AMP evaluates the amount of resources required to run the job, and asks itself two questions: <strong>how many containers are necessary?</strong> and <strong>is the parallelization worth the overhead?</strong> For a small enough input, the answer to the second question is no — starting containers across a cluster costs more than simply running the job where it stands.</p>
+
+    <h3>Task assignment</h3>
+    <p><strong>Step 8</strong>: the AMP requests containers for map (and reduce) tasks. Two rules govern the order:</p>
+    <ul>
+      <li>Requests for <strong>map tasks are made first and with higher priority</strong>.</li>
+      <li><strong>Reduce tasks are not made until 5% of the map tasks have completed.</strong></li>
+    </ul>
+
+    <p>The RM tries to honor the <strong>data locality constraint for map tasks</strong>, distinguishing three cases:</p>
+    <table>
+      <tr><th>Case</th><th>Definition</th></tr>
+      <tr><td><strong>Data-local</strong></td><td>The task is run on the <em>same node</em> that the input split resides on</td></tr>
+      <tr><td><strong>Rack-local</strong></td><td>The task is run on a <em>different node in the same rack</em> that the input split resides on</td></tr>
+      <tr><td><strong>Neither</strong></td><td>Some tasks are neither data-local nor rack-local</td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Both scheduling rules in step 8 have a reason worth stating. <strong>Maps first, with higher priority</strong>, because no reducer can finish before every mapper has emitted its pairs — allocating reducers early would just hold containers idle. But <strong>reduce tasks start at 5% of map completion</strong>, not at 100%, because the shuffle can begin as soon as <em>some</em> map output exists: overlapping the transfer with the remaining map work hides most of the network cost. It is a deliberate compromise between not wasting containers and not serialising the two phases.</p>
+    </div>
+
+    <h3>Task execution</h3>
+    <table>
+      <tr><th>Step</th><th>What happens</th></tr>
+      <tr><td><strong>9a</strong></td><td>The <strong>AMP starts the containers</strong> by contacting the NMs, in accordance with the assignments made by the RM.</td></tr>
+      <tr><td><strong>9b</strong></td><td>The <strong>container is initialized</strong> to run the map (or reduce) task.</td></tr>
+      <tr><td><strong>10</strong></td><td>The task <strong>loads the required resources</strong>: configuration file, JAR file, input data.</td></tr>
+      <tr><td><strong>11</strong></td><td>The <strong>map (or reduce) task is run</strong>. Code execution is <strong>isolated within the container</strong>: any bug or failure will not affect the NM.</td></tr>
+    </table>
+
+    <h3>Progress and status updates</h3>
+    <p>Jobs may take <strong>from tens of seconds to hours</strong> to run, so a job and each of its tasks carry a status, which includes:</p>
+    <ul>
+      <li>the <strong>state</strong> of the job or task (e.g., running, successfully completed, failed);</li>
+      <li>the <strong>progress of maps</strong> — the proportion of the input that has been processed — and of <strong>reduces</strong>, an estimate of the proportion of the reduce input processed, split into three bands: <strong>0&ndash;33% is shuffling, 34&ndash;66% is sorting, 67&ndash;100% is reducing</strong>;</li>
+      <li>the values of the job&rsquo;s <strong>counters</strong> (e.g., the number of records in input/output for the map/combine/reduce task);</li>
+      <li>a <strong>status message</strong> or description.</li>
+    </ul>
+
+    <div id="se-status"></div>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>The three reduce bands are a favourite exam detail, and they explain a phenomenon everybody who has watched a Hadoop console has seen: a reduce sitting at 33% for a very long time. That is not the reduce function being slow — it is the <strong>shuffle</strong>, i.e. the network transfer of map output, which is the expensive part. The user-defined reduce logic does not begin until the last third of the bar.</p>
+    </div>
+
+    <h3>Job completion</h3>
+    <ul>
+      <li>The <strong>user is notified</strong> of the job completion.</li>
+      <li><strong>Job statistics and counters are printed.</strong></li>
+      <li>The <strong>AMP and the task containers clean up their working state</strong> — e.g., intermediate output is deleted.</li>
+      <li><strong>Job information is archived by the job history server.</strong></li>
+    </ul>
+  </section>
+
+  <section id="s10" data-src="BigData 5 Batch applications.pdf">
+    <h2>10. Coping with node failures</h2>
+    <p>Chapter 3 said that on commodity hardware failure is the norm rather than the exception. Here is the compute-side counterpart of that statement. Note that <em>who detects the failure</em> depends on <em>what failed</em>:</p>
+
+    <table>
+      <tr><th>Failure</th><th>Detected and managed by</th><th>What happens</th></tr>
+      <tr>
+        <td><strong>Failure of a worker</strong></td>
+        <td>the AMP</td>
+        <td>The tasks assigned to this worker will have to be <strong>redone</strong> — and in case of a <em>reduce</em> failure, <strong>the map tasks that produced its input may have to be redone</strong> as well. The AMP sets the status of each failed task to <strong>idle</strong> and <strong>reschedules them on a worker</strong> when one becomes available.</td>
+      </tr>
+      <tr>
+        <td><strong>Failure of the AMP</strong></td>
+        <td>the RM</td>
+        <td><strong>Job history is used to recover the state</strong> of the tasks that were already run. Worst case: <strong>the entire map-reduce job must be restarted.</strong></td>
+      </tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — why a reduce failure can cost map work</span>
+      <p>Recall from Chapter 4 that map output is <strong>intermediate output stored on the local disk</strong>, deliberately not in HDFS with replication, because that would be overkill. The consequence appears exactly here: when a worker dies, the map output it was holding dies with it. If a reducer needed those pairs, they no longer exist anywhere, and the corresponding <em>map</em> tasks must be re-executed to regenerate them. The storage decision and the recovery cost are two sides of one trade-off.</p>
+    </div>
+
+    <h3>What the runtime handles</h3>
+    <p>Stepping back, this is the complete list of what the MapReduce &ldquo;runtime&rdquo; does on your behalf:</p>
+    <table>
+      <tr><th>Concern</th><th>What it means</th></tr>
+      <tr><td><strong>Scheduling</strong></td><td>Assigns workers to map and reduce tasks</td></tr>
+      <tr><td><strong>Data distribution</strong></td><td>Gets data to the workers</td></tr>
+      <tr><td><strong>Synchronization</strong></td><td>Gathers, sorts and shuffles intermediate data</td></tr>
+      <tr><td><strong>Errors and faults</strong></td><td>Detects container failures and restarts</td></tr>
+    </table>
+    <p>And <strong>everything happens on top of a DFS</strong>.</p>
+  </section>
+
+  <section id="s11" data-src="BigData 5 Batch applications.pdf">
+    <h2>11. The limitations that produced Spark</h2>
+    <p>Hadoop&rsquo;s MapReduce is the result of many years of development — and that is precisely the problem. Follow the dates backwards:</p>
+
+    <ul class="lk-timeline">
+      <li><span class="lk-tl-when">2012</span> — Hadoop 1.0 is released.</li>
+      <li><span class="lk-tl-when">2008</span> — adopted by Yahoo.</li>
+      <li><span class="lk-tl-when">2004</span> — based on a paper by Google.</li>
+      <li><span class="lk-tl-when">2000</span> — whose authors started working on MapReduce.</li>
+    </ul>
+
+    <p>In the meanwhile, a lot changed:</p>
+    <ul>
+      <li><strong>Hardware</strong> — RAM became cheaper and more available; multi-core machines became standard.</li>
+      <li><strong>Software</strong> — HDFS and YARN enabled professionals to put their effort on the development of analytical tools.</li>
+      <li><strong>Data and user needs</strong> — Big Data became everyone&rsquo;s problem, and <strong>velocity became a hard requirement</strong>.</li>
+    </ul>
+
+    <p>Against that backdrop, two families of limitation stand out.</p>
+
+    <table>
+      <tr><th>Hardware resources are not adequately exploited</th><th>The paradigm is strict</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Every MapReduce job ends by <strong>saving results to HDFS, which is slow</strong>.</li>
+            <li><strong>No possibility to keep data in RAM.</strong></li>
+            <li><strong>Multi-core architecture not easily exploited.</strong></li>
+            <li>End result: <strong>it is slow.</strong></li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li><strong>Everything has to fit into Map and Reduce</strong> &rarr; programming is not straightforward.</li>
+            <li>Complex algorithms take <strong>multiple jobs and passes on hard disk</strong>.</li>
+            <li><strong>Not suitable for iterative algorithms or interactive processing.</strong></li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <h3>The picture that makes it concrete</h3>
+    <p>The deck puts the two data-processing models side by side. In <strong>MapReduce</strong>, every iteration is an <em>HDFS read</em>, the computation, and an <em>HDFS write</em>; the next iteration reads it all back. Every interactive query re-reads the input from HDFS from scratch. The caption is blunt: <strong>slow due to data replication and disk I/O</strong>. Remember that an HDFS write is not one disk write — with replication factor 3, it is three, two of them across the network.</p>
+
+    <p>In <strong>Spark</strong>, the input is read once with <em>one-time processing</em>, and then every iteration and every query runs from what is already in memory: <strong>10&ndash;100&times; faster than network and disk</strong>.</p>
+
+    <div class="bd-w">
+      <h4>Count the HDFS round trips</h4>
+      <p class="bd-sub">Set the number of iterations of an algorithm and compare how many times each model touches the distributed file system.</p>
+      <div id="w-iter"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>&ldquo;Why is Hadoop MapReduce slow for iterative algorithms?&rdquo; has a two-part answer, and most people give only the first. Part one: <strong>results are persisted to HDFS between jobs</strong>, so an <em>n</em>-iteration algorithm pays 2<em>n</em> distributed-storage operations, each write replicated three times. Part two: <strong>the paradigm itself is strict</strong> — an algorithm that does not decompose into map and reduce must be expressed as a <em>chain of separate jobs</em>, and it is the chain, not any single job, that creates those round trips. Spark attacks both: RDDs can stay cached in RAM, and the API is not limited to two functions.</p>
+    </div>
+
+    <p>That is the bridge to the next chapter. Everything in Chapter 6 — resilient distributed datasets, lazy evaluation, the DAG, caching — is an answer to one of the bullet points above.</p>
+  </section>
+
+  <section id="quiz" data-src="BigData 5 Batch applications.pdf">
+    <h2>Test your knowledge</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What was the original idea of the Data Lake, and how does it become a swamp?</summary>
+        <p>Originally the Data Lake was just a <strong>central repository system for storage, processing and analysis of raw data</strong>, in which data is kept <strong>in its original format</strong> and is processed to be queried <strong>only when needed</strong>. It becomes a <strong>swamp</strong> in the <em>absence of organization and governance</em>: the data is all still there, but nobody can find, trust or interpret it. Deferring the schema does not remove the work of understanding the data — it moves that work to query time and multiplies it by the number of people asking.</p>
+      </details>
+
+      <details>
+        <summary>List the five areas of an organised Data Lake and explain what makes the Discovery area special.</summary>
+        <p><strong>Landing</strong> (data stored immediately after ingestion), <strong>Working</strong> (temporary tables and configuration data), <strong>Harbor</strong> (data completely or partially processed from the landing area), <strong>Discovery</strong> (data created by data scientists for experimental purposes), <strong>Access</strong> (data ready to be accessed by reporting and visualization tools). The areas represent the <em>processing state</em> of the data. Discovery is special because it is a <strong>safe sandbox where data is only taken from, and not published to, other areas</strong> — a one-way valve that lets experimentation be free without contaminating anything downstream.</p>
+      </details>
+
+      <details>
+        <summary>Map the medallion layers onto the data lake areas and the data warehouse layers.</summary>
+        <p><strong>Raw area = Bronze = Source layer</strong>; <strong>Harbor area = Silver = Reconciled layer</strong>; <strong>Access area = Gold = Warehouse layer</strong>. Bronze holds data immediately after ingestion with only minimal transformations such as type conversions; Silver is where raw data is filtered, cleaned and augmented by joining across one or many other tables; Gold is purpose-built to solve explicit intended business goals. Is medallion just a revamped 3-layer warehouse? &ldquo;Perhaps&rdquo; — there is <strong>no universal number of areas, levels or layers</strong>; the basic philosophy is common and you specialize it based on the complexities of your organization and pipelines.</p>
+      </details>
+
+      <details>
+        <summary>What does a resource negotiator do, and why is YARN not tied to MapReduce?</summary>
+        <p>It has a <strong>global view of the cluster resources</strong>; decides <strong>where and when</strong> each unit of work is allocated and with how many resources (CPU and RAM); uses a <strong>scheduling policy</strong> to manage concurrency; <strong>avoids over-instantiation</strong> of processes on the same worker; and <strong>handles fault tolerance</strong>. YARN was introduced in Hadoop 2 to improve the MapReduce implementation but is <strong>general enough to support other distributed computing paradigms</strong>, because its APIs for requesting cluster resources are used by <em>frameworks</em> (MapReduce, Spark) and not by user code. YARN allocates containers with CPU and memory; it does not know what a map task is.</p>
+      </details>
+
+      <details>
+        <summary>Describe the two YARN daemons and the role of the application master process.</summary>
+        <p>The <strong>Resource Manager</strong> is global, one per cluster, and is the ultimate authority that arbitrates resources among all applications. The <strong>Node Manager</strong> is a per-node slave responsible for <strong>containers</strong> — abstract entities used to execute an application-specific process with a constrained set of resources — and it monitors their CPU and memory usage and reports to the RM. On a client request, the RM finds a NM that can launch the <strong>AMP</strong> in a container; the AMP controls the execution of one application, requests further containers dynamically to run the distributed computation, and <strong>offloads the burden from the RM</strong>. The RM arbitrates <em>between</em> applications, the AMP manages <em>within</em> one.</p>
+      </details>
+
+      <details>
+        <summary>State the data locality principle and the four preference levels.</summary>
+        <p><strong>When computations involve a large set of data, it is cheaper (i.e. faster) to move code to data rather than data to code.</strong> Preference order: (1) process and data on the <em>same node</em>; (2) process and data on <em>different nodes of the same rack</em>; (3) process and data on <em>different racks of the same data center</em>; (4) process and data on <em>different racks of different data centers</em>. It works because block replication is topology-aware, so the scheduler has three candidate nodes per block rather than one.</p>
+      </details>
+
+      <details>
+        <summary>Walk through the eight steps of a YARN application, and say when the client stops talking to the Resource Manager.</summary>
+        <p>(1) The client submits the application including the specifications to launch the AMP. (2) The RM negotiates a container in which to start the AMP and launches it. (3) The AMP registers with the RM on boot-up; after asking the RM for details, the client can communicate directly with its own AMP. (4) The AMP negotiates appropriate resource containers. (5) On successful allocation the AMP launches the container by giving the launch specification to the NM. (6) The application code in the container reports progress and status to its AMP. (7) The client communicates directly with the AMP for status and progress. (8) On completion the AMP deregisters with the RM and shuts down, letting its container be repurposed. The client contacts the RM only in step 1 and, after step 3, deals exclusively with its AMP.</p>
+      </details>
+
+      <details>
+        <summary>What are the four steps of job submission, and why is the job JAR replicated ten times?</summary>
+        <p>(1) The program calls <code>submit()</code> or <code>waitForCompletion()</code> to create the Job. (2) The Job contacts the RM to get an application ID. (3) The Job copies to the DFS the resources needed to run the job — configuration file, JAR file, input splits metadata. (4) The application is submitted to the RM. The JAR is copied with a <strong>default replication factor of 10 so that Node Managers can easily access it</strong>: unlike a data block read by one task, this small file is needed almost simultaneously by many NMs, so extra replicas buy parallel read throughput and a better chance of a local copy — replication for performance, not durability.</p>
+      </details>
+
+      <details>
+        <summary>In task assignment, why are map tasks requested first, and why do reduce tasks start at 5%?</summary>
+        <p>Requests for map tasks are made <strong>first and with higher priority</strong> because no reducer can complete before the mappers have emitted their pairs, so allocating reducers early would hold containers idle. But reduce tasks are requested once <strong>5% of the map tasks have completed</strong>, rather than 100%, because the shuffle can begin as soon as some map output exists — overlapping the network transfer with the remaining map work hides most of its cost.</p>
+      </details>
+
+      <details>
+        <summary>What do the three reduce progress bands mean?</summary>
+        <p>The progress of a reduce is an estimate of the proportion of the reduce input processed, divided into <strong>0&ndash;33% shuffling, 34&ndash;66% sorting, 67&ndash;100% reducing</strong>. This is why a reduce can appear stuck at around 33%: that is the shuffle, i.e. the network transfer of map output from every mapper, and the user-defined reduce function does not start running until the final third.</p>
+      </details>
+
+      <details>
+        <summary>Who handles a worker failure, who handles an application master failure, and why can a reduce failure cost map work?</summary>
+        <p>A <strong>worker failure is detected and managed by the AMP</strong>: the tasks assigned to that worker must be redone, the AMP sets each failed task to <em>idle</em> and reschedules it on a worker when one becomes available. An <strong>AMP failure is detected and managed by the RM</strong>: job history is used to recover the state of the tasks already run, and in the worst case the entire job must be restarted. A reduce failure can force map re-execution because <strong>map output is intermediate data written to the local disk</strong>, not to HDFS with replication — when the node holding it dies, those pairs no longer exist anywhere and the corresponding map tasks must regenerate them.</p>
+      </details>
+
+      <details>
+        <summary>List the two families of limitation of Hadoop MapReduce that motivated Spark.</summary>
+        <p><strong>Hardware resources are not adequately exploited</strong>: every MapReduce job ends by saving results to HDFS which is slow; there is no possibility to keep data in RAM; the multi-core architecture is not easily exploited; the end result is that it is slow. <strong>The paradigm is strict</strong>: everything has to fit into map and reduce so programming is not straightforward; complex algorithms take multiple jobs and passes on hard disk; and it is not suitable for iterative algorithms or interactive processing. In MapReduce every iteration reads from and writes to HDFS (slow due to data replication and disk I/O), whereas Spark reads once and then works from memory, 10&ndash;100&times; faster than network and disk.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-04-mapreduce.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-06-spark.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>BigData 5 Batch applications</em> · Big Data — University of Bologna · Prof. Enrico Gallinucci</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+if (window.hljs) { hljs.highlightAll(); }
+
+/* ---- Annotated code: the map in Java (BigData 5 Batch applications) ---- */
+LessonKit.annotatedCode('#ac-mapper', {
+  lang: 'java',
+  lines: [
+    ['public class WordCountMapper extends Mapper<LongWritable, Text, Text, IntWritable> {',
+      "The four type parameters are input key, input value, output key, output value. Input is (byte offset in the file, line of text); output is (word, 1). Hadoop uses its own Writable types instead of Java primitives because they serialise faster and more compactly when millions of pairs cross the network."],
+    ['    private static final IntWritable one = new IntWritable(1);',
+      "The constant 1 that every word is counted with, allocated once outside the map call. Map runs for every record in the split, so allocating a fresh object per word would create millions of short-lived objects and hand the garbage collector the bill."],
+    ['    private Text word = new Text();',
+      "The same reuse trick for the output key. The framework copies the value out when context.write is called, so a single mutable Text object can be recycled for every word in the split."],
+    ['    public void map(LongWritable key, Text value, Context context)',
+      "This is the user-defined map function of Chapter 4, with the abstract signature map (k1, v1). It is called once per record in the input split; how many splits exist and where each map task runs are decisions made by the framework, not here."],
+    ['       throws IOException, InterruptedException {',
+      "The framework catches these. A failed task is set to idle by the application master and rescheduled on another node, which is what lets the job survive a broken machine without the developer writing any recovery code."],
+    ['        String line = value.toString();',
+      "The input value is the line of text. The input key, the byte offset within the file, is simply ignored: word count does not care where in the file a line came from."],
+    ['        StringTokenizer tokenizer = new StringTokenizer(line);',
+      "Split the line into words. Together with the loop below, this is the entire domain logic of the program: everything else on the page is plumbing or configuration."],
+    ['        while (tokenizer.hasMoreTokens()) {',
+      "One map call can emit any number of key-value pairs, including zero. That is what makes map able to expand a record as well as transform it — and it is why the abstract signature returns list(k2, v2) rather than a single pair."],
+    ['          word.set(tokenizer.nextToken());',
+      "Point the reused Text object at the current word."],
+    ['          context.write(word, one);',
+      "Emit the intermediate pair (word, 1). Everything after this line belongs to the framework: sorting by key, partitioning into one file per reducer, spilling to the local disk, and shipping the partitions to the reduce tasks."],
+    ['        }',
+      "End of the per-record loop. When the loop ends, this record is done; the framework then calls map again with the next record of the split."],
+    ['    }',
+      "End of the map function. Note there is no return value: output is produced through the Context, because the framework needs to intercept every pair as it is emitted rather than receive them all at the end."],
+    ['}',
+      "Note what is absent from the whole class: no threads, no sockets, no file paths, no failure handling, no mention of how many machines exist. This is the what. The how is section 9."]
+  ]
+});
+
+/* ---- Annotated code: the job in Java (BigData 5 Batch applications) ---- */
+LessonKit.annotatedCode('#ac-job', {
+  lang: 'java',
+  lines: [
+    ['public class WordCount {',
+      "The driver class. It does not process a single record: its whole purpose is to describe the job and hand it to the cluster."],
+    [' public static void main(String[] args) throws Exception {',
+      "This main runs on the client JVM, not on the cluster. It is the process that contacts the YARN Resource Manager to submit the application."],
+    ['        Job job = new Job(new Configuration(), "WordCount");',
+      "A MapReduce program is called a job, and it consists of the code for map and reduce plus configuration parameters. This object is that description."],
+    ['        job.setJarByClass(WordCount.class);',
+      "Tells Hadoop which JAR to ship to the cluster. That JAR is copied to the DFS with a default replication factor of 10, so that Node Managers all over the cluster can fetch it quickly and in parallel."],
+    ['        job.setMapperClass(WordCountMapper.class);',
+      "Register the map function. The number of map tasks is not set here: it follows from the number of input splits, which follows from the input size and the DFS block size."],
+    ['        job.setReducerClass(WordCountReducer.class);',
+      "Register the reduce function. Unlike the maps, the number of reduce tasks can be specified independently — the choice discussed in Chapter 4, where the rule of thumb was a task running about five minutes and producing at least one DFS block of output."],
+    ['        FileInputFormat.addInputPath(job, new Path(args[0]));',
+      "The input directory on the DFS. The input format is the component that divides the input into fixed-size splits, with one map task created per split."],
+    ['        FileOutputFormat.setOutputPath(job, new Path(args[1]));',
+      "The output directory on the DFS. Hadoop refuses to start if it already exists — a deliberate guard against silently destroying the result of a job that may have taken hours."],
+    ['        job.setOutputKeyClass(Text.class);',
+      "The type of the output key. It must be declared because Java erases generics at runtime, and the framework needs to know how to serialise and sort the keys."],
+    ['        job.setOutputValueClass(IntWritable.class);',
+      "The type of the output value, declared for the same reason."],
+    ['        job.waitForCompletion(true);',
+      "Submit the job and block until it finishes. This is step 1 of the execution sequence in section 9; from here on the client polls its own application master for progress, not the Resource Manager."],
+    ['    }',
+      "End of main. If this method returns, the cluster has finished the work."],
+    ['}',
+      "Thirteen lines of configuration. Everything about where the code runs, how many machines it uses, how the intermediate data is moved, and what happens when a node dies, is decided by YARN and the MapReduce runtime."]
+  ]
+});
+
+/* ---- State explorer: job and task status (BigData 5 Batch applications) ---- */
+LessonKit.stateExplorer('#se-status', {
+  title: 'The status of a job and its tasks',
+  start: 'Map tasks running',
+  states: {
+    'Map tasks running': { desc: 'The progress of a map is the proportion of the input split that has been processed. Requests for map containers were made first and with higher priority, because no reducer can complete before the mappers have emitted their pairs.', to: [['5% of maps completed', 'Reduce: shuffling (0-33%)'], ['the worker dies', 'Task failed']] },
+    'Reduce: shuffling (0-33%)': { desc: 'The first third of the reduce progress bar is the shuffle: map output is fetched over the network from every map task. This is the expensive part, and it is why a reduce can appear stuck around 33%. It starts before the maps are finished so that the transfer overlaps the remaining map work.', to: [['all input fetched', 'Reduce: sorting (34-66%)'], ['the worker dies', 'Task failed']] },
+    'Reduce: sorting (34-66%)': { desc: 'Inputs from different mappers are merged and sorted by key, so that the reduce function can be called once per key with all of its values together.', to: [['merge complete', 'Reduce: reducing (67-100%)'], ['the worker dies', 'Task failed']] },
+    'Reduce: reducing (67-100%)': { desc: 'Only now does the user-defined reduce function actually run, one key at a time. Counters record the number of records in input and output for the map, combine and reduce tasks.', to: [['output written to the DFS', 'Successfully completed'], ['the worker dies', 'Task failed']] },
+    'Task failed': { desc: 'Detected and managed by the AMP. The task is set to idle and rescheduled on a worker when one becomes available. If the failed task was a reduce, the map tasks that produced its input may also have to be redone, because map output lives on a local disk and died with the node.', to: [['rescheduled on another node', 'Map tasks running']] },
+    'AMP failed': { desc: 'Detected and managed by the RM, not the AMP: a process cannot manage its own death. Job history is used to recover the state of the tasks that were already run. In the worst case the entire map-reduce job must be restarted.', to: [['state recovered from job history', 'Map tasks running']] },
+    'Successfully completed': { desc: 'The user is notified, job statistics and counters are printed, the AMP and the task containers clean up their working state (intermediate output is deleted), and job information is archived by the job history server. The AMP deregisters with the RM and its container is repurposed.', to: [] }
+  }
+});
+
+/* ---- Bespoke widget: data locality classifier (BigData 5 Batch applications) ---- */
+(function () {
+  var host = document.getElementById('w-locality');
+  if (!host) return;
+  var cases = [
+    { label: 'Same node as the split',
+      name: 'Data-local',
+      rank: 'preference level 1',
+      why: "The task is run on the same node that the input split resides on. No split crosses the network at all: the container reads its 128 MB from the local disk. This is the case the scheduler tries hardest to obtain, and block replication gives it three chances per block." },
+    { label: 'Different node, same rack',
+      name: 'Rack-local',
+      rank: 'preference level 2',
+      why: "The task is run on a different node in the same rack that the input split resides on. One hop over the intra-rack link, which Chapter 2 established is the fast one. Usually an acceptable outcome." },
+    { label: 'Different rack, same data center',
+      name: 'Neither data-local nor rack-local',
+      rank: 'preference level 3',
+      why: "The split must cross the aggregation layer between racks, where bandwidth is much scarcer. The slides note plainly that some tasks are neither data-local nor rack-local; this is one of those." },
+    { label: 'Different data center',
+      name: 'Neither data-local nor rack-local',
+      rank: 'preference level 4 — the worst case',
+      why: "A wide-area transfer of the whole input split. At this point the principle has been inverted: instead of moving the code to the data, you are moving the data to the code, which is exactly what the framework exists to avoid." }
+  ];
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  out.textContent = 'Choose where the free container is.';
+  cases.forEach(function (c) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'bd-btn bd-alt';
+    b.style.textAlign = 'left'; b.style.flex = '1 1 200px';
+    b.textContent = c.label;
+    b.addEventListener('click', function () {
+      out.innerHTML = '';
+      var t = document.createElement('div');
+      t.className = c.rank.indexOf('1') > -1 ? 'bd-ok' : 'bd-bad';
+      t.textContent = c.name + ' — ' + c.rank;
+      var w = document.createElement('div');
+      w.style.color = 'var(--lk-ink-soft)'; w.style.marginTop = '.35rem';
+      w.textContent = c.why;
+      out.appendChild(t); out.appendChild(w);
+    });
+    btns.appendChild(b);
+  });
+  host.appendChild(btns); host.appendChild(out);
+})();
+
+/* ---- Bespoke widget: the eight-step YARN walkthrough (BigData 5 Batch applications) ---- */
+(function () {
+  var host = document.getElementById('w-yarn');
+  if (!host) return;
+  var steps = [
+    { actor: 'Client', t: '1. Submit the application',
+      d: "A client program submits the application, including the necessary specifications to launch the application-specific AMP itself." },
+    { actor: 'Resource Manager', t: '2. Negotiate a container and launch the AMP',
+      d: "The RM assumes the responsibility to negotiate a specified container in which to start the AMP, and then launches it. This is the only coarse-grained decision the RM makes for this application." },
+    { actor: 'Application Master', t: '3. Register with the RM',
+      d: "The AMP, on boot-up, registers with the RM. After asking details to the RM, the client program is able to communicate directly with its own AMP — and from here on it never needs the RM again." },
+    { actor: 'Application Master', t: '4. Negotiate resource containers',
+      d: "During normal operation the AMP negotiates appropriate resource containers. Allocation and de-allocation requests can take place dynamically, so an application can grow and shrink while it runs." },
+    { actor: 'Application Master + Node Manager', t: '5. Launch the containers',
+      d: "On successful container allocations, the AMP launches the container by providing the container launch specification to the NM, including the information needed to enable communications back to the AMP." },
+    { actor: 'Task container', t: '6. Report progress and status',
+      d: "The application code executing within the container provides the necessary information — progress, status and so on — to its AMP. Note the direction: the task reports to its own application master, not to the Resource Manager." },
+    { actor: 'Client', t: '7. Poll the AMP for updates',
+      d: "During the application execution, the client that submitted the program communicates directly with the AMP to get status, progress updates and so on." },
+    { actor: 'Application Master', t: '8. Deregister and shut down',
+      d: "Once the application is complete, the AMP deregisters with the RM and shuts down, allowing its own container to be repurposed for somebody else." }
+  ];
+  var i = 0;
+  var box = document.createElement('div'); box.className = 'bd-out';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var prev = document.createElement('button'); prev.type = 'button'; prev.className = 'bd-btn bd-alt'; prev.textContent = 'Previous';
+  var next = document.createElement('button'); next.type = 'button'; next.className = 'bd-btn'; next.textContent = 'Next step';
+  btns.appendChild(prev); btns.appendChild(next);
+  function render() {
+    box.innerHTML = '';
+    var a = document.createElement('div'); a.className = 'bd-actor'; a.textContent = steps[i].actor;
+    var t = document.createElement('div'); t.style.color = 'var(--lk-cobalt-dark)'; t.style.fontWeight = '700'; t.textContent = steps[i].t;
+    var d = document.createElement('div'); d.style.color = 'var(--lk-ink-soft)'; d.style.marginTop = '.35rem'; d.textContent = steps[i].d;
+    var n = document.createElement('div'); n.style.marginTop = '.5rem'; n.style.color = 'var(--lk-ink-soft)';
+    n.textContent = 'step ' + (i + 1) + ' of ' + steps.length;
+    box.appendChild(a); box.appendChild(t); box.appendChild(d); box.appendChild(n);
+    prev.disabled = i === 0;
+    next.disabled = i === steps.length - 1;
+  }
+  prev.addEventListener('click', function () { if (i > 0) { i--; render(); } });
+  next.addEventListener('click', function () { if (i < steps.length - 1) { i++; render(); } });
+  host.appendChild(box); host.appendChild(btns);
+  render();
+})();
+
+/* ---- Bespoke widget: HDFS round trips, MapReduce vs Spark (BigData 5 Batch applications) ---- */
+(function () {
+  var host = document.getElementById('w-iter');
+  if (!host) return;
+  var n = 5;
+  var ctl = document.createElement('div'); ctl.className = 'bd-ctl';
+  ctl.innerHTML = '<label>iterations of the algorithm <input type="range" id="bdIter" min="1" max="30" step="1" value="5"> <b id="bdIterV">5</b></label>';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  host.appendChild(ctl); host.appendChild(out);
+  function render() {
+    var mrOps = 2 * n;
+    var sparkOps = 2;
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    var cells = [
+      ['MapReduce · HDFS reads', String(n)],
+      ['MapReduce · HDFS writes', String(n)],
+      ['MapReduce · total DFS ops', String(mrOps)],
+      ['Spark · total DFS ops', String(sparkOps)]
+    ];
+    cells.forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>';
+      d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var p = document.createElement('div');
+    p.style.color = 'var(--lk-ink-soft)'; p.style.marginTop = '.4rem';
+    p.textContent = "In MapReduce every iteration reads its input from HDFS and writes its result back, so the cost grows with the number of iterations: " + mrOps + " distributed-storage operations, and each write is replicated three times, two of those copies crossing the network. In Spark the input is read once and the result written once, with every intermediate step held in memory. The slides put the difference at 10 to 100 times faster than network and disk.";
+    out.appendChild(p);
+  }
+  document.getElementById('bdIter').addEventListener('input', function (e) {
+    n = +e.target.value;
+    document.getElementById('bdIterV').textContent = n;
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>

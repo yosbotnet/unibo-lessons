@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 3 — Distributed storage: HDFS, file formats and Parquet · Big Data</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bd-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .bd-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .bd-w .bd-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .bd-ctl{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.82rem}
+  .bd-ctl label{display:flex;gap:.4rem;align-items:center}
+  .bd-ctl input[type=range]{accent-color:var(--lk-cobalt)}
+  .bd-btn{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;
+    border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .bd-btn:hover{background:var(--lk-cobalt-dark)}
+  .bd-btn.bd-alt{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .bd-btn:disabled{opacity:.4;cursor:not-allowed}
+  .bd-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0}
+  .bd-out{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .8rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.82rem;margin-top:.6rem;overflow-x:auto}
+  .bd-grid{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:.6rem 0}
+  .bd-cell{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.45rem .6rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.8rem}
+  .bd-cell b{color:var(--lk-cobalt-dark)}
+  .bd-ok{color:var(--lk-forest);font-weight:600} .bd-bad{color:var(--lk-vermilion);font-weight:600}
+  .bd-bar{height:14px;border:1px solid var(--lk-rule-soft);background:var(--lk-paper);position:relative;border-radius:2px;overflow:hidden}
+  .bd-bar i{display:block;height:100%;background:var(--lk-cobalt)}
+  .bd-bar i.bd-par{background:var(--lk-vermilion)}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-02-infrastructure.html">&larr; Ch. 2 — Infrastructure and reference architectures</a>
+    <a href="index.html">Index</a>
+    <a href="cap-04-mapreduce.html">Ch. 4 — The MapReduce paradigm &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Storage · Chapter 3</div>
+    <h1>Distributed storage: HDFS, file formats and Parquet</h1>
+    <div class="lk-meta"><span>~45 min read</span><span>6 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What HDFS is</a></li>
+      <li><a href="#s2">The three goals of a DFS</a></li>
+      <li><a href="#s3">Blocks, and why they are so big</a></li>
+      <li><a href="#s4">NameNode and DataNodes</a></li>
+      <li><a href="#s5">The single point of failure and its remedies</a></li>
+      <li><a href="#s6">Federation</a></li>
+      <li><a href="#s7">Replication and block placement</a></li>
+      <li><a href="#s8">Erasure Coding</a></li>
+      <li><a href="#s9">Where HDFS is not a good fit</a></li>
+      <li><a href="#s10">HDFS I/O: the read path</a></li>
+      <li><a href="#s11">Why big data file formats</a></li>
+      <li><a href="#s12">Row-oriented vs column-oriented</a></li>
+      <li><a href="#s13">Parquet: history and data model</a></li>
+      <li><a href="#s14">Unnesting: definition and repetition levels</a></li>
+      <li><a href="#s15">Two exercises on levels</a></li>
+      <li><a href="#s16">Encodings and the physical file layout</a></li>
+      <li><a href="#quiz">Test your knowledge</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>1. What HDFS is</h2>
+    <p>The definition the course uses is worth taking apart word by word, because every clause is a design decision that shows up later as a limitation:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the definition</span>
+      <p>HDFS is a filesystem designed for storing <strong>very large files</strong> with <strong>streaming data access patterns</strong>, running on <strong>clusters of commodity hardware</strong>.</p>
+    </div>
+
+    <p>Four assumptions follow from that sentence, and they are the ones to quote at the exam:</p>
+
+    <table>
+      <tr><th>Assumption</th><th>What the slides say</th></tr>
+      <tr>
+        <td><strong>Very large files</strong></td>
+        <td>A typical file in HDFS is gigabytes to terabytes in size. There are Hadoop clusters running today that store <em>petabytes</em> of data.</td>
+      </tr>
+      <tr>
+        <td><strong>Streaming access</strong></td>
+        <td>Applications that run on HDFS need streaming access to their data sets. HDFS is designed more for <em>batch processing</em> rather than interactive use. The emphasis is on <strong>high throughput</strong> of data access rather than <strong>low latency</strong>.</td>
+      </tr>
+      <tr>
+        <td><strong>Write-once-read-many</strong></td>
+        <td>HDFS applications need a write-once-read-many access model. A file once created, written and closed need not be changed. This assumption <em>simplifies data coherency issues</em> and enables high throughput data access.</td>
+      </tr>
+      <tr>
+        <td><strong>Failure is the norm</strong></td>
+        <td>Hardware failure is the norm rather than the exception. Therefore, detection of faults and quick, automatic recovery from them is a <strong>core architectural goal</strong> of HDFS.</td>
+      </tr>
+    </table>
+
+    <p>Read those four together and you get a system that is unapologetically specialised. It will happily stream a terabyte to a hundred machines at once; it will refuse, politely but firmly, to be a database. The fourth assumption is the cultural one: on a commodity cluster (Chapter 2) failure is not an emergency to be handled by an operator, it is a routine event that the filesystem must absorb by itself while the job keeps running.</p>
+  </section>
+
+  <section id="s2" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>2. The three goals of a DFS</h2>
+    <p>Before looking at any implementation detail, the deck states what any distributed file system must achieve, and — crucially — the typical solution for each. This table <em>is</em> the architecture of HDFS in miniature; everything in sections 3 to 8 is one of these three rows expanded.</p>
+
+    <table>
+      <tr><th>Goal</th><th>Requirement</th><th>Typical solution</th></tr>
+      <tr>
+        <td><strong>Big data support</strong></td>
+        <td>Files may be bigger than single disks</td>
+        <td>Split files into smaller <strong>blocks</strong>, store blocks on different machines</td>
+      </tr>
+      <tr>
+        <td><strong>Abstraction</strong></td>
+        <td>Interact with disks on different machines as if it were one, unified disk</td>
+        <td><strong>Master-slave architecture</strong> with high availability</td>
+      </tr>
+      <tr>
+        <td><strong>Fault-tolerance</strong></td>
+        <td>Disks can fail, machines can be unreachable, but data should always be available</td>
+        <td>Store <strong>multiple copies</strong> of each block (replication)</td>
+      </tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>If you are asked &ldquo;what are the goals of a distributed file system&rdquo;, answer with the three pairs — <em>goal, requirement, solution</em>. Naming the goal without the mechanism (blocks, master-slave with HA, replication) is half an answer.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>3. Blocks, and why they are so big</h2>
+    <p><strong>Why blocks at all?</strong> Two reasons. Files can be larger than disks, so a file must be breakable across machines. And by splitting files into blocks, <em>storage management is simplified and replication is easier</em>: you replicate a fixed-size unit, not a file of arbitrary length.</p>
+
+    <p>The block is the <strong>minimum amount of data read or written</strong>. The scale of that unit is where HDFS parts company with everything you have used before:</p>
+
+    <table>
+      <tr><th>Level</th><th>Typical block size</th></tr>
+      <tr><td>Disk blocks</td><td>normally 512 B</td></tr>
+      <tr><td>Filesystem blocks</td><td>typically a few KB</td></tr>
+      <tr><td><strong>HDFS blocks</strong></td><td><strong>between 64 MB and 1 GB — default 128 MB</strong></td></tr>
+    </table>
+
+    <p>An important detail that surprises people: if a file is smaller than a block, <strong>it will occupy the necessary disk space, not the full block size</strong>. The 128 MB is a maximum unit of splitting, not a minimum unit of allocation.</p>
+
+    <h3>Why this big?</h3>
+    <p>Because <strong>large files split into many small blocks require a huge number of seeks</strong>. The slides make it concrete: with a block size of 4 KB, a 1 GB file is 250,000 blocks — and therefore up to 250,000 seeks. On spinning media a seek costs milliseconds while streaming a megabyte costs a fraction of that, so a small block size turns a throughput problem into a latency problem. Big blocks amortise the seek over a large sequential read, which is exactly what the &ldquo;streaming access&rdquo; assumption asked for.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note — why not bigger?</span>
+      <p>The slide asks &ldquo;why not bigger?&rdquo; and leaves it hanging. The answer is already in the course, one chapter ahead: in MapReduce the <strong>optimal split size is the DFS block size</strong> and one map task is created per split (Chapter 4). Bigger blocks therefore mean fewer, longer tasks: less parallelism, coarser load balancing, and a slower recovery when one task has to be redone. The block size is a negotiation between seek amortisation and parallelism — 128 MB is where the two curves cross for typical hardware.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>4. NameNode and DataNodes</h2>
+    <p>Nodes in an HDFS cluster operate in a <strong>master-slave pattern</strong>, and the split of responsibilities is unusually clean: one machine knows <em>where everything is</em>, and all the others hold <em>the actual bytes</em>.</p>
+
+    <table>
+      <tr><th>Role</th><th>Responsibilities</th></tr>
+      <tr>
+        <td><strong>NameNode (NN)</strong><br>the master</td>
+        <td>Persistently maintains the filesystem tree and all files&rsquo; and directories&rsquo; <strong>metadata</strong>.<br>Keeps <strong>in memory</strong> the location of each block for a given file — the <strong>block pool</strong>.</td>
+      </tr>
+      <tr>
+        <td><strong>DataNodes (DNs)</strong><br>the slaves</td>
+        <td>Store and retrieve blocks.<br>Periodically report to the NN with the list of blocks they are storing; <strong>heartbeats</strong> signal their active state (e.g., every 10 minutes).</td>
+      </tr>
+    </table>
+
+    <p>Two words in that table carry a lot of weight. <strong>Persistently</strong>: the tree and the metadata survive a restart, they are written to disk. <strong>In memory</strong>: the block pool — which block lives on which DataNode — is <em>not</em> persisted, it is rebuilt from the reports the DataNodes send. That is why a NameNode restart is slow (section 5) and why the amount of RAM on the NameNode is the hard ceiling on the number of files in the cluster (sections 6 and 9).</p>
+  </section>
+
+  <section id="s5" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>5. The single point of failure and its remedies</h2>
+    <p>The design has an obvious weak spot, and the course names it directly: <strong>the NN is a single point of failure</strong>. Without it the filesystem cannot be used — there is <em>no way to reconstruct the files from the blocks in the DataNodes</em>. The blocks are still there, intact and replicated, and they are useless: nothing records which block belongs to which file, in which order.</p>
+
+    <p>Three remedies, in increasing order of cost and effectiveness:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Backup</button>
+        <button class="lk-tab">Secondary NameNode</button>
+        <button class="lk-tab">High Availability</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>The NN writes its <strong>persistent state to multiple filesystems</strong>, preventing loss of data. This protects the metadata from disappearing, but it does nothing for downtime: somebody still has to bring a NameNode back up from those files.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>A separate machine regularly connects with the primary NN to build <strong>snapshots</strong> of its persistent data and saves them to local or remote directories. These <strong>checkpoints</strong> can be used to restart a failed NN <em>without having to replay the entire journal</em> of filesystem actions.</p>
+        <p>Still, restarting a NN could take <strong>30+ minutes</strong>. Note the name is misleading: the secondary NameNode is not a standby that takes over, it is a checkpointing helper.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>High Availability (HA)</strong> indicates a system that can tolerate faults: the service <em>never stops</em> while the fault — hardware or software — is detected, reported, masked and repaired off-line. Most big data tools offer HA, not just HDFS.</p>
+        <p>HA is supported by configuring <strong>two separate machines as NameNodes</strong>: one <em>active</em>, one <em>standby</em>. If the active NN fails, the standby takes over. The standby keeps its metadata up to date by:</p>
+        <ul>
+          <li>reading the <strong>edit log files</strong> written by the active NN in a <strong>shared storage</strong> — edit logs are typically stored in <strong>Journal Nodes</strong>, which are themselves replicated;</li>
+          <li>receiving the <strong>data block locations and the heartbeats directly from the DataNodes</strong>, which are configured to report to <em>both</em> NameNodes.</li>
+        </ul>
+        <p>An HA solution recovers far more efficiently, but requires <strong>more resources and communications</strong>.</p>
+      </div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The second bullet of HA is the one people forget. It is not enough for the standby to read the edit log: the edit log carries the <em>namespace</em>, not the <em>block locations</em>, because block locations live only in memory and are rebuilt from DataNode reports. So the DataNodes must report to both NameNodes — otherwise the standby would take over with a complete file tree and no idea where any block physically is, and would need the same 30+ minutes to find out.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>6. Federation</h2>
+    <p>High availability solves the <em>failure</em> problem of a single master. It does not solve the <em>capacity</em> problem: the size of the block pool is limited by the memory size of the NameNode, which may incur scaling issues on large clusters with many files.</p>
+
+    <p>The solution is <strong>federation</strong>: configure additional NameNodes, where each NN manages a portion of the filesystem (a <strong>namespace</strong>), and the NNs are <strong>independent of each other</strong>. The DataNodes are shared; the namespaces are not.</p>
+
+    <table>
+      <tr><th>Advantage</th><th>Why federation gives it</th></tr>
+      <tr><td><strong>Performance</strong></td><td>A single NN can become a bottleneck for data access; several NNs share the metadata traffic</td></tr>
+      <tr><td><strong>Availability</strong></td><td>In case of one NN failure, the others are available</td></tr>
+      <tr><td><strong>Scalability</strong></td><td>By storing metadata in memory, the size of the NN heap limits the number of files and blocks — more heaps, more files</td></tr>
+      <tr><td><strong>Maintainability, security &amp; flexibility</strong></td><td>Each namespace is isolated and not aware of the others</td></tr>
+    </table>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>Federation and High Availability answer <em>different</em> questions and are not alternatives. HA gives you two NameNodes serving <strong>the same</strong> namespace (one active, one standby) so the service survives a crash. Federation gives you several NameNodes serving <strong>different</strong> namespaces so the metadata fits in memory. A large production cluster runs both: each federated namespace has its own active/standby pair.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>7. Replication and block placement</h2>
+    <p>Each data block is <strong>independently replicated at multiple DataNodes</strong> in order to improve <em>performance</em> and <em>robustness</em>. Two properties matter: replication is <strong>aware of the cluster topology</strong>, and for each data block the NN stores the list of DNs storing it.</p>
+
+    <p>The default replication factor is <strong>3</strong>, and the placement is not random. Memorise the rule — it is a classic exam question:</p>
+
+    <table>
+      <tr><th>Replica</th><th>Placement rule</th><th>What it buys</th></tr>
+      <tr><td><strong>Replica 1</strong></td><td>On the node (n1) where the client issued the write command, <em>if the client resides within the cluster</em></td><td>The first copy costs no network traffic at all</td></tr>
+      <tr><td><strong>Replica 2</strong></td><td>On a node (n2) in a rack (r2) <strong>different</strong> from the one of n1 — off-rack</td><td>Survives the loss of an entire rack (switch, power)</td></tr>
+      <tr><td><strong>Replica 3</strong></td><td>On a node <strong>different from n2</strong> but belonging to the <strong>same rack r2</strong></td><td>The third copy is written over the cheap intra-rack link, not a second expensive inter-rack hop</td></tr>
+    </table>
+
+    <p>Replicas can be <strong>rebalanced</strong> when nodes are added or become unavailable.</p>
+
+    <p>Read the three rules as a single sentence and the reasoning appears: <em>one copy where it is free, one copy far enough to survive a rack failure, and the third copy next to the second because the expensive hop has already been paid.</em> Placing replica 3 in a third rack would double the inter-rack traffic to buy protection against the simultaneous loss of two racks — a trade the default configuration refuses. This is Chapter 2 speaking again: intra-rack bandwidth is much greater than inter-rack bandwidth, so the topology of the network dictates the topology of the data.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 380" width="100%" role="img" aria-labelledby="p31t p31d">
+        <title id="p31t">HDFS block placement with the default replication factor of 3</title>
+        <desc id="p31d">A file split into three blocks; the three replicas of block B1 are placed on the writing node in rack 1, and on two different nodes in rack 2. The NameNode holds only metadata, and the client exchanges data directly with the DataNodes.</desc>
+        <rect x="20" y="18" width="200" height="70" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="34" y="40" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">NameNode</text>
+        <text x="34" y="58" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">tree + metadata (on disk)</text>
+        <text x="34" y="74" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">block pool (in memory)</text>
+
+        <rect x="470" y="18" width="200" height="70" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+        <text x="484" y="40" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink)">file.dat = B1 B2 B3</text>
+        <text x="484" y="58" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">client, inside the cluster,</text>
+        <text x="484" y="74" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">running on node n1</text>
+
+        <path d="M220 50 L468 50" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#a3)"/>
+        <text x="270" y="42" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt)">metadata only — never the data</text>
+
+        <rect x="30" y="130" width="290" height="210" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.2" stroke-dasharray="4 3"/>
+        <text x="44" y="152" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">Rack r1</text>
+        <rect x="380" y="130" width="290" height="210" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.2" stroke-dasharray="4 3"/>
+        <text x="394" y="152" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">Rack r2</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="50" y="168" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+          <text x="60" y="188" fill="var(--lk-ink)">n1 (writer)</text>
+          <rect x="60" y="198" width="34" height="20" rx="2" fill="var(--lk-vermilion)"/>
+          <text x="68" y="213" fill="var(--lk-paper-light)">B1</text>
+          <text x="102" y="213" fill="var(--lk-ink-soft)">replica 1</text>
+
+          <rect x="180" y="168" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="190" y="188" fill="var(--lk-ink-soft)">n2</text>
+          <rect x="50" y="252" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="60" y="272" fill="var(--lk-ink-soft)">n3</text>
+          <rect x="180" y="252" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="190" y="272" fill="var(--lk-ink-soft)">n4</text>
+
+          <rect x="400" y="168" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+          <text x="410" y="188" fill="var(--lk-ink)">n5</text>
+          <rect x="410" y="198" width="34" height="20" rx="2" fill="var(--lk-vermilion)"/>
+          <text x="418" y="213" fill="var(--lk-paper-light)">B1</text>
+          <text x="452" y="213" fill="var(--lk-ink-soft)">replica 2</text>
+
+          <rect x="530" y="168" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+          <text x="540" y="188" fill="var(--lk-ink)">n6</text>
+          <rect x="540" y="198" width="34" height="20" rx="2" fill="var(--lk-vermilion)"/>
+          <text x="548" y="213" fill="var(--lk-paper-light)">B1</text>
+          <text x="582" y="213" fill="var(--lk-ink-soft)">replica 3</text>
+
+          <rect x="400" y="252" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="410" y="272" fill="var(--lk-ink-soft)">n7</text>
+          <rect x="530" y="252" width="110" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="540" y="272" fill="var(--lk-ink-soft)">n8</text>
+        </g>
+
+        <path d="M160 198 L398 198" fill="none" stroke="var(--lk-vermilion)" stroke-width="2.4" marker-end="url(#a3v)"/>
+        <text x="196" y="192" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">1 inter-rack hop (costly)</text>
+        <path d="M510 208 L528 208" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#a3v)"/>
+        <text x="404" y="240" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">then intra-rack (cheap)</text>
+
+        <defs>
+          <marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-cobalt)"/></marker>
+          <marker id="a3v" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-vermilion)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 3.1</b> — Default block placement. Replica 1 is free (it stays on the writing node), replica 2 pays the one expensive inter-rack hop to survive a rack failure, and replica 3 rides the cheap intra-rack link next to replica 2. Meanwhile the NameNode only ever exchanges metadata: the bytes travel client&harr;DataNode.</figcaption>
+    </figure>
+
+    <div class="bd-w">
+      <h4>Redundancy explorer: replication vs erasure coding</h4>
+      <p class="bd-sub">Move the sliders to see how much raw storage a logical dataset actually consumes, and what you buy with it. The erasure coding defaults are the ones in the slides: 3 parity chunks every 6 data chunks.</p>
+      <div id="w-repl"></div>
+    </div>
+  </section>
+
+  <section id="s8" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>8. Erasure Coding</h2>
+    <p>Replication is simple and fast, and it is also brutally expensive: the default factor of 3 means <strong>200% overhead</strong> — you buy three disks to store one disk of data. HDFS therefore supports <strong>Erasure Coding (EC)</strong> as an alternative, a mechanism similar to <strong>RAID 5-6</strong>.</p>
+
+    <p>Instead of replicating each block, <strong>blocks are striped</strong>. A <strong>stripe</strong> is a sequence of chunks, composed of <strong>m data chunks + k parity chunks</strong>. Note the consequence the slides call out explicitly: <em>the data in a block may end up in multiple stripes</em>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-labelledby="p32t p32d">
+        <title id="p32t">Erasure coding compared with three-way replication</title>
+        <desc id="p32d">Above, three identical copies of one block occupying three nodes. Below, a stripe of data chunks plus parity chunks spread across nodes in two racks, with a much smaller total footprint.</desc>
+        <text x="20" y="28" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">3x REPLICATION — store 1 unit, occupy 3</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="40" width="90" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="48" y="62" fill="var(--lk-paper-light)">B1</text>
+          <rect x="120" y="40" width="90" height="34" rx="2" fill="var(--lk-cobalt)" opacity=".6"/><text x="148" y="62" fill="var(--lk-paper-light)">B1</text>
+          <rect x="220" y="40" width="90" height="34" rx="2" fill="var(--lk-cobalt)" opacity=".6"/><text x="248" y="62" fill="var(--lk-paper-light)">B1</text>
+          <text x="326" y="62" fill="var(--lk-vermilion)">redundancy 200%</text>
+        </g>
+
+        <path d="M20 96 L680 96" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+
+        <text x="20" y="124" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">ERASURE CODING — a stripe of m data chunks + k parity chunks (default 6 + 3)</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="140" width="66" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="42" y="162" fill="var(--lk-paper-light)">C1</text>
+          <rect x="92" y="140" width="66" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="114" y="162" fill="var(--lk-paper-light)">C2</text>
+          <rect x="164" y="140" width="66" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="186" y="162" fill="var(--lk-paper-light)">C3</text>
+          <rect x="236" y="140" width="66" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="258" y="162" fill="var(--lk-paper-light)">C4</text>
+          <rect x="308" y="140" width="66" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="330" y="162" fill="var(--lk-paper-light)">C5</text>
+          <rect x="380" y="140" width="66" height="34" rx="2" fill="var(--lk-cobalt)"/><text x="402" y="162" fill="var(--lk-paper-light)">C6</text>
+          <rect x="460" y="140" width="66" height="34" rx="2" fill="var(--lk-vermilion)"/><text x="480" y="162" fill="var(--lk-paper-light)">P1</text>
+          <rect x="532" y="140" width="66" height="34" rx="2" fill="var(--lk-vermilion)"/><text x="552" y="162" fill="var(--lk-paper-light)">P2</text>
+          <rect x="604" y="140" width="66" height="34" rx="2" fill="var(--lk-vermilion)"/><text x="624" y="162" fill="var(--lk-paper-light)">P3</text>
+        </g>
+        <text x="20" y="196" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt)">6 data chunks</text>
+        <text x="460" y="196" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">3 parity chunks &rarr; redundancy 50%</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="222" width="310" height="96" rx="3" fill="none" stroke="var(--lk-rule)" stroke-dasharray="4 3"/>
+          <text x="32" y="242" fill="var(--lk-ink-soft)">Rack r1</text>
+          <rect x="40" y="252" width="52" height="26" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="56" y="270" fill="var(--lk-paper-light)">C1</text>
+          <rect x="102" y="252" width="52" height="26" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="118" y="270" fill="var(--lk-paper-light)">C4</text>
+          <rect x="164" y="252" width="52" height="26" rx="2" fill="var(--lk-vermilion)" opacity=".8"/><text x="180" y="270" fill="var(--lk-paper-light)">P1</text>
+          <rect x="40" y="286" width="52" height="26" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="56" y="304" fill="var(--lk-paper-light)">C5</text>
+
+          <rect x="360" y="222" width="310" height="96" rx="3" fill="none" stroke="var(--lk-rule)" stroke-dasharray="4 3"/>
+          <text x="372" y="242" fill="var(--lk-ink-soft)">Rack r2</text>
+          <rect x="380" y="252" width="52" height="26" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="396" y="270" fill="var(--lk-paper-light)">C2</text>
+          <rect x="442" y="252" width="52" height="26" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="458" y="270" fill="var(--lk-paper-light)">C3</text>
+          <rect x="504" y="252" width="52" height="26" rx="2" fill="var(--lk-vermilion)" opacity=".8"/><text x="520" y="270" fill="var(--lk-paper-light)">P2</text>
+          <rect x="380" y="286" width="52" height="26" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="396" y="304" fill="var(--lk-paper-light)">C6</text>
+          <rect x="442" y="286" width="52" height="26" rx="2" fill="var(--lk-vermilion)" opacity=".8"/><text x="458" y="304" fill="var(--lk-paper-light)">P3</text>
+        </g>
+        <text x="20" y="334" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">no single node holds a whole block any more &rarr; data locality is lost</text>
+      </svg>
+      <figcaption><b>Plate 3.2</b> — Replication buys locality with space; erasure coding buys space with locality. Once a block is striped, reading it means fetching chunks from several machines, which is exactly what MapReduce and Spark spend their scheduling effort trying to avoid.</figcaption>
+    </figure>
+
+    <p><strong>EC works best for cold datasets with relatively low I/O activities.</strong> The trade-offs, exactly as the slides list them:</p>
+
+    <table>
+      <tr><th>Main advantages</th><th>Main disadvantages</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Sensibly <strong>reduces data redundancy</strong>, from <strong>200% to 50%</strong> with default setups. If <em>m</em> parity chunks are created every <em>k</em> chunks, the redundancy factor is <em>m/k</em>; the default is <strong>3 parity chunks every 6 chunks</strong>.</li>
+            <li><strong>Faster writes</strong>, because chunks are distributed.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>Higher <strong>CPU cost</strong> in both reading and writing.</li>
+            <li>Longer <strong>recovery time</strong> in case of failure.</li>
+            <li>Loss of <strong>data locality</strong>: to read a block you need to get its stripes from multiple machines.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Be ready to compute the redundancy. With replication factor <em>r</em> the overhead is <em>(r&minus;1)&times;100%</em>, so r=3 gives 200%. With EC the redundancy factor is <em>m/k</em> parity over data, so the default 3-every-6 gives 50%. And be ready to say <em>when</em> to use EC: cold data with low I/O — never for a dataset that a Spark job scans repeatedly, because you would pay CPU and lose locality on every pass.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>9. Where HDFS is not a good fit</h2>
+    <p>The deck is refreshingly honest about the limits. &ldquo;Although this may change in the future, there are areas where HDFS is not a good fit today.&rdquo;</p>
+
+    <table>
+      <tr><th>Weak spot</th><th>Why</th></tr>
+      <tr>
+        <td><strong>Low-latency data access</strong></td>
+        <td>HDFS is optimized for delivering a <em>high throughput</em> of data, and this may be at the expense of latency. Applications that require access to data in the <strong>tens of milliseconds</strong> range will not work well with HDFS.</td>
+      </tr>
+      <tr>
+        <td><strong>Lots of small files</strong></td>
+        <td>The limit to the number of files in a filesystem is governed by the <strong>amount of memory on the NameNode</strong>, because it holds filesystem metadata in memory. Storing <em>millions</em> of files is feasible; <em>billions</em> is beyond the capability of current hardware.</td>
+      </tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Both weaknesses are the direct cost of the design choices in section 1. Big blocks and streaming access give throughput and take latency. A single in-memory block pool gives one authoritative, fast metadata lookup and takes a ceiling on the file count. When your workload hits either wall, the answer is not to tune HDFS — it is to use a different storage service, which is why the course later devotes an entire chapter to NoSQL systems (Chapter 11) built for exactly those two profiles.</p>
+    </div>
+  </section>
+
+  <section id="s10" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>10. HDFS I/O: the read path</h2>
+    <p>An application client wishing to read a file (or a portion thereof) must <strong>first contact the NN</strong> to determine where the actual data is stored. In response, the NN returns:</p>
+    <ul>
+      <li>the relevant <strong>block id</strong>;</li>
+      <li>the <strong>location</strong> where the block is held, i.e. which DataNode.</li>
+    </ul>
+    <p>The client <strong>then contacts the DataNode</strong> to retrieve the data. Blocks are themselves stored on standard single-machine file systems: <strong>HDFS lies on top of the standard OS stack</strong> — a DataNode is, at bottom, an ordinary Linux box holding ordinary files.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — three features of the design</span>
+      <p><strong>Data is never moved through the NN.</strong> <strong>All data transfer occurs directly between clients and DataNodes.</strong> <strong>Communications with the NN only involve transfer of metadata.</strong></p>
+      <p>This is what keeps a single master from becoming a bandwidth bottleneck: the master is on the control plane, never on the data plane. A thousand clients streaming a terabyte each cost the NameNode nothing but a few thousand small lookups.</p>
+    </div>
+
+    <div id="se-read"></div>
+  </section>
+
+  <section id="s11" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>11. Why big data file formats</h2>
+    <p>Storage is only half the story. Data usually comes in <strong>standard file formats</strong> — structured CSV files, semi-structured JSON files, unstructured textual files — and those formats are, for this setting, actively bad. Three properties separate a big data format from a text file:</p>
+
+    <table>
+      <tr><th>Property</th><th>What it gives</th><th>What you pay without it</th></tr>
+      <tr>
+        <td><strong>Binary serialization</strong></td>
+        <td>Compact streams of bytes occupy less space</td>
+        <td>Large overhead for storing data as text: more space required, and type-conversion required when reading and writing</td>
+      </tr>
+      <tr>
+        <td><strong>Splittability</strong></td>
+        <td>Metadata headers allow skipping unnecessary I/O</td>
+        <td>You cannot access single portions of files</td>
+      </tr>
+      <tr>
+        <td><strong>Compression</strong></td>
+        <td>Block-level (distinctly compress the single blocks) and record-level (distinctly compress the single records within a block)</td>
+        <td>The whole file must be compressed and decompressed for reading</td>
+      </tr>
+    </table>
+
+    <p>Splittability deserves a second look, because it connects directly to everything in Chapter 4. If a file cannot be split, the framework cannot create one map task per block: the whole file has to go to a single task, and the cluster idles. A gzipped CSV is the classic trap — perfectly compressed, and perfectly unparallelisable.</p>
+  </section>
+
+  <section id="s12" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>12. Row-oriented vs column-oriented</h2>
+    <p>Everything starts from a physical fact: <strong>disks store data sequentially — they are 1-dimensional</strong>. Tables cannot be directly represented, so cells are stored either <strong>row-by-row</strong> or <strong>column-by-column</strong>. That single choice determines which workload the file is good at.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" width="100%" role="img" aria-labelledby="p33t p33d">
+        <title id="p33t">Row-oriented versus column-oriented layout on a one-dimensional disk</title>
+        <desc id="p33d">The same three-column table serialised twice: row by row, where an analytical query on one column must touch every record, and column by column, where it reads one contiguous run.</desc>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <text x="20" y="26" fill="var(--lk-ink-soft)">the table</text>
+          <rect x="20" y="34" width="70" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/><text x="34" y="51" fill="var(--lk-ink)">dept</text>
+          <rect x="90" y="34" width="70" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/><text x="104" y="51" fill="var(--lk-ink)">name</text>
+          <rect x="160" y="34" width="70" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/><text x="174" y="51" fill="var(--lk-ink)">salary</text>
+          <rect x="20" y="58" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="34" y="74" fill="var(--lk-ink-soft)">d1</text>
+          <rect x="90" y="58" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="104" y="74" fill="var(--lk-ink-soft)">n1</text>
+          <rect x="160" y="58" width="70" height="22" fill="var(--lk-vermilion)" opacity=".8"/><text x="174" y="74" fill="var(--lk-paper-light)">s1</text>
+          <rect x="20" y="80" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="34" y="96" fill="var(--lk-ink-soft)">d2</text>
+          <rect x="90" y="80" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="104" y="96" fill="var(--lk-ink-soft)">n2</text>
+          <rect x="160" y="80" width="70" height="22" fill="var(--lk-vermilion)" opacity=".8"/><text x="174" y="96" fill="var(--lk-paper-light)">s2</text>
+          <rect x="20" y="102" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="34" y="118" fill="var(--lk-ink-soft)">d3</text>
+          <rect x="90" y="102" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="104" y="118" fill="var(--lk-ink-soft)">n3</text>
+          <rect x="160" y="102" width="70" height="22" fill="var(--lk-vermilion)" opacity=".8"/><text x="174" y="118" fill="var(--lk-paper-light)">s3</text>
+          <text x="250" y="74" fill="var(--lk-vermilion)">the query needs</text>
+          <text x="250" y="90" fill="var(--lk-vermilion)">only the salary column</text>
+        </g>
+
+        <text x="20" y="164" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">ROW-ORIENTED on disk</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="176" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="34" y="194" fill="var(--lk-ink-soft)">d1</text>
+          <rect x="66" y="176" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="80" y="194" fill="var(--lk-ink-soft)">n1</text>
+          <rect x="112" y="176" width="46" height="26" fill="var(--lk-vermilion)" opacity=".8"/><text x="126" y="194" fill="var(--lk-paper-light)">s1</text>
+          <rect x="158" y="176" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="172" y="194" fill="var(--lk-ink-soft)">d2</text>
+          <rect x="204" y="176" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="218" y="194" fill="var(--lk-ink-soft)">n2</text>
+          <rect x="250" y="176" width="46" height="26" fill="var(--lk-vermilion)" opacity=".8"/><text x="264" y="194" fill="var(--lk-paper-light)">s2</text>
+          <rect x="296" y="176" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="310" y="194" fill="var(--lk-ink-soft)">d3</text>
+          <rect x="342" y="176" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="356" y="194" fill="var(--lk-ink-soft)">n3</text>
+          <rect x="388" y="176" width="46" height="26" fill="var(--lk-vermilion)" opacity=".8"/><text x="402" y="194" fill="var(--lk-paper-light)">s3</text>
+          <text x="452" y="194" fill="var(--lk-ink-soft)">3 useful cells out of 9 read</text>
+        </g>
+
+        <text x="20" y="248" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">COLUMN-ORIENTED on disk</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="260" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="34" y="278" fill="var(--lk-ink-soft)">d1</text>
+          <rect x="66" y="260" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="80" y="278" fill="var(--lk-ink-soft)">d2</text>
+          <rect x="112" y="260" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="126" y="278" fill="var(--lk-ink-soft)">d3</text>
+          <rect x="158" y="260" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="172" y="278" fill="var(--lk-ink-soft)">n1</text>
+          <rect x="204" y="260" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="218" y="278" fill="var(--lk-ink-soft)">n2</text>
+          <rect x="250" y="260" width="46" height="26" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="264" y="278" fill="var(--lk-ink-soft)">n3</text>
+          <rect x="296" y="260" width="138" height="26" fill="var(--lk-vermilion)" opacity=".8"/><text x="330" y="278" fill="var(--lk-paper-light)">s1  s2  s3</text>
+          <text x="452" y="278" fill="var(--lk-forest)">one contiguous run</text>
+        </g>
+        <path d="M296 292 L434 292" stroke="var(--lk-forest)" stroke-width="2"/>
+        <text x="296" y="308" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-forest)">homogeneous &rarr; compresses better too</text>
+      </svg>
+      <figcaption><b>Plate 3.3</b> — The same table, serialised two ways. Column orientation does not make the disk faster; it makes the query read less, and it puts values of the same type next to each other, which is what makes the compression ratios so good.</figcaption>
+    </figure>
+
+    <p><strong>Row orientation is better for transactional workloads (OLTP)</strong>, because applications work on a row basis — updating a customer&rsquo;s profile, adding a new order. <strong>Column orientation is better for analytical workloads (OLAP)</strong>, because analyses are done on a columnar basis — the average salary of employees by department.</p>
+
+    <p>The advantages of columnar formats, as listed in the deck:</p>
+    <ul>
+      <li><strong>Better compression</strong> — data is more homogeneous; the space savings are very noticeable at the scale of a Hadoop cluster; type-specific encodings become possible.</li>
+      <li><strong>Reduced I/O for analytical queries</strong> — only a subset of the columns is read, and unnecessary deserialization is skipped.</li>
+      <li><strong>Operate on encoded data</strong> — e.g., when a dictionary encoding is used, some operations can run without decoding at all.</li>
+    </ul>
+
+    <h3>The format families</h3>
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">SequenceFiles</button>
+        <button class="lk-tab">Thrift &amp; Protobuf</button>
+        <button class="lk-tab">Avro</button>
+        <button class="lk-tab">ORC</button>
+        <button class="lk-tab">Parquet</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Row-oriented.</strong> Binary key-value pairs, specifically designed to work with MapReduce (others are available, e.g. MapFiles). <strong>No support besides Java.</strong> Mostly used for <em>intermediate data storage</em> and for packing many small files into a single SequenceFile — which is the classic workaround for the &ldquo;lots of small files&rdquo; weakness of section 9.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Row-oriented.</strong> <em>Apache Thrift</em> (Facebook) and <em>Protocol Buffers</em> (Google) were born to facilitate communication between programs (RPC). They offer <strong>multi-language support</strong>, but their key features are available only through <strong>external libraries</strong>. Their schema is similar to Parquet&rsquo;s but more complex, defining also Maps, Lists and Sets.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Row-oriented.</strong> <em>Apache Avro</em> addresses the major drawbacks of <code>Writable</code>, the default serialization of SequenceFiles. Multi-language support, more integrated with Hadoop, <strong>supports schema evolution</strong> with no need to compile code.</p>
+        <p>The distinctive property: in Avro, <strong>data is always serialized with its schema</strong>. Each file is <em>self-describing</em>, and different schemas can be used for serialization and deserialization — Avro will autonomously handle the missing, extra or modified fields.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Column-oriented.</strong> <em>ORC Files</em> (Optimized Record Columnar Files) were the <strong>first columnar format on Hadoop</strong>, initially as RC Files. <strong>No support for schema evolution</strong>, and originally designed for Hive alone.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Column-oriented.</strong> <em>Apache Parquet</em> is <strong>general-purpose</strong> and <strong>supports schema evolution</strong>. It is the format the rest of this chapter — and most of the practical work in the course — is about.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s13" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>13. Parquet: history and data model</h2>
+    <p><strong>Parquet is a columnar storage format for efficient querying of nested structures in a flat format.</strong> Hold on to the tension in that sentence: <em>nested</em> structures, stored <em>flat</em>. Sections 14 and 15 exist entirely to resolve it.</p>
+
+    <ul class="lk-timeline">
+      <li><span class="lk-tl-when">2006</span> — the <strong>Dremel</strong> system, using the <strong>ColumnIO</strong> file format, goes into production at Google.</li>
+      <li><span class="lk-tl-when">2010</span> — Google publishes a paper about Dremel.</li>
+      <li><span class="lk-tl-when">2013</span> — <strong>Apache Parquet 1.0</strong> is released (open source) as a joint effort between <strong>Twitter and Cloudera</strong>.</li>
+    </ul>
+
+    <p>Parquet ensures <strong>interoperability</strong> through several frameworks (Spark, MapReduce, etc.) and query engines (Hive, Impala, Pig, Presto, etc.) — which is precisely why it became the default currency of the data lake, and why Chapter 12 will find it again underneath the lakehouse.</p>
+
+    <h3>The data model</h3>
+    <p>The model is deliberately small — three concepts:</p>
+    <ul>
+      <li><strong>Root</strong>: a group of fields called a <strong>message</strong>.</li>
+      <li><strong>Field types</strong>: <strong>group</strong> or <strong>primitive</strong> (e.g., string).</li>
+      <li><strong>Frequency</strong>: <strong>required</strong> (exactly one), <strong>optional</strong> (zero or one), or <strong>repeated</strong> (zero or more).</li>
+    </ul>
+
+    <div id="ac-schema"></div>
+
+    <p>With only those three frequencies you can express the collection types other systems build in: a list is a repeated field, a map is a repeated group of key-value pairs. The slides show both:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">List of strings</button>
+        <button class="lk-tab">Map of strings to strings</button>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-text">message ExampleList {
+  repeated string list;
+}</code></pre>
+        <p>Data <code>[ "a", "b", "c", ... ]</code> is stored as:</p>
+<pre><code class="language-text">{
+  list: "a",
+  list: "b",
+  list: "c",
+  ...
+}</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-text">message ExampleMap {
+  repeated group map {
+    required string key;
+    optional string value;
+  }
+}</code></pre>
+        <p>Data <code>[ "AL" =&gt; "Alabama", ... ]</code> is stored as:</p>
+<pre><code class="language-text">{
+  map: {
+    key: "AL",
+    value: "Alabama",
+  },
+  ...
+}</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="s14" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>14. Unnesting: definition and repetition levels</h2>
+
+    <p><strong>The problem.</strong> Can we store nested data structures in columnar format? We need to map the schema to a list of columns in a way that we can write records to flat columns <em>and read them back to their original nested data structure</em>. And with repeatable fields, <strong>how do I know when one record ends and another begins?</strong></p>
+
+    <p>The starting rule is simple: <strong>one column per primitive-type field in the schema</strong> — if we represent the schema as a tree, the primitive types are the <em>leaves</em> of this tree. But a flat column of values loses two things: which nulls happened at which nesting depth, and where each repeated list starts.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the solution</span>
+      <p>Each value is associated with <strong>two integers: repetition level and definition level</strong>. These integers allow to fully reconstruct the nested structures while still being able to store each primitive separately.</p>
+    </div>
+
+    <h3>Definition level</h3>
+    <p>Consider a column <code>a.b.c</code> where all fields are optional and can be null:</p>
+<pre><code class="language-text">message ExampleDefLevel {
+  optional group a {
+    optional group b {
+      optional string c;
+    }
+  }
+}</code></pre>
+    <p>When <code>c</code> is defined, then necessarily <code>a</code> and <code>b</code> are defined too. But when <code>c</code> is null, <strong>we need to save the level of the null value</strong> — is <code>a</code> itself missing, or is <code>a</code> present with <code>b</code> missing, or are both present and only <code>c</code> missing? There are 3 nested optional fields, so the <strong>maximum definition level is 3</strong>.</p>
+
+    <p>Now make <code>b</code> required:</p>
+<pre><code class="language-text">message ExampleDefLevel {
+  optional group a {
+    required group b {
+      optional string c;
+    }
+  }
+}</code></pre>
+    <p>The maximum definition level is now <strong>2</strong>, as <code>b</code> does not need one: a required field cannot be missing on its own, so it contributes no level. <strong>Remember: the smaller the definition levels, the less the required bits.</strong> Marking a field <code>required</code> is not documentation, it is a storage optimisation.</p>
+
+    <h3>Repetition level</h3>
+    <p>The presence of repeated fields requires storing <strong>when new lists are starting</strong> in a column of values. The repetition level indicates <em>at which level we have to create a new list for the current value</em> — it can be seen as a marker of when to start a new list and at which level:</p>
+
+    <table>
+      <tr><th>Repetition level</th><th>Meaning</th></tr>
+      <tr><td><strong>0</strong></td><td>marks every <strong>new record</strong>; implies creating a new level1 <em>and</em> level2 list</td></tr>
+      <tr><td><strong>1</strong></td><td>marks every <strong>new level1 list</strong>; implies creating a new level2 list as well</td></tr>
+      <tr><td><strong>2</strong></td><td>marks every <strong>new element in a level2 list</strong></td></tr>
+    </table>
+
+    <h3>The AddressBook example</h3>
+    <p>Take the schema and the two records from the slides:</p>
+<pre><code class="language-text">message AddressBook {
+  required string owner;
+  repeated string ownerPhoneNumbers;
+  repeated group contacts {
+    required string name;
+    optional string phoneNumber;
+  }
+}</code></pre>
+<pre><code class="language-text">AddressBook {
+  owner: "Julien Le Dem",
+  ownerPhoneNumbers: "555 123 4567",
+  ownerPhoneNumbers: "555 666 1337",
+  contacts: {
+    name: "Dmitriy Ryaboy",
+    phoneNumber: "555 987 6543",
+  },
+  contacts: {
+    name: "Chris Aniszczyk"
+  }
+}
+AddressBook {
+  owner: "A. Nonymous"
+}</code></pre>
+
+    <p>For the column <code>contacts.phoneNumber</code>, the definition levels are:</p>
+    <table>
+      <tr><th>Situation</th><th>Definition level</th></tr>
+      <tr><td>Defined phone number</td><td><strong>2</strong></td></tr>
+      <tr><td>A contact without phone number</td><td><strong>1</strong></td></tr>
+      <tr><td>No contacts at all</td><td><strong>0</strong></td></tr>
+    </table>
+
+    <p>So that column, stripped of everything except its two integers and its value, holds exactly what is needed to rebuild:</p>
+<pre><code class="language-text">AddressBook {
+  contacts: {
+    phoneNumber: "555 987 6543"
+  }
+  contacts: { }
+}
+AddressBook { }</code></pre>
+
+    <p>And here is the reconstruction, iterating through the column, exactly as the slides walk it:</p>
+    <table>
+      <tr><th>(R, D, Value)</th><th>How it is read</th></tr>
+      <tr>
+        <td><code>R=0, D=2, Value = "555 987 6543"</code></td>
+        <td><strong>R = 0</strong> means a new record: we recreate the nested records from the root until the definition level (here 2). <strong>D = 2</strong>, which is the maximum: the value is defined and is inserted.</td>
+      </tr>
+      <tr>
+        <td><code>R=1, D=1</code></td>
+        <td><strong>R = 1</strong> means a new entry in the <code>contacts</code> list at level 1. <strong>D = 1</strong> means <code>contacts</code> is defined but not <code>phoneNumber</code>: we just create an empty contact.</td>
+      </tr>
+      <tr>
+        <td><code>R=0, D=0</code></td>
+        <td><strong>R = 0</strong> means a new record: we create the nested records from the root until the definition level (here 0). <strong>D = 0</strong> means <code>contacts</code> is actually null: we only have an empty AddressBook.</td>
+      </tr>
+    </table>
+
+    <div class="bd-w">
+      <h4>Rebuild the AddressBook column, one triple at a time</h4>
+      <p class="bd-sub">Step through the three (R, D, value) triples and watch the record take shape. This is the exact walkthrough from the slides, made clickable.</p>
+      <div id="w-levels"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Two sentences that answer most level questions. <strong>Definition level = how deep the path is actually defined</strong>, so it tells you <em>where</em> a null happened; only <code>optional</code> and <code>repeated</code> fields contribute to it, never <code>required</code>. <strong>Repetition level = at which level a new list starts</strong>, so 0 always means &ldquo;a new record begins here&rdquo;. Every value in a column carries both; the pair is enough to reconstruct the nesting without storing any structure.</p>
+    </div>
+  </section>
+
+  <section id="s15" data-src="BigData 3 Storage - DFS and formats.pdf,BigData 3 Storage - Parquet exercises solutions.pdf">
+    <h2>15. Two exercises on levels</h2>
+    <p>Both exercises use the same schema. Try each one before opening the solution — this is exactly the kind of question that appears at the exam, and reading the answer is not the same as producing it.</p>
+
+<pre><code class="language-text">message Person {
+  required string name;
+  repeated group orders {
+    required string item;
+    optional int quantity;
+  }
+}</code></pre>
+
+    <h3>Exercise 1 — define the columns</h3>
+    <p>Given the following data, define the columns (DL, RL, Value) for <code>item</code> and <code>quantity</code>:</p>
+<pre><code class="language-json">[
+  { "name": "Alice",
+    "orders": [
+      { "item": "Book", "quantity": 1 },
+      { "item": "Pen", "quantity": null }
+    ]
+  },
+  { "name": "Bob",
+    "orders": null
+  },
+  { "name": "Carol",
+    "orders": [
+      { "item": "Notebook", "quantity": 3 }
+    ]
+  },
+  { "name": "Dan",
+    "orders": []
+  }
+]</code></pre>
+
+    <details>
+      <summary>Solution to Exercise 1</summary>
+      <table>
+        <tr><th>DL</th><th>RL</th><th>item</th><th></th><th>DL</th><th>RL</th><th>quantity</th></tr>
+        <tr><td>1</td><td>0</td><td>Book</td><td></td><td>2</td><td>0</td><td>1</td></tr>
+        <tr><td>1</td><td>1</td><td>Pen</td><td></td><td>1</td><td>1</td><td>null</td></tr>
+        <tr><td>0</td><td>0</td><td>Null</td><td></td><td>0</td><td>0</td><td>Null</td></tr>
+        <tr><td>1</td><td>0</td><td>Notebook</td><td></td><td>2</td><td>0</td><td>3</td></tr>
+        <tr><td>0</td><td>0</td><td>null</td><td></td><td>0</td><td>0</td><td>null</td></tr>
+      </table>
+      <p>Things to notice. <em>Alice</em> contributes two rows: the first has RL=0 because a new record starts, the second RL=1 because it is a new entry in the <code>orders</code> list. Since <code>item</code> is <code>required</code> inside a <code>repeated</code> group, its maximum definition level is 1, while <code>quantity</code> is <code>optional</code> so its maximum is 2 — which is why a present quantity shows DL=2 and a null quantity inside an existing order shows DL=1. <em>Bob</em> (orders null) and <em>Dan</em> (orders empty) both collapse to (0,0,null): from the point of view of the column, <strong>an absent list and an empty list are indistinguishable</strong>.</p>
+    </details>
+
+    <h3>Exercise 2 — rebuild the messages</h3>
+    <p>Now go the other way. Rebuild the messages starting from the (DL, RL, Value) of <code>item</code> and <code>quantity</code>:</p>
+    <table>
+      <tr><th>DL</th><th>RL</th><th>item</th><th></th><th>DL</th><th>RL</th><th>quantity</th></tr>
+      <tr><td>1</td><td>0</td><td>A</td><td></td><td>1</td><td>0</td><td>null</td></tr>
+      <tr><td>1</td><td>1</td><td>B</td><td></td><td>2</td><td>1</td><td>101</td></tr>
+      <tr><td>0</td><td>0</td><td>null</td><td></td><td>0</td><td>0</td><td>null</td></tr>
+      <tr><td>1</td><td>0</td><td>C</td><td></td><td>2</td><td>0</td><td>102</td></tr>
+      <tr><td>0</td><td>0</td><td>null</td><td></td><td>0</td><td>0</td><td>null</td></tr>
+      <tr><td>1</td><td>0</td><td>D</td><td></td><td>2</td><td>0</td><td>103</td></tr>
+      <tr><td>1</td><td>1</td><td>E</td><td></td><td>1</td><td>1</td><td>null</td></tr>
+      <tr><td>1</td><td>1</td><td>F</td><td></td><td>2</td><td>1</td><td>104</td></tr>
+      <tr><td>1</td><td>1</td><td>G</td><td></td><td>1</td><td>1</td><td>null</td></tr>
+    </table>
+
+    <details>
+      <summary>Solution to Exercise 2</summary>
+<pre><code class="language-json">[
+  { "orders": [
+      { "item": "A", "quantity": null },
+      { "item": "B", "quantity": 101 }
+  ]},
+  { "orders": null },
+  { "orders": [
+      { "item": "C", "quantity": 102 }
+  ]},
+  { "orders": null },
+  { "orders": [
+      { "item": "D", "quantity": 103 },
+      { "item": "E", "quantity": null },
+      { "item": "F", "quantity": 104 },
+      { "item": "G", "quantity": null }
+  ]}
+]</code></pre>
+      <p>The method is mechanical: every <strong>RL=0</strong> opens a new <code>Person</code>; every <strong>RL=1</strong> appends another order to the <em>current</em> person. The last record therefore swallows D, E, F and G, because after D the repetition level never returns to 0. The definition level then decides whether the value is present (DL=2 for <code>quantity</code>) or null at that depth.</p>
+    </details>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>The most common mistake in Exercise 2 is to read the <code>item</code> and <code>quantity</code> columns as if they were rows of a table read independently. They are two <em>separate</em> columns of the same records: you rebuild the record skeleton from the repetition levels (which agree across columns), and then fill each leaf using its own definition level.</p>
+    </div>
+  </section>
+
+  <section id="s16" data-src="BigData 3 Storage - DFS and formats.pdf">
+    <h2>16. Encodings and the physical file layout</h2>
+
+    <h3>The cost of levels, and how it is paid back</h3>
+    <p>Definition and repetition levels cause overhead: <strong>each primitive type corresponds to three columns</strong> (the value, its definition level, its repetition level). Two facts keep that overhead small:</p>
+    <ul>
+      <li>Their values are <strong>bound by the depth of the schema</strong>, resulting in only a few bits used.</li>
+      <li>When <strong>all fields are required in a flat schema, levels can be omitted</strong> entirely.</li>
+    </ul>
+
+    <p>Then <strong>compression takes care of condensing data efficiently</strong>:</p>
+    <table>
+      <tr><th>Encoding</th><th>Where it is useful</th></tr>
+      <tr><td><strong>Bit Packing</strong></td><td>Repetition and definition levels, dictionary keys</td></tr>
+      <tr><td><strong>Run Length Encoding (RLE)</strong></td><td>The definition level of sparse columns</td></tr>
+      <tr><td><strong>Dictionary Encoding</strong></td><td>Columns with few (&lt; 50k) distinct values</td></tr>
+    </table>
+    <p>The definition of new encodings is supported.</p>
+
+    <h3>The file format hierarchy</h3>
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 360" width="100%" role="img" aria-labelledby="p34t p34d">
+        <title id="p34t">The Parquet physical layout</title>
+        <desc id="p34d">A Parquet file containing two row groups; each row group holds one column chunk per column; each column chunk is divided into pages; the file metadata sits at the end.</desc>
+        <rect x="20" y="20" width="660" height="292" rx="3" fill="none" stroke="var(--lk-ink)" stroke-width="1.6"/>
+        <text x="34" y="42" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink)">FILE — an HDFS file</text>
+
+        <rect x="40" y="56" width="620" height="112" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="54" y="76" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">ROW GROUP 1 — a horizontal partitioning of the rows (512MB–1GB recommended)</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="56" y="86" width="188" height="70" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="66" y="102" fill="var(--lk-ink)">column chunk: dept</text>
+          <rect x="66" y="110" width="80" height="18" rx="2" fill="var(--lk-cobalt)" opacity=".75"/><text x="76" y="123" fill="var(--lk-paper-light)">page</text>
+          <rect x="152" y="110" width="80" height="18" rx="2" fill="var(--lk-cobalt)" opacity=".75"/><text x="162" y="123" fill="var(--lk-paper-light)">page</text>
+          <rect x="66" y="132" width="80" height="18" rx="2" fill="var(--lk-cobalt)" opacity=".75"/><text x="76" y="145" fill="var(--lk-paper-light)">page</text>
+
+          <rect x="254" y="86" width="188" height="70" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="264" y="102" fill="var(--lk-ink)">column chunk: name</text>
+          <rect x="264" y="110" width="80" height="18" rx="2" fill="var(--lk-cobalt)" opacity=".75"/><text x="274" y="123" fill="var(--lk-paper-light)">page</text>
+          <rect x="350" y="110" width="80" height="18" rx="2" fill="var(--lk-cobalt)" opacity=".75"/><text x="360" y="123" fill="var(--lk-paper-light)">page</text>
+
+          <rect x="452" y="86" width="188" height="70" rx="2" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="462" y="102" fill="var(--lk-vermilion)">column chunk: salary</text>
+          <rect x="462" y="110" width="80" height="18" rx="2" fill="var(--lk-vermilion)" opacity=".8"/><text x="472" y="123" fill="var(--lk-paper-light)">page</text>
+          <rect x="548" y="110" width="80" height="18" rx="2" fill="var(--lk-vermilion)" opacity=".8"/><text x="558" y="123" fill="var(--lk-paper-light)">page</text>
+          <text x="462" y="148" fill="var(--lk-ink-soft)">contiguous in the file</text>
+        </g>
+
+        <rect x="40" y="180" width="620" height="56" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="54" y="200" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">ROW GROUP 2</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="56" y="208" width="188" height="18" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="66" y="221" fill="var(--lk-ink-soft)">column chunk: dept</text>
+          <rect x="254" y="208" width="188" height="18" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="264" y="221" fill="var(--lk-ink-soft)">column chunk: name</text>
+          <rect x="452" y="208" width="188" height="18" rx="2" fill="var(--lk-paper)" stroke="var(--lk-vermilion)"/><text x="462" y="221" fill="var(--lk-vermilion)">column chunk: salary</text>
+        </g>
+
+        <rect x="40" y="250" width="620" height="44" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+        <text x="54" y="270" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-forest)">FILE METADATA</text>
+        <text x="54" y="286" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">schema, and where every column chunk lives — this is what lets a reader skip whole chunks</text>
+
+        <text x="20" y="332" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">optimized read setup: 1GB row groups · 1GB HDFS block size · 1 HDFS block per HDFS file</text>
+        <text x="20" y="350" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">a page is the indivisible unit of compression and encoding</text>
+      </svg>
+      <figcaption><b>Plate 3.4</b> — File &rarr; row group &rarr; column chunk &rarr; page. The row group is the unit of horizontal partitioning, the column chunk the unit of columnar locality, and the page the unit of compression. Sizing the row group to the HDFS block is what keeps a &ldquo;read one row group&rdquo; from becoming a multi-machine operation.</figcaption>
+    </figure>
+
+    <table>
+      <tr><th>Level</th><th>Definition from the slides</th></tr>
+      <tr><td><strong>File</strong></td><td>An HDFS file. Includes the metadata for the file.</td></tr>
+      <tr><td><strong>Row group</strong></td><td>A logical horizontal partitioning of the data into rows. <em>No physical structure is guaranteed for a row group.</em> Contains a column chunk for each column in the dataset.</td></tr>
+      <tr><td><strong>Column chunk</strong></td><td>A chunk of the data for a particular column. These live in a particular row group and are <strong>guaranteed to be contiguous in the file</strong>.</td></tr>
+      <tr><td><strong>Page</strong></td><td>Column chunks are divided up into pages. A page is <strong>an indivisible unit in terms of compression and encoding</strong>.</td></tr>
+    </table>
+
+    <h3>Configuration</h3>
+    <p><strong>Row group size</strong>: larger row groups &rarr; larger column chunks &rarr; larger sequential I/O. <strong>Large row groups (512MB&ndash;1GB) are recommended</strong>, since an entire row group might need to be read and we want it to <em>completely fit on one HDFS block</em>. The optimized read setup named in the deck is: <strong>1GB row groups, 1GB HDFS block size, 1 HDFS block per HDFS file</strong>.</p>
+
+    <p><strong>Data page size</strong>: data pages should be considered indivisible. Smaller data pages &rarr; more fine-grained reading (e.g., single row lookup). Larger page sizes &rarr; less space overhead (fewer page headers) and less parsing overhead (fewer headers to process).</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the whole chapter in one line</span>
+      <p>Every number in this chapter is the same negotiation seen from a different level. A 128 MB <strong>HDFS block</strong> balances seeks against parallelism; a 1 GB <strong>row group</strong> is sized to fit one block so a columnar read stays on one machine; a <strong>page</strong> is small enough to compress well and large enough that its header is not the payload. Storage design at this scale is not about clever data structures, it is about choosing the size of the unit at each level.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="BigData 3 Storage - DFS and formats.pdf,BigData 3 Storage - Parquet exercises solutions.pdf">
+    <h2>Test your knowledge</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>State the four design assumptions of HDFS and one consequence of each.</summary>
+        <p><strong>1. Very large files</strong> (gigabytes to terabytes; clusters store petabytes) &rarr; the block is huge, 128 MB by default. <strong>2. Streaming data access</strong>, designed for batch rather than interactive use, emphasis on high throughput rather than low latency &rarr; HDFS is a poor fit for applications needing tens of milliseconds. <strong>3. Write-once-read-many</strong>: a file once created, written and closed need not be changed &rarr; this simplifies data coherency issues and enables high throughput. <strong>4. Hardware failure is the norm rather than the exception</strong> &rarr; detection of faults and quick automatic recovery is a core architectural goal, which is why replication is built in rather than bolted on.</p>
+      </details>
+
+      <details>
+        <summary>Why are HDFS blocks so much larger than filesystem blocks, and what stops them from being larger still?</summary>
+        <p>Large files split into many small blocks require a <strong>huge number of seeks</strong>: with a 4 KB block a 1 GB file needs 250,000 seeks. Big blocks amortise the seek over a long sequential read, which is what streaming access needs. What stops them from growing further is parallelism: in MapReduce the optimal split size is the DFS block size and one map task is created per split, so bigger blocks mean fewer, longer tasks — less concurrency, worse load balancing, and a more expensive re-execution when a task fails.</p>
+      </details>
+
+      <details>
+        <summary>What exactly does the NameNode keep on disk, and what only in memory? Why does the distinction matter?</summary>
+        <p>On disk, <strong>persistently</strong>: the filesystem tree and all files&rsquo; and directories&rsquo; metadata. In memory only: the <strong>location of each block</strong> for a given file — the block pool, rebuilt from the block lists the DataNodes periodically report. It matters twice: a restarted NameNode has the namespace immediately but must wait for DataNode reports before it can serve data (part of why a restart takes 30+ minutes), and the NameNode heap size is the hard limit on the number of files and blocks the cluster can hold.</p>
+      </details>
+
+      <details>
+        <summary>Compare the three answers to the NameNode single point of failure.</summary>
+        <p><strong>Backup</strong>: the NN writes its persistent state to multiple filesystems, preventing loss of data but not downtime. <strong>Secondary NameNode</strong>: a separate machine regularly builds snapshots (checkpoints) of the primary NN persistent data, which allow restarting a failed NN without replaying the entire journal of filesystem actions — but restarting could still take 30+ minutes; it is a checkpointing helper, not a standby. <strong>High Availability</strong>: two machines configured as NNs, one active and one standby; the standby stays current by reading the edit logs the active writes to shared storage (typically replicated Journal Nodes) and by receiving block locations and heartbeats directly from the DataNodes, which report to both. HA recovers far better but requires more resources and communications.</p>
+      </details>
+
+      <details>
+        <summary>What problem does federation solve, and how is it different from High Availability?</summary>
+        <p>Federation solves a <strong>capacity</strong> problem: the block pool size is limited by the NameNode memory, which causes scaling issues on large clusters with many files. It configures additional NameNodes, each managing a portion of the filesystem (a namespace), independent of each other — giving performance, availability, scalability, maintainability, security and flexibility, since each namespace is isolated and unaware of the others. HA solves a <strong>failure</strong> problem instead: two NameNodes serving <em>the same</em> namespace, one active and one standby. They are complementary, not alternatives.</p>
+      </details>
+
+      <details>
+        <summary>Give the default replica placement rule and justify each of the three positions.</summary>
+        <p>With replication factor 3: <strong>replica 1</strong> on the node where the client issued the write (if the client resides within the cluster) — it costs no network traffic; <strong>replica 2</strong> on a node in a <em>different rack</em> (off-rack) — this is what survives the loss of a whole rack; <strong>replica 3</strong> on a node different from the second but <em>in the same rack as the second</em> — the expensive inter-rack hop has already been paid, so the third copy travels the cheap intra-rack link. Replication is topology-aware, and replicas can be rebalanced when nodes are added or become unavailable.</p>
+      </details>
+
+      <details>
+        <summary>What is erasure coding, what does it save, and when should you not use it?</summary>
+        <p>An alternative to simple replication, similar to RAID 5-6: instead of replicating each block, blocks are <strong>striped</strong>, where a stripe is a sequence of chunks made of <em>m</em> data chunks + <em>k</em> parity chunks (the data of one block may end up in multiple stripes). It reduces redundancy from <strong>200% to 50%</strong> with default setups — the redundancy factor is m/k and the default is 3 parity chunks every 6 chunks — and gives faster writes since chunks are distributed. Do not use it for hot data: it costs more CPU on both read and write, recovery after a failure takes longer, and <strong>data locality is lost</strong> because reading a block requires fetching stripes from multiple machines. It works best for cold datasets with relatively low I/O activity.</p>
+      </details>
+
+      <details>
+        <summary>Describe the HDFS read path and the three design features it illustrates.</summary>
+        <p>The client first contacts the NameNode, which returns the relevant <strong>block id</strong> and the <strong>location</strong> (which DataNode) where the block is held; the client then contacts the DataNode directly to retrieve the data. Blocks are themselves stored on standard single-machine filesystems, so HDFS lies on top of the standard OS stack. The three features: <strong>data is never moved through the NN</strong>; <strong>all data transfer occurs directly between clients and DataNodes</strong>; <strong>communications with the NN only involve transfer of metadata</strong>. This keeps the single master off the data plane, so it never becomes a bandwidth bottleneck.</p>
+      </details>
+
+      <details>
+        <summary>Why are CSV and JSON poor choices at this scale? Name the three properties a big data format adds.</summary>
+        <p><strong>Binary serialization</strong>: compact streams of bytes occupy less space, whereas text costs extra space plus type conversion on every read and write. <strong>Splittability</strong>: metadata headers allow skipping unnecessary I/O; without it you cannot access single portions of files, which also means the framework cannot create one task per block. <strong>Compression</strong>: block-level compresses single blocks distinctly and record-level compresses single records within a block, whereas otherwise the whole file must be compressed and decompressed just to read part of it.</p>
+      </details>
+
+      <details>
+        <summary>Row or column orientation: which for OLTP, which for OLAP, and what are the three advantages of columnar?</summary>
+        <p>Disks are 1-dimensional, so cells go either row-by-row or column-by-column. <strong>Row orientation suits OLTP</strong>, because applications work on a row basis (updating a customer profile, adding an order). <strong>Column orientation suits OLAP</strong>, because analyses are done on a columnar basis (average salary by department). Columnar advantages: <strong>better compression</strong> (data is more homogeneous, type-specific encodings, savings very noticeable at cluster scale); <strong>reduced I/O for analytical queries</strong> (only a subset of columns is read, unnecessary deserialization skipped); the ability to <strong>operate on encoded data</strong>, e.g. with dictionary encoding.</p>
+      </details>
+
+      <details>
+        <summary>What makes Avro distinctive among row-oriented formats?</summary>
+        <p>Avro addresses the major drawbacks of <code>Writable</code> (the default serialization of SequenceFiles), has multi-language support, is more integrated with Hadoop, and <strong>supports schema evolution with no need to compile code</strong>. Its defining property is that <strong>data is always serialized with its schema</strong>: each file is self-describing, and different schemas can be used for serialization and deserialization, with Avro autonomously handling missing, extra or modified fields. Contrast with SequenceFiles (no support besides Java) and ORC (no support for schema evolution).</p>
+      </details>
+
+      <details>
+        <summary>What problem do definition and repetition levels solve, and what does each of them encode?</summary>
+        <p>They solve the <strong>unnesting</strong> problem: storing nested structures in a columnar format such that records can be written to flat columns and read back into their original nested structure, and — with repeated fields — knowing when one record ends and another begins. There is one column per primitive field (the leaves of the schema tree), and each value carries two integers. The <strong>definition level</strong> records how deep the path is actually defined, i.e. at which level a null occurred; only optional and repeated fields contribute to it, so making a field required lowers the maximum level and therefore the number of bits. The <strong>repetition level</strong> records at which level a new list starts: 0 marks a new record (implying a new level1 and level2 list), 1 marks a new level1 list (implying a new level2 list), 2 marks a new element in a level2 list.</p>
+      </details>
+
+      <details>
+        <summary>In the AddressBook example, what are the definition levels for contacts.phoneNumber, and how is the column read back?</summary>
+        <p>A defined phone number has DL <strong>2</strong>, a contact without a phone number has DL <strong>1</strong>, and no contacts at all has DL <strong>0</strong>. Reconstruction: <code>R=0, D=2, "555 987 6543"</code> — R=0 means a new record, so nested records are recreated from the root down to the definition level (2), and since D is the maximum the value is defined and inserted. <code>R=1, D=1</code> — a new entry in the contacts list at level 1, with contacts defined but phoneNumber not, so an empty contact is created. <code>R=0, D=0</code> — a new record, and D=0 means contacts is actually null, so we only have an empty AddressBook.</p>
+      </details>
+
+      <details>
+        <summary>Describe the Parquet physical hierarchy and the recommended sizing.</summary>
+        <p><strong>File</strong> (an HDFS file, including the metadata for the file) &rarr; <strong>row group</strong> (a logical horizontal partitioning of the data into rows, with no guaranteed physical structure, containing one column chunk per column) &rarr; <strong>column chunk</strong> (the data for a particular column within a row group, guaranteed contiguous in the file) &rarr; <strong>page</strong> (an indivisible unit in terms of compression and encoding). Sizing: large row groups of 512MB&ndash;1GB are recommended because an entire row group might need to be read and should fit on one HDFS block; the optimized read setup is 1GB row groups, 1GB HDFS block size, one HDFS block per HDFS file. For pages, smaller means more fine-grained reading (single row lookup), larger means less space and parsing overhead from headers.</p>
+      </details>
+
+      <details>
+        <summary>Levels cost storage. What keeps that cost small, and which encodings help?</summary>
+        <p>Each primitive type corresponds to three columns (value, definition level, repetition level), but the level values are <strong>bound by the depth of the schema</strong>, so only a few bits are used — and when all fields are required in a flat schema, <strong>levels can be omitted</strong> entirely. Then compression condenses the rest: <strong>Bit Packing</strong> for repetition and definition levels and dictionary keys, <strong>Run Length Encoding</strong> for the definition level of sparse columns, and <strong>Dictionary Encoding</strong> for columns with fewer than about 50k distinct values. New encodings can also be defined.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-02-infrastructure.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-04-mapreduce.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>BigData 3 Storage - DFS and formats</em>, <em>BigData 3 Storage - Parquet exercises solutions</em> · Big Data — University of Bologna · Prof. Enrico Gallinucci</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+if (window.hljs) { hljs.highlightAll(); }
+
+/* ---- Annotated code: the AddressBook Parquet schema ---- */
+LessonKit.annotatedCode('#ac-schema', {
+  lang: 'text',
+  lines: [
+    ['message AddressBook {', 'The root of a Parquet schema is a group of fields called a message. This is the whole logical record; there is no table declaration around it.'],
+    ['  required string owner;', 'A primitive field with frequency "required": exactly one value, always present. Required fields cost nothing in definition levels, because they can never be missing on their own.'],
+    ['  repeated string ownerPhoneNumbers;', 'Frequency "repeated": zero or more values. This is how Parquet expresses a list without a list type — and it is what forces the repetition level, since the reader must know where one list ends.'],
+    ['  repeated group contacts {', 'A group is a nested structure; repeated makes it a list of structures. Groups are the internal nodes of the schema tree, and only the leaves become columns.'],
+    ['    required string name;', 'Inside a repeated group, required still means "present whenever the enclosing contact exists". Its maximum definition level therefore comes from the enclosing repeated group only.'],
+    ['    optional string phoneNumber;', 'Frequency "optional": zero or one. This is the field that needs a definition level of 2 when present, 1 when the contact exists without a number, and 0 when there is no contact at all.'],
+    ['  }', 'Closing the repeated group. Note the schema is a tree: AddressBook is the root, contacts is an internal node, and owner, ownerPhoneNumbers, name and phoneNumber are the leaves.'],
+    ['}', 'Four leaves means four columns on disk. Nothing about the nesting is stored as structure: it is entirely reconstructed from the definition and repetition levels attached to each value.']
+  ]
+});
+
+/* ---- State explorer: the HDFS read path ---- */
+LessonKit.stateExplorer('#se-read', {
+  title: 'The HDFS read path',
+  start: 'Client wants a file',
+  states: {
+    'Client wants a file': { desc: 'An application client wishes to read a file, or a portion of it. It knows the path in the filesystem and nothing else: it has no idea which machines physically hold the bytes.', to: [['contact the NameNode', 'NameNode lookup']] },
+    'NameNode lookup': { desc: 'The NameNode consults the filesystem tree (persisted on disk) and the block pool (held in memory). It returns the relevant block id and the location where the block is held, that is, which DataNode. Only metadata crosses this link.', to: [['reply with block id + DN locations', 'Client has the map'], ['the NameNode is down', 'Filesystem unusable']] },
+    'Client has the map': { desc: 'The client now knows which DataNode holds each block. Note what has NOT happened: no byte of data has passed through the NameNode, and none ever will.', to: [['contact the DataNode', 'DataNode streams the block']] },
+    'DataNode streams the block': { desc: 'All data transfer occurs directly between the client and the DataNode. Blocks are stored on standard single-machine file systems, so the DataNode is just serving an ordinary local file: HDFS lies on top of the standard OS stack.', to: [['more blocks to read', 'Client has the map'], ['done', 'Client wants a file']] },
+    'Filesystem unusable': { desc: 'Without the NameNode the filesystem cannot be used: there is no way to reconstruct the files from the blocks in the DataNodes. The data is intact and completely unreachable. This is why the backup, secondary NameNode and High Availability solutions exist.', to: [['a standby NameNode takes over (HA)', 'NameNode lookup']] }
+  }
+});
+
+/* ---- Bespoke widget: replication vs erasure coding ---- */
+(function () {
+  var host = document.getElementById('w-repl');
+  if (!host) return;
+  var mode = 'repl', r = 3, m = 6, k = 3, size = 100;
+
+  var ctl = document.createElement('div'); ctl.className = 'bd-ctl';
+  ctl.innerHTML = '<label>logical data <input type="range" id="bdSize" min="10" max="500" step="10" value="100"> <b id="bdSizeV">100 TB</b></label>';
+  var modes = document.createElement('div'); modes.className = 'bd-btns';
+  var bRep = document.createElement('button'); bRep.type = 'button'; bRep.className = 'bd-btn'; bRep.textContent = 'Replication';
+  var bEc = document.createElement('button'); bEc.type = 'button'; bEc.className = 'bd-btn bd-alt'; bEc.textContent = 'Erasure coding';
+  modes.appendChild(bRep); modes.appendChild(bEc);
+  var ctl2 = document.createElement('div'); ctl2.className = 'bd-ctl';
+  ctl2.innerHTML = '<label id="bdRlab">replication factor <input type="range" id="bdR" min="1" max="5" step="1" value="3"> <b id="bdRV">3</b></label>' +
+    '<label id="bdMlab" hidden>data chunks m <input type="range" id="bdM" min="3" max="10" step="1" value="6"> <b id="bdMV">6</b></label>' +
+    '<label id="bdKlab" hidden>parity chunks k <input type="range" id="bdK" min="1" max="4" step="1" value="3"> <b id="bdKV">3</b></label>';
+  var bar = document.createElement('div'); bar.className = 'bd-bar'; bar.style.margin = '.7rem 0';
+  bar.innerHTML = '<i style="width:40%"></i>';
+  var out = document.createElement('div'); out.className = 'bd-out';
+
+  host.appendChild(ctl); host.appendChild(modes); host.appendChild(ctl2); host.appendChild(bar); host.appendChild(out);
+
+  function render() {
+    var stored, overhead, note;
+    if (mode === 'repl') {
+      stored = size * r;
+      overhead = (r - 1) * 100;
+      note = r === 3
+        ? "The HDFS default. Every block exists three times: one on the writing node, one off-rack, one beside it. Full data locality: any task can read a whole block from a single machine."
+        : (r === 1
+          ? "No redundancy at all. One disk failure loses data permanently — remember that on commodity hardware failure is the norm, not the exception."
+          : "Higher robustness and more chances of a local replica, paid linearly in disks.");
+    } else {
+      stored = size * (m + k) / m;
+      overhead = Math.round(k / m * 100);
+      note = (m === 6 && k === 3)
+        ? "The default setup named in the slides: 3 parity chunks every 6 data chunks, i.e. 50% redundancy against the 200% of 3x replication. Best for cold datasets with low I/O activity."
+        : "Redundancy is k/m. Fewer parity chunks means less space and less tolerance to simultaneous failures.";
+    }
+    var pct = Math.min(100, stored / (size * 3) * 100);
+    bar.innerHTML = '';
+    var iData = document.createElement('i');
+    iData.style.width = (size / stored * pct) + '%';
+    var iRed = document.createElement('i');
+    iRed.className = 'bd-par';
+    iRed.style.width = (pct - (size / stored * pct)) + '%';
+    iRed.style.marginTop = '-14px';
+    iRed.style.marginLeft = (size / stored * pct) + '%';
+    bar.appendChild(iData); bar.appendChild(iRed);
+
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    var cells = [
+      ['logical data', size + ' TB'],
+      ['raw storage', Math.round(stored * 10) / 10 + ' TB'],
+      ['redundancy', overhead + '%'],
+      ['locality', mode === 'repl' ? 'preserved' : 'lost']
+    ];
+    cells.forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>';
+      d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var p = document.createElement('div');
+    p.style.color = 'var(--lk-ink-soft)'; p.style.marginTop = '.4rem';
+    p.textContent = note;
+    out.appendChild(p);
+  }
+
+  function setMode(nm) {
+    mode = nm;
+    bRep.className = nm === 'repl' ? 'bd-btn' : 'bd-btn bd-alt';
+    bEc.className = nm === 'ec' ? 'bd-btn' : 'bd-btn bd-alt';
+    document.getElementById('bdRlab').hidden = nm !== 'repl';
+    document.getElementById('bdMlab').hidden = nm !== 'ec';
+    document.getElementById('bdKlab').hidden = nm !== 'ec';
+    render();
+  }
+  bRep.addEventListener('click', function () { setMode('repl'); });
+  bEc.addEventListener('click', function () { setMode('ec'); });
+  document.getElementById('bdSize').addEventListener('input', function (e) {
+    size = +e.target.value; document.getElementById('bdSizeV').textContent = size + ' TB'; render();
+  });
+  document.getElementById('bdR').addEventListener('input', function (e) {
+    r = +e.target.value; document.getElementById('bdRV').textContent = r; render();
+  });
+  document.getElementById('bdM').addEventListener('input', function (e) {
+    m = +e.target.value; document.getElementById('bdMV').textContent = m; render();
+  });
+  document.getElementById('bdK').addEventListener('input', function (e) {
+    k = +e.target.value; document.getElementById('bdKV').textContent = k; render();
+  });
+  setMode('repl');
+})();
+
+/* ---- Bespoke widget: rebuilding the AddressBook column ---- */
+(function () {
+  var host = document.getElementById('w-levels');
+  if (!host) return;
+  var steps = [
+    { t: 'R=0, D=2, Value = "555 987 6543"',
+      why: 'R = 0 means a new record: we recreate the nested records from the root until the definition level, here 2. D = 2 is the maximum, so the value is defined and is inserted.',
+      rec: 'AddressBook {\n  contacts: {\n    phoneNumber: "555 987 6543"\n  }\n}' },
+    { t: 'R=1, D=1',
+      why: 'R = 1 means a new entry in the contacts list at level 1. D = 1 means contacts is defined but phoneNumber is not, so we just create an empty contact.',
+      rec: 'AddressBook {\n  contacts: {\n    phoneNumber: "555 987 6543"\n  }\n  contacts: { }\n}' },
+    { t: 'R=0, D=0',
+      why: 'R = 0 means a new record, so we create the nested records from the root until the definition level, here 0. D = 0 means contacts is actually null: we only have an empty AddressBook.',
+      rec: 'AddressBook {\n  contacts: {\n    phoneNumber: "555 987 6543"\n  }\n  contacts: { }\n}\n\nAddressBook { }' }
+  ];
+  var i = -1;
+  var trip = document.createElement('div'); trip.className = 'bd-out';
+  trip.textContent = 'Press Next triple to start reading the column.';
+  var why = document.createElement('div'); why.className = 'bd-out';
+  why.style.color = 'var(--lk-ink-soft)';
+  why.textContent = 'The two integers are all the reader has: no structure is stored on disk.';
+  var rec = document.createElement('div'); rec.className = 'bd-out';
+  rec.style.whiteSpace = 'pre';
+  rec.textContent = '(nothing reconstructed yet)';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var next = document.createElement('button'); next.type = 'button'; next.className = 'bd-btn'; next.textContent = 'Next triple';
+  var reset = document.createElement('button'); reset.type = 'button'; reset.className = 'bd-btn bd-alt'; reset.textContent = 'Reset';
+  btns.appendChild(next); btns.appendChild(reset);
+  next.addEventListener('click', function () {
+    if (i >= steps.length - 1) return;
+    i++;
+    trip.textContent = steps[i].t;
+    why.textContent = steps[i].why;
+    rec.textContent = steps[i].rec;
+    next.disabled = i >= steps.length - 1;
+  });
+  reset.addEventListener('click', function () {
+    i = -1; next.disabled = false;
+    trip.textContent = 'Press Next triple to start reading the column.';
+    why.textContent = 'The two integers are all the reader has: no structure is stored on disk.';
+    rec.textContent = '(nothing reconstructed yet)';
+  });
+  host.appendChild(trip); host.appendChild(why); host.appendChild(rec); host.appendChild(btns);
+})();
+</script>
+</body>
+</html>

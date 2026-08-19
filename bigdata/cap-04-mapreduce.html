@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 4 — The MapReduce paradigm · Big Data</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bd-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .bd-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .bd-w .bd-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .bd-ctl{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.82rem}
+  .bd-ctl label{display:flex;gap:.4rem;align-items:center}
+  .bd-ctl input[type=range]{accent-color:var(--lk-cobalt)}
+  .bd-btn{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;
+    border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .bd-btn:hover{background:var(--lk-cobalt-dark)}
+  .bd-btn.bd-alt{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .bd-btn:disabled{opacity:.4;cursor:not-allowed}
+  .bd-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0}
+  .bd-out{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .8rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.82rem;margin-top:.6rem;overflow-x:auto}
+  .bd-grid{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:.6rem 0}
+  .bd-cell{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.45rem .6rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.8rem}
+  .bd-cell b{color:var(--lk-cobalt-dark)}
+  .bd-ok{color:var(--lk-forest);font-weight:600} .bd-bad{color:var(--lk-vermilion);font-weight:600}
+  .bd-stage{font-family:var(--lk-utility);font-size:.72rem;font-weight:700;letter-spacing:.09em;
+    text-transform:uppercase;color:var(--lk-vermilion);margin:.5rem 0 .2rem}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-03-storage-hdfs.html">&larr; Ch. 3 — Distributed storage: HDFS, file formats and Parquet</a>
+    <a href="index.html">Index</a>
+    <a href="cap-05-yarn-hadoop.html">Ch. 5 — The Data Lake, YARN and Hadoop MapReduce &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Batch processing · Chapter 4</div>
+    <h1>The MapReduce paradigm</h1>
+    <div class="lk-meta"><span>~40 min read</span><span>6 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Disambiguation: model and implementation</a></li>
+      <li><a href="#s2">The goal, and the two functions</a></li>
+      <li><a href="#s3">A use case: the travel agency</a></li>
+      <li><a href="#s4">Map, shuffle &amp; sort, reduce</a></li>
+      <li><a href="#s5">What the programmer defines</a></li>
+      <li><a href="#s6">The MapReduce process, step by step</a></li>
+      <li><a href="#s7">Word Count and Word Length Count</a></li>
+      <li><a href="#s8">Combiners, and when they lie</a></li>
+      <li><a href="#s9">Partitioning the map output</a></li>
+      <li><a href="#s10">How many reduce tasks?</a></li>
+      <li><a href="#s11">The complete picture</a></li>
+      <li><a href="#s12">Four algorithm patterns</a></li>
+      <li><a href="#s13">Two-stage MapReduce</a></li>
+      <li><a href="#s14">Real-life MapReduce: the classroom cluster</a></li>
+      <li><a href="#quiz">Test your knowledge</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>1. Disambiguation: model and implementation</h2>
+    <p>Before anything else, the course disambiguates a word that gets used for two different things. Here is the original definition, from Dean and Ghemawat at Google:</p>
+
+    <blockquote style="border-left:3px solid var(--lk-vermilion);margin:1.2rem 0;padding:.2rem 0 .2rem 1rem;font-style:italic">
+      &ldquo;MapReduce is a programming model and an associated implementation for processing and generating large data sets. Users specify a <strong>map</strong> function that processes a key/value pair to generate a set of intermediate key/value pairs, and a <strong>reduce</strong> function that merges all intermediate values associated with the same intermediate key.&rdquo;
+      <div style="font-style:normal;font-family:var(--lk-mono);font-size:.8rem;color:var(--lk-ink-soft);margin-top:.5rem">— Dean J., Ghemawat S. (Google)</div>
+    </blockquote>
+
+    <p>And then the distinction that matters for the rest of the course: <strong>Hadoop MapReduce is an open-source implementation of the MapReduce programming model</strong>. Two different objects share one name.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>This chapter is about the <strong>model</strong>: what you can express, what a combiner is allowed to do, why a partitioner exists. Chapter 5 is about the <strong>implementation</strong>: how Hadoop and YARN actually schedule the tasks, move the bytes, and recover from a dead machine. Keep them apart in your head — at the exam, &ldquo;how does MapReduce work&rdquo; and &ldquo;how does Hadoop run a MapReduce job&rdquo; are two different questions with two different answers.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>2. The goal, and the two functions</h2>
+    <p>MapReduce aims to support <strong>analytical jobs over large datasets</strong>. The shape of such a job is always the same four beats:</p>
+    <ul>
+      <li><strong>Iterate</strong> over a large number of records — e.g., a dataset of customers.</li>
+      <li><strong>Extract</strong> something of interest from each — e.g., their department and salary.</li>
+      <li><strong>Aggregate</strong> results — e.g., compute the average salary by department.</li>
+      <li><strong>Save</strong> results to the DFS.</li>
+    </ul>
+
+    <p>Two of those four beats are yours to write. The names come straight from functional programming:</p>
+    <table>
+      <tr><th>Function</th><th>What it does</th></tr>
+      <tr><td><strong>MAP</strong></td><td>Apply a function <var>f</var> to <em>every element</em> in a list</td></tr>
+      <tr><td><strong>REDUCE</strong></td><td>Iteratively apply a function <var>g</var> to <em>aggregate</em> elements</td></tr>
+    </table>
+
+    <h3>Roots in functional programming</h3>
+    <p>The deck makes the lineage explicit by putting the imperative and the functional style side by side. In the imperative version you manage the loop, the index and the accumulator yourself; in the functional version you hand a function to a combinator and let it manage them:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Imperative</button>
+        <button class="lk-tab">Functional</button>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-python">a = 0
+b = a + 1
+
+### Map example to obtain [4,4,3]
+names = ['Mary', 'Isla', 'Sam']
+name_lengths = []
+for i in range(len(names)):
+   name_lengths[i] = len(names[i])
+
+### Reduce example to obtain 3
+sentences = [
+   'Mary read a story to Sam and Isla.',
+   'Isla cuddled Sam.', 'Sam chortled.' ]
+sam_count = 0
+
+for sentence in sentences:
+        sam_count += sentence.count('Sam')</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-python">a = 0
+b = increment(a)
+def increment(a):
+     return a + 1;
+
+### Map example to obtain [4,4,3]
+names = ['Mary', 'Isla', 'Sam']
+name_lengths = map(len, names)
+
+### Reduce example to obtain 3
+sentences = [
+   'Mary read a story to Sam and Isla.',
+   'Isla cuddled Sam.', 'Sam chortled.' ]
+sam_count = reduce(
+  lambda a, x: a + x.count('Sam'),
+  sentences, 0
+)</code></pre>
+      </div>
+    </div>
+
+    <p>The difference looks cosmetic on three names. It is not. In the imperative version the <em>order</em> of the iterations is part of the program: <code>name_lengths[i]</code> is written at step <var>i</var>, and <code>sam_count</code> is a variable that every iteration mutates. In the functional version nothing is shared and nothing is ordered — <code>len</code> is applied to each name in complete isolation from the others. That isolation is the entire reason the model can be distributed: if applying <var>f</var> to element 1 cannot possibly affect applying <var>f</var> to element 2, the two applications can happen on two machines a rack apart.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>MapReduce did not invent map and reduce, it <strong>industrialised</strong> them. The functional style forbids exactly the things that make parallelism hard — shared mutable state and implicit ordering — so a runtime that only accepts <code>map</code> and <code>reduce</code> can parallelise anything it is given, without understanding what it computes.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>3. A use case: the travel agency</h2>
+    <p>The deck grounds the whole paradigm in one running example. A travel agency offers hotel rooms on Trivago, competing with other agencies to offer the best value for money. The numbers add up quickly:</p>
+
+    <ul>
+      <li>For a given user search (e.g., 4 nights in Rome for 2 people), <strong>25 offers</strong> are returned.</li>
+      <li>Every day <strong>40M user searches</strong> are made &rarr; <strong>1B offers</strong> are returned.</li>
+      <li>A log of every offer is maintained; <strong>1KB per offer = 1TB per day</strong>, with info about hotel and room type plus a lot of statistics.</li>
+    </ul>
+
+    <p>A handful of rows from that log:</p>
+
+    <table>
+      <tr>
+        <th>Hotel</th><th>City</th><th>Country</th><th>Date</th><th>TTT</th><th>LOS</th><th>GS</th>
+        <th>Market</th><th>Price</th><th>Markup</th><th>CMP</th><th>Impr.</th><th>Clicks</th><th>Book.</th>
+      </tr>
+      <tr><td>The Majestic</td><td>Rome</td><td>Italy</td><td>22/09/24</td><td>4</td><td>2</td><td>1</td><td>EU</td><td>150</td><td>5</td><td>155</td><td>23</td><td>10</td><td>2</td></tr>
+      <tr><td>Augustian</td><td>Rome</td><td>Italy</td><td>22/09/24</td><td>4</td><td>2</td><td>1</td><td>EU</td><td>160</td><td>10</td><td>140</td><td>16</td><td>5</td><td>0</td></tr>
+      <tr><td>Cosmopolitan</td><td>Milan</td><td>Italy</td><td>19/12/24</td><td>10</td><td>1</td><td>2</td><td>NA</td><td>120</td><td>20</td><td>110</td><td>42</td><td>11</td><td>0</td></tr>
+      <tr><td>The Empire</td><td>NYC</td><td>USA</td><td>31/12/24</td><td>30</td><td>5</td><td>3</td><td>AS</td><td>130</td><td>2</td><td>125</td><td>8</td><td>1</td><td>1</td></tr>
+      <tr><td>Presidential</td><td>Paris</td><td>France</td><td>28/10/24</td><td>1</td><td>1</td><td>2</td><td>EU</td><td>150</td><td>3</td><td>140</td><td>4</td><td>2</td><td>1</td></tr>
+      <tr><td>Royal Orchid</td><td>London</td><td>UK</td><td>06/01/25</td><td>45</td><td>7</td><td>4</td><td>EU</td><td>100</td><td>&minus;5</td><td>100</td><td>15</td><td>10</td><td>1</td></tr>
+    </table>
+
+    <p style="font-family:var(--lk-mono);font-size:.8rem;color:var(--lk-ink-soft)">
+      Legend: TTT = time to travel (in number of days); LOS = length of stay (in number of days); GS = group size; CMP = cheapest market price.
+    </p>
+
+    <p>The questions the business wants answered are ordinary analytical questions:</p>
+    <ul>
+      <li>In which <strong>countries</strong> (or markets) do I make the most revenues (i.e., markup)?</li>
+      <li>What is the rate of converting <strong>impressions into clicks</strong>? And <strong>clicks into bookings</strong>?</li>
+      <li>In which combinations of <strong>City-TTT-LOS-GS</strong> am I most competitive?</li>
+      <li>Over which <strong>hotels</strong> am I never competitive?</li>
+    </ul>
+
+    <p>Every one of them is a <code>GROUP BY</code> you could write in SQL in twenty seconds. And then comes the sentence that turns a database exercise into this course:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the actual question</span>
+      <p><strong>How do we calculate them, considering that the data is distributed over multiple nodes in the cluster?</strong> The arithmetic is trivial. The problem is that no single machine has all the rows, and moving all the rows to one machine defeats the purpose of having a cluster.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>4. Map, shuffle &amp; sort, reduce</h2>
+    <p>Take the first query: <em>how much revenue (markup &times; bookings) is made in each country?</em> The deck walks it in three moves.</p>
+
+    <h3>Move 1 — Map: extract locally</h3>
+    <p>Each map task reads the records that happen to live on its node and throws away everything the query does not need, keeping a <strong>(Country, Revenue)</strong> pair per record. Nothing moves across the network yet; each task works only on the block already sitting on its disk. Three map tasks might produce:</p>
+
+<pre><code class="language-text">MAP 1              MAP 2              MAP 3
+Italy      5       Italy     12       France     8
+Italy     10       Spain      8       Italy     15
+Italy     20       France    10       Belgium   10
+USA        2       UK         6       UK        11
+France     3       Italy      9       Spain      6
+UK        -5       Spain      7       Italy     13</code></pre>
+
+    <p>And then the deck asks the right question: <em>what then?</em> Every node holds a partial answer for Italy. No node holds <em>the</em> answer for Italy.</p>
+
+    <h3>Move 2 — Shuffle &amp; Sort: bring the same key together</h3>
+    <p><strong>Shuffling is a global operation to redistribute data, on the basis of how it is meant to be aggregated.</strong> After it, all the Italy pairs sit on one machine, all the France pairs on another, and so on. It is the only phase in which large volumes cross the network, and it is therefore the phase every optimisation in the next chapters attacks.</p>
+
+    <p>The deck immediately refines the name: <strong>it is actually Shuffle &amp; Sort, as sorting is locally done to enable the later aggregation</strong>. Sorting is not decoration. If the values arriving at a reducer are ordered by key, the reducer can stream through them and close out each key the moment the key changes, holding one group in memory rather than all of them.</p>
+
+<pre><code class="language-text">REDUCER 1          REDUCER 2          REDUCER 3
+Italy      5       France     3       Belgium   10
+Italy     10       France    10       Spain      7
+Italy     20       France     8       Spain     10
+Italy     12       UK        -5       Spain      6
+Italy      9       UK         6       USA        2
+Italy     15       UK        11
+Italy     13</code></pre>
+
+    <h3>Move 3 — Reduce: aggregate locally again</h3>
+    <p>Now each reduce task performs an ordinary local aggregation, because everything it needs is finally in one place:</p>
+
+    <table>
+      <tr><th>Country</th><th>Total revenue</th></tr>
+      <tr><td>Italy</td><td>84</td></tr>
+      <tr><td>France</td><td>21</td></tr>
+      <tr><td>UK</td><td>12</td></tr>
+      <tr><td>Belgium</td><td>10</td></tr>
+      <tr><td>Spain</td><td>23</td></tr>
+      <tr><td>USA</td><td>2</td></tr>
+    </table>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note</span>
+      <p>If you check the arithmetic by hand, verify against the <em>shuffle &amp; sort</em> panel above, which is the one consistent with the totals (Italy 5+10+20+12+9+15+13 = 84; France 3+10+8 = 21; UK &minus;5+6+11 = 12; Spain 7+10+6 = 23). The map-side panel in the original figure lists one Spain value differently; the discrepancy is in the drawing, not in the paradigm.</p>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 420" width="100%" role="img" aria-labelledby="p41t p41d">
+        <title id="p41t">The MapReduce dataflow</title>
+        <desc id="p41d">Four input splits each feeding a map task on its own node; the map outputs are grouped by key in a shuffle and sort band, then three reduce tasks produce one result per key.</desc>
+
+        <text x="20" y="18" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">INPUT SPLITS &mdash; one map task each</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="26" width="150" height="132" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.1" stroke-dasharray="4 3"/>
+          <rect x="190" y="26" width="150" height="132" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.1" stroke-dasharray="4 3"/>
+          <rect x="360" y="26" width="150" height="132" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.1" stroke-dasharray="4 3"/>
+          <rect x="530" y="26" width="150" height="132" rx="3" fill="none" stroke="var(--lk-rule)" stroke-width="1.1" stroke-dasharray="4 3"/>
+
+          <rect x="34" y="36" width="122" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="44" y="52" fill="var(--lk-ink-soft)">k1 v1  k2 v2</text>
+          <rect x="204" y="36" width="122" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="214" y="52" fill="var(--lk-ink-soft)">k3 v3</text>
+          <rect x="374" y="36" width="122" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="384" y="52" fill="var(--lk-ink-soft)">k4 v4  k5 v5</text>
+          <rect x="544" y="36" width="122" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="554" y="52" fill="var(--lk-ink-soft)">k6 v6</text>
+
+          <rect x="34" y="72" width="122" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="76" y="90" fill="var(--lk-cobalt-dark)">map</text>
+          <rect x="204" y="72" width="122" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="246" y="90" fill="var(--lk-cobalt-dark)">map</text>
+          <rect x="374" y="72" width="122" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="416" y="90" fill="var(--lk-cobalt-dark)">map</text>
+          <rect x="544" y="72" width="122" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="586" y="90" fill="var(--lk-cobalt-dark)">map</text>
+
+          <path d="M95 60 L95 70" stroke="var(--lk-ink-soft)" stroke-width="1"/>
+          <path d="M265 60 L265 70" stroke="var(--lk-ink-soft)" stroke-width="1"/>
+          <path d="M435 60 L435 70" stroke="var(--lk-ink-soft)" stroke-width="1"/>
+          <path d="M605 60 L605 70" stroke="var(--lk-ink-soft)" stroke-width="1"/>
+
+          <rect x="34" y="110" width="122" height="34" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="44" y="132" fill="var(--lk-ink)">a 1&nbsp;&nbsp; b 2</text>
+          <rect x="204" y="110" width="122" height="34" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="214" y="132" fill="var(--lk-ink)">c 3&nbsp;&nbsp; c 6</text>
+          <rect x="374" y="110" width="122" height="34" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="384" y="132" fill="var(--lk-ink)">a 5&nbsp;&nbsp; c 2</text>
+          <rect x="544" y="110" width="122" height="34" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="554" y="132" fill="var(--lk-ink)">b 7&nbsp;&nbsp; c 8</text>
+        </g>
+
+        <rect x="20" y="176" width="660" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="34" y="196" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">SHUFFLE &amp; SORT &mdash; aggregate values by key (the only phase that crosses the network)</text>
+
+        <g stroke="var(--lk-vermilion)" stroke-width="2.6" fill="none" marker-end="url(#mr41)">
+          <path d="M95 146 L95 174"/><path d="M265 146 L265 174"/><path d="M435 146 L435 174"/><path d="M605 146 L605 174"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:12px">
+          <rect x="40" y="228" width="170" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="54" y="248" fill="var(--lk-ink)">a&nbsp;&nbsp; 1  5</text>
+          <rect x="265" y="228" width="170" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="279" y="248" fill="var(--lk-ink)">b&nbsp;&nbsp; 2  7</text>
+          <rect x="490" y="228" width="170" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="504" y="248" fill="var(--lk-ink)">c&nbsp;&nbsp; 2  3  6  8</text>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.6" fill="none" marker-end="url(#mr41)">
+          <path d="M125 208 L125 226"/><path d="M350 208 L350 226"/><path d="M575 208 L575 226"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="286" width="170" height="28" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="105" y="305" fill="var(--lk-cobalt-dark)">reduce</text>
+          <rect x="265" y="286" width="170" height="28" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="330" y="305" fill="var(--lk-cobalt-dark)">reduce</text>
+          <rect x="490" y="286" width="170" height="28" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="555" y="305" fill="var(--lk-cobalt-dark)">reduce</text>
+        </g>
+        <g stroke="var(--lk-ink-soft)" stroke-width="1" fill="none">
+          <path d="M125 258 L125 284"/><path d="M350 258 L350 284"/><path d="M575 258 L575 284"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:12px">
+          <rect x="70" y="340" width="110" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="98" y="359" fill="var(--lk-forest)">r1&nbsp;&nbsp; 6</text>
+          <rect x="295" y="340" width="110" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="323" y="359" fill="var(--lk-forest)">r2&nbsp;&nbsp; 9</text>
+          <rect x="520" y="340" width="110" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="548" y="359" fill="var(--lk-forest)">r3&nbsp;&nbsp; 19</text>
+        </g>
+        <g stroke="var(--lk-ink-soft)" stroke-width="1" fill="none">
+          <path d="M125 314 L125 338"/><path d="M350 314 L350 338"/><path d="M575 314 L575 338"/>
+        </g>
+
+        <text x="20" y="400" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">dotted box = one node&nbsp;&nbsp;·&nbsp;&nbsp;thin arrow = intra-node transfer&nbsp;&nbsp;·&nbsp;&nbsp;thick arrow = inter-node transfer</text>
+
+        <defs>
+          <marker id="mr41" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+            <path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/>
+          </marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 4.1</b> — The dataflow, using the key example from the slides. Everything above the vermilion band is local and cheap; everything crossing it is network traffic. The whole art of writing a good MapReduce job is deciding how few pairs have to cross that line.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s5" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>5. What the programmer defines</h2>
+    <p>Two functions, and a very clear division of labour.</p>
+
+    <p>The <strong>map operation defines what must be extracted from the data</strong>, in the form of key-value pairs. Two properties follow:</p>
+    <ul>
+      <li>It <strong>can be parallelized in a straightforward manner</strong>, since each functional application happens <em>in isolation</em>.</li>
+      <li>The <strong>type of key-value pair can be chosen by the programmer</strong> — the key is a design decision, not a given.</li>
+    </ul>
+
+    <p>The <strong>reduce operation defines how the values corresponding to the same keys must be aggregated/combined</strong>. And it comes with a hard requirement:</p>
+    <ul>
+      <li>To be applied, <strong>all values corresponding to the same key must be brought together on the same machine</strong>.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the contract</span>
+      <p><strong>The programmer defines the map and the reduce functions. The execution framework handles everything else.</strong> This is the compromise from Chapter 1 made concrete: you say <em>what</em>, the runtime does <em>how</em> — scheduling, data movement, sorting, failure recovery.</p>
+    </div>
+
+    <p>Notice where the cost hides. The programmer writes the key, and the framework then has to physically relocate every record so that equal keys meet. <strong>Choosing the key is choosing the network traffic.</strong> That is why the same query can be fast or ruinous depending on a decision that looks like naming.</p>
+  </section>
+
+  <section id="s6" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>6. The MapReduce process, step by step</h2>
+
+    <p><strong>1) Input is divided into fixed-size splits.</strong> Smaller splits mean faster processing and better load balancing, but increased management overhead. And the sizing rule that ties this chapter back to the previous one: <strong>the optimal split size equals the DFS block size</strong>. Chapter 3 explained why from the storage side; here is the processing side of the same coin — if a split matched two blocks, half the input of every task would have to be fetched from another machine.</p>
+
+    <p><strong>2) A map task is created for each split.</strong> The task runs the user-defined map function for each record in the split.</p>
+
+    <p><strong>3) The key-value pairs returned by map tasks are sorted and stored on the local disk.</strong> Note <em>local</em>: map output is <strong>intermediate</strong> output, and storing it in HDFS with replication would be, in the words of the deck, &ldquo;overkill&rdquo;. If a map task dies, its output is simply recomputed. The output is sorted by key and subdivided into <strong>partitions — one for each reducer</strong>.</p>
+
+    <p><strong>4) Map outputs are sent to the nodes where the reduce tasks are running.</strong> Four details to remember:</p>
+    <ul>
+      <li>The task runs the user-defined reduce function to combine the values of a given key.</li>
+      <li>The <strong>number of reduce tasks can be specified independently</strong> of the number of maps.</li>
+      <li>Inputs from different mappers are <strong>merged and sorted by key</strong> before running the reduce function.</li>
+      <li>The values for a given key <strong>fall to the same reducer</strong>; a reducer may handle more keys, <em>one at a time</em>.</li>
+    </ul>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note — reading the diagrams</span>
+      <p>The slides use a consistent convention worth internalising, and reproduced in Plate 4.1: <strong>dotted boxes are nodes</strong>, <strong>light arrows are intra-node data transfers</strong>, <strong>heavy arrows are inter-node data transfers</strong>. When you read any MapReduce figure, find the heavy arrows first: they are the cost.</p>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Two facts from this section are asked constantly. <strong>Why is map output written to local disk and not to HDFS?</strong> Because it is intermediate: replicating it would be overkill, and it can be recomputed by re-running the map task. <strong>Why is the optimal split size the DFS block size?</strong> Because it is the largest split that a single node can read entirely from its own disk, which is what makes data locality possible.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>7. Word Count and Word Length Count</h2>
+    <p>Two examples, deliberately almost identical, that teach the single most important design lesson in the model: <strong>what you choose as the key determines what the job computes.</strong></p>
+
+    <h3>Word Count</h3>
+    <p><em>Problem</em>: counting the number of occurrences for each word in a collection of documents. <em>Input</em>: a repository of documents; each document is a value in the input pairs.</p>
+    <table>
+      <tr><th>Phase</th><th>What happens</th></tr>
+      <tr><td><strong>Map</strong></td><td>Read a document and emit a sequence of key-value pairs. Keys are the words found in the documents; values are equal to 1:<br><code>(w1, 1), (w2, 1), (w1, 1), ... , (wn, 1)</code></td></tr>
+      <tr><td><strong>Shuffle &amp; Sort</strong></td><td>Group by key and generate pairs of the form:<br><code>(w1, [1, 1, ... , 1]) , ... , (wn, [1, 1, ... , 1])</code></td></tr>
+      <tr><td><strong>Reduce</strong></td><td>Add up all the values for a given key and emit a pair of the form <code>(w, m)</code></td></tr>
+      <tr><td><strong>Output</strong></td><td><var>w</var> is a word that appears at least once among all the input documents; <var>m</var> is the total number of occurrences of <var>w</var> among all those documents</td></tr>
+    </table>
+
+    <div class="bd-w">
+      <h4>Word Count, one phase at a time</h4>
+      <p class="bd-sub">Three tiny documents, three map tasks. Step through the phases and watch where the pairs go — and notice that after the shuffle, no machine needs to see anything but its own keys.</p>
+      <div id="w-wordcount"></div>
+    </div>
+
+    <h3>Word Length Count</h3>
+    <p><em>Problem</em>: counting how many words of certain lengths exist in a collection of documents. Same input, same three phases — one different line in the mapper:</p>
+    <table>
+      <tr><th>Phase</th><th>What happens</th></tr>
+      <tr><td><strong>Map</strong></td><td>Read a document and emit key-value pairs where <strong>the key is the length of a word</strong> and <strong>the value is the word itself</strong>:<br><code>(i, w1), ... , (j, wn)</code></td></tr>
+      <tr><td><strong>Shuffle &amp; Sort</strong></td><td>Group by key:<br><code>(1, [w1, ... , wk]) , ... , (n, [wr, ... , ws])</code></td></tr>
+      <tr><td><strong>Reduce</strong></td><td>Count the number of words in the list and emit <code>(l, m)</code></td></tr>
+      <tr><td><strong>Output</strong></td><td><var>l</var> is a length; <var>m</var> is the total number of words of length <var>l</var> in the input documents</td></tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Compare the two mappers. Word Count emits <code>(word, 1)</code>; Word Length Count emits <code>(length, word)</code>. The framework, the shuffle, the reduce skeleton are all unchanged — and yet one job counts vocabulary and the other measures style. <strong>Designing a MapReduce job is choosing the key.</strong> Everything else follows.</p>
+    </div>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>The two jobs also have very different shuffle profiles. Word Count has as many keys as there are distinct words — hundreds of thousands — spread over all reducers. Word Length Count has perhaps twenty keys, so at most twenty reducers can ever do work, and the values are whole words rather than the integer 1. A key with tiny cardinality is a bottleneck by construction; keep it in mind when you meet skew in section 9.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>8. Combiners, and when they lie</h2>
+    <p><strong>Combining means pre-aggregating data on the Map side.</strong> When the reduce function is <em>associative and commutative</em>, we can push some of what the reducers do to the map tasks: in this case we also apply a <strong>Combiner</strong> to the map function.</p>
+
+    <p>Two clarifications the deck insists on:</p>
+    <ul>
+      <li><strong>Grouping is still necessary.</strong> Values belonging to the same key are (most probably) distributed across multiple splits, so a local pre-aggregation can never be the final answer.</li>
+      <li>The gains are: <strong>it reduces the amount of intermediate data</strong>, and <strong>it reduces the network traffic</strong>.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-labelledby="p42t p42d">
+        <title id="p42t">The effect of a combiner</title>
+        <desc id="p42d">The same four map tasks, with a combine step added after each; the second task collapses two pairs for key c into one, so fewer pairs cross the network, while the reduce results stay identical.</desc>
+
+        <text x="20" y="18" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">MAP OUTPUT</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="26" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="34" y="46" fill="var(--lk-ink)">a 1&nbsp;&nbsp; b 2</text>
+          <rect x="190" y="26" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="204" y="46" fill="var(--lk-vermilion)">c 3&nbsp;&nbsp; c 6</text>
+          <rect x="360" y="26" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="374" y="46" fill="var(--lk-ink)">a 5&nbsp;&nbsp; c 2</text>
+          <rect x="530" y="26" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="544" y="46" fill="var(--lk-ink)">b 7&nbsp;&nbsp; c 8</text>
+        </g>
+
+        <g stroke="var(--lk-ink-soft)" stroke-width="1" fill="none" marker-end="url(#mr42g)">
+          <path d="M95 58 L95 74"/><path d="M265 58 L265 74"/><path d="M435 58 L435 74"/><path d="M605 58 L605 74"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="76" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="66" y="94" fill="var(--lk-cobalt-dark)">combine</text>
+          <rect x="190" y="76" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="236" y="94" fill="var(--lk-cobalt-dark)">combine</text>
+          <rect x="360" y="76" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="406" y="94" fill="var(--lk-cobalt-dark)">combine</text>
+          <rect x="530" y="76" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="576" y="94" fill="var(--lk-cobalt-dark)">combine</text>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="118" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="34" y="138" fill="var(--lk-ink)">a 1&nbsp;&nbsp; b 2</text>
+          <rect x="190" y="118" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="204" y="138" fill="var(--lk-vermilion)">c 9</text>
+          <rect x="360" y="118" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="374" y="138" fill="var(--lk-ink)">a 5&nbsp;&nbsp; c 2</text>
+          <rect x="530" y="118" width="150" height="30" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="544" y="138" fill="var(--lk-ink)">b 7&nbsp;&nbsp; c 8</text>
+        </g>
+        <text x="204" y="164" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">two pairs became one</text>
+
+        <rect x="20" y="180" width="660" height="30" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="34" y="200" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">SHUFFLE &amp; SORT &mdash; 7 pairs cross the network instead of 8</text>
+
+        <g stroke="var(--lk-vermilion)" stroke-width="2.6" fill="none" marker-end="url(#mr42)">
+          <path d="M95 150 L95 178"/><path d="M265 150 L265 178"/><path d="M435 150 L435 178"/><path d="M605 150 L605 178"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:12px">
+          <rect x="40" y="230" width="170" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="54" y="249" fill="var(--lk-ink)">a&nbsp;&nbsp; 1  5</text>
+          <rect x="265" y="230" width="170" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="279" y="249" fill="var(--lk-ink)">b&nbsp;&nbsp; 2  7</text>
+          <rect x="490" y="230" width="170" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="504" y="249" fill="var(--lk-ink)">c&nbsp;&nbsp; 2  9  8</text>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:12px">
+          <rect x="70" y="286" width="110" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="98" y="305" fill="var(--lk-forest)">r1&nbsp;&nbsp; 6</text>
+          <rect x="295" y="286" width="110" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="323" y="305" fill="var(--lk-forest)">r2&nbsp;&nbsp; 9</text>
+          <rect x="520" y="286" width="110" height="28" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+          <text x="548" y="305" fill="var(--lk-forest)">r3&nbsp;&nbsp; 19</text>
+        </g>
+        <g stroke="var(--lk-ink-soft)" stroke-width="1" fill="none">
+          <path d="M125 258 L125 284"/><path d="M350 258 L350 284"/><path d="M575 258 L575 284"/>
+        </g>
+        <text x="20" y="332" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-forest)">identical results &mdash; which is exactly the property a combiner must never break</text>
+
+        <defs>
+          <marker id="mr42" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/></marker>
+          <marker id="mr42g" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink-soft)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 4.2</b> — A combiner is a mini-reduce that runs on the map side. It changes how much data crosses the vermilion band and nothing else — provided the function it applies has the two properties below.</figcaption>
+    </figure>
+
+    <h3>The two required properties</h3>
+    <p>The combiner function must be <strong>associative and commutative</strong>:</p>
+<pre><code class="language-text">Associativity:  f( f(a,b), c ) = f( a, f(b,c) )
+Commutativity:  f(a,b) = f(b,a)</code></pre>
+
+    <p>Those are not decorative conditions. A combiner changes both the <em>grouping</em> of the arguments (some values get folded early, on the map side) and their <em>order</em> (values arrive at the reducer in a different sequence). If your function is sensitive to either, the combiner silently changes the answer. The deck demonstrates both failures.</p>
+
+    <h3>Counter-example 1 — non-commutativity</h3>
+    <p>Take <strong>concatenation of alphabetically-ordered values</strong>, so <code>f(a,b) &ne; f(b,a)</code>. Four map tasks emit, for key 3, the values <code>z</code>, <code>a</code>, <code>u</code>, <code>h</code>.</p>
+    <table>
+      <tr><th></th><th>Intermediate for key 3</th><th>Reducer 3 output</th></tr>
+      <tr><td><strong>With combiner</strong></td><td>the task holding <code>z</code> and <code>a</code> combines them locally into <code>az</code>, so the reducer receives <code>az</code>, <code>u</code>, <code>h</code></td><td><code>azhu</code></td></tr>
+      <tr><td><strong>Without combiner</strong></td><td>the reducer receives <code>z</code>, <code>a</code>, <code>u</code>, <code>h</code></td><td><code>ahuz</code></td></tr>
+    </table>
+    <p>Two different answers from the same input. The pre-folded <code>az</code> can no longer be broken apart, so <code>a</code> can never sort before <code>h</code> at the end.</p>
+
+    <h3>Counter-example 2 — non-associativity</h3>
+    <p>Take the <strong>average</strong>, where <code>f( f(a,b), c ) &ne; f( a, f(b,c) )</code>. For key <code>c</code> the map tasks emit <code>3</code>, <code>9</code>, <code>2</code>, <code>8</code>, with <code>3</code> and <code>9</code> on the same task.</p>
+    <table>
+      <tr><th></th><th>Intermediate for key c</th><th>Reducer 3 output</th></tr>
+      <tr><td><strong>With combiner</strong></td><td><code>3</code> and <code>9</code> are averaged locally to <code>6</code>, so the reducer receives <code>2</code>, <code>6</code>, <code>8</code></td><td><code>5.33</code></td></tr>
+      <tr><td><strong>Without combiner</strong></td><td>the reducer receives <code>2</code>, <code>3</code>, <code>8</code>, <code>9</code></td><td><code>5.5</code></td></tr>
+    </table>
+    <p>The average of averages is not the average. The combined value <code>6</code> arrives without its <em>weight</em>: the reducer cannot know it stands for two measurements rather than one.</p>
+
+    <div class="bd-w">
+      <h4>Is a combiner safe here?</h4>
+      <p class="bd-sub">Pick an aggregation function and check it against the two properties, with the exact numbers from the slides.</p>
+      <div id="w-agg"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Expect to be handed a function and asked whether a combiner may be used. Test it against both properties separately, and be ready to <em>show</em> the failure with a two-line counter-example — that is what the slides do with <code>azhu</code> vs <code>ahuz</code> and 5.33 vs 5.5. And know the standard workaround for the average: emit <strong>(sum, count)</strong> pairs instead of raw values. Summing pairs component-wise <em>is</em> associative and commutative, and the division is performed once at the very end.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>9. Partitioning the map output</h2>
+    <p><strong>Partitioning map output means assigning to each key-value pair the ID of the reducer that will manage that key.</strong> It is the bookkeeping that makes the shuffle possible: before anything moves, every pair already knows its destination.</p>
+
+    <table>
+      <tr><th>Side</th><th>What determines the split</th></tr>
+      <tr><td><strong>Maps</strong></td><td>Partitioning depends on the <em>input splits</em>: one map task per input split.</td></tr>
+      <tr><td><strong>Reducers</strong></td><td>Data is shuffled according to a <strong>partitioning function</strong>, which decides for each key which reducer it goes to. The number of reducers is <strong>tuneable</strong> — based on the number of nodes and available resources, or defined by the user. The keyspace of the intermediate key-value pairs is <strong>evenly distributed over the reducers with a hash function</strong>.</td></tr>
+    </table>
+
+    <h3>How it works</h3>
+    <ul>
+      <li>Let <var>p</var> be the number of Reduce tasks, either specified by the user or calculated by the system.</li>
+      <li>The partitioner adopts a <strong>hash function that translates a key to a number from 0 to p&minus;1</strong>. Different keys may end up in the same partition.</li>
+      <li>Each output key-value pair is stored in one of <var>p</var> files (i.e., partitions), each destined for one of the Reduce tasks.</li>
+      <li>The reduce task <strong>collects from every map task the partitions with the same hash value</strong>.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 360" width="100%" role="img" aria-labelledby="p43t p43d">
+        <title id="p43t">Partitioning the map output</title>
+        <desc id="p43d">Three map tasks each write p equals three partition files; each reduce task collects the partition with its own index from every map task.</desc>
+
+        <text x="20" y="20" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">each map task writes p = 3 partition files, one per reducer</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="34" width="96" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="52" y="52" fill="var(--lk-cobalt-dark)">map 1</text>
+          <rect x="20" y="128" width="96" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="52" y="146" fill="var(--lk-cobalt-dark)">map 2</text>
+          <rect x="20" y="222" width="96" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+          <text x="52" y="240" fill="var(--lk-cobalt-dark)">map 3</text>
+
+          <g>
+            <rect x="140" y="30" width="52" height="20" rx="2" fill="var(--lk-vermilion)" opacity=".85"/><text x="156" y="45" fill="var(--lk-paper-light)">P0</text>
+            <rect x="140" y="54" width="52" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="156" y="69" fill="var(--lk-paper-light)">P1</text>
+            <rect x="140" y="78" width="52" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/><text x="156" y="93" fill="var(--lk-paper-light)">P2</text>
+
+            <rect x="140" y="124" width="52" height="20" rx="2" fill="var(--lk-vermilion)" opacity=".85"/><text x="156" y="139" fill="var(--lk-paper-light)">P0</text>
+            <rect x="140" y="148" width="52" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="156" y="163" fill="var(--lk-paper-light)">P1</text>
+            <rect x="140" y="172" width="52" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/><text x="156" y="187" fill="var(--lk-paper-light)">P2</text>
+
+            <rect x="140" y="218" width="52" height="20" rx="2" fill="var(--lk-vermilion)" opacity=".85"/><text x="156" y="233" fill="var(--lk-paper-light)">P0</text>
+            <rect x="140" y="242" width="52" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".8"/><text x="156" y="257" fill="var(--lk-paper-light)">P1</text>
+            <rect x="140" y="266" width="52" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/><text x="156" y="281" fill="var(--lk-paper-light)">P2</text>
+          </g>
+        </g>
+
+        <rect x="216" y="118" width="120" height="60" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="228" y="140" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">hash(key) mod p</text>
+        <text x="228" y="158" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">&rarr; 0 .. p&minus;1</text>
+        <text x="228" y="174" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">same key, same file</text>
+
+        <g fill="none" stroke-width="1.6" marker-end="url(#mr43)">
+          <path d="M192 40 C 300 40, 380 40, 470 62" stroke="var(--lk-vermilion)"/>
+          <path d="M192 134 C 320 134, 400 100, 470 74" stroke="var(--lk-vermilion)"/>
+          <path d="M192 228 C 340 228, 420 110, 470 86" stroke="var(--lk-vermilion)"/>
+
+          <path d="M192 64 C 320 64, 400 150, 470 166" stroke="var(--lk-cobalt)"/>
+          <path d="M192 158 C 320 158, 400 168, 470 178" stroke="var(--lk-cobalt)"/>
+          <path d="M192 252 C 320 252, 400 200, 470 190" stroke="var(--lk-cobalt)"/>
+
+          <path d="M192 88 C 330 88, 420 250, 470 270" stroke="var(--lk-forest)"/>
+          <path d="M192 182 C 340 182, 420 262, 470 282" stroke="var(--lk-forest)"/>
+          <path d="M192 276 C 330 276, 420 290, 470 294" stroke="var(--lk-forest)"/>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="474" y="50" width="200" height="48" rx="2" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="488" y="70" fill="var(--lk-vermilion)">reduce 0</text>
+          <text x="488" y="88" fill="var(--lk-ink-soft)">collects every P0</text>
+
+          <rect x="474" y="154" width="200" height="48" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+          <text x="488" y="174" fill="var(--lk-cobalt-dark)">reduce 1</text>
+          <text x="488" y="192" fill="var(--lk-ink-soft)">collects every P1</text>
+
+          <rect x="474" y="258" width="200" height="48" rx="2" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="488" y="278" fill="var(--lk-forest)">reduce 2</text>
+          <text x="488" y="296" fill="var(--lk-ink-soft)">collects every P2</text>
+        </g>
+
+        <text x="20" y="336" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">m map tasks &times; p reducers = m&times;p partition files &mdash; remember this number, it returns in Chapter 8</text>
+
+        <defs>
+          <marker id="mr43" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="context-stroke"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 4.3</b> — The partitioner runs on the map side, before any data moves. Each map task writes one file per reducer; each reducer then pulls the file with its own index from every map task. The colours track one partition index across the whole cluster.</figcaption>
+    </figure>
+
+    <div class="bd-w">
+      <h4>Try the partitioner</h4>
+      <p class="bd-sub">Type a key and change the number of reduce tasks. The hash is a simple deterministic function of the characters — the point is that the same key always lands in the same partition, and that different keys happily share one.</p>
+      <div id="w-part"></div>
+    </div>
+
+    <h3>The problem the partitioner cannot see</h3>
+    <p>The simplest partitioner assigns approximately the same <em>number of keys</em> to each reducer. But — and this is the crucial observation — <strong>a partitioner only considers the key and ignores the number of values</strong>.</p>
+
+    <p>An imbalance in the amount of data associated with each key is relatively common in many text processing applications. The slides state the law behind it: <strong>in texts, the frequency of any word is inversely proportional to its rank in the frequency table</strong>. The most frequent word will occur approximately twice as often as the second most frequent word, three times as often as the third most frequent word, and so on.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-labelledby="p44t p44d">
+        <title id="p44t">Skew: equal keys, unequal work</title>
+        <desc id="p44d">A steeply decreasing key frequency profile above three reducers; the reducer that received the most frequent key carries far more data than the others despite holding the same number of keys.</desc>
+
+        <text x="20" y="20" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">frequency of each key (rank order) &mdash; the most frequent occurs about twice as often as the second, three times as often as the third...</text>
+
+        <g fill="none" stroke="var(--lk-ink)" stroke-width="1.2"><path d="M40 150 L670 150"/></g>
+        <g fill="var(--lk-vermilion)">
+          <rect x="46" y="34" width="30" height="116"/>
+        </g>
+        <g fill="var(--lk-cobalt)">
+          <rect x="86" y="92" width="30" height="58"/><rect x="126" y="111" width="30" height="39"/>
+          <rect x="166" y="121" width="30" height="29"/><rect x="206" y="127" width="30" height="23"/>
+          <rect x="246" y="131" width="30" height="19"/><rect x="286" y="133" width="30" height="17"/>
+          <rect x="326" y="135" width="30" height="15"/><rect x="366" y="136" width="30" height="14"/>
+          <rect x="406" y="137" width="30" height="13"/><rect x="446" y="138" width="30" height="12"/>
+          <rect x="486" y="139" width="30" height="11"/><rect x="526" y="139" width="30" height="11"/>
+          <rect x="566" y="140" width="30" height="10"/><rect x="606" y="140" width="30" height="10"/>
+        </g>
+        <text x="46" y="28" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">one very heavy key</text>
+
+        <text x="20" y="192" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">the partitioner balances the NUMBER of keys...</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="204" width="190" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="54" y="222" fill="var(--lk-ink)">reduce 0 : 5 keys</text>
+          <rect x="255" y="204" width="190" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="269" y="222" fill="var(--lk-ink)">reduce 1 : 5 keys</text>
+          <rect x="470" y="204" width="190" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+          <text x="484" y="222" fill="var(--lk-ink)">reduce 2 : 5 keys</text>
+        </g>
+
+        <text x="20" y="264" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">...but not the AMOUNT OF WORK</text>
+        <g>
+          <rect x="40" y="276" width="190" height="20" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <rect x="40" y="276" width="176" height="20" rx="2" fill="var(--lk-vermilion)" opacity=".85"/>
+          <rect x="255" y="276" width="190" height="20" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <rect x="255" y="276" width="42" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".8"/>
+          <rect x="470" y="276" width="190" height="20" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <rect x="470" y="276" width="30" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".8"/>
+        </g>
+        <text x="40" y="322" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">the job finishes when the slowest reducer finishes &mdash; this one</text>
+      </svg>
+      <figcaption><b>Plate 4.4</b> — Skew. Balancing keys is not balancing bytes. Because a job is only as fast as its slowest task, one popular key can hold an entire cluster hostage while the other reducers sit idle.</figcaption>
+    </figure>
+
+    <p>The partitioning <strong>can be controlled by a user-defined partitioning function</strong>. However, the deck is pragmatic about it: <strong>the default partitioner normally works well</strong>. Write your own when you have measured a problem, not before.</p>
+  </section>
+
+  <section id="s10" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>10. How many reduce tasks?</h2>
+    <p>Hadoop <strong>used to create only one, global Reduce task by default</strong> — an obvious bottleneck for a large job. So how many should there be? The deck offers two defensible answers and refuses to declare a winner.</p>
+
+    <table>
+      <tr><th>Strategy</th><th>Argument for</th><th>Argument against</th></tr>
+      <tr>
+        <td><strong>One task per CPU</strong><br>many keys per task</td>
+        <td>The obvious mapping of work onto hardware</td>
+        <td>Different tasks may take significantly different times, usually because of the non-uniform distribution of values within keys (<strong>skewness</strong>). A random distribution of keys within tasks may mitigate potential problems.</td>
+      </tr>
+      <tr>
+        <td><strong>Many tasks per CPU</strong><br>fewer keys per task</td>
+        <td>Better capable of mitigating skewness problems: time-consuming tasks occupy a CPU fully, while many quicker tasks run sequentially in the same CPU</td>
+        <td>There is <strong>overhead associated with each task</strong></td>
+      </tr>
+    </table>
+
+    <p>The second strategy is worth understanding properly, because the reasoning recurs everywhere in this course. If you have many small tasks and one of them turns out to be huge, the scheduler simply keeps feeding the other CPUs with the remaining small tasks while the big one grinds away. With one task per CPU, every other CPU finishes and then waits. <strong>Over-decomposition buys you elasticity</strong> — at the price of per-task overhead.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p><strong>Choosing the number of reducers for a job is more of an art than a science.</strong> The rule of thumb the deck gives is the useful takeaway: a task should run for <strong>about 5 minutes</strong> and produce <strong>at least one DFS block&rsquo;s worth of output</strong>. Below that, you are paying more in scheduling than you gain in parallelism; well above it, a single failure or a single straggler costs too much.</p>
+    </div>
+  </section>
+
+  <section id="s11" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>11. The complete picture</h2>
+    <p>Everything in this chapter collapses into four signatures. Two you must write; two you usually write.</p>
+
+<pre><code class="language-text">map     (k1, v1)        &rarr; list(k2, v2)
+reduce  (k2, list(v2))  &rarr; list(k3, v3)</code></pre>
+    <p>All values with the same key are reduced together. And usually, programmers also specify:</p>
+<pre><code class="language-text">combine   (k2, list(v2))              &rarr; list(k3, v3)
+partition (k2, number_of_partitions)  &rarr; partition_for_k2</code></pre>
+
+    <table>
+      <tr><th>Function</th><th>Role</th></tr>
+      <tr><td><strong>combine</strong></td><td>Mini-reducers that run after the map phase; used as an <em>optimization</em> to reduce network traffic</td></tr>
+      <tr><td><strong>partition</strong></td><td>Divides up the key space for parallel reduce operations</td></tr>
+    </table>
+
+    <p>Look at the type of <code>combine</code>: it has exactly the signature of <code>reduce</code>. That is not a coincidence, it is the formal statement of section 8 — a combiner is a reducer you are allowed to run early, and it is legal precisely when running it early cannot change the result.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Four small functions, and then: <strong>the execution framework handles everything else</strong>. Splitting the input, launching tasks near their data, sorting, moving partitions across the network, restarting whatever died, and writing the output back to the DFS. Chapter 5 opens that box.</p>
+    </div>
+  </section>
+
+  <section id="s12" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>12. Four algorithm patterns</h2>
+    <p>Before the patterns, a warning the deck states plainly: <strong>MapReduce is a paradigm, not a tool.</strong> You must fit your solution into the framework of map and reduce, and in some situations that might be challenging — <em>translating machine learning and data mining algorithms to the MapReduce paradigm is not trivial</em>. Sometimes you need multiple map/reduce stages: <strong>chains of maps and reduces</strong> (section 13, and all of Chapter 9).</p>
+
+    <p>Four patterns cover a surprising share of real jobs.</p>
+
+    <div id="se-patterns"></div>
+
+    <h3>Filtering</h3>
+    <p><em>Goal</em>: find lines/files/tuples with a particular characteristic. <em>Examples</em>: retrieve web logs for requests to a certain domain (or from a certain IP); retrieve a sample of the dataset; find the 10 customers with the highest reputation, given that the reputation is already stored in the data.</p>
+<pre><code class="language-text">map    (key, record) &rarr; if (criteria is met) then emit(key, record)
+reduce (key, record) &rarr; if (criteria is met) then emit(key, record)
+                          &mdash; reduce may even be omitted</code></pre>
+    <p>Filtering is the one pattern with no aggregation at all: there is nothing to bring together, so there is nothing to shuffle. A map-only job is the cheapest thing this framework can run.</p>
+
+    <h3>Summarization</h3>
+    <p><em>Goal</em>: compute the maximum/sum/average/... over a set of values. <em>Examples</em>: count the number of requests to each subdomain of <code>*.csr.unibo.it</code>; find the most popular domain; build an inverted index of words in documents.</p>
+<pre><code class="language-text">map    (key, record) &rarr; foreach group_criteria in record :
+                            emit (group_criteria, value)
+reduce (group_criteria, values) &rarr; emit (group_criteria, agg(values))</code></pre>
+    <p><strong>A combiner may be used to perform a pre-aggregation</strong> — subject, of course, to section 8.</p>
+
+    <h3>Join</h3>
+    <p><em>Goal</em>: combine different inputs on some shared values. <em>Example</em>: given a list of professors (with the courses they teach) and a list of students (with the courses they follow), find all triples <code>&lt;professor, course, student&gt;</code> where the course is in common.</p>
+<pre><code class="language-text">map    (key, record) &rarr; if (dataset1)
+                          then emit (sharedKey, (flag1, record) )
+                          else emit (sharedKey, (flag2, record) )
+reduce (sharedKey, records) &rarr; for r1 in records with flag1 :
+                                 for r2 in records with flag2 :
+                                    emit (someKey, &lt;r1, sharedKey, r2&gt; )</code></pre>
+
+    <p>The trick is the <strong>flag</strong>. Both datasets are poured into the same shuffle under the same key, and each record carries a tag saying which side it came from; the reducer then does the nested loop. Worked through with the example from the slides:</p>
+
+<pre><code class="language-text">Prof(Name, Course) = {(Enrico, BigData), (Matteo, BigData)}
+Stud(Name, Course) = {(Mario, BigData), (Lucia, DataMining)}
+Prof JOIN Stud ON (Prof.Course = Stud.Course)
+
+MAP:              {(BigData, (Prof, Enrico)), (BigData, (Prof, Matteo)),
+                   (BigData, (Stud, Mario)), (DataMining, (Stud, Lucia))}
+
+SHUFFLE AND SORT: {(BigData, [(Prof, Enrico), (Prof, Matteo), (Stud, Mario)]),
+                   (DataMining, [(Stud, Lucia)])}
+
+REDUCE:           {(k1, (Enrico, BigData, Mario)), (k2, (Matteo, BigData, Mario))}</code></pre>
+
+    <p>Notice what happened to <code>DataMining</code>: it arrives at a reducer with a student and no professor, the nested loop runs zero times, and nothing is emitted. The inner join falls out of the pattern for free.</p>
+
+    <h3>Sort</h3>
+    <p><em>Goal</em>: sort input. <em>Example</em>: return all the domains indexed by Google and the number of pages in each, ordered by the number of pages.</p>
+    <p>Here the deck makes a subtle and very examinable point: <strong>the programming model (map, then reduce) does not support sorting per se — but the implementations do, because the shuffle stage performs grouping and ordering.</strong> You get sorting as a side effect of the machinery, not as a feature of the model.</p>
+<pre><code class="language-text">map    (sortKey, record)  &rarr; emit (sortKey, record)
+reduce (sortKey, records) &rarr; emit (sortKey, records[1]), ...</code></pre>
+    <p><strong>The Map and the Reduce do nothing.</strong> With 1 reducer, we get sorted output. With many reducers, we get <em>partly</em> sorted output — each partition is internally sorted, but the partitions are not ordered relative to each other — <strong>unless you use the TotalOrderPartitioner</strong>, which assigns key <em>ranges</em> rather than hash values to reducers.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>&ldquo;Can MapReduce sort?&rdquo; deserves a precise answer: <em>the model cannot, the implementation can</em>, because shuffle &amp; sort already orders keys locally. State the consequence too: one reducer gives a globally sorted result but no parallelism; many reducers give parallelism but only partial ordering, unless the partitioner is range-based (TotalOrderPartitioner).</p>
+    </div>
+  </section>
+
+  <section id="s13" data-src="BigData 4 MapReduce paradigm.pdf">
+    <h2>13. Two-stage MapReduce</h2>
+    <p>As map-reduce calculations get more complex, <strong>it is useful to break them down into stages</strong>:</p>
+    <ul>
+      <li>The output of the first stage serves as input to the next one.</li>
+      <li>The same output may be useful for <strong>different subsequent stages</strong>.</li>
+      <li>The output can be stored in the DFS, forming a <strong>materialized view</strong>.</li>
+    </ul>
+
+    <p>And the economic argument for doing so: <strong>early stages of map-reduce operations often represent the heaviest amount of data access, so building and saving them once as a basis for many downstream uses saves a lot of work.</strong> The first stage is the one that touches the raw terabytes; every later stage works on something far smaller.</p>
+
+    <h3>The example: compare 2011 sales to 2010, by product and month</h3>
+    <div id="ac-twostage"></div>
+
+    <p>Read the two keys and the design becomes obvious. Stage one groups by <em>month, year, product</em> because that is the finest grain we will need. Stage two <strong>drops the year from the key and moves it into the value</strong>, so that the 2010 and the 2011 totals for the same month and product finally meet at the same reducer, where they can be divided.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Chaining stages is how you compare two things that live in different records. A reducer can only combine values that share a key, so if you need <em>x</em> and <em>y</em> together, some stage must emit them under the same key. Moving a field <strong>out of the key and into the value</strong> is the standard move, and it is worth recognising: you will do it again in Chapter 9 when parallelising genuinely awkward algorithms.</p>
+    </div>
+  </section>
+
+  <section id="s14" data-src="BigData 4 Real-life MapReduce.pdf">
+    <h2>14. Real-life MapReduce: the classroom cluster</h2>
+    <p>The course runs an exercise that is worth more than any diagram. The setup:</p>
+    <ul>
+      <li>Students subdivide into groups. <strong>Each group is a cluster. Each person is a machine.</strong></li>
+      <li>There is a big dataset about e-commerce sales, and <strong>data is spread in blocks across the &ldquo;machines&rdquo;</strong>.</li>
+      <li>The goal is to <strong>collaborate to answer a simple analytical question</strong>: the total revenue by category.</li>
+      <li>One constraint, and it is the whole point: <strong>you can only exchange data with the others, not commands.</strong></li>
+    </ul>
+
+    <p>The tasks were prescribed, MapReduce-style:</p>
+    <table>
+      <tr><th>Task</th><th>Instructions</th></tr>
+      <tr>
+        <td><strong>First task</strong><br>(on a given block)</td>
+        <td>Convert USD to EUR (10 USD make 9 EUR) · Calculate partial totals by category in 2025 · Write partial totals in separate messages</td>
+      </tr>
+      <tr>
+        <td><strong>Second task</strong></td>
+        <td>Collect partial totals (of a given category) · Calculate the total</td>
+      </tr>
+    </table>
+
+    <p>That first task is a mapper with a combiner: transform each record, pre-aggregate locally, emit one message per category. The second is a reducer: collect everything for one key and sum. Then the five human clusters ran, and here is what they produced:</p>
+
+    <table>
+      <tr><th>Category</th><th>Ground truth</th><th>Cluster 1<br>(by the window)</th><th>Cluster 2</th><th>Cluster 3</th><th>Cluster 4</th><th>Cluster 5<br>(by the entrance)</th></tr>
+      <tr><td>Books</td><td><strong>52.5</strong></td><td>49</td><td>48.25</td><td>64.5</td><td>55.5</td><td><strong>52.5</strong></td></tr>
+      <tr><td>Clothing</td><td><strong>80.5</strong></td><td>57</td><td>80</td><td>77.5</td><td>95.5</td><td><strong>80.5</strong></td></tr>
+      <tr><td>Technology</td><td><strong>75</strong></td><td>77</td><td>75</td><td>85</td><td>100</td><td><strong>75</strong></td></tr>
+    </table>
+
+    <p>One cluster out of five got all three numbers right. The deck congratulates Cluster 5 and closes with the line: <em>to everyone else — this is why we use machines for this kind of job.</em></p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — read the failures, not the winner</span>
+      <p>The interesting result is not that one group succeeded; it is <strong>how</strong> the other four failed, because each failure mode has a counterpart the framework must engineer away:</p>
+      <ul>
+        <li><strong>Arithmetic slips</strong> in the local computation &mdash; the framework answers with deterministic, testable user functions and with re-execution of failed tasks.</li>
+        <li><strong>Messages dropped, garbled or sent to the wrong person</strong> &mdash; answered by the partitioner, which computes the destination mechanically, and by the shuffle machinery that tracks every partition.</li>
+        <li><strong>Partial results never reconciled</strong> (a category summed by two people, or by none) &mdash; answered by the guarantee that all values for a key reach exactly one reducer.</li>
+      </ul>
+      <p>Every guarantee in this chapter looks like bureaucracy until you watch twenty intelligent people fail to add three columns without it.</p>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>If asked what the execution framework actually provides, do not answer &ldquo;parallelism&rdquo;. Answer <strong>correctness under parallelism</strong>: deterministic partitioning, the guarantee that all values of a key meet on one machine, sorted delivery, and automatic re-execution of whatever failed. Parallelism is easy; parallelism that returns the same number as a single machine would is the product.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="BigData 4 MapReduce paradigm.pdf,BigData 4 Real-life MapReduce.pdf">
+    <h2>Test your knowledge</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Quote the Dean and Ghemawat definition and explain the ambiguity the course warns about.</summary>
+        <p>&ldquo;MapReduce is a programming model and an associated implementation for processing and generating large data sets. Users specify a map function that processes a key/value pair to generate a set of intermediate key/value pairs, and a reduce function that merges all intermediate values associated with the same intermediate key.&rdquo; The ambiguity is that the name covers two different things: the <strong>programming model</strong>, and an <strong>implementation</strong> of it. <strong>Hadoop MapReduce is an open-source implementation of the MapReduce programming model</strong> — the model tells you what you can express, the implementation tells you how the tasks are actually scheduled and run.</p>
+      </details>
+
+      <details>
+        <summary>Walk the revenue-by-country query through the three phases, and say which one costs.</summary>
+        <p><strong>Map</strong>: each task reads the records local to its node and extracts (Country, Revenue) pairs — no network traffic. <strong>Shuffle &amp; Sort</strong>: a global operation that redistributes data on the basis of how it is meant to be aggregated, so that all values of one key land on one machine; sorting is done locally to enable the later aggregation. <strong>Reduce</strong>: each task performs an ordinary local aggregation over the keys it received (Italy 84, France 21, UK 12, Belgium 10, Spain 23, USA 2). The shuffle is the only phase that moves large volumes across the network, and therefore the only phase that really costs.</p>
+      </details>
+
+      <details>
+        <summary>List the four steps of the MapReduce process, with the detail that matters in each.</summary>
+        <p><strong>1)</strong> The input is divided into fixed-size <strong>splits</strong>: smaller splits give faster processing and better load balancing but more management overhead, and the <em>optimal split size equals the DFS block size</em>. <strong>2)</strong> One <strong>map task per split</strong>, running the user-defined map function on each record. <strong>3)</strong> The emitted pairs are <strong>sorted and stored on the local disk</strong> — map output is intermediate, so writing it to HDFS with replication would be overkill — and subdivided into partitions, one per reducer. <strong>4)</strong> Map outputs are sent to the <strong>reduce</strong> nodes; the number of reduce tasks is specified independently, inputs from different mappers are merged and sorted by key, all values of a key reach the same reducer, and a reducer may handle several keys one at a time.</p>
+      </details>
+
+      <details>
+        <summary>Word Count and Word Length Count differ by one line. Which one, and what does that teach?</summary>
+        <p>Only the mapper. Word Count emits <code>(word, 1)</code> — keys are the words, values are 1 — and the reducer sums the values to emit <code>(w, m)</code>. Word Length Count emits <code>(length, word)</code> — the key is the length of a word, the value is the word itself — and the reducer counts the elements of the list to emit <code>(l, m)</code>. The lesson is that <strong>designing a MapReduce job is choosing the key</strong>: the framework, the shuffle and the reduce skeleton are unchanged, yet the two jobs answer completely different questions.</p>
+      </details>
+
+      <details>
+        <summary>Show, with the slide numbers, why a combiner breaks a non-commutative and a non-associative function.</summary>
+        <p>First, the premise: a combiner <strong>pre-aggregates on the map side</strong> to cut intermediate data and network traffic, and it is legal only when the function is associative and commutative — grouping is still needed either way, since values of one key are spread across splits. <strong>Non-commutative</strong> — concatenation of alphabetically-ordered values, where <code>f(a,b) &ne; f(b,a)</code>. For key 3 the values are z, a, u, h with z and a on the same map task. With a combiner they are folded into <code>az</code> before the shuffle, and the reducer produces <strong>azhu</strong>; without a combiner it receives z, a, u, h and produces <strong>ahuz</strong>. <strong>Non-associative</strong> — the average, where <code>f(f(a,b),c) &ne; f(a,f(b,c))</code>. For key c the values are 3, 9, 2, 8 with 3 and 9 on the same task. With a combiner they become 6, the reducer sees 2, 6, 8 and returns <strong>5.33</strong>; without it the reducer sees 2, 3, 8, 9 and returns <strong>5.5</strong>. The combined value arrives without its weight, so the average of averages is not the average.</p>
+      </details>
+
+      <details>
+        <summary>How does the partitioner work, and how many intermediate files does a job produce?</summary>
+        <p>Let <var>p</var> be the number of reduce tasks, either specified by the user or calculated by the system. The partitioner adopts a <strong>hash function that translates a key to a number from 0 to p&minus;1</strong>; different keys may end up in the same partition. Each output key-value pair is written into one of <var>p</var> files, each destined for one reduce task, and <strong>each reduce task collects from every map task the partitions with the same hash value</strong>. With <var>m</var> map tasks that is <strong>m &times; p</strong> partition files.</p>
+      </details>
+
+      <details>
+        <summary>Why can a perfectly balanced partitioner still produce a badly unbalanced job?</summary>
+        <p>Because <strong>a partitioner only considers the key and ignores the number of values</strong>. The simplest partitioner assigns approximately the same number of keys to each reducer, but in many text processing applications the amount of data per key is heavily skewed: <em>the frequency of any word is inversely proportional to its rank in the frequency table</em>, so the most frequent word occurs about twice as often as the second, three times as often as the third, and so on. A reducer that receives one very popular key does far more work than the others, and the job finishes only when the slowest reducer finishes.</p>
+      </details>
+
+      <details>
+        <summary>Compare the two strategies for choosing the number of reduce tasks, and give the rule of thumb.</summary>
+        <p>Hadoop used to create only one global reduce task by default, an obvious bottleneck. <strong>One task per CPU with many keys per task</strong> maps work onto hardware directly, but different tasks may take very different times because of skewness — a random distribution of keys within tasks may mitigate it. <strong>Many tasks per CPU with fewer keys per task</strong> handles skew better, since a time-consuming task occupies one CPU fully while many quicker tasks run sequentially elsewhere, but there is overhead associated with each task. Choosing is &ldquo;more of an art than a science&rdquo;; the rule of thumb is that a task should run for <strong>about 5 minutes</strong> and produce <strong>at least one DFS block&rsquo;s worth of output</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Explain the join pattern, and what happens to a key present in only one dataset.</summary>
+        <p>The mapper emits every record under the <strong>shared key</strong>, tagged with a <strong>flag</strong> identifying which dataset it came from: <code>emit (sharedKey, (flag1, record))</code> or <code>emit (sharedKey, (flag2, record))</code>. The reducer receives all records for that key and performs a nested loop, emitting a triple for each pair of records with flag1 and flag2. In the example, <code>BigData</code> arrives with Enrico and Matteo (professors) and Mario (student), producing (Enrico, BigData, Mario) and (Matteo, BigData, Mario); <code>DataMining</code> arrives with only Lucia, the nested loop runs zero times, and nothing is emitted — the inner-join semantics come for free.</p>
+      </details>
+
+      <details>
+        <summary>Can MapReduce sort? Answer precisely.</summary>
+        <p>The <strong>programming model does not support sorting per se</strong> — map then reduce says nothing about order — <strong>but the implementations do</strong>, because the shuffle stage already performs grouping and ordering. The pattern is trivial: <code>map (key, record) &rarr; emit (sortKey, record)</code> and the reducer emits the records, so the map and the reduce do nothing. With <strong>1 reducer you get sorted output</strong>; with <strong>many reducers you get partly sorted output</strong> — each partition sorted internally, but partitions unordered relative to each other — <strong>unless you use the TotalOrderPartitioner</strong>, which assigns key ranges instead of hash values.</p>
+      </details>
+
+      <details>
+        <summary>Why break a computation into two stages, and what changes between the two keys in the sales example?</summary>
+        <p>Because the output of one stage feeds the next, the same output may serve several later stages, and it can be stored in the DFS as a <strong>materialized view</strong>. Since early stages represent the heaviest data access, building and saving them once for many downstream uses saves a lot of work. In the example, stage one emits <code>concat(month, year, product) &rarr; qty</code> and reduces to the sum, producing sales for a single product in a single month of a single year. Stage two emits <code>concat(month, product) &rarr; (year, totalQty)</code> — the <strong>year moves out of the key and into the value</strong> — so the 2010 and 2011 totals for the same month and product meet at the same reducer, which emits <code>totals[2011]/totals[2010]</code>.</p>
+      </details>
+
+      <details>
+        <summary>What did the classroom exercise demonstrate, beyond the fact that humans make mistakes?</summary>
+        <p>Each group was a cluster and each person a machine, with sales data spread in blocks and one constraint: <strong>you can only exchange data, not commands</strong>. The first task (convert USD to EUR at 10 USD = 9 EUR, compute partial totals by category in 2025, write them in separate messages) is a mapper with a combiner; the second (collect the partial totals of a category and total them) is a reducer. Only Cluster 5 reproduced the ground truth (Books 52.5, Clothing 80.5, Technology 75). The lesson is that the failures map one-to-one onto the guarantees a framework must provide: arithmetic slips call for deterministic functions and task re-execution, lost or misdirected messages for a mechanical partitioner and a tracked shuffle, and unreconciled partial results for the guarantee that all values of a key reach exactly one reducer.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-03-storage-hdfs.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-05-yarn-hadoop.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>BigData 4 MapReduce paradigm</em>, <em>BigData 4 Real-life MapReduce</em> · Big Data — University of Bologna · Prof. Enrico Gallinucci</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+if (window.hljs) { hljs.highlightAll(); }
+
+/* ---- State explorer: the four algorithm patterns (BigData 4 MapReduce paradigm) ---- */
+LessonKit.stateExplorer('#se-patterns', {
+  title: 'Four MapReduce algorithm patterns',
+  start: 'Filtering',
+  states: {
+    'Filtering': { desc: 'Goal: find lines, files or tuples with a particular characteristic. Examples: retrieve web logs for requests to a certain domain or from a certain IP; retrieve a sample of the dataset; find the 10 customers with the highest reputation, given that the reputation is already stored in the data. The map emits the record if the criteria is met, the reduce does the same, and the reduce may even be omitted: there is nothing to aggregate, so nothing has to be shuffled.', to: [['now aggregate the survivors', 'Summarization'], ['combine two datasets instead', 'Join']] },
+    'Summarization': { desc: 'Goal: compute the maximum, sum, average and so on over a set of values. Examples: count the number of requests to each subdomain of *.csr.unibo.it; find the most popular domain; build an inverted index of words in documents. The map emits one pair per group criteria found in the record, and the reduce emits the aggregate of the values. A combiner may be used to perform a pre-aggregation, provided the function is associative and commutative.', to: [['order the results', 'Sort'], ['bring in a second dataset', 'Join']] },
+    'Join': { desc: 'Goal: combine different inputs on some shared values. Both datasets are emitted under the shared key, each record tagged with a flag identifying which dataset it came from; the reducer performs the nested loop over the records with flag1 and the records with flag2. A key that arrives with records from only one side produces nothing, which is exactly inner-join semantics.', to: [['aggregate the joined triples', 'Summarization'], ['order the results', 'Sort']] },
+    'Sort': { desc: 'Goal: sort the input, for instance returning all the domains indexed by Google and the number of pages in each, ordered by the number of pages. The programming model does not support this per se, but the implementations do, because the shuffle stage performs grouping and ordering: the map and the reduce do nothing. With one reducer the output is sorted; with many reducers it is only partly sorted, unless the TotalOrderPartitioner is used.', to: [['filter the sorted output', 'Filtering']] }
+  }
+});
+
+/* ---- Annotated code: two-stage MapReduce (BigData 4 MapReduce paradigm) ---- */
+LessonKit.annotatedCode('#ac-twostage', {
+  lang: 'text',
+  lines: [
+    ['// FIRST STAGE', "Produce records showing the sales for a single product, in a single month, of a single year. This is the stage that touches the raw data, so it is the expensive one — and the reason it is worth saving its output."],
+    ['map (key, sales) ->', "The input is the raw sales data, exactly as it sits in the DFS."],
+    ['  for s in sales :', "One map task per split; inside it, we walk the records of that split only."],
+    ['    emit( concat(s.month, s.year, s.product), s.qty )', "The key is the composite month+year+product, which is the finest grain the final answer will need. The value is the quantity sold."],
+    ['reduce (keyMYP, quantities) ->', "All quantities for the same month, year and product have now been brought to one machine."],
+    ['  emit (keyMYP, sum(quantities))', "A plain sum: associative and commutative, so a combiner would be perfectly safe here. The output can be stored in the DFS as a materialized view and reused by other pipelines."],
+    ['', ""],
+    ['// SECOND STAGE', "Produce records showing the increase of sales for a single product in a single month, by comparing 2011 sales with 2010 ones."],
+    ['map (keyMYP, totalQty) ->', "The input is the output of stage one: far smaller than the raw data, already aggregated."],
+    ['  emit( concat(s.month, s.product), (s.year, s.totalQty) )', "The decisive move: the YEAR LEAVES THE KEY and becomes part of the value. Now the 2010 record and the 2011 record for the same month and product share a key, so the shuffle will deliver them to the same reducer."],
+    ['reduce (keyMP, totals) ->', "This reducer sees, for one month and one product, the totals of both years tagged with the year they belong to."],
+    ['  emit (keyMP, (totals[2011] / totals[2010]) )', "The comparison is finally a local division. A reducer can only combine values that share a key: if you need two things together, some stage must emit them under the same key."]
+  ]
+});
+
+/* ---- Bespoke widget: Word Count, phase by phase ---- */
+(function () {
+  var host = document.getElementById('w-wordcount');
+  if (!host) return;
+  var docs = ['big data is big', 'data is data', 'big data rules'];
+  var phases = [
+    { name: 'INPUT',
+      note: "Three documents, one per input split. Each document is a value in the input pairs, and one map task is created for each split.",
+      render: function () {
+        return docs.map(function (d, i) { return 'split ' + (i + 1) + ':  "' + d + '"'; }).join('\n');
+      } },
+    { name: 'MAP',
+      note: "Each map task reads its own document and emits one pair per word: the key is the word, the value is 1. Nothing has crossed the network yet — every task worked on the block already on its disk.",
+      render: function () {
+        return docs.map(function (d, i) {
+          return 'map ' + (i + 1) + ':  ' + d.split(' ').map(function (w) { return '(' + w + ', 1)'; }).join(' ');
+        }).join('\n');
+      } },
+    { name: 'SHUFFLE & SORT',
+      note: "The global redistribution: all the pairs with the same key are brought to the same machine, and sorted by key so the reducer can stream through them. This is the only phase that moves data across the network.",
+      render: function () {
+        var g = {};
+        docs.join(' ').split(' ').forEach(function (w) { g[w] = (g[w] || 0) + 1; });
+        return Object.keys(g).sort().map(function (w) {
+          var ones = [];
+          for (var i = 0; i < g[w]; i++) { ones.push('1'); }
+          return '(' + w + ', [' + ones.join(', ') + '])';
+        }).join('\n');
+      } },
+    { name: 'REDUCE',
+      note: "Each reducer adds up all the values for a given key and emits (w, m). Note that no reducer ever had to see a word that was not assigned to it.",
+      render: function () {
+        var g = {};
+        docs.join(' ').split(' ').forEach(function (w) { g[w] = (g[w] || 0) + 1; });
+        return Object.keys(g).sort().map(function (w) { return '(' + w + ', ' + g[w] + ')'; }).join('\n');
+      } }
+  ];
+  var i = 0;
+  var label = document.createElement('div'); label.className = 'bd-stage';
+  var out = document.createElement('div'); out.className = 'bd-out'; out.style.whiteSpace = 'pre';
+  var note = document.createElement('div'); note.className = 'bd-out'; note.style.color = 'var(--lk-ink-soft)';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var next = document.createElement('button'); next.type = 'button'; next.className = 'bd-btn'; next.textContent = 'Next phase';
+  var reset = document.createElement('button'); reset.type = 'button'; reset.className = 'bd-btn bd-alt'; reset.textContent = 'Reset';
+  btns.appendChild(next); btns.appendChild(reset);
+
+  function draw() {
+    label.textContent = phases[i].name;
+    out.textContent = phases[i].render();
+    note.textContent = phases[i].note;
+    next.disabled = i >= phases.length - 1;
+  }
+  next.addEventListener('click', function () { if (i < phases.length - 1) { i++; draw(); } });
+  reset.addEventListener('click', function () { i = 0; draw(); });
+  host.appendChild(label); host.appendChild(out); host.appendChild(note); host.appendChild(btns);
+  draw();
+})();
+
+/* ---- Bespoke widget: is a combiner safe? (BigData 4 MapReduce paradigm) ---- */
+(function () {
+  var host = document.getElementById('w-agg');
+  if (!host) return;
+  var fns = [
+    { name: 'sum', assoc: true, comm: true,
+      verdict: "Safe. Sum is both associative and commutative, so folding some values early on the map side cannot change the total.",
+      demo: "key c, values 3 9 2 8   with combiner: (3+9)=12, then 12+2+8 = 22   without: 3+9+2+8 = 22" },
+    { name: 'max', assoc: true, comm: true,
+      verdict: "Safe. The maximum does not care how the values are grouped or in which order they arrive.",
+      demo: "key c, values 3 9 2 8   with combiner: max(3,9)=9, then max(9,2,8) = 9   without: max(3,9,2,8) = 9" },
+    { name: 'average', assoc: false, comm: true,
+      verdict: "NOT safe: the average is not associative. The pre-combined value arrives without its weight, so the reducer cannot know it stands for two measurements. The standard fix is to emit (sum, count) pairs and divide only at the end.",
+      demo: "key c, values 3 9 2 8   with combiner: avg(3,9)=6, then avg(2,6,8) = 5.33   without: avg(2,3,8,9) = 5.5" },
+    { name: 'concatenation of alphabetically-ordered values', assoc: true, comm: false,
+      verdict: "NOT safe: concatenation of ordered values is not commutative. Once two values are folded into one string they can no longer be interleaved with the rest.",
+      demo: "key 3, values z a u h   with combiner: (z,a) -> az, then az u h = azhu   without: z a u h -> ahuz" }
+  ];
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  out.textContent = 'Pick an aggregation function.';
+  fns.forEach(function (f) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'bd-btn bd-alt'; b.textContent = f.name;
+    b.addEventListener('click', function () {
+      out.innerHTML = '';
+      var g = document.createElement('div'); g.className = 'bd-grid';
+      [['associative', f.assoc], ['commutative', f.comm]].forEach(function (c) {
+        var d = document.createElement('div'); d.className = 'bd-cell';
+        d.innerHTML = c[0] + ': <b></b>';
+        var b2 = d.querySelector('b');
+        b2.textContent = c[1] ? 'yes' : 'no';
+        b2.className = c[1] ? 'bd-ok' : 'bd-bad';
+        g.appendChild(d);
+      });
+      out.appendChild(g);
+      var v = document.createElement('div');
+      v.className = (f.assoc && f.comm) ? 'bd-ok' : 'bd-bad';
+      v.textContent = f.verdict;
+      var d2 = document.createElement('div');
+      d2.style.color = 'var(--lk-ink-soft)'; d2.style.marginTop = '.4rem'; d2.style.whiteSpace = 'pre-wrap';
+      d2.textContent = f.demo;
+      out.appendChild(v); out.appendChild(d2);
+    });
+    btns.appendChild(b);
+  });
+  host.appendChild(btns); host.appendChild(out);
+})();
+
+/* ---- Bespoke widget: the partitioner (BigData 4 MapReduce paradigm) ---- */
+(function () {
+  var host = document.getElementById('w-part');
+  if (!host) return;
+  var keys = ['Italy', 'France', 'UK', 'Spain', 'Belgium', 'USA'];
+  var p = 3;
+  var ctl = document.createElement('div'); ctl.className = 'bd-ctl';
+  ctl.innerHTML = '<label>your key <input type="text" id="bdKey" value="Italy" size="12" style="font-family:var(--lk-mono);padding:.2rem .4rem;border:1px solid var(--lk-rule-soft);border-radius:2px;background:var(--lk-paper)"></label>' +
+    '<label>reduce tasks p <input type="range" id="bdP" min="1" max="6" step="1" value="3"> <b id="bdPV">3</b></label>';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  var tbl = document.createElement('div'); tbl.className = 'bd-out'; tbl.style.whiteSpace = 'pre';
+  host.appendChild(ctl); host.appendChild(out); host.appendChild(tbl);
+
+  function hash(s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+    return h;
+  }
+  function part(s) { return Math.abs(hash(s)) % p; }
+
+  function draw() {
+    var k = document.getElementById('bdKey').value || '';
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['key', k], ['hash', hash(k)], ['mod p', part(k)], ['goes to', 'reduce ' + part(k)]].forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>';
+      d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var buckets = {};
+    for (var i = 0; i < p; i++) { buckets[i] = []; }
+    keys.forEach(function (key) { buckets[part(key)].push(key); });
+    var lines = ['the six country keys of the running example:'];
+    for (var j = 0; j < p; j++) {
+      lines.push('  reduce ' + j + ' : ' + (buckets[j].length ? buckets[j].join(', ') : '(nothing)'));
+    }
+    lines.push('');
+    lines.push('different keys may share a partition; the same key never splits across two.');
+    tbl.textContent = lines.join('\n');
+  }
+  document.getElementById('bdKey').addEventListener('input', draw);
+  document.getElementById('bdP').addEventListener('input', function (e) {
+    p = +e.target.value; document.getElementById('bdPV').textContent = p; draw();
+  });
+  draw();
+})();
+</script>
+</body>
+</html>

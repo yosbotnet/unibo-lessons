@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 8 — Tuning Spark: partitioning, shuffling and caching · Big Data</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bd-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .bd-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .bd-w .bd-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .bd-ctl{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.82rem}
+  .bd-ctl label{display:flex;gap:.4rem;align-items:center}
+  .bd-ctl input[type=range]{accent-color:var(--lk-cobalt)}
+  .bd-btn{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;
+    border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .bd-btn:hover{background:var(--lk-cobalt-dark)}
+  .bd-btn.bd-alt{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .bd-btn:disabled{opacity:.4;cursor:not-allowed}
+  .bd-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0}
+  .bd-out{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .8rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.82rem;margin-top:.6rem;overflow-x:auto}
+  .bd-grid{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:.6rem 0}
+  .bd-cell{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.45rem .6rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.8rem}
+  .bd-cell b{color:var(--lk-cobalt-dark)}
+  .bd-ok{color:var(--lk-forest);font-weight:600} .bd-bad{color:var(--lk-vermilion);font-weight:600}
+  .bd-bar{height:14px;border:1px solid var(--lk-rule-soft);background:var(--lk-paper);position:relative;border-radius:2px;overflow:hidden}
+  .bd-bar i{display:block;height:100%;background:var(--lk-cobalt)}
+  .bd-bar b{position:absolute;inset:0;text-align:center;font-size:.62rem;line-height:14px;color:var(--lk-ink-soft);font-weight:600}
+  .bd-lin{font-family:var(--lk-mono);font-size:.8rem;padding:.2rem .5rem;border-radius:2px;margin:.15rem 0}
+  .bd-lin.bd-pend{color:var(--lk-ink-soft);border-left:3px solid var(--lk-rule-soft)}
+  .bd-lin.bd-run{background:var(--lk-hl);color:var(--lk-cobalt-dark);border-left:3px solid var(--lk-cobalt);font-weight:600}
+  .bd-chip{display:inline-block;font-family:var(--lk-mono);font-size:.76rem;padding:.15rem .45rem;margin:.12rem;
+    border-radius:2px;border:1px solid var(--lk-rule-soft);background:var(--lk-paper);color:var(--lk-ink-soft)}
+  .bd-chip.bd-hot{border-color:var(--lk-vermilion);color:var(--lk-vermilion);font-weight:600}
+  .bd-num{font-family:var(--lk-mono);font-size:1.5rem;font-weight:700;color:var(--lk-cobalt-dark);letter-spacing:.02em}
+  .bd-num.bd-red{color:var(--lk-vermilion)} .bd-num.bd-green{color:var(--lk-forest)}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-07-spark-sql.html">&larr; Ch. 7 — SQL-on-Hadoop, Spark SQL and Catalyst</a>
+    <a href="index.html">Index</a>
+    <a href="cap-09-beyond-mapreduce.html">Ch. 9 — Beyond simple MapReduce &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Batch processing · Chapter 8</div>
+    <h1>Tuning Spark: partitioning, shuffling and caching</h1>
+    <div class="lk-meta"><span>~40 min read</span><span>9 interactive widgets</span><span>5 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Partitioning: the two levers</a></li>
+      <li><a href="#s2">The number of partitions</a></li>
+      <li><a href="#s3">The partitioning criteria</a></li>
+      <li><a href="#s4">Repartitioning: pay once, shuffle less</a></li>
+      <li><a href="#s5">Shuffling: mechanism and cost</a></li>
+      <li><a href="#s6">Three generations of shuffle</a></li>
+      <li><a href="#s7">Caching: persist and storage levels</a></li>
+      <li><a href="#s8">Shared variables: broadcast and accumulators</a></li>
+      <li><a href="#s9">Tuning the cluster: CPU</a></li>
+      <li><a href="#s10">Tuning the cluster: memory</a></li>
+      <li><a href="#quiz">Test your knowledge</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>1. Partitioning: the two levers</h2>
+    <p>Chapter 6 introduced the RDD as <em>a resilient distributed dataset</em>, and glossed over the word &ldquo;distributed&rdquo;. This chapter pays that word its due: the lab deck on Spark optimization starts where any tuning conversation has to start, with <strong>partitioning</strong>.</p>
+
+    <p><strong>Data in RDDs are split into multiple partitions.</strong> One property holds unconditionally and explains most of what follows:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the hard constraint</span>
+      <p><strong>A single partition can never span multiple workers.</strong> A partition is the atomic unit of both storage and computation: it lives entirely on one worker, and one task processes it entirely. Everything you will tune in this chapter is a way of shaping these indivisible pieces of data.</p>
+    </div>
+
+    <p>Given that constraint, partitioning serves <strong>two purposes</strong>, and the lab deck is careful to attach a separate control knob to each:</p>
+
+    <ul>
+      <li><strong>Parallelize computation across workers and CPU cores</strong> &mdash; controlled by <strong>the number of partitions</strong>.</li>
+      <li><strong>Minimize network traffic for data exchange between executors</strong> &mdash; controlled by <strong>the partitioning criteria (the partitioner)</strong>.</li>
+    </ul>
+
+    <p>The two knobs answer two different questions. <em>How many pieces is the data cut into?</em> decides how much parallelism you get. <em>Which piece does each key go to?</em> decides how much data has to travel between executors when operations that group by key run.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 380" width="100%" role="img" aria-labelledby="p81t p81d">
+        <title id="p81t">The two levers of RDD partitioning</title>
+        <desc id="p81d">RDD partitions are laid out over two workers; each RDD has partitions on both workers, and a note states that one partition never spans two workers. Two levers are listed below: the number of partitions controls parallelization, the partitioning criteria controls network traffic.</desc>
+        <text x="20" y="24" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">RDD PARTITIONING — data is split into partitions; one partition never spans two workers</text>
+
+        <rect x="40" y="48" width="290" height="196" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <text x="56" y="70" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">WORKER A</text>
+        <text x="56" y="96" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">RDD 1</text>
+        <rect x="56" y="104" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="70" y="120" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">Partition 1</text>
+        <rect x="56" y="132" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="70" y="148" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">Partition 2</text>
+        <rect x="56" y="160" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="70" y="176" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">Partition 3</text>
+        <text x="200" y="96" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">RDD 2</text>
+        <rect x="200" y="104" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="214" y="120" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">Partition 1</text>
+
+        <rect x="370" y="48" width="290" height="196" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <text x="386" y="70" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">WORKER B</text>
+        <text x="386" y="96" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">RDD 1</text>
+        <rect x="386" y="104" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="400" y="120" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">Partition 4</text>
+        <rect x="386" y="132" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="400" y="148" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">Partition 5</text>
+        <rect x="386" y="160" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="400" y="176" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">Partition 6</text>
+        <text x="530" y="96" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">RDD 3</text>
+        <rect x="530" y="104" width="120" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="544" y="120" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">Partition 1</text>
+
+        <path d="M310 190 L368 190" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="4 3" fill="none"/>
+        <text x="258" y="180" style="font-family:var(--lk-mono);font-size:10px" fill="var(--lk-vermilion)">a partition cannot</text>
+        <text x="258" y="192" style="font-family:var(--lk-mono);font-size:10px" fill="var(--lk-vermilion)">be split across</text>
+        <text x="258" y="204" style="font-family:var(--lk-mono);font-size:10px" fill="var(--lk-vermilion)">the two workers</text>
+
+        <line x1="20" y1="264" x2="680" y2="264" stroke="var(--lk-rule-soft)"/>
+        <text x="20" y="290" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt-dark)">LEVER 1 — THE NUMBER OF PARTITIONS</text>
+        <text x="20" y="308" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">parallelize computation across workers and CPU cores — one task runs per partition</text>
+        <text x="20" y="334" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">LEVER 2 — THE PARTITIONING CRITERIA (PARTITIONER)</text>
+        <text x="20" y="352" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">minimize network traffic for data exchange between executors — same key, same partition</text>
+        <text x="20" y="372" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">no control over which worker node a partition goes to — only over how keys are distributed among partitions</text>
+      </svg>
+      <figcaption><b>Plate 8.1</b> — The two levers. Lever 1 (how many partitions) buys concurrency; lever 2 (which partition a key lands in) buys cheaper joins and aggregations. Both are constrained by the one rule in vermilion: the pieces cannot be split.</figcaption>
+    </figure>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note — why this chapter is Chapter 7&rsquo;s continuation</span>
+      <p>The cost model of Chapter 7 could not see the cluster: it planned from cardinality and size, and explicitly ignored &ldquo;allocation of resources&rdquo; and &ldquo;allocation of tasks&rdquo;. This chapter is precisely about those two blind spots. Partitioning and shuffling decide how many tasks exist, where they run, and how much data crosses the network &mdash; the costs Catalyst had to leave out of its formula.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>2. The number of partitions</h2>
+    <p>If you do not specify it, <strong>Spark sets the number of partitions automatically</strong>. The lab deck gives the exact rules, and they are a mini-review of everything Chapter 6 said about where RDDs come from:</p>
+
+    <ul>
+      <li><strong>In-memory datasets</strong> (e.g., <code>parallelize</code>) &rarr; <strong>total number of available cores</strong>.</li>
+      <li><strong>External datasets</strong> (e.g., files read from HDFS) &rarr; <strong>one partition for each block of each file</strong> &mdash; Chapter 3&rsquo;s block size, reused as the natural data unit.</li>
+      <li><strong>Transformations</strong> &rarr; <strong>largest number of partitions in a parent RDD</strong>.</li>
+    </ul>
+
+    <p>Why does the number matter so much? Because of a one-line equation the deck states plainly: <strong>one task is run for each partition</strong>. Partition count is task count. Everything that follows is the consequence of that mapping.</p>
+
+    <h3>Too few partitions</h3>
+    <ul>
+      <li><strong>Less concurrency: some cores will not be used</strong> &mdash; with four partitions and eight cores, half the cluster idles.</li>
+      <li><strong>Risks from data skewness: the job might get stuck on that one task handling most of the keys</strong> &mdash; the straggler problem of Chapter 6, now caused by partitioning rather than by scheduling.</li>
+    </ul>
+
+    <h3>Too many partitions</h3>
+    <ul>
+      <li><strong>Excessive overhead in managing/scheduling many small tasks</strong> &mdash; each task is a scheduling decision, a JVM object, a status report; thousands of two-millisecond tasks pay that overhead on every single one.</li>
+    </ul>
+
+    <p>The deck then gives the rules of thumb, and they are worth memorising as a ladder:</p>
+
+    <table>
+      <tr><th>Bound</th><th>Rule</th><th>Rationale</th></tr>
+      <tr><td><strong>Lower bound</strong></td><td><strong>2 partitions for each core</strong></td><td>Keeps every core busy even when a task ends early and the scheduler must fill the gap.</td></tr>
+      <tr><td><strong>Lower bound</strong></td><td><strong>Each task should process no more than a block-worth of data</strong></td><td>A task is the unit of scheduling and of failure; a task bigger than a block recomputes more than necessary on retry.</td></tr>
+      <tr><td><strong>Upper bound</strong></td><td><strong>Each task should take at least 100&ndash;200ms to execute</strong></td><td>Below that, scheduling overhead dominates the actual work.</td></tr>
+      <tr><td><strong>When in doubt</strong></td><td><strong>More partitions is usually better than fewer</strong></td><td>The skew and concurrency risks of &ldquo;too few&rdquo; are worse than the overhead of &ldquo;too many&rdquo;.</td></tr>
+    </table>
+
+    <div class="bd-w">
+      <h4>The partition count, live</h4>
+      <p class="bd-sub">A fixed scenario — 8 cores, a dataset of 100 blocks. Slide the partition count and watch the consequences change.</p>
+      <div id="w-part"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Three default rules and four tuning rules. Defaults: <strong>in-memory &rarr; available cores; external &rarr; one partition per block; transformations &rarr; max of the parents</strong>. Tuning: <strong>at least 2 per core; at most a block per task; at least 100&ndash;200ms per task; when in doubt, more</strong>. And the equation underneath everything: <em>one task per partition</em> &mdash; so &ldquo;too few partitions&rdquo; means idle cores plus a skew-stuck straggler, and &ldquo;too many&rdquo; means scheduling overhead.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>3. The partitioning criteria</h2>
+    <p>The second lever is <strong>the partitioning criteria</strong>: the rule that decides, for a key/value RDD, which key goes to which partition. The deck gives it three jobs:</p>
+
+    <ul>
+      <li><strong>Put values that belong to the same key in the same partition</strong> &mdash; this is what makes local aggregation possible.</li>
+      <li><strong>Define how the key should be distributed in different partitions</strong> &mdash; ideally evenly, so no partition becomes a straggler.</li>
+      <li>There is deliberately <strong>no control over the specific worker node a partition goes to</strong> &mdash; placement is the cluster&rsquo;s business, not yours.</li>
+    </ul>
+
+    <p>Where does the criteria come from? <strong>It depends on how the key/value RDD is built</strong>:</p>
+    <ul>
+      <li><strong>In-memory datasets</strong> &rarr; <strong>none</strong> (no specific criteria);</li>
+      <li><strong>External datasets</strong> &rarr; <strong>none</strong> (no specific criteria);</li>
+      <li><strong>Transformations</strong> &rarr; <strong>depends on the transformation</strong> (possibly none).</li>
+    </ul>
+
+    <p>And the crucial pricing note: <strong>forcing a partitioning criteria on an RDD requires shuffling the data &mdash; it costs.</strong> A criteria is not a free annotation; it is a redistribution, and redistribution is the expensive operation that sections 5 and 6 will dissect.</p>
+
+    <p>There are <strong>three ways of partitioning</strong>:</p>
+    <table>
+      <tr><th>Method</th><th>How it distributes keys</th></tr>
+      <tr><td><strong>Hash partitioning</strong></td><td>Hashing using the <strong>Java <code>hashCode</code></strong> (i.e., a <strong>32-bit signed integer</strong>); the hash value decides the partition.</td></tr>
+      <tr><td><strong>Range partitioning</strong></td><td>Distributes data into <strong>uniform ranges</strong>; the ranges are determined <strong>by sampling the data</strong>.</td></tr>
+      <tr><td><strong>Custom partitioning</strong></td><td><strong>User-defined partitioning</strong> &mdash; any rule you can code.</td></tr>
+    </table>
+
+    <div class="bd-w">
+      <h4>Hash vs. range on the slide&rsquo;s own numbers</h4>
+      <p class="bd-sub">The same five keys, distributed by two criteria over three partitions. In both cases the values with the same key stay together &mdash; that is what a criteria is <em>for</em>.</p>
+      <div id="w-criteria"></div>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" width="100%" role="img" aria-labelledby="p82t p82d">
+        <title id="p82t">Repartitioning by n mod 3</title>
+        <desc id="p82d">Three source partitions containing values 4, 8, 40, 80; 15, 16, 4, 90; and 23, 42, 83, 93 are redistributed by the remainder of n modulo 3 into three new partitions containing multiples of three, numbers congruent to one, and numbers congruent to two.</desc>
+        <text x="20" y="24" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">FORCING A PARTITIONING CRITERIA — repartitioning by n mod 3</text>
+
+        <text x="40" y="52" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">before — no criteria</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="60" width="130" height="128" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="52" y="80" fill="var(--lk-cobalt-dark)">Partition 1</text>
+          <text x="52" y="100" fill="var(--lk-ink)">4</text><text x="76" y="100" fill="var(--lk-ink)">8</text>
+          <text x="52" y="120" fill="var(--lk-ink)">40</text><text x="80" y="120" fill="var(--lk-ink)">80</text>
+          <text x="52" y="140" fill="var(--lk-ink-soft)">(2 tasks&rsquo; worth)</text>
+
+          <rect x="40" y="196" width="130" height="90" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="52" y="216" fill="var(--lk-cobalt-dark)">Partition 2</text>
+          <text x="52" y="236" fill="var(--lk-ink)">15</text><text x="76" y="236" fill="var(--lk-ink)">16</text>
+          <text x="52" y="256" fill="var(--lk-ink)">4</text><text x="76" y="256" fill="var(--lk-ink)">90</text>
+
+          <rect x="200" y="60" width="130" height="128" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="212" y="80" fill="var(--lk-cobalt-dark)">Partition 3</text>
+          <text x="212" y="100" fill="var(--lk-ink)">23</text><text x="236" y="100" fill="var(--lk-ink)">42</text>
+          <text x="212" y="120" fill="var(--lk-ink)">83</text><text x="236" y="120" fill="var(--lk-ink)">93</text>
+          <text x="212" y="140" fill="var(--lk-ink-soft)">(skewed: 4 values)</text>
+        </g>
+
+        <text x="352" y="140" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">repartition</text>
+        <text x="364" y="156" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">(mod 3)</text>
+        <path d="M336 132 L420 132" stroke="var(--lk-vermilion)" stroke-width="1.6" fill="none" marker-end="url(#a8v)"/>
+        <text x="336" y="178" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">requires a shuffle</text>
+        <text x="336" y="192" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">— it costs</text>
+
+        <text x="440" y="52" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">after — forced criteria</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="440" y="60" width="220" height="52" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="452" y="78" fill="var(--lk-forest)">new P1 — n mod 3 = 0</text>
+          <text x="452" y="98" fill="var(--lk-ink)">15</text><text x="476" y="98" fill="var(--lk-ink)">42</text><text x="500" y="98" fill="var(--lk-ink)">90</text><text x="524" y="98" fill="var(--lk-ink)">93</text>
+
+          <rect x="440" y="120" width="220" height="52" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="452" y="138" fill="var(--lk-forest)">new P2 — n mod 3 = 1</text>
+          <text x="452" y="158" fill="var(--lk-ink)">4</text><text x="476" y="158" fill="var(--lk-ink)">4</text><text x="500" y="158" fill="var(--lk-ink)">16</text><text x="524" y="158" fill="var(--lk-ink)">40</text>
+
+          <rect x="440" y="180" width="220" height="52" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="452" y="198" fill="var(--lk-forest)">new P3 — n mod 3 = 2</text>
+          <text x="452" y="218" fill="var(--lk-ink)">8</text><text x="476" y="218" fill="var(--lk-ink)">23</text><text x="500" y="218" fill="var(--lk-ink)">80</text><text x="524" y="218" fill="var(--lk-ink)">83</text>
+        </g>
+
+        <text x="40" y="306" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">the same keys are now grouped by remainder — and no key went to a worker of our choosing: placement is out of our control</text>
+        <defs>
+          <marker id="a8v" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 8.2</b> — Repartitioning by <em>n mod 3</em>, worked on the deck&rsquo;s own numbers. Note where the values travel: 15, 42, 90, 93 to P1; 4, 4, 16, 40 to P2; 8, 23, 80, 83 to P3. The redistribution is a shuffle — a full pass of data across the cluster — which is why forcing a criteria &ldquo;costs&rdquo;.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s4" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>4. Repartitioning: pay once, shuffle less</h2>
+    <p>Given that a criteria costs a shuffle, when is it worth paying? The deck gives two answers:</p>
+    <ul>
+      <li><strong>In presence of an unbalanced dataset</strong> &mdash; the skew of section 2, fixed by re-cutting the pieces;</li>
+      <li><strong>When the dataset is reused multiple times in key-oriented operations</strong> (e.g., <code>reduceByKey</code>, <code>join</code>) &mdash; because partitioning <strong>avoids re-shuffling the data every time</strong>.</li>
+    </ul>
+
+    <p>The second case gets a full worked example, and it is the canonical tuning story of this whole chapter. An application keeps in memory a large table of user information, where <code>UserInfo</code> contains the list of topics the user is subscribed to:</p>
+
+<pre><code class="language-scala">val sc = new SparkContext(...)
+val userData = sc.sequenceFile[UserID, UserInfo]("hdfs://...").persist()</code></pre>
+
+    <p>Every 5 minutes, <code>userData</code> is combined with a smaller file containing the websites visited by the users; <code>LinkInfo</code> is a single website:</p>
+
+<pre><code class="language-scala">def processNewLogs(logFileName: String) {
+  val events = sc.sequenceFile[UserID, LinkInfo](logFileName)
+  val joined = userData.join(events) // RDD of (UserID, (UserInfo, LinkInfo)) pairs
+  val offTopicVisits = joined.filter {
+    case (userId, (userInfo, linkInfo)) => // Expand the tuple into its components
+      !userInfo.topics.contains(linkInfo.topic)
+  }.count()
+  println("Number of visits to non-subscribed topics: " + offTopicVisits)
+}</code></pre>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out — the default is quietly terrible</span>
+      <p><strong>By default, this operation will hash all the keys of both datasets</strong>; elements with the same key hash are sent across the network to the same partition. That is very inefficient: <strong><code>userData</code> is expected to be much larger than the small log of events</strong>, and nonetheless <strong><code>userData</code> is hashed and shuffled across the network every time</strong> &mdash; every 5 minutes, the large table is redistributed from scratch, while the small file is the one that actually changed.</p>
+    </div>
+
+    <p>The fix is a one-liner, and it is the whole lesson of the chapter in miniature: <strong>partition <code>userData</code> before persisting it</strong>.</p>
+
+    <div class="bd-w">
+      <h4>The fix, annotated</h4>
+      <p class="bd-sub">Select each line. The two code blocks are the same program; the only difference is where the partitioning is paid.</p>
+      <div id="ac-repart"></div>
+    </div>
+
+    <p>After the fix, <strong>only the <code>events</code> RDD is shuffled</strong>, sending events with a certain <code>UserID</code> to the machine that contains the corresponding hash partition of <code>userData</code>. Fewer network communications, and &mdash; in the deck&rsquo;s words &mdash; a <strong>significant boost in performance</strong>.</p>
+
+    <div class="bd-w">
+      <h4>The 5-minute join, quantified</h4>
+      <p class="bd-sub">Step through the rounds and compare the network traffic of the default plan against the partitioned plan. userData: 100 GB, persisted. events: 1 GB, new every round.</p>
+      <div id="w-repart"></div>
+    </div>
+
+    <h3>Repartitioning advantages, in full</h3>
+    <p>The deck then generalises, and the generalisation is a ladder of three cases:</p>
+    <ul>
+      <li><strong>Operations on a single, partitioned RDD</strong> (e.g., <code>reduceByKey</code>) &rarr; <strong>the values for each key are computed locally (no further shuffling occurs)</strong>.</li>
+      <li><strong>Operations on two RDDs</strong> (e.g., <code>join</code>) &rarr; <strong>if one RDD is partitioned, only the other is shuffled</strong>.</li>
+      <li><strong>If both RDDs share the same partitioner</strong> &rarr; <strong>partitions of RDD2 are only sent to the correct partition of RDD1</strong> &mdash; no full redistribution of either side.</li>
+      <li><strong>If both RDDs share the same partitioner <em>and</em> the partitions reside in the same machine</strong> (e.g., RDD2 was created with <code>RDD1.mapValues</code>) &rarr; <strong>no shuffling occurs</strong>.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — partitioning is an investment</span>
+      <p>The ladder is one idea: <em>a partitioner you already paid for keeps paying</em>. The first shuffle (the <code>partitionBy</code>) is capital expenditure; every subsequent key-oriented operation is operational expenditure that the partitioner reduces or eliminates. That is why the example persists the partitioned RDD &mdash; the investment must survive across actions, which is exactly what <code>persist()</code> (section 7) guarantees.</p>
+    </div>
+
+    <h3>Partitioning heritage: Spark knows what it created</h3>
+    <p>The last piece of the partitioning model is bookkeeping: <strong>Spark knows internally how each of its operations affects partitioning</strong>, and records it on the result RDD. The partitioner is automatically set on RDDs created by operations that partition the data:</p>
+
+<pre><code class="language-text">cogroup(), groupWith(), join(), leftOuterJoin(), rightOuterJoin(),
+groupByKey(), reduceByKey(), combineByKey(), partitionBy(), sort()</code></pre>
+
+    <p>And <strong>if the parent RDD has a partitioner, also</strong> these narrow transformations keep it:</p>
+
+<pre><code class="language-text">mapValues(), flatMapValues(), filter()</code></pre>
+
+    <p>Everything else &mdash; notably <code>map()</code> &mdash; <strong>produces a result with no partitioner</strong>. The reason is semantic: <code>map()</code> can change the key arbitrarily, so the old criteria would be a lie. The heritage rules are exactly the deck&rsquo;s way of saying <em>the partitioner survives only where the key survives unchanged</em>.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The <code>userData</code>/<code>events</code> example is the exam&rsquo;s favourite story: <strong>default join = both datasets hashed and shuffled every round; fixed join = the large table partitioned once and persisted, only the small file shuffled afterwards</strong>. Then the ladder: single RDD &rarr; fully local; one partitioned RDD &rarr; only the other shuffles; same partitioner &rarr; targeted sends; same partitioner <em>and</em> co-located &rarr; no shuffle. And the heritage list: <code>join</code> and friends <em>set</em> the partitioner; <code>mapValues</code>, <code>flatMapValues</code>, <code>filter</code> <em>keep</em> it; <code>map()</code> <em>drops</em> it.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>5. Shuffling: mechanism and cost</h2>
+    <p>Everything so far has been circling one word. Time to name it: <strong>shuffling is the mechanism used to re-distribute data across partitions</strong>. The deck&rsquo;s definition comes with two qualifiers that set the tone of the whole chapter:</p>
+    <ul>
+      <li><strong>It is necessary to compute some operations</strong> &mdash; you cannot join or aggregate by key without bringing the keys together;</li>
+      <li><strong>It is complex and costly</strong> &mdash; and the complexity is about to be itemised.</li>
+    </ul>
+
+    <p>First, why it is necessary at all. Values for a key live scattered across partitions; <strong>all partitions must be read in order to find values for the key k1</strong>:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 380" width="100%" role="img" aria-labelledby="p83t p83d">
+        <title id="p83t">The shuffle pipeline and its three costs</title>
+        <desc id="p83d">On the map side, three map tasks each produce a spill file on disk; the data crosses a network band to reach reduce tasks, which aggregate it. Three cost components are listed: disk I/O, network I/O, and data serialization. A note states that all partitions must be read to find values for a key.</desc>
+        <text x="20" y="24" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">SHUFFLING — re-distributing data across partitions: necessary, complex, costly</text>
+
+        <text x="40" y="56" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">MAP SIDE — sets of map tasks organize the data</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="40" y="66" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="54" y="83" fill="var(--lk-cobalt-dark)">map task M1</text>
+          <rect x="40" y="100" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="54" y="117" fill="var(--lk-cobalt-dark)">map task M2</text>
+          <rect x="40" y="134" width="150" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="54" y="151" fill="var(--lk-cobalt-dark)">map task M3</text>
+          <rect x="210" y="66" width="120" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="224" y="83" fill="var(--lk-ink-soft)">spill file</text>
+          <rect x="210" y="100" width="120" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="224" y="117" fill="var(--lk-ink-soft)">spill file</text>
+          <rect x="210" y="134" width="120" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="224" y="151" fill="var(--lk-ink-soft)">spill file</text>
+          <text x="210" y="180" fill="var(--lk-vermilion)">disk — data spilled on the map side,</text>
+          <text x="210" y="194" fill="var(--lk-vermilion)">later read by reduce tasks</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.2" fill="none" marker-end="url(#a8c)"><path d="M190 79 L208 79"/><path d="M190 113 L208 113"/><path d="M190 147 L208 147"/></g>
+
+        <rect x="350" y="66" width="120" height="94" rx="3" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="366" y="88" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">NETWORK</text>
+        <text x="366" y="104" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">I/O</text>
+        <text x="366" y="124" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">data crosses the</text>
+        <text x="366" y="140" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">wire between executors</text>
+        <path d="M330 92 L348 92" stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a8c)"/>
+        <path d="M330 92 L330 200 L348 200" stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#a8c)"/>
+
+        <text x="490" y="56" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">REDUCE SIDE — reduce tasks aggregate it</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="490" y="66" width="170" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="504" y="83" fill="var(--lk-forest)">reduce task R1 — k1</text>
+          <rect x="490" y="100" width="170" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="504" y="117" fill="var(--lk-forest)">reduce task R2</text>
+          <rect x="490" y="134" width="170" height="26" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="504" y="151" fill="var(--lk-forest)">reduce task R3</text>
+          <text x="490" y="180" fill="var(--lk-forest)">each key&rsquo;s values must end</text>
+          <text x="490" y="194" fill="var(--lk-forest)">up in one task</text>
+        </g>
+
+        <text x="40" y="232" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">to find values for the key k1, all partitions must be read — the reduce task for k1 has no idea where its values are</text>
+
+        <line x1="20" y1="250" x2="680" y2="250" stroke="var(--lk-rule-soft)"/>
+        <text x="20" y="272" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">THE THREE COSTS</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="282" width="205" height="70" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <text x="32" y="302" fill="var(--lk-vermilion)">1. DISK I/O</text>
+          <text x="32" y="320" fill="var(--lk-ink)">data on the map side is spilled to</text>
+          <text x="32" y="336" fill="var(--lk-ink)">disk, later read by reduce tasks</text>
+          <rect x="238" y="282" width="205" height="70" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <text x="250" y="302" fill="var(--lk-vermilion)">2. NETWORK I/O</text>
+          <text x="250" y="320" fill="var(--lk-ink)">every redistributed record crosses</text>
+          <text x="250" y="336" fill="var(--lk-ink)">the wire between executors</text>
+          <rect x="456" y="282" width="205" height="70" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <text x="468" y="302" fill="var(--lk-vermilion)">3. DATA SERIALIZATION</text>
+          <text x="468" y="320" fill="var(--lk-ink)">increases CPU workload</text>
+          <text x="468" y="336" fill="var(--lk-ink)">to reduce the cost of I/O</text>
+        </g>
+        <text x="20" y="374" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">Spark generates sets of map tasks (to organize the data) and reduce tasks (to aggregate it) — nomenclature taken from MapReduce (Chapter 4)</text>
+        <defs>
+          <marker id="a8c" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-cobalt)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 8.3</b> — The shuffle pipeline. Map tasks organise, spill to disk, and push across the network; reduce tasks pull and aggregate. The three cost centres are the same three resources Chapters 2&ndash;5 taught you to watch: disk, network, and the CPU that serialization burns to save the other two.</figcaption>
+    </figure>
+
+    <p>Which operations trigger all this? The deck&rsquo;s taxonomy is short and examinable:</p>
+    <ul>
+      <li><strong>Repartitioning</strong> (e.g., <code>repartition</code>, <code>coalesce</code>) &mdash; always a shuffle by construction.</li>
+      <li><strong>ByKey operations</strong> (e.g., <code>groupByKey</code>, <code>reduceByKey</code>) &mdash; <strong>if data is already partitioned by key, no shuffling occurs</strong>; and <code>countByKey</code> does not shuffle at all, it just sends counts to the driver.</li>
+      <li><strong>Joins</strong> (e.g., <code>cogroup</code>, <code>join</code>) &mdash; <strong>the partitioning of the two RDDs may decrease the amount of shuffled data</strong> (section 4&rsquo;s ladder, in one line).</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Three facts to keep separate: (1) the definition &mdash; <strong>shuffling re-distributes data across partitions; it is necessary and it is costly</strong>; (2) the mechanism &mdash; <strong>map tasks organize, reduce tasks aggregate</strong> (MapReduce nomenclature); (3) the three costs &mdash; <strong>disk I/O (spill on the map side), network I/O, and data serialization (extra CPU to save I/O)</strong>. And the two exceptions that surprise people: already-partitioned-by-key &rarr; no shuffle; <code>countByKey</code> &rarr; no shuffle, counts go to the driver.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>6. Three generations of shuffle</h2>
+    <p>Shuffling is costly enough that Spark has spent its whole history making it cheaper. The deck tells the story as three generations: <strong>hash shuffle</strong> (the very first technique), <strong>sort shuffle</strong> (default with Spark 1.2), and <strong>Tungsten sort</strong> (an evolution of the sort shuffle).</p>
+
+    <h3>Hash shuffle: one file per (mapper, reducer)</h3>
+    <p><strong>Each map task creates a file for every reducer.</strong> The deck&rsquo;s example is famous for a reason &mdash; a real Yahoo workload with <strong>46,000 mappers and 46,000 reducers</strong>:</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out — the arithmetic</span>
+      <p>46,000 &times; 46,000 = <strong>over 2,000,000,000 intermediate files</strong>. Two billion files on the filesystem, for one shuffle. That is the baseline the whole history of Spark shuffles is trying to escape.</p>
+    </div>
+
+    <p>An evolved version pooled the files per executor: <strong>each executor holds a pool of files, one group containing a file for every reducer, with as many groups as the mappers that can run in parallel in the executor itself</strong>. With 100 executors, 10 cores each, 1 core per task:</p>
+    <ul>
+      <li>each executor holds <strong>10 groups of 46,000 files</strong>;</li>
+      <li>multiplied by the number of executors: <strong>over 46,000,000 intermediate files</strong>.</li>
+    </ul>
+    <p>Better than two billion, still absurd.</p>
+
+    <p><strong>Pros:</strong> fast &mdash; <strong>no sorting is required at all, no hash table maintained</strong>; no memory/CPU overhead for sorting the data. <strong>Cons:</strong> <strong>when the amount of partitions is big, performance starts to degrade due to the big amount of output files</strong> &mdash; a big amount of files written to the filesystem causes <strong>IO skew towards random IO, which is in general up to 100&times; slower than sequential IO</strong>.</p>
+
+    <h3>Sort shuffle: one spill file per mapper</h3>
+    <p>The second generation inverts the file structure. <strong>Each mapper keeps output in memory, spills to disk if necessary; each mapper spills to its own file(s); each file is sorted by reducer. When a reducer asks for its data, the &ldquo;pieces&rdquo; from each file are collected, sorted in memory, and sent to the reducer.</strong></p>
+
+    <p>Same Yahoo example: <strong>~46,000 intermediate files</strong>. Not two billion, not forty-six million &mdash; one per mapper.</p>
+
+    <p><strong>Pros:</strong> smaller amount of files created on the map side; smaller amount of random IO operations, mostly sequential writes and reads. <strong>Cons:</strong> <strong>sorting is slower than hashing</strong> &mdash; although <strong>in practice sort shuffle is usually better</strong>; and the deck notes the one environment where the trade flips: <strong>in case SSD drives are used for the temporary data of Spark shuffles, hash shuffle might work better</strong>.</p>
+
+    <h3>Tungsten sort: shuffle on serialized bytes</h3>
+    <p>The third generation attacks serialization, the third cost of Plate 8.3. <strong>Tungsten sort directly works on serialized records: records can be sorted, merged, concatenated, spilled to disk without de-serializing and re-serializing</strong>, using a <strong>cache-efficient sorter</strong>. The pros are one line: it <strong>improves performances of the sort shuffle technique</strong>. The cons are the interesting part &mdash; it <strong>can be adopted only under specific conditions</strong>:</p>
+    <ul>
+      <li><strong>No map-side aggregation (i.e., combining) is requested</strong>;</li>
+      <li><strong>The serializer supports relocation (i.e., reordering) of serialized values</strong> (e.g., <code>KryoSerializer</code>);</li>
+      <li>Other implementative limits: <strong>the shuffle produces fewer than 16,777,216 output partitions</strong>, and <strong>no individual record is larger than 128 MB when serialized</strong>.</li>
+    </ul>
+
+    <div class="bd-w">
+      <h4>The file-count story, calculated</h4>
+      <p class="bd-sub">Same workload — 46,000 mappers, 46,000 reducers. Pick a technique and see how many intermediate files it produces.</p>
+      <div id="w-shuffle"></div>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-labelledby="p84t p84d">
+        <title id="p84t">Three generations of shuffle: intermediate files on the Yahoo workload</title>
+        <desc id="p84d">Hash shuffle produces one file per mapper-reducer pair, over two billion files; evolved hash shuffle produces forty-six million; sort shuffle produces about forty-six thousand, one per mapper. A note explains that today a single SortShuffleManager picks among the techniques.</desc>
+        <text x="20" y="24" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">THREE GENERATIONS — Yahoo workload: 46,000 mappers · 46,000 reducers</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="48" width="210" height="168" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="34" y="70" fill="var(--lk-vermilion)">HASH SHUFFLE — 1st technique</text>
+          <text x="34" y="88" fill="var(--lk-ink)">each map task creates a file</text>
+          <text x="34" y="104" fill="var(--lk-ink)">for every reducer:</text>
+          <text x="34" y="128" fill="var(--lk-ink)">46,000 &times; 46,000</text>
+          <text x="34" y="150" style="font-family:var(--lk-mono);font-size:15px" fill="var(--lk-vermilion)">&gt; 2,000,000,000 files</text>
+          <text x="34" y="172" fill="var(--lk-ink-soft)">now obsolete — random IO up to</text>
+          <text x="34" y="188" fill="var(--lk-ink-soft)">100&times; slower than sequential IO</text>
+
+          <rect x="245" y="48" width="210" height="168" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <text x="259" y="70" fill="var(--lk-vermilion)">HASH SHUFFLE EVOLVED</text>
+          <text x="259" y="88" fill="var(--lk-ink)">pool of files per executor:</text>
+          <text x="259" y="104" fill="var(--lk-ink)">100 executors &times; 10 concurrent</text>
+          <text x="259" y="120" fill="var(--lk-ink)">mappers &times; 46,000 reducers</text>
+          <text x="259" y="144" style="font-family:var(--lk-mono);font-size:15px" fill="var(--lk-vermilion)">46,000,000 files</text>
+          <text x="259" y="166" fill="var(--lk-ink-soft)">each executor holds 10 groups</text>
+          <text x="259" y="182" fill="var(--lk-ink-soft)">of 46,000 files</text>
+
+          <rect x="470" y="48" width="210" height="168" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="484" y="70" fill="var(--lk-forest)">SORT SHUFFLE — default since 1.2</text>
+          <text x="484" y="88" fill="var(--lk-ink)">one spill file per mapper,</text>
+          <text x="484" y="104" fill="var(--lk-ink)">each file sorted by reducer:</text>
+          <text x="484" y="128" fill="var(--lk-ink)">46,000 mappers</text>
+          <text x="484" y="150" style="font-family:var(--lk-mono);font-size:15px" fill="var(--lk-forest)">~46,000 files</text>
+          <text x="484" y="172" fill="var(--lk-ink-soft)">mostly sequential IO;</text>
+          <text x="484" y="188" fill="var(--lk-ink-soft)">sorting slower than hashing</text>
+        </g>
+
+        <text x="20" y="244" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">TUNGSTEN SORT — evolution of the sort shuffle: works directly on serialized records (no de/re-serialization), cache-efficient sorter; adopted only when conditions allow (no map-side combining, serializer supports relocation, &lt; 2^24 output partitions, no record &gt; 128 MB serialized)</text>
+        <text x="20" y="278" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">TODAY — one single implementation is provided: SortShuffleManager. If conditions allow it, tungsten sort is adopted; if there are too few partitions, hash shuffling is adopted; otherwise, sort shuffle is adopted.</text>
+      </svg>
+      <figcaption><b>Plate 8.4</b> — The file-count story. The ordering matters: hash&rsquo;s flat structure (file per reducer) explodes with scale; the pool only rescales it; sort&rsquo;s sorted spill files collapse it to one file per mapper. The current manager is a decision tree over the three techniques.</figcaption>
+    </figure>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Know the three techniques by their file structure: <strong>hash = one file per (mapper, reducer)</strong> (&gt;2 billion on the Yahoo example); <strong>sort = one spill file per mapper</strong> (~46,000), pieces sorted in memory when the reducer pulls; <strong>Tungsten = the same sort, but directly on serialized records</strong>. And know the current state: one manager, <strong>SortShuffleManager</strong>, which picks <strong>tungsten if conditions allow, hash if there are too few partitions, sort otherwise</strong>. The SSD caveat (hash can win on SSDs) is a favourite exam detail.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>7. Caching: persist and storage levels</h2>
+    <p>The third tuning target is memory, and the starting observation is blunt: <strong>Spark recomputes an RDD each time an action is called on it</strong>. The deck&rsquo;s example is the &ldquo;trivial&rdquo; one that everyone hits:</p>
+
+<pre><code class="language-scala">rddCapraKvLength.count()     // action 1: the whole lineage runs
+rddCapraKvLength.collect()    // action 2: the whole lineage runs again</code></pre>
+
+    <p>Two actions, two full recomputations of the same RDD. <strong>Especially expensive for iterative algorithms</strong> &mdash; the ones Chapter 9 will build on, where the same dataset is re-read on every iteration.</p>
+
+    <p>The fix is <strong><code>persist()</code></strong>: <strong>when you persist an RDD x, each node stores in memory the partitions of x that it computes and reuses them in other actions on x</strong>. Three properties complete the picture:</p>
+    <ul>
+      <li><strong>This allows future actions to be much faster</strong>;</li>
+      <li><strong>Unlike actions, persisting operations do not trigger the computation of the RDD</strong> &mdash; persistence is a directive on the lineage, not a job;</li>
+      <li><strong>To release persisted RDDs, call the <code>unpersist()</code> method</strong>.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out — the deck&rsquo;s own warning</span>
+      <p><strong>Beware: do not cache unless necessary!</strong> A cached RDD occupies memory that could serve shuffle buffers or other computations, and eviction under pressure means recomputation anyway. The rule of thumb: cache when the same RDD is consumed by multiple actions or iterations &mdash; the <code>userData</code> of section 4 is the canonical case &mdash; and not otherwise.</p>
+    </div>
+
+    <p><strong>RDDs can be persisted using the <code>persist()</code> or <code>cache()</code> methods; <code>persist()</code> allows specifying the storage level; <code>cache()</code> uses <code>MEMORY_ONLY</code></strong>. The storage levels form a ladder from pure memory to pure disk:</p>
+
+    <table>
+      <tr><th>Storage level</th><th>What it stores</th></tr>
+      <tr><td><strong>MEMORY_ONLY</strong></td><td>Default using <code>cache()</code> &mdash; deserialized objects in memory; if it does not fit, it is simply not cached.</td></tr>
+      <tr><td><strong>MEMORY_AND_DISK</strong></td><td><strong>Spills to disk if there is too much data to fit in memory</strong>.</td></tr>
+      <tr><td><strong>MEMORY_ONLY_SER / MEMORY_AND_DISK_SER</strong></td><td><strong>Store the serialized representation in memory</strong> &mdash; more efficient space-wise, <strong>but more CPU-intensive</strong> (and the disk variant spills when full).</td></tr>
+      <tr><td><strong>DISK_ONLY</strong></td><td>Everything on disk &mdash; no memory footprint, full re-read cost on every action.</td></tr>
+      <tr><td><strong>[storage_level]_2</strong></td><td><strong>Replicate the data on 2 machines</strong> &mdash; any level, with a second copy for fast fault recovery.</td></tr>
+    </table>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-labelledby="p85t p85d">
+        <title id="p85t">Storage levels from memory to disk</title>
+        <desc id="p85d">A horizontal axis from MEMORY_ONLY to DISK_ONLY with the serialized and disk-spill variants in between; labels note that serialization is more space-efficient but CPU-intensive, and that the _2 suffix replicates data on two machines for fast fault recovery.</desc>
+        <text x="20" y="24" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">STORAGE LEVELS — a ladder from memory to disk</text>
+
+        <line x1="60" y1="170" x2="640" y2="170" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <text x="40" y="160" style="font-family:var(--lk-mono);font-size:10px" fill="var(--lk-forest)">memory</text>
+        <text x="620" y="160" style="font-family:var(--lk-mono);font-size:10px" fill="var(--lk-vermilion)">disk</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="60" y="80" width="110" height="40" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="72" y="98" fill="var(--lk-forest)">MEMORY_ONLY</text>
+          <text x="72" y="112" fill="var(--lk-ink-soft)">default of cache()</text>
+
+          <rect x="196" y="80" width="130" height="40" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4"/>
+          <text x="208" y="98" fill="var(--lk-forest)">MEMORY_AND_DISK</text>
+          <text x="208" y="112" fill="var(--lk-ink-soft)">spills if it does not fit</text>
+
+          <rect x="352" y="80" width="150" height="40" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+          <text x="364" y="98" fill="var(--lk-ink)">MEMORY_ONLY_SER</text>
+          <text x="364" y="112" fill="var(--lk-ink-soft)">serialized in memory</text>
+
+          <rect x="478" y="80" width="162" height="40" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-ink)"/>
+          <text x="490" y="98" fill="var(--lk-ink)">MEMORY_AND_DISK_SER</text>
+          <text x="490" y="112" fill="var(--lk-ink-soft)">serialized, spills to disk</text>
+
+          <rect x="590" y="80" width="90" height="40" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="602" y="98" fill="var(--lk-vermilion)">DISK_ONLY</text>
+          <text x="602" y="112" fill="var(--lk-ink-soft)">no memory at all</text>
+        </g>
+
+        <text x="60" y="208" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt-dark)">the SER trade-off</text>
+        <text x="60" y="224" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">serialization makes the objects much more space-efficient — at the cost of CPU to (de)serialize on every read</text>
+        <text x="60" y="248" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">[level]_2 — replicate the data on 2 machines</text>
+        <text x="60" y="264" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink)">use replication only if you want fast fault recovery — it doubles the storage cost</text>
+      </svg>
+      <figcaption><b>Plate 8.5</b> — The storage-level ladder. Two dimensions move as you walk it: the memory footprint shrinks toward disk, and the CPU cost of serialization grows toward the SER levels. Replication is an orthogonal switch that trades space for recovery speed.</figcaption>
+    </figure>
+
+    <p>The deck closes the topic with explicit guidance on <strong>which storage level is best</strong>:</p>
+    <ul>
+      <li><strong>It is best to stay in-memory as much as possible</strong>;</li>
+      <li><strong>Serialization makes the objects much more space-efficient</strong>;</li>
+      <li><strong>Spill to disk only if the dataset is computed via expensive functions</strong> &mdash; disk is cheaper than recomputation, but only then;</li>
+      <li><strong>Use replication only if you want fast fault recovery</strong>.</li>
+    </ul>
+
+    <div class="bd-w">
+      <h4>Choosing a storage level</h4>
+      <p class="bd-sub">Pick a level and a replication flag; the trade-offs are the same four the deck lists.</p>
+      <div id="w-storage"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Five facts: <strong>Spark recomputes an RDD at every action</strong>; <strong><code>cache()</code> = <code>persist(MEMORY_ONLY)</code></strong>; <strong>persisting does not trigger computation</strong>; <strong><code>unpersist()</code> releases</strong>; and the warning <strong>&ldquo;do not cache unless necessary&rdquo;</strong> is itself examinable. The four guidance bullets (stay in memory; serialization saves space; spill only for expensive computations; replicate only for fast recovery) are the answer to any &ldquo;which level?&rdquo; question.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>8. Shared variables: broadcast and accumulators</h2>
+    <p>Variables used inside closures have a problem that Chapter 6 never mentioned: <strong>variables used within functions passed to distributed operations (e.g., <code>map</code> or <code>reduce</code>) are copied to every task</strong>. The deck adds the design rationale in one clause: <strong>supporting general read/write shared variables across tasks would be inefficient</strong>. Keeping every task&rsquo;s copy coherent with the driver &mdash; or with each other &mdash; is exactly the distributed-systems nightmare the chapters on consensus would warn you about.</p>
+
+    <p>Spark therefore supports <strong>two (limited) types of shared variables</strong>, each with its own semantics:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Broadcast variable</button>
+        <button class="lk-tab">Accumulator</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Provide each node with a copy of the variable</strong> &mdash; read-only. Useful for the two situations below, both of which are about paying the shipping cost once instead of per task.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Provide each node with a pointer to the original variable</strong> &mdash; so that updates from inside tasks land on the single shared instance, not on a private copy that gets discarded.</p>
+      </div>
+    </div>
+
+    <h3>Broadcast variables</h3>
+    <p><strong>Through broadcast variables it is possible to send read-only copies of variables to every executor.</strong> The mechanism matters because Spark <em>already ships</em> the required data to each task: any variable your closure captures travels with every task. Broadcasting is therefore useful exactly when that default is wasteful:</p>
+    <ul>
+      <li><strong>The same variable is used across multiple stages</strong> &mdash; without broadcasting it is shipped once per stage; <strong>with broadcasting it is shipped only once</strong>;</li>
+      <li><strong>A large object is used by every task</strong> &mdash; it is <strong>shipped only to the executor and kept in memory for every task to read</strong>, instead of being copied into every task&rsquo;s payload.</li>
+    </ul>
+
+<pre><code class="language-scala">val dictionary = Map(("man"-&gt; "noun"), ("is"-&gt;"verb"), ("mortal"-&gt;"adjective"))
+val broadDictionary = sc.broadcast(dictionary)
+
+val result = words
+  .map( word =&gt; getElementsCount(word, broadDictionary) )
+  .reduceByKey(_+_)</code></pre>
+
+    <p>This is also the mechanism behind Chapter 7&rsquo;s <em>Broadcast Hash join</em>: the small table is shipped to every executor once &mdash; the same reasoning, at the engine level.</p>
+
+    <h3>Accumulators</h3>
+    <p><strong>Accumulators are shared variables that can be updated from inside tasks</strong>. From the point of view of tasks they are <strong>write-only</strong> &mdash; reading the current value from inside a task would require keeping all tasks up to date, which is the inefficiency the design avoids. They are <strong>useful for debugging, computing metrics or commutative and associative functions</strong> &mdash; i.e., updates whose order does not matter, exactly like the combiners of Chapter 4.</p>
+
+<pre><code class="language-scala">val emptyLines = sc.accumulator(0)
+
+val tokens = textFile.flatMap( line =&gt; {
+    if (line == "")
+       emptyLines += 1
+    line.split(" ")
+  }
+)</code></pre>
+
+    <p>Two properties matter for the exam, and the second one is a genuine trap:</p>
+
+    <ul>
+      <li><strong>Accumulators do not change the lazy evaluation model of Spark</strong> &mdash; they are updated only when an action actually runs the transformation;</li>
+      <li><strong>Pitfall: if a transformation gets executed multiple times (e.g., because of failures or stragglers), then accumulators are updated multiple times</strong> &mdash; a re-executed task increments the counter again, and the final value is silently wrong.</li>
+    </ul>
+
+    <div class="bd-w">
+      <h4>The re-execution pitfall, simulated</h4>
+      <p class="bd-sub">Run the job, then simulate a failed task being re-executed, and watch the counter lie.</p>
+      <div id="w-acc"></div>
+    </div>
+
+    <p>Finally, a visibility detail: <strong>accumulators will be displayed in the web UI for the stage that modifies that accumulator</strong> &mdash; the UI is where you actually see the double-counting happening.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The one-line contrast: <strong>broadcast = a copy per node; accumulator = a pointer to the original</strong>. Broadcast is for <strong>large or multi-stage read-only data</strong> (shipped once per executor, not per task); accumulators are <strong>write-only from the tasks&rsquo; view</strong>, for debugging, metrics, and commutative/associative functions, and they <strong>do not break laziness</strong>. The trap: <strong>re-execution (failures, stragglers) double-counts accumulator updates</strong>.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="BigData Lab 105 Spark cluster config.pdf">
+    <h2>9. Tuning the cluster: CPU</h2>
+    <p>The lab deck on Spark optimization ends with caching; a companion deck on <em>cluster configuration</em> turns the same knobs at the level of the whole application. This section and the next summarise that deck, because partitioning, shuffling and caching all happen inside an executor budget you get to choose.</p>
+
+    <p><strong>Two main resources: CPU and memory.</strong> Disk and network I/O play an important part too, but with a decisive caveat: <strong>neither Spark nor YARN currently do anything to actively manage them</strong> &mdash; everything the chapters so far called &ldquo;IO cost&rdquo; is yours to tune indirectly. Every <strong>executor in an application has the same fixed</strong>:</p>
+    <ul>
+      <li><strong>Number of cores</strong> &mdash; <strong>controls the number of concurrent tasks an executor can run</strong>;</li>
+      <li><strong>Heap size</strong> &mdash; <strong>impacts the amount of data that can be cached</strong> and <strong>the maximum sizes of the shuffle data structures</strong>.</li>
+    </ul>
+    <p><strong>The number of executors is also fixed</strong> &mdash; unless dynamic allocation is enabled.</p>
+
+    <p><strong>Tuning CPU</strong> is done by setting two options of <code>spark-submit</code>: <strong><code>--num-executors</code></strong> (how many executors) and <strong><code>--executor-cores</code></strong> (how many cores each). The deck adds four things to bear in mind:</p>
+    <ul>
+      <li><strong>The HDFS client has trouble with tons of concurrent threads</strong> &mdash; <strong>Cloudera&rsquo;s recommendation is to not exceed 5 tasks per executor</strong>;</li>
+      <li><strong>Single-core executors throw away the benefits that come from running multiple tasks in a single JVM</strong> (e.g., sharing broadcast variables among tasks);</li>
+      <li><strong>The application master takes up its own resources that must be budgeted in</strong> &mdash; in <strong>yarn-client</strong> mode it defaults to <strong>1 core (and 1GB of RAM)</strong>; in <strong>yarn-cluster</strong> mode <strong>the application master runs the driver</strong>, so you should <strong>bolster the driver&rsquo;s resources with the <code>--driver-memory</code> and <code>--driver-cores</code> properties</strong>;</li>
+      <li><strong>Each node should be left with enough power to run the OS and Hadoop daemons</strong>.</li>
+    </ul>
+
+    <p>These constraints collapse into a small recipe, and the recipe is examinable arithmetic:</p>
+
+<pre><code class="language-text">--executor-cores = 3 to 5
+                  (such that all cores in a node (-1 for daemons) are employed)
+
+executors-per-node = ⌊ ( available cores - 1 ) / --executor-cores ⌋
+--num-executors    = number-of-nodes × executors-per-node - 1
+                     (leave out 1 executor for the application master)</code></pre>
+
+    <table>
+      <tr><th>Property</th><th>Example</th><th>Cluster (old)</th><th>Cluster (new)</th></tr>
+      <tr><td>Number of nodes</td><td>11</td><td>9</td><td>9</td></tr>
+      <tr><td>Available cores (per node)</td><td>8</td><td>4</td><td>16</td></tr>
+      <tr><td><code>--executor-cores</code></td><td>3</td><td>3</td><td>5</td></tr>
+      <tr><td>Executors per node</td><td>2 = &lfloor;7/3&rfloor;</td><td>1 = &lfloor;3/3&rfloor;</td><td>3 = &lfloor;15/5&rfloor;</td></tr>
+      <tr><td><code>--num-executors</code></td><td>21 = 11&middot;2 &minus;1</td><td>8 = 9&middot;1 &minus;1</td><td>26 = 9&middot;3 &minus;1</td></tr>
+      <tr><td>Used cores (%)</td><td>63/88 = 72%</td><td>24/40 = 60%</td><td>130/144 = 90%</td></tr>
+    </table>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note — the deck&rsquo;s own arithmetic</span>
+      <p>The &ldquo;old cluster&rdquo; row uses 24/40 where the formulas give 9 nodes &times; 4 cores = 36 available; the extra node&rsquo;s worth of cores is the application master (the &minus;1 in the recipe, applied to a node count of 10). Trust the formulas: they are what the deck states, and they reproduce the &ldquo;Example&rdquo; and &ldquo;new&rdquo; columns exactly.</p>
+    </div>
+
+    <div class="bd-w">
+      <h4>CPU tuning calculator</h4>
+      <p class="bd-sub">Set the cluster and the executor core count, and the recipe computes the rest. Warning levels follow the deck: 3&ndash;5 cores per executor, one executor left for the AM.</p>
+      <div id="w-cluster-cpu"></div>
+    </div>
+  </section>
+
+  <section id="s10" data-src="BigData Lab 105 Spark cluster config.pdf">
+    <h2>10. Tuning the cluster: memory</h2>
+    <p><strong>Tuning memory</strong> is done with one main option: <strong><code>--executor-memory</code></strong>, the amount of memory per executor. The cautions are the mirror of the CPU ones:</p>
+    <ul>
+      <li><strong>Executors with too much memory often result in excessive garbage collection delays</strong> &mdash; <strong>64GB is a rough guess at a good upper limit for a single executor</strong>;</li>
+      <li><strong>Each node should be left with enough memory to run the OS and Hadoop daemons</strong>;</li>
+      <li><strong>The full memory request for each executor is determined by heap size + off heap size</strong> &mdash; the requested amount is not just the heap.</li>
+    </ul>
+
+    <p>The off-heap default is small but not negligible: <strong>max(384 MB, 10% of <code>spark.executor.memory</code>)</strong>. The recipe, with <strong>off-heap size = 0.1</strong> (10%):</p>
+
+<pre><code class="language-text">--executor-memory = ( available memory × 0.75 ) × ( 1 - 0.1 ) / executors-per-node
+                    (leave out 25% of RAM for running daemons)</code></pre>
+
+    <table>
+      <tr><th>Property</th><th>Example</th><th>Cluster (old)</th><th>Cluster (new)</th></tr>
+      <tr><td>Available memory (per node) in GB</td><td>32</td><td>16</td><td>32</td></tr>
+      <tr><td>Executors per node</td><td>2</td><td>1</td><td>3</td></tr>
+      <tr><td><code>--executor-memory</code></td><td>11 = (32&middot;0.75)&middot;(1&minus;0.1)/2</td><td>11 = (16&middot;0.75)&middot;(1&minus;0.1)/1</td><td>7 = (32&middot;0.75)&middot;(1&minus;0.1)/3</td></tr>
+      <tr><td>Used memory</td><td>24.2/32 = 76%</td><td>11.1/16 = 69%</td><td>23.1/32 = 72%</td></tr>
+    </table>
+
+    <p>And the mapping table that ties every knob to its <code>spark-submit</code> option &mdash; this is the one to memorise because exams love pairing a property with its flag:</p>
+
+    <table>
+      <tr><th>Spark conf parameter</th><th>Option in spark-submit</th><th>Description</th></tr>
+      <tr><td><code>spark.executor.memory</code></td><td><code>--executor-memory</code></td><td>Amount of memory dedicated to each executor</td></tr>
+      <tr><td><code>spark.executor.cores</code></td><td><code>--executor-cores</code></td><td>Number of cores dedicated to each executor</td></tr>
+      <tr><td><code>spark.executor.instances</code></td><td><code>--num-executors</code></td><td>Total number of executors</td></tr>
+      <tr><td><code>spark.driver.memory</code></td><td><code>--driver-memory</code></td><td>Amount of memory dedicated to the driver (note: in the local environment, only the driver is created)</td></tr>
+      <tr><td><code>spark.driver.cores</code></td><td><code>--driver-cores</code></td><td>Number of cores dedicated to the driver (note: in the local environment, only the driver is created)</td></tr>
+    </table>
+
+    <div class="bd-w">
+      <h4>Memory tuning calculator</h4>
+      <p class="bd-sub">Feed in the executors-per-node from the CPU recipe and the per-node RAM; the memory recipe computes the heap, the off-heap overhead, and the utilisation.</p>
+      <div id="w-cluster-mem"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Four numbers and two formulas. Numbers: <strong>3&ndash;5 cores per executor</strong> (Cloudera: at most 5 tasks), <strong>~64GB upper limit per executor</strong> (GC), <strong>1 executor reserved for the AM</strong> (&minus;1), <strong>25% of node RAM left for daemons</strong> (&times;0.75). Formulas: <strong>executors-per-node = &lfloor;(cores&minus;1)/executor-cores&rfloor;</strong> and <strong>executor-memory = (available&times;0.75)&times;(1&minus;0.1)/executors-per-node</strong>. And the flag pairs: <code>spark.executor.memory</code>&harr;<code>--executor-memory</code>, <code>spark.executor.cores</code>&harr;<code>--executor-cores</code>, <code>spark.executor.instances</code>&harr;<code>--num-executors</code>, <code>spark.driver.memory</code>&harr;<code>--driver-memory</code>, <code>spark.driver.cores</code>&harr;<code>--driver-cores</code> &mdash; in the local environment only the driver exists.</p>
+    </div>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — how the whole chapter fits together</span>
+      <p>The cluster recipe fixes <em>how many</em> tasks can run at once (cores) and <em>how much</em> data can sit in memory (heap). Partitioning decides how many tasks there are (section 2) and where their data lands (sections 3&ndash;4); shuffling is what a bad partitioning costs (sections 5&ndash;6); caching is what makes the memory budget useful across actions (section 7). The four topics are one system: the cluster budget is the frame, and every earlier section is a way of spending it better.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="BigData Lab 102 Spark optimization.pdf">
+    <h2>Test your knowledge</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What are the two purposes of partitioning, and which knob controls each?</summary>
+        <p><strong>Parallelize computation across workers and CPU cores</strong> &mdash; controlled by <strong>the number of partitions</strong>; and <strong>minimize network traffic for data exchange between executors</strong> &mdash; controlled by <strong>the partitioning criteria (the partitioner)</strong>. The hard constraint underneath both: <strong>a single partition can never span multiple workers</strong>.</p>
+      </details>
+
+      <details>
+        <summary>How does Spark set the number of partitions by default?</summary>
+        <p><strong>In-memory datasets</strong> &rarr; the <strong>total number of available cores</strong>; <strong>external datasets</strong> &rarr; <strong>one partition for each block of each file</strong>; <strong>transformations</strong> &rarr; <strong>the largest number of partitions in a parent RDD</strong>. One task is run for each partition.</p>
+      </details>
+
+      <details>
+        <summary>What are the consequences of too few or too many partitions, and what are the rules of thumb?</summary>
+        <p><strong>Too few:</strong> less concurrency (some cores unused) and skew risk &mdash; the job may get stuck on the one task handling most of the keys. <strong>Too many:</strong> excessive overhead in managing/scheduling many small tasks. <strong>Rules of thumb:</strong> lower bounds &mdash; 2 partitions for each core, and each task should process no more than a block-worth of data; upper bound &mdash; each task should take at least 100&ndash;200ms; when in doubt, more partitions is usually better than fewer.</p>
+      </details>
+
+      <details>
+        <summary>What is a partitioning criteria used for, and what can it not do?</summary>
+        <p>It is used to <strong>put values that belong to the same key in the same partition</strong> and to <strong>define how the key should be distributed in different partitions</strong>. It <strong>cannot control the specific worker node a partition goes to</strong>. Forcing a criteria on an RDD <strong>requires shuffling the data &mdash; it costs</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Name the three partitioning methods.</summary>
+        <p><strong>Hash partitioning</strong> (hashing using the Java <code>hashCode</code>, a 32-bit signed integer); <strong>range partitioning</strong> (uniform ranges determined by sampling the data); <strong>custom partitioning</strong> (user-defined).</p>
+      </details>
+
+      <details>
+        <summary>Why is the default behaviour of the userData/events join inefficient, and what is the fix?</summary>
+        <p>By default the join <strong>hashes all the keys of both datasets</strong>; since <code>userData</code> is much larger than the events log, the large table is hashed and shuffled across the network every 5 minutes even though only the small log changed. The fix: <code>userData.partitionBy(new HashPartitioner(100)).persist()</code> &mdash; partition once before persisting, so <strong>only the events RDD is shuffled</strong> (events with a certain UserID go to the machine holding the corresponding hash partition of userData). Fewer network communications, significant boost in performance.</p>
+      </details>
+
+      <details>
+        <summary>State the repartitioning-advantage ladder for joins and single-RDD operations.</summary>
+        <p><strong>Single partitioned RDD</strong> (e.g., <code>reduceByKey</code>): values for each key are computed locally, no further shuffling. <strong>Two RDDs, one partitioned:</strong> only the other is shuffled. <strong>Both share the same partitioner:</strong> partitions of RDD2 are only sent to the correct partition of RDD1. <strong>Same partitioner and co-located</strong> (e.g., RDD2 from <code>RDD1.mapValues</code>): no shuffling occurs.</p>
+      </details>
+
+      <details>
+        <summary>Which operations set a partitioner on their result, which keep a parent&rsquo;s, and which drop it?</summary>
+        <p><strong>Set it:</strong> <code>cogroup()</code>, <code>groupWith()</code>, <code>join()</code>, <code>leftOuterJoin()</code>, <code>rightOuterJoin()</code>, <code>groupByKey()</code>, <code>reduceByKey()</code>, <code>combineByKey()</code>, <code>partitionBy()</code>, <code>sort()</code>. <strong>Keep a parent&rsquo;s:</strong> <code>mapValues()</code>, <code>flatMapValues()</code>, <code>filter()</code>. <strong>Drop it:</strong> everything else, notably <code>map()</code> &mdash; because it can change the key.</p>
+      </details>
+
+      <details>
+        <summary>What is shuffling, and what are its three costs?</summary>
+        <p><strong>Shuffling is the mechanism used to re-distribute data across partitions</strong>; it is necessary to compute some operations and it is complex and costly. Spark generates <strong>sets of map tasks (to organize the data) and reduce tasks (to aggregate it)</strong> &mdash; MapReduce nomenclature. The three costs: <strong>disk I/O</strong> (data on the map side is spilled to disk, later read by reduce tasks), <strong>network I/O</strong>, and <strong>data serialization</strong> (increases CPU workload to reduce the cost of I/O).</p>
+      </details>
+
+      <details>
+        <summary>Which operations avoid the shuffle, and why?</summary>
+        <p><strong>ByKey operations when data is already partitioned by key</strong> &mdash; no shuffling occurs because the values for each key are already together. <strong><code>countByKey</code> never shuffles</strong> &mdash; it just sends the counts to the driver. Joins may also shuffle less when the partitioning of the two RDDs matches (the section 4 ladder).</p>
+      </details>
+
+      <details>
+        <summary>Compare hash, sort and Tungsten shuffle on the Yahoo workload (46,000 mappers, 46,000 reducers).</summary>
+        <p><strong>Hash shuffle:</strong> each map task creates a file for every reducer &mdash; 46,000 &times; 46,000 = <strong>over 2,000,000,000 intermediate files</strong> (evolved version: pools per executor, 100 executors &times; 10 concurrent mappers &rarr; 46,000,000). Fast (no sorting) but degrades with many partitions; random IO up to 100&times; slower than sequential IO. <strong>Sort shuffle:</strong> each mapper keeps output in memory and spills to its own sorted file(s); the reducer collects pieces, sorts them in memory &mdash; <strong>~46,000 files</strong>; mostly sequential IO, but sorting is slower than hashing (on SSDs hash may win). <strong>Tungsten sort:</strong> works directly on serialized records with a cache-efficient sorter; only when conditions allow (no map-side aggregation, serializer supports relocation, &lt;16,777,216 partitions, no record &gt;128 MB serialized). Today one implementation, <strong>SortShuffleManager</strong>, picks tungsten if conditions allow, hash if too few partitions, sort otherwise.</p>
+      </details>
+
+      <details>
+        <summary>What does persist() do, how does it differ from cache(), and how do you release an RDD?</summary>
+        <p><code>persist()</code> makes each node <strong>store in memory the partitions it computes and reuse them in other actions</strong> on the RDD, so future actions are much faster. It does <strong>not trigger computation</strong> (unlike actions). <code>cache()</code> is <code>persist()</code> with the <strong>MEMORY_ONLY</strong> level; <code>persist()</code> lets you specify any storage level (<code>MEMORY_AND_DISK</code>, <code>MEMORY_ONLY_SER</code>, <code>MEMORY_AND_DISK_SER</code>, <code>DISK_ONLY</code>, and the <code>_2</code> replication suffix). Release with <strong><code>unpersist()</code></strong>. And remember the warning: <strong>do not cache unless necessary</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Which storage level is best, and when?</summary>
+        <p><strong>Stay in-memory as much as possible</strong>; <strong>serialization makes the objects much more space-efficient</strong> (at CPU cost); <strong>spill to disk only if the dataset is computed via expensive functions</strong>; <strong>use replication only if you want fast fault recovery</strong>.</p>
+      </details>
+
+      <details>
+        <summary>What are broadcast variables and when are they useful?</summary>
+        <p>Broadcast variables send <strong>read-only copies of a variable to every executor</strong>. Broadcasting is useful when <strong>the same variable is used across multiple stages</strong> (it is shipped only once) and when <strong>a large object is used by every task</strong> (it is shipped only to the executor and kept in memory for every task to read, instead of per-task copies).</p>
+      </details>
+
+      <details>
+        <summary>What is an accumulator, and what is its pitfall?</summary>
+        <p>An accumulator is a shared variable that can be updated from inside tasks; from the tasks&rsquo; point of view it is <strong>write-only</strong>. It is useful for debugging, metrics, or commutative and associative functions. It <strong>does not change the lazy evaluation model</strong> of Spark. The pitfall: <strong>if a transformation gets executed multiple times (failures or stragglers), the accumulator is updated multiple times</strong>, so the final value is wrong. Accumulators are displayed in the web UI for the stage that modifies them.</p>
+      </details>
+
+      <details>
+        <summary>Give the CPU and memory tuning recipes for a cluster, with the numbers that constrain them.</summary>
+        <p>CPU: <code>--executor-cores</code> = 3 to 5 (Cloudera: no more than 5 tasks per executor; single-core executors lose JVM sharing); <strong>executors-per-node = &lfloor;(available cores &minus; 1)/--executor-cores&rfloor;</strong>; <strong><code>--num-executors</code> = nodes &times; executors-per-node &minus; 1</strong> (one executor left for the application master); leave each node enough power for OS and Hadoop daemons; in yarn-cluster the AM runs the driver, so bolster it with <code>--driver-memory</code>/<code>--driver-cores</code>. Memory: <strong><code>--executor-memory</code> = (available memory &times; 0.75) &times; (1 &minus; 0.1) / executors-per-node</strong> (25% of RAM left for daemons, off-heap = 10%); the full request is heap + off-heap (default overhead max(384 MB, 10% of executor memory)); executors above ~64GB cause excessive GC delays.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-07-spark-sql.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-09-beyond-mapreduce.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>BigData Lab 102 Spark optimization</em> · <em>BigData Lab 105 Spark cluster config</em> · Big Data — University of Bologna · Prof. Enrico Gallinucci</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+if (window.hljs) { hljs.highlightAll(); }
+
+function fmt(n) { return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+/* ---- Annotated code: the userData fix ---- */
+LessonKit.annotatedCode('#ac-repart', {
+  lang: 'scala',
+  lines: [
+    ['val userData = sc.sequenceFile[UserID, UserInfo]("hdfs://...").persist()', 'The large table, kept in memory across the whole application. persist() will store each partition on the node that computed it (section 7) — but note: at this point userData has no partitioner, because sequenceFile is an external dataset (section 3: none).'],
+    ['val joined = userData.join(events) // every 5 minutes', 'join() is a key-oriented operation. By default Spark hashes all the keys of BOTH datasets and sends same-hash keys to the same partition. userData is much larger than the small log of events — and yet userData is hashed and shuffled across the network every single round. Very inefficient.'],
+    ['// simple fix: partition userData before persisting it', 'The investment: one forced shuffle, paid once, before the RDD is persisted. From now on the partitioner is part of the persisted RDD — partitioning heritage survives persistence.'],
+    ['val userData = sc.sequenceFile[UserID, UserInfo]("hdfs://...")\n   .partitionBy(new HashPartitioner(100)) // 100 partitions\n   .persist()', 'partitionBy forces a partitioning criteria (hash over 100 partitions). Forcing a criteria requires a shuffle — it costs — but this is the only time the large table pays it.'],
+    ['// now only the events RDD is shuffled', 'In each subsequent join, only events is shuffled: events with a certain UserID are sent to the machine that contains the corresponding hash partition of userData. Less network communications → significant boost in performance.'],
+    ['// same partitioner + co-located (e.g., mapValues) → no shuffle', 'The full ladder: if both RDDs share the same partitioner, partitions of RDD2 are only sent to the correct partition of RDD1; if they also reside in the same machine — e.g., RDD2 was created with RDD1.mapValues — no shuffling occurs at all.']
+  ]
+});
+
+/* ---- w-part: partition count explorer ---- */
+(function () {
+  var host = document.getElementById('w-part');
+  if (!host) return;
+  var CORES = 8, BLOCKS = 100, parts = 32;
+  var ctl = document.createElement('div'); ctl.className = 'bd-ctl';
+  ctl.innerHTML = '<label>partitions <input type="range" id="paR" min="1" max="256" step="1" value="32"> <b id="paV">32</b></label>' +
+    '<span>fixed scenario: 8 cores · 100 blocks of data</span>';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  host.appendChild(ctl); host.appendChild(out);
+  function render() {
+    var used = Math.min(parts, CORES);
+    var perCore = Math.ceil(parts / CORES);
+    var perTask = BLOCKS / parts;
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['active cores', used + ' / ' + CORES],
+     ['tasks per core', perCore + (perCore === 1 ? ' task' : ' tasks')],
+     ['data per task', perTask.toFixed(1) + ' blocks'],
+     ['tasks (total)', parts]].forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>'; d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.innerHTML = ''; out.appendChild(g);
+    var v = document.createElement('div'); v.style.marginTop = '.5rem';
+    if (parts < 2 * CORES) {
+      v.className = 'bd-bad';
+      v.textContent = 'TOO FEW — below the 2-partitions-per-core lower bound: less concurrency (some cores unused) and skew risk: the job might get stuck on that one task handling most of the keys.';
+    } else if (parts > BLOCKS) {
+      v.className = 'bd-bad';
+      v.textContent = 'TOO MANY — more partitions than blocks: each task processes less than a block-worth of data. Check the upper bound too: each task should take at least 100-200ms, or scheduling overhead dominates.';
+    } else {
+      v.className = 'bd-ok';
+      v.textContent = 'SWEET SPOT — at least 2 partitions per core and at most a block of data per task. When in doubt, more partitions is usually better than fewer.';
+    }
+    out.appendChild(v);
+  }
+  ctl.addEventListener('input', function (e) {
+    parts = +e.target.value;
+    document.getElementById('paV').textContent = parts;
+    render();
+  });
+  render();
+})();
+
+/* ---- w-criteria: hash vs range ---- */
+(function () {
+  var host = document.getElementById('w-criteria');
+  if (!host) return;
+  var vals = [7, 5, 3, 1, 11];
+  var mode = 'hash';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  function mk(label, m) {
+    var b = document.createElement('button'); b.type = 'button';
+    function paint() { b.className = (mode === m) ? 'bd-btn' : 'bd-btn bd-alt'; }
+    b.addEventListener('click', function () { mode = m; btns.querySelectorAll('button').forEach(function (x) { x.className = 'bd-btn bd-alt'; }); b.className = 'bd-btn'; render(); });
+    b.textContent = label; paint(); btns.appendChild(b);
+  }
+  mk('Hash partitioning (hashCode mod 3)', 'hash');
+  mk('Range partitioning ([1,4] · [5,9] · [10,11])', 'range');
+  host.appendChild(btns); host.appendChild(out);
+  function pOf(v) { return mode === 'hash' ? Math.abs(v) % 3 : (v <= 4 ? 0 : (v <= 9 ? 1 : 2)); }
+  function render() {
+    var cols = [[], [], []];
+    vals.forEach(function (v) { cols[pOf(v)].push(v); });
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    cols.forEach(function (c, i) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = '<b>P' + i + '</b> — ';
+      c.forEach(function (v) { var s = document.createElement('span'); s.className = 'bd-chip'; s.textContent = v; d.appendChild(s); });
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var note = document.createElement('div');
+    note.style.color = 'var(--lk-ink-soft)'; note.style.marginTop = '.4rem';
+    note.textContent = mode === 'hash'
+      ? 'Hash: Java hashCode of the key (a 32-bit signed integer) decides the partition — here the hashCode of a small int is the int itself, so it reduces to n mod 3.'
+      : 'Range: uniform ranges, determined by sampling the data — here the ranges [1,4], [5,9], [10,11] put 3 and 1 together in P0, 7 and 5 in P1, 11 in P2.';
+    out.appendChild(note);
+  }
+  render();
+})();
+
+/* ---- w-repart: the 5-minute join, quantified ---- */
+(function () {
+  var host = document.getElementById('w-repart');
+  if (!host) return;
+  var UD = 100, EV = 1, MAXR = 6;
+  var mode = 'def', rounds = 0;
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  function modeBtn(label, m) {
+    var b = document.createElement('button'); b.type = 'button';
+    function paint() { b.className = (mode === m) ? 'bd-btn' : 'bd-btn bd-alt'; }
+    b.addEventListener('click', function () { mode = m; btns.querySelectorAll('button').forEach(function (x) { x.className = 'bd-btn bd-alt'; }); b.className = 'bd-btn'; render(); });
+    b.textContent = label; paint(); btns.appendChild(b);
+  }
+  modeBtn('Default: no partitioning', 'def');
+  modeBtn('partitionBy(new HashPartitioner(100)) once', 'fix');
+  var next = document.createElement('button'); next.type = 'button'; next.className = 'bd-btn';
+  next.textContent = 'Next round (+5 min)';
+  next.addEventListener('click', function () { if (rounds < MAXR) { rounds++; render(); } });
+  var rst = document.createElement('button'); rst.type = 'button'; rst.className = 'bd-btn bd-alt';
+  rst.textContent = 'Reset';
+  rst.addEventListener('click', function () { rounds = 0; render(); });
+  btns.appendChild(next); btns.appendChild(rst);
+  host.appendChild(btns); host.appendChild(out);
+  function perRound(m, r) {
+    if (m === 'fix') return r === 0 ? (UD + EV) : EV;      // one-time shuffle of userData at round 1
+    return UD + EV;                                         // both datasets every round
+  }
+  function render() {
+    out.innerHTML = '';
+    var t = document.createElement('div');
+    t.style.fontWeight = '600'; t.style.color = 'var(--lk-cobalt-dark)';
+    t.textContent = mode === 'fix' ? 'Partitioned: userData shuffled once (100 GB), then only events (1 GB) moves.' : 'Default: userData (100 GB) and events (1 GB) are both hashed and shuffled every round.';
+    out.appendChild(t);
+    var cum = 0;
+    for (var r = 0; r < rounds; r++) cum += perRound(mode, r);
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    var d1 = document.createElement('div'); d1.className = 'bd-cell';
+    d1.innerHTML = 'rounds run: <b></b>'; d1.querySelector('b').textContent = rounds + ' / ' + MAXR; g.appendChild(d1);
+    var d2 = document.createElement('div'); d2.className = 'bd-cell';
+    d2.innerHTML = 'network traffic so far: <b></b>'; d2.querySelector('b').textContent = cum + ' GB'; g.appendChild(d2);
+    var d3 = document.createElement('div'); d3.className = 'bd-cell';
+    d3.innerHTML = 'per round: <b></b>'; d3.querySelector('b').textContent = perRound(mode, rounds) + ' GB'; g.appendChild(d3);
+    out.appendChild(g);
+    var bar = document.createElement('div'); bar.className = 'bd-bar';
+    bar.innerHTML = '<i style="width:' + Math.min(100, Math.round(cum / (MAXR * (UD + EV)) * 100)) + '%"></i>';
+    out.appendChild(bar);
+    if (rounds > 0 && mode === 'fix') {
+      var v = document.createElement('div'); v.className = 'bd-ok'; v.style.marginTop = '.4rem';
+      v.textContent = 'Only the events RDD is shuffled, sending events with a certain UserID to the machine that contains the corresponding hash partition of userData — fewer network communications, significant boost in performance.';
+      out.appendChild(v);
+    }
+    if (rounds > 0 && mode === 'def') {
+      var w = document.createElement('div'); w.className = 'bd-bad'; w.style.marginTop = '.4rem';
+      w.textContent = 'Very inefficient: userData is expected to be much larger than the small log of events, and nonetheless it is hashed and shuffled across the network every time.';
+      out.appendChild(w);
+    }
+    next.disabled = rounds >= MAXR;
+  }
+  render();
+})();
+
+/* ---- w-shuffle: file-count story ---- */
+(function () {
+  var host = document.getElementById('w-shuffle');
+  if (!host) return;
+  var M = 46000, R = 46000;
+  var mode = 'hash';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  function mk(label, m) {
+    var b = document.createElement('button'); b.type = 'button';
+    function paint() { b.className = (mode === m) ? 'bd-btn' : 'bd-btn bd-alt'; }
+    b.addEventListener('click', function () { mode = m; btns.querySelectorAll('button').forEach(function (x) { x.className = 'bd-btn bd-alt'; }); b.className = 'bd-btn'; render(); });
+    b.textContent = label; paint(); btns.appendChild(b);
+  }
+  mk('Hash shuffle', 'hash');
+  mk('Hash shuffle (evolved)', 'evolved');
+  mk('Sort shuffle', 'sort');
+  mk('Tungsten sort', 'tungsten');
+  host.appendChild(btns); host.appendChild(out);
+  var DATA = {
+    hash: {
+      n: M * R, cls: 'bd-num bd-red',
+      head: 'each map task creates a file for every reducer',
+      body: '46,000 mappers × 46,000 reducers. Pros: fast — no sorting required at all, no hash table maintained; no memory/CPU overhead for sorting. Cons: when the amount of partitions is big, performance degrades due to the big amount of output files — random IO is in general up to 100× slower than sequential IO.'
+    },
+    evolved: {
+      n: 100 * 10 * R, cls: 'bd-num bd-red',
+      head: 'each executor holds a pool of files: one group of files per concurrent mapper',
+      body: '100 executors, 10 cores each, 1 core per task: each executor holds 10 groups of 46,000 files; multiplied by the number of executors. Better than two billion — still absurd, and still the same cons.'
+    },
+    sort: {
+      n: M, cls: 'bd-num bd-green',
+      head: 'each mapper spills to its own file(s), each file sorted by reducer',
+      body: 'When a reducer asks for its data, the pieces from each file are collected, sorted in memory, and sent to the reducer. Pros: smaller amount of files on the map side, mostly sequential writes and reads. Cons: sorting is slower than hashing — in practice, however, sort shuffle is usually better (hash may win on SSDs).'
+    },
+    tungsten: {
+      n: M, cls: 'bd-num bd-green',
+      head: 'evolution of the sort shuffle: directly works on serialized records',
+      body: 'Records can be sorted, merged, concatenated, spilled to disk without de-serializing and re-serializing, using a cache-efficient sorter. Can be adopted only under specific conditions: no map-side aggregation requested; the serializer supports relocation of serialized values (e.g., KryoSerializer); fewer than 16,777,216 output partitions; no individual record larger than 128 MB when serialized.'
+    }
+  };
+  function render() {
+    var d = DATA[mode];
+    out.innerHTML = '';
+    var n = document.createElement('div'); n.className = d.cls;
+    n.textContent = fmt(d.n) + ' intermediate files';
+    out.appendChild(n);
+    var h = document.createElement('div');
+    h.style.marginTop = '.4rem'; h.style.color = 'var(--lk-ink)'; h.style.fontWeight = '600';
+    h.textContent = d.head; out.appendChild(h);
+    var b = document.createElement('div');
+    b.style.marginTop = '.3rem'; b.style.color = 'var(--lk-ink-soft)';
+    b.textContent = d.body; out.appendChild(b);
+    var today = document.createElement('div');
+    today.style.marginTop = '.5rem'; today.style.borderTop = '1px solid var(--lk-rule-soft)'; today.style.paddingTop = '.4rem';
+    today.textContent = 'Today one single implementation is provided: SortShuffleManager — tungsten if conditions allow it, hash if there are too few partitions, sort otherwise.';
+    out.appendChild(today);
+  }
+  render();
+})();
+
+/* ---- w-storage: storage level picker ---- */
+(function () {
+  var host = document.getElementById('w-storage');
+  if (!host) return;
+  var LEVELS = {
+    'MEMORY_ONLY': { mem: 100, cpu: 10, spill: 0, txt: 'Default using cache(). Deserialized objects in memory. Fastest reads; if the data does not fit, it is simply not cached and every action recomputes.' },
+    'MEMORY_AND_DISK': { mem: 100, cpu: 20, spill: 100, txt: 'Spills to disk if there is too much data to fit in memory. Reads are memory-fast while it fits, disk-slow once spilled — but never recomputed.' },
+    'MEMORY_ONLY_SER': { mem: 40, cpu: 70, spill: 0, txt: 'Stores the serialized representation in memory. Much more space-efficient — more CPU-intensive to read, because every read pays (de)serialization.' },
+    'MEMORY_AND_DISK_SER': { mem: 40, cpu: 80, spill: 100, txt: 'Serialized in memory, spilled to disk when full. The most resilient in-memory option: compact, and never recomputed under pressure.' },
+    'DISK_ONLY': { mem: 0, cpu: 60, spill: 100, txt: 'Everything on disk. No memory footprint at all — every action re-reads the data from disk.' }
+  };
+  var rep = false, level = 'MEMORY_ONLY';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  Object.keys(LEVELS).forEach(function (k) {
+    var b = document.createElement('button'); b.type = 'button';
+    function paint() { b.className = (level === k) ? 'bd-btn' : 'bd-btn bd-alt'; }
+    b.addEventListener('click', function () { level = k; btns.querySelectorAll('button').forEach(function (x) { x.className = 'bd-btn bd-alt'; }); b.className = 'bd-btn'; render(); });
+    b.textContent = k; paint(); btns.appendChild(b);
+  });
+  var repB = document.createElement('button'); repB.type = 'button'; repB.className = 'bd-btn bd-alt';
+  repB.textContent = 'replication _2: off';
+  repB.addEventListener('click', function () { rep = !rep; repB.textContent = 'replication _2: ' + (rep ? 'on (2 machines)' : 'off'); repB.className = rep ? 'bd-btn' : 'bd-btn bd-alt'; render(); });
+  btns.appendChild(repB);
+  host.appendChild(btns); host.appendChild(out);
+  function bar(label, pct, color) {
+    var row = document.createElement('div');
+    row.style.margin = '.45rem 0';
+    var l = document.createElement('div'); l.textContent = label; l.style.marginBottom = '.15rem';
+    var b = document.createElement('div'); b.className = 'bd-bar';
+    b.innerHTML = '<i style="width:' + pct + '%;background:' + color + '"></i><b>' + pct + '%</b>';
+    row.appendChild(l); row.appendChild(b);
+    return row;
+  }
+  function render() {
+    var d = LEVELS[level];
+    out.innerHTML = '';
+    var h = document.createElement('div'); h.style.fontWeight = '600'; h.style.color = 'var(--lk-cobalt-dark)';
+    h.textContent = level + (rep ? ' _2' : '');
+    out.appendChild(h);
+    out.appendChild(bar('memory footprint', d.mem, 'var(--lk-cobalt)'));
+    out.appendChild(bar('CPU cost (serialization)', d.cpu, 'var(--lk-vermilion)'));
+    out.appendChild(bar('grace under pressure (spill instead of recompute)', d.spill, 'var(--lk-forest)'));
+    var t = document.createElement('div'); t.style.color = 'var(--lk-ink-soft)'; t.style.marginTop = '.4rem';
+    t.textContent = d.txt;
+    out.appendChild(t);
+    if (rep) {
+      var r = document.createElement('div'); r.style.color = 'var(--lk-forest)'; r.style.marginTop = '.3rem';
+      r.textContent = 'Replication on 2 machines: fast fault recovery — at double the storage cost. Use it only if you want fast fault recovery.';
+      out.appendChild(r);
+    }
+  }
+  render();
+})();
+
+/* ---- w-acc: accumulator re-execution pitfall ---- */
+(function () {
+  var host = document.getElementById('w-acc');
+  if (!host) return;
+  var state = 0; // 0 = idle, 1 = ran once, 2 = re-executed
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  var run = document.createElement('button'); run.type = 'button'; run.className = 'bd-btn';
+  run.textContent = 'Run the action (count)';
+  run.addEventListener('click', function () { if (state === 0) { state = 1; render(); } });
+  var fail = document.createElement('button'); fail.type = 'button'; fail.className = 'bd-btn';
+  fail.textContent = 'Simulate a failed task + re-execution';
+  fail.addEventListener('click', function () { if (state === 1) { state = 2; render(); } });
+  var rst = document.createElement('button'); rst.type = 'button'; rst.className = 'bd-btn bd-alt';
+  rst.textContent = 'Reset';
+  rst.addEventListener('click', function () { state = 0; render(); });
+  btns.appendChild(run); btns.appendChild(fail); btns.appendChild(rst);
+  host.appendChild(btns); host.appendChild(out);
+  function render() {
+    out.innerHTML = '';
+    var val = state === 0 ? 0 : (state === 1 ? 3 : 6);
+    var n = document.createElement('div');
+    n.className = state === 2 ? 'bd-num bd-red' : 'bd-num';
+    n.textContent = 'emptyLines = ' + val;
+    out.appendChild(n);
+    var t = document.createElement('div'); t.style.color = 'var(--lk-ink-soft)'; t.style.marginTop = '.3rem';
+    if (state === 0) {
+      t.textContent = 'Scenario: textFile has 100 lines, 3 of them empty. emptyLines is an accumulator; the flatMap transformation increments it. Nothing has run yet — accumulators do not change the lazy evaluation model of Spark.';
+    } else if (state === 1) {
+      t.textContent = 'The action ran the transformation once: 3 empty lines counted. The counter is displayed in the web UI for the stage that modified it.';
+    } else {
+      t.textContent = 'A task failed and Spark re-executed it (failures, stragglers). The transformation was executed multiple times, so the accumulator was updated multiple times — 3 + 3 = 6, and the answer is silently wrong. This is the pitfall: re-execution double-counts accumulator updates.';
+    }
+    out.appendChild(t);
+    run.disabled = state !== 0; fail.disabled = state !== 1;
+  }
+  render();
+})();
+
+/* ---- w-cluster-cpu: CPU tuning recipe ---- */
+(function () {
+  var host = document.getElementById('w-cluster-cpu');
+  if (!host) return;
+  var nodes = 9, cores = 16, execCores = 5;
+  function ctlRow(id, label, min, max, val) {
+    return '<label>' + label + ' <input type="range" id="' + id + '" min="' + min + '" max="' + max + '" step="1" value="' + val + '"> <b></b></label>';
+  }
+  var ctl = document.createElement('div'); ctl.className = 'bd-ctl';
+  ctl.innerHTML = ctlRow('clN', 'nodes', 1, 40, nodes) + ctlRow('clC', 'cores per node', 1, 64, cores) + ctlRow('clE', '--executor-cores', 1, 8, execCores);
+  var out = document.createElement('div'); out.className = 'bd-out';
+  host.appendChild(ctl); host.appendChild(out);
+  function bind(id, set) {
+    var b = ctl.querySelector('#' + id + ' + b');
+    ctl.querySelector('#' + id).addEventListener('input', function (e) {
+      set(+e.target.value); b.textContent = e.target.value; render();
+    });
+    b.textContent = ctl.querySelector('#' + id).value;
+  }
+  bind('clN', function (v) { nodes = v; }); bind('clC', function (v) { cores = v; }); bind('clE', function (v) { execCores = v; });
+  function render() {
+    var epn = Math.floor((cores - 1) / execCores);
+    var numExec = epn > 0 ? nodes * epn - 1 : 0;
+    var usedCores = numExec * execCores, availCores = nodes * cores;
+    var pct = availCores ? Math.round(usedCores / availCores * 100) : 0;
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['executors per node', epn > 0 ? epn + ' = ⌊(' + cores + '−1)/' + execCores + '⌋' : 'n/a'],
+     ['--num-executors', numExec > 0 ? numExec + ' = ' + nodes + '·' + epn + ' −1' : 'n/a'],
+     ['used cores', numExec > 0 ? usedCores + '/' + availCores + ' = ' + pct + '%' : 'n/a'],
+     ['--executor-cores', execCores]].forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>'; d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var v = document.createElement('div'); v.style.marginTop = '.4rem';
+    if (epn <= 0) {
+      v.className = 'bd-bad';
+      v.textContent = 'Not enough cores: executors-per-node would be 0. Reduce --executor-cores or raise the cores per node.';
+    } else if (execCores > 5) {
+      v.className = 'bd-bad';
+      v.textContent = '--executor-cores = ' + execCores + ' exceeds Cloudera\'s recommendation of no more than 5 tasks per executor (the HDFS client has trouble with tons of concurrent threads).';
+    } else if (execCores < 3) {
+      v.className = 'bd-bad';
+      v.textContent = '--executor-cores = ' + execCores + ' is below the 3-5 band; single-core executors throw away the benefits of running multiple tasks in a single JVM (e.g., sharing broadcast variables).';
+    } else {
+      v.className = 'bd-ok';
+      v.textContent = 'Recipe applied: ' + epn + ' executors per node, one executor left out for the application master (--num-executors = ' + numExec + '), ' + pct + '% of the cluster cores employed. Leave each node enough power for the OS and Hadoop daemons.';
+    }
+    out.appendChild(v);
+  }
+  render();
+})();
+
+/* ---- w-cluster-mem: memory tuning recipe ---- */
+(function () {
+  var host = document.getElementById('w-cluster-mem');
+  if (!host) return;
+  var nodes = 9, mem = 32, epn = 3;
+  function ctlRow(id, label, min, max, val) {
+    return '<label>' + label + ' <input type="range" id="' + id + '" min="' + min + '" max="' + max + '" step="1" value="' + val + '"> <b></b></label>';
+  }
+  var ctl = document.createElement('div'); ctl.className = 'bd-ctl';
+  ctl.innerHTML = ctlRow('meN', 'nodes', 1, 40, nodes) + ctlRow('meM', 'available memory per node (GB)', 8, 256, mem) + ctlRow('meE', 'executors per node', 1, 12, epn);
+  var out = document.createElement('div'); out.className = 'bd-out';
+  host.appendChild(ctl); host.appendChild(out);
+  function bind(id, set) {
+    var b = ctl.querySelector('#' + id + ' + b');
+    ctl.querySelector('#' + id).addEventListener('input', function (e) {
+      set(+e.target.value); b.textContent = e.target.value; render();
+    });
+    b.textContent = ctl.querySelector('#' + id).value;
+  }
+  bind('meN', function (v) { nodes = v; }); bind('meM', function (v) { mem = v; }); bind('meE', function (v) { epn = v; });
+  function render() {
+    var heap = (mem * 0.75) * (1 - 0.1) / epn;
+    var offHeap = Math.max(0.384, heap * 0.1);
+    var full = heap + offHeap;
+    var numExec = nodes * epn - 1;
+    var usedMem = numExec * full, availMem = nodes * mem;
+    var pct = availMem ? Math.round(usedMem / availMem * 100) : 0;
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['--executor-memory (heap)', heap.toFixed(1) + ' GB = (' + mem + '·0.75)·(1−0.1)/' + epn],
+     ['off-heap (10%, min 384 MB)', offHeap.toFixed(2) + ' GB'],
+     ['full request per executor', full.toFixed(1) + ' GB'],
+     ['used memory', usedMem.toFixed(0) + '/' + availMem + ' GB = ' + pct + '%']].forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>'; d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var v = document.createElement('div'); v.style.marginTop = '.4rem';
+    if (heap > 64) {
+      v.className = 'bd-bad';
+      v.textContent = heap.toFixed(0) + ' GB per executor is above the ~64GB rule of thumb: executors with too much memory often result in excessive garbage collection delays.';
+    } else {
+      v.className = 'bd-ok';
+      v.textContent = '25% of node RAM is left for the OS and Hadoop daemons (×0.75), and the off-heap overhead is budgeted in: the full memory request is heap + off-heap. Keep each node below the 64GB-per-executor ceiling to avoid GC delays.';
+    }
+    out.appendChild(v);
+  }
+  render();
+})();
+</script>
+</body>
+</html>

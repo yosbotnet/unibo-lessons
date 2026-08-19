@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 9 — Beyond simple MapReduce · Big Data</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .bd-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .bd-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .bd-w .bd-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .bd-ctl{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.82rem}
+  .bd-ctl label{display:flex;gap:.4rem;align-items:center}
+  .bd-ctl input[type=range]{accent-color:var(--lk-cobalt)}
+  .bd-btn{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.45rem .95rem;
+    border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .bd-btn:hover{background:var(--lk-cobalt-dark)}
+  .bd-btn.bd-alt{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .bd-btn:disabled{opacity:.4;cursor:not-allowed}
+  .bd-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0}
+  .bd-out{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .8rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.82rem;margin-top:.6rem;overflow-x:auto}
+  .bd-grid{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:.6rem 0}
+  .bd-cell{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.45rem .6rem;background:var(--lk-paper);
+    font-family:var(--lk-mono);font-size:.8rem}
+  .bd-cell b{color:var(--lk-cobalt-dark)}
+  .bd-ok{color:var(--lk-forest);font-weight:600} .bd-bad{color:var(--lk-vermilion);font-weight:600}
+  .bd-bar{height:14px;border:1px solid var(--lk-rule-soft);background:var(--lk-paper);position:relative;border-radius:2px;overflow:hidden}
+  .bd-bar i{display:block;height:100%;background:var(--lk-cobalt)}
+  .bd-chip{display:inline-block;font-family:var(--lk-mono);font-size:.76rem;padding:.15rem .45rem;margin:.12rem;
+    border-radius:2px;border:1px solid var(--lk-rule-soft);background:var(--lk-paper);color:var(--lk-ink-soft)}
+  .bd-chip.bd-freq{border-color:var(--lk-forest);color:var(--lk-forest);font-weight:600}
+  .bd-chip.bd-pruned{border-color:var(--lk-rule-soft);color:var(--lk-rule);text-decoration:line-through;opacity:.6}
+  .bd-chip.bd-cand{border-color:var(--lk-cobalt);color:var(--lk-cobalt-dark)}
+  .bd-vec{font-family:var(--lk-mono);font-size:.9rem;letter-spacing:.28em}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-08-spark-tuning.html">&larr; Ch. 8 — Tuning Spark: partitioning, shuffling and caching</a>
+    <a href="index.html">Index</a>
+    <a href="cap-10-streaming.html">Ch. 10 — Stream processing and Spark Streaming &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Batch processing · Chapter 9</div>
+    <h1>Beyond simple MapReduce</h1>
+    <div class="lk-meta"><span>~38 min read</span><span>5 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">When MapReduce is not so straightforward</a></li>
+      <li><a href="#s2">Sequential or parallel? Amdahl&rsquo;s law</a></li>
+      <li><a href="#s3">The design notation: word count revisited</a></li>
+      <li><a href="#s4">Prefix sum: a problem that resists parallelism</a></li>
+      <li><a href="#s5">Prefix sum: the parallel solution</a></li>
+      <li><a href="#s6">Frequent itemset mining: the problem</a></li>
+      <li><a href="#s7">The Apriori principle</a></li>
+      <li><a href="#s8">One-pass FIM</a></li>
+      <li><a href="#s9">PApriori: a chain of jobs</a></li>
+      <li><a href="#s10">YAFIM and R-Apriori: the Spark generation</a></li>
+      <li><a href="#s11">MRA and IMRA: local frequency as a filter</a></li>
+      <li><a href="#s12">DFIMA: boolean vectors</a></li>
+      <li><a href="#quiz">Test your knowledge</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>1. When MapReduce is not so straightforward</h2>
+    <p>So far the course has focused on <strong>simple algorithms applied to Big Data</strong> — word count, secondary index, and the four design patterns of Chapter 4. Those all share a convenient property: each input record can be processed <em>in isolation</em>.</p>
+
+    <p>But what happens when the computation is complex?</p>
+    <ul>
+      <li><strong>Data mining algorithms are not trivial.</strong></li>
+      <li>And they are <strong>not usually designed with a distributed architecture in mind</strong>.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the thesis of the chapter</span>
+      <p><strong>Rethinking an algorithm from a sequential to a parallel logic is a challenge.</strong> It is not a matter of translating code. It usually means finding a <em>different algorithm</em> that computes the same answer through a data flow the framework can actually run, and then paying attention to how many passes over the data that flow costs.</p>
+    </div>
+
+    <p>This chapter works through two case studies. <strong>Prefix sum</strong> is the small one: an algorithm whose definition seems to forbid parallelism outright, and which yields to one good idea. <strong>Frequent itemset mining</strong> is the large one: a genuinely hard data mining problem with a decade of published parallel formulations, each fixing a specific weakness of the last. Read the second case study as a story about engineering trade-offs, because that is exactly what it is.</p>
+  </section>
+
+  <section id="s2" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>2. Sequential or parallel? Amdahl&rsquo;s law</h2>
+    <p>Two questions come before any design work. <em>Does it always make sense to parallelize a sequential algorithm to take advantage of a Big Data architecture?</em> And <em>is it worth scaling out indefinitely?</em></p>
+
+    <p><strong>Short answer: no.</strong></p>
+
+    <p><strong>Amdahl&rsquo;s law</strong>: the performance gain depends on the actual percentage of the computation that can be parallelized. It is <strong>limited by the computation portion that cannot be parallelized</strong>. With <em>P</em> the parallel fraction and <em>S</em> the speedup due to parallelization:</p>
+
+<pre><code class="language-text">                    1
+real speedup = ─────────────────
+                (1 - P) + P / S</code></pre>
+
+    <p>And on top of that, you must <strong>account for the overhead in parallelization management</strong> — the scheduling, the shuffling, the task launch costs that Chapters 5 to 8 spent their time measuring.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-labelledby="p91t p91d">
+        <title id="p91t">Amdahl&rsquo;s law: speedup against parallel speedup for several parallel fractions</title>
+        <desc id="p91d">Four curves showing that even large parallel speedups yield modest real speedups when part of the computation is serial; each curve flattens at the ceiling set by one over one minus P.</desc>
+        <line x1="70" y1="290" x2="670" y2="290" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <line x1="70" y1="290" x2="70" y2="40" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <text x="330" y="322" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">S — speedup due to parallelization</text>
+        <text x="16" y="50" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">real</text>
+        <text x="16" y="64" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">speedup</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">
+          <text x="60" y="306">1</text><text x="216" y="306">8</text><text x="366" y="306">16</text>
+          <text x="516" y="306">24</text><text x="656" y="306">32</text>
+          <text x="46" y="294">0</text><text x="42" y="230">5</text><text x="38" y="166">10</text><text x="38" y="102">15</text><text x="38" y="46">20</text>
+        </g>
+
+        <path d="M70 290 L88 245 L107 221 L145 195 L201 176 L276 163 L370 155 L483 150 L614 147 L670 146"
+              fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2"/>
+        <text x="560" y="138" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt)">P = 95%  ceiling 20x</text>
+
+        <path d="M70 290 L88 254 L107 236 L145 218 L201 207 L276 200 L370 196 L483 194 L614 193 L670 192"
+              fill="none" stroke="var(--lk-cobalt)" stroke-width="1.8" opacity=".7"/>
+        <text x="560" y="185" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-cobalt)">P = 90%  ceiling 10x</text>
+
+        <path d="M70 290 L88 265 L107 254 L145 244 L201 238 L276 235 L370 233 L483 232 L614 231 L670 231"
+              fill="none" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+        <text x="560" y="224" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">P = 75%  ceiling 4x</text>
+
+        <path d="M70 290 L88 277 L107 272 L145 268 L201 265 L276 264 L370 264 L483 263 L614 263 L670 263"
+              fill="none" stroke="var(--lk-vermilion)" stroke-width="1.8" opacity=".6"/>
+        <text x="560" y="256" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">P = 50%  ceiling 2x</text>
+
+        <text x="86" y="70" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">every curve flattens: the serial part (1 - P)</text>
+        <text x="86" y="86" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">sets a hard ceiling no cluster size can pass</text>
+      </svg>
+      <figcaption><b>Plate 9.1</b> — Amdahl&rsquo;s law drawn out. The lesson is the flattening, not the slope: an algorithm that is 75% parallel can never go more than four times faster, however many machines you throw at it. Adding nodes past the knee of the curve buys overhead and nothing else.</figcaption>
+    </figure>
+
+    <div class="bd-w">
+      <h4>Amdahl calculator</h4>
+      <p class="bd-sub">Set the parallel fraction and the raw parallel speedup, and see the real speedup — and the ceiling you can never pass.</p>
+      <div id="w-amdahl"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The examinable point is the <em>asymptote</em>. As S grows without bound, the term P/S vanishes and the real speedup tends to <strong>1/(1&minus;P)</strong>. So the serial fraction alone fixes the maximum. Quote that alongside the reminder that parallelization management has its own overhead, which means the real curve does not merely flatten — past a point it turns back down.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>3. The design notation: word count revisited</h2>
+    <p>Before the hard problems, the deck re-draws the easy one to establish a notation. Every algorithm from here on is presented as a <strong>chain of key-value shapes</strong>, with the operation that transforms one into the next written on the arrow.</p>
+
+    <p>Word count on <em>sopra la panca la capra campa, sotto la panca la capra crepa</em>:</p>
+
+    <table>
+      <tr><th>Stage</th><th>Content</th></tr>
+      <tr><td><strong>INPUT</strong></td><td>(0, sopra) (6, la) (9, panca) (15, la) (18, capra) (24, campa,) &hellip;</td></tr>
+      <tr><td><strong>MAP</strong></td><td>(sopra, 1) (la, 1) (panca, 1) (la, 1) (capra, 1) (campa, 1) &hellip;</td></tr>
+      <tr><td><strong>SHUFFLE &amp; SORT</strong></td><td>(campa, [1]) (capra, [1,1]) (crepa, [1]) (la, [1,1,1,1]) &hellip;</td></tr>
+      <tr><td><strong>REDUCE</strong></td><td>(campa, 1) (capra, 2) (crepa, 1) (la, 4) &hellip;</td></tr>
+    </table>
+
+    <p>And the same thing in the design notation the rest of the chapter uses:</p>
+<pre><code class="language-text">(offset, line)
+      │ flatMap
+(offset, word)
+      │ map
+(word, 1)
+      │ reduceByKey
+(word, sum)</code></pre>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note — how to read these diagrams</span>
+      <p>Each box is the <em>type</em> of the RDD at that point, each arrow is a Spark operation from Chapter 6. Reading an algorithm design therefore means reading two things at once: what information is carried at each step, and — from the arrow labels — <strong>where the shuffles are</strong>. Every <code>reduceByKey</code>, <code>groupByKey</code> or <code>join</code> in these diagrams is a stage boundary and a network cost. That is the whole basis on which the competing Apriori formulations later in the chapter are judged.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>4. Prefix sum: a problem that resists parallelism</h2>
+    <p>Given a sequence of numbers x<sub>0</sub>, x<sub>1</sub>, x<sub>2</sub>, &hellip; return a sequence y<sub>0</sub>, y<sub>1</sub>, y<sub>2</sub>, &hellip; where</p>
+<pre><code class="language-text">y_i = Σ  x_j
+     j ≤ i</code></pre>
+
+    <table>
+      <tr><th>X</th><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td></tr>
+      <tr><th>Y</th><td>1</td><td>3</td><td>6</td><td>10</td><td>15</td><td>21</td></tr>
+    </table>
+
+    <p>Now look at what the definition demands: <strong>each item requires the previous items to compute the result</strong>. That is the exact opposite of the property that made word count easy. Every output depends on every input before it, so there is no obvious way to hand a slice of the problem to a machine that cannot see the other slices.</p>
+
+    <p><strong>How can this be parallelized?</strong> (Assume the input to be ordered.)</p>
+  </section>
+
+  <section id="s5" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>5. Prefix sum: the parallel solution</h2>
+    <p>The trick is to stop thinking about items and start thinking about <strong>partitions</strong>. The five steps from the deck:</p>
+
+    <ol>
+      <li><strong>Divide input into partitions.</strong></li>
+      <li><strong>Process the entire partitions, not the single items.</strong></li>
+      <li><strong>Compute partial prefix sums within each partition.</strong></li>
+      <li><strong>Save and broadcast the maximum value from each partition</strong> — that is, its total.</li>
+      <li><strong>Compute final prefix sums by adding to each partial the required offsets.</strong></li>
+    </ol>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 360" width="100%" role="img" aria-labelledby="p92t p92d">
+        <title id="p92t">Parallel prefix sum over three partitions</title>
+        <desc id="p92d">The input is split into three partitions; each computes its own prefix sums locally; the partition totals are broadcast and turned into offsets; adding the offset to each local prefix sum produces the global answer.</desc>
+        <text x="20" y="26" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">1. input divided into partitions</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="36" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="34" y="56" fill="var(--lk-ink)">p0:  1   2</text>
+          <rect x="240" y="36" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="254" y="56" fill="var(--lk-ink)">p1:  3   4</text>
+          <rect x="460" y="36" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+          <text x="474" y="56" fill="var(--lk-ink)">p2:  5   6</text>
+        </g>
+
+        <text x="20" y="98" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-cobalt)">2-3. local prefix sums, computed in parallel with no communication</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="108" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="34" y="128" fill="var(--lk-cobalt-dark)">1   3</text>
+          <rect x="240" y="108" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="254" y="128" fill="var(--lk-cobalt-dark)">3   7</text>
+          <rect x="460" y="108" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+          <text x="474" y="128" fill="var(--lk-cobalt-dark)">5   11</text>
+        </g>
+
+        <text x="20" y="172" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-vermilion)">4. broadcast the maximum (= total) of each partition</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="182" width="90" height="26" rx="2" fill="var(--lk-vermilion)" opacity=".85"/>
+          <text x="42" y="200" fill="var(--lk-paper-light)">tot 3</text>
+          <rect x="240" y="182" width="90" height="26" rx="2" fill="var(--lk-vermilion)" opacity=".85"/>
+          <text x="262" y="200" fill="var(--lk-paper-light)">tot 7</text>
+          <rect x="460" y="182" width="90" height="26" rx="2" fill="var(--lk-vermilion)" opacity=".85"/>
+          <text x="480" y="200" fill="var(--lk-paper-light)">tot 11</text>
+        </g>
+        <path d="M110 195 L238 195" stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none" marker-end="url(#a9v)"/>
+        <path d="M330 195 L458 195" stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none" marker-end="url(#a9v)"/>
+        <text x="126" y="188" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">offsets flow forward only</text>
+
+        <text x="20" y="244" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">5. offset for each partition = sum of the totals of all preceding partitions</text>
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="254" width="200" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="34" y="272" fill="var(--lk-ink-soft)">offset 0</text>
+          <rect x="240" y="254" width="200" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="254" y="272" fill="var(--lk-ink-soft)">offset 3</text>
+          <rect x="460" y="254" width="200" height="26" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+          <text x="474" y="272" fill="var(--lk-ink-soft)">offset 3 + 7 = 10</text>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="20" y="296" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="34" y="316" fill="var(--lk-forest)">1   3</text>
+          <rect x="240" y="296" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="254" y="316" fill="var(--lk-forest)">6   10</text>
+          <rect x="460" y="296" width="200" height="30" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+          <text x="474" y="316" fill="var(--lk-forest)">15   21</text>
+        </g>
+        <text x="20" y="348" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-forest)">the sequential answer, computed with one small broadcast instead of one long chain</text>
+        <defs>
+          <marker id="a9v" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-vermilion)"/></marker>
+        </defs>
+      </svg>
+      <figcaption><b>Plate 9.2</b> — The parallel prefix sum. The dependency between items has not disappeared; it has been <em>lifted</em> to the level of partitions, where there are only a handful of values to combine. This is the general move: find a coarser unit on which the sequential dependency is cheap.</figcaption>
+    </figure>
+
+    <div class="bd-w">
+      <h4>Prefix sum, step by step</h4>
+      <p class="bd-sub">Run the five steps on the example from the slides and watch the local results turn global.</p>
+      <div id="w-prefix"></div>
+    </div>
+
+    <h3>The design</h3>
+    <p>Assuming ordered input:</p>
+<pre><code class="language-text">(partitionID, orderedNumbers[])
+      │ map
+(partitionID, sum)
+      │ Bjoin( green.partitionID <= blue.partitionID )
+(blue.partitionID, green.sums[])
+      │ map
+(partitionID, PS)</code></pre>
+
+    <p>Assuming <em>unordered</em> input (and assuming max is known), two operations are prepended to rebuild the ordering:</p>
+<pre><code class="language-text">(offset, number)
+      │ map
+(partitionId, number)
+      │ groupByKey
+(partitionId, orderedNumbers[])
+      │ map
+(partitionId, sum)
+      │ Bjoin( green.partitionId <= blue.partitionId )
+(blue.partitionId, green.sums[])
+      │ map
+(offset, PS)</code></pre>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Note the <strong>Bjoin</strong> — a broadcast join. The set of partition totals is tiny (one number per partition), so it can be sent to every executor rather than shuffled. This is the same reasoning as the <em>Broadcast Hash join</em> of Chapter 7 and the broadcast variables of Chapter 8: when one side of a join is small, replicating it everywhere is cheaper than moving the big side. The pattern <em>compute local, broadcast the summary, correct locally</em> recurs in almost every algorithm in this chapter.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>6. Frequent itemset mining: the problem</h2>
+    <p>Now the serious case study. The vocabulary first:</p>
+
+    <table>
+      <tr><th>Term</th><th>Definition</th></tr>
+      <tr><td><strong>Itemset</strong></td><td>A set of items, e.g. {Milk, Bread, Diaper}</td></tr>
+      <tr><td><strong>k-itemset</strong></td><td>A set of k items</td></tr>
+      <tr><td><strong>Transactions</strong></td><td>Occurrences of one or more items</td></tr>
+      <tr><td><strong>Support of an itemset</strong></td><td>The <strong>fraction of transactions that contain the itemset</strong></td></tr>
+    </table>
+
+    <p>The running example, five transactions:</p>
+    <table>
+      <tr><th>TID</th><th>Items</th></tr>
+      <tr><td>1</td><td>Bread, Milk</td></tr>
+      <tr><td>2</td><td>Bread, Diaper, Beer, Eggs</td></tr>
+      <tr><td>3</td><td>Milk, Diaper, Beer, Coke</td></tr>
+      <tr><td>4</td><td>Bread, Milk, Diaper, Beer</td></tr>
+      <tr><td>5</td><td>Bread, Milk, Diaper, Coke</td></tr>
+    </table>
+    <p>So <strong>s({Milk, Bread, Diaper}) = 2/5</strong> — only transactions 4 and 5 contain all three.</p>
+
+    <p>A <strong>frequent itemset</strong> is an itemset whose support is higher than a certain threshold, with 0 &lt; minsup &le; 1. <strong>The problem is to find all frequent itemsets, independently of their length.</strong></p>
+
+    <p>The naive approach is to <strong>match every candidate against each transaction</strong>, and it is <strong>way too complex</strong>:</p>
+    <div class="callout warn">
+      <span class="callout-label">Watch out — the complexity</span>
+      <p>Given <strong>d</strong> items, the total number of itemsets is <strong>2<sup>d</sup></strong>. Not 2<sup>d</sup> operations for some clever algorithm — 2<sup>d</sup> <em>candidates to consider</em>. With a supermarket catalogue of a thousand products, the lattice has more nodes than there are atoms within reach. No amount of cluster is going to fix an exponential; the algorithm has to avoid generating most of the space.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>7. The Apriori principle</h2>
+    <p>The escape from the exponential is one observation, published by <strong>Agrawal and Srikant</strong> (<em>Fast Algorithms for Mining Association Rules in Large Databases</em>, VLDB 1994, pp. 478-499):</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the Apriori principle</span>
+      <p><strong>If a k-itemset is frequent, then all (k&minus;1)-itemsets are also frequent.</strong></p>
+      <p>This follows the <strong>anti-monotone property of support</strong>: &forall;X, Y : (X &sube; Y) &rArr; s(X) &ge; s(Y).</p>
+      <p>Put another way — and this is the form you actually use: <strong>if a k-itemset is infrequent, then all (k+1)-itemsets are also infrequent.</strong></p>
+    </div>
+
+    <p>The contrapositive is what does the work. The moment an itemset is found infrequent, its <em>entire supersets subtree</em> in the lattice can be deleted without ever being counted. Pruning one node near the top of the lattice removes an exponential number of nodes below it.</p>
+
+    <h3>The example, worked</h3>
+    <p>With <strong>threshold = 3/5</strong> (i.e. a count of at least 3 out of 5 transactions), the 1-itemset counts are:</p>
+    <table>
+      <tr><th>1-itemset</th><th>Count</th><th>Verdict</th></tr>
+      <tr><td>Bread</td><td>4</td><td>frequent</td></tr>
+      <tr><td>Coke</td><td>2</td><td><em>infrequent</em></td></tr>
+      <tr><td>Milk</td><td>4</td><td>frequent</td></tr>
+      <tr><td>Beer</td><td>3</td><td>frequent</td></tr>
+      <tr><td>Diaper</td><td>4</td><td>frequent</td></tr>
+      <tr><td>Eggs</td><td>1</td><td><em>infrequent</em></td></tr>
+    </table>
+
+    <p>Coke and Eggs are out — and with them, every itemset that contains them. The slide says it in a parenthesis worth memorising: <strong>&ldquo;No need to generate those involving Coke or Eggs&rdquo;</strong>. Four frequent items remain, so there are C(4,2) = <strong>6 candidate 2-itemsets</strong> instead of the C(6,2) = 15 the full lattice would hold. Of those six, four clear the threshold, and they in turn admit exactly <strong>1 candidate 3-itemset</strong>, {Bread, Milk, Diaper}, whose support is 2/5 — below the threshold, so the algorithm stops.</p>
+
+    <p>The arithmetic that summarises the whole idea:</p>
+    <table>
+      <tr><th>Strategy</th><th>Itemsets considered</th></tr>
+      <tr><td>If every subset is considered</td><td><sup>6</sup>C<sub>1</sub> + <sup>6</sup>C<sub>2</sub> + <sup>6</sup>C<sub>3</sub> = 6 + 15 + 20 = <strong>41</strong></td></tr>
+      <tr><td>With support-based pruning</td><td>6 + 6 + 1 = <strong>13</strong></td></tr>
+    </table>
+
+    <div class="callout note">
+      <span class="callout-label">Editor&rsquo;s note</span>
+      <p>The counts for the 2- and 3-itemsets printed on this slide come out garbled in the extracted text (the columns interleave), so the per-itemset counts above have been recomputed directly from the five transactions on the same slide. They agree with the support the deck states explicitly earlier, s({Milk, Bread, Diaper}) = 2/5, and with the 6 + 6 + 1 = 13 arithmetic the slide concludes with. If your copy of the slide shows different counts in that middle table, trust the transaction table.</p>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 380" width="100%" role="img" aria-labelledby="p93t p93d">
+        <title id="p93t">Support-based pruning of the itemset lattice</title>
+        <desc id="p93d">The lattice of itemsets over five items; one infrequent item at the top is crossed out, and the whole subtree of supersets beneath it is greyed out as pruned without being counted.</desc>
+        <text x="20" y="24" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">the lattice over d items has 2^d nodes — pruning one infrequent node removes its entire superset subtree</text>
+
+        <circle cx="350" cy="52" r="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+        <text x="336" y="56" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">null</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <circle cx="150" cy="120" r="16" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="145" y="124" fill="var(--lk-forest)">A</text>
+          <circle cx="250" cy="120" r="16" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="245" y="124" fill="var(--lk-forest)">B</text>
+          <circle cx="350" cy="120" r="16" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="2.2"/><text x="345" y="124" fill="var(--lk-vermilion)">C</text>
+          <circle cx="450" cy="120" r="16" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="445" y="124" fill="var(--lk-forest)">D</text>
+          <circle cx="550" cy="120" r="16" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="545" y="124" fill="var(--lk-forest)">E</text>
+        </g>
+        <path d="M350 66 L152 106 M350 66 L252 106 M350 66 L350 104 M350 66 L448 106 M350 66 L548 106"
+              stroke="var(--lk-rule-soft)" fill="none"/>
+        <line x1="336" y1="106" x2="364" y2="134" stroke="var(--lk-vermilion)" stroke-width="2.4"/>
+        <text x="376" y="112" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-vermilion)">C is infrequent</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="60" y="180" width="46" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="72" y="197" fill="var(--lk-forest)">AB</text>
+          <rect x="116" y="180" width="46" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="128" y="197" fill="var(--lk-rule)">AC</text>
+          <rect x="172" y="180" width="46" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="184" y="197" fill="var(--lk-forest)">AD</text>
+          <rect x="228" y="180" width="46" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="240" y="197" fill="var(--lk-forest)">AE</text>
+          <rect x="284" y="180" width="46" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="296" y="197" fill="var(--lk-rule)">BC</text>
+          <rect x="340" y="180" width="46" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="352" y="197" fill="var(--lk-forest)">BD</text>
+          <rect x="396" y="180" width="46" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="408" y="197" fill="var(--lk-forest)">BE</text>
+          <rect x="452" y="180" width="46" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="464" y="197" fill="var(--lk-rule)">CD</text>
+          <rect x="508" y="180" width="46" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="520" y="197" fill="var(--lk-rule)">CE</text>
+          <rect x="564" y="180" width="46" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="576" y="197" fill="var(--lk-forest)">DE</text>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="60" y="238" width="52" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="70" y="255" fill="var(--lk-rule)">ABC</text>
+          <rect x="122" y="238" width="52" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="132" y="255" fill="var(--lk-forest)">ABD</text>
+          <rect x="184" y="238" width="52" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="194" y="255" fill="var(--lk-forest)">ABE</text>
+          <rect x="246" y="238" width="52" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="256" y="255" fill="var(--lk-rule)">ACD</text>
+          <rect x="308" y="238" width="52" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="318" y="255" fill="var(--lk-rule)">ACE</text>
+          <rect x="370" y="238" width="52" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="380" y="255" fill="var(--lk-forest)">ADE</text>
+          <rect x="432" y="238" width="52" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="442" y="255" fill="var(--lk-rule)">BCD</text>
+          <rect x="494" y="238" width="52" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="504" y="255" fill="var(--lk-rule)">BCE</text>
+          <rect x="556" y="238" width="52" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="566" y="255" fill="var(--lk-forest)">BDE</text>
+        </g>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <rect x="180" y="296" width="60" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="188" y="313" fill="var(--lk-rule)">ABCD</text>
+          <rect x="250" y="296" width="60" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="258" y="313" fill="var(--lk-rule)">ABCE</text>
+          <rect x="320" y="296" width="60" height="24" rx="2" fill="var(--lk-paper-light)" stroke="var(--lk-forest)"/><text x="328" y="313" fill="var(--lk-forest)">ABDE</text>
+          <rect x="390" y="296" width="60" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="398" y="313" fill="var(--lk-rule)">ACDE</text>
+          <rect x="460" y="296" width="60" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><text x="468" y="313" fill="var(--lk-rule)">BCDE</text>
+        </g>
+        <rect x="310" y="340" width="80" height="24" rx="2" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+        <text x="322" y="357" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-rule)">ABCDE</text>
+
+        <text x="20" y="357" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-rule)">greyed = never generated,</text>
+        <text x="20" y="373" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-rule)">never counted</text>
+      </svg>
+      <figcaption><b>Plate 9.3</b> — Support-based pruning. Every greyed node contains C, and by the anti-monotone property none of them can be frequent once C is not. They are not counted and rejected — they are never generated at all, which is where the saving comes from.</figcaption>
+    </figure>
+
+    <h3>The sequential algorithm</h3>
+    <p>Note the property that will dominate every parallel version: it <strong>requires several passes on the transaction set</strong>.</p>
+<pre><code class="language-text">k = 1
+repeat
+  generate candidate itemsets based on frequent k-1 itemsets
+  for each transaction
+    for each candidate itemset
+      increase itemset's support
+    end for
+  end for
+  keep frequent k-itemsets
+until k = |d| or no more frequent k-itemsets</code></pre>
+
+    <div class="bd-w">
+      <h4>Apriori, level by level</h4>
+      <p class="bd-sub">Run the algorithm on the five transactions with threshold 3/5. Watch candidates get generated, counted, and pruned — and watch the candidates that are never generated at all.</p>
+      <div id="w-apriori"></div>
+    </div>
+
+    <h3>Why it parallelizes at all</h3>
+    <p>Two observations open the door:</p>
+    <ul>
+      <li><strong>Itemsets are inferred from the items in a transaction.</strong> Each transaction is independent from the others, so <em>a map function can return the itemsets in the given transaction</em>.</li>
+      <li><strong>Calculating the support of an itemset means counting its occurrences</strong> — <em>pretty much like word counting</em>.</li>
+    </ul>
+    <p>So the shape of the solution is already familiar. What the next five sections argue about is not <em>whether</em> to use map and reduce, but <strong>how many passes over the transaction set to pay, and how many key-value pairs to generate on the map side</strong>.</p>
+  </section>
+
+  <section id="s8" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>8. One-pass FIM</h2>
+    <p>The most direct translation (Li &amp; Zhang, <em>The strategy of mining association rule based on cloud computing</em>, ICBCGI 2011, pp. 475-478):</p>
+
+    <table>
+      <tr><th>Summary</th><th>Discussion</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>A <strong>single map-reduce job</strong>.</li>
+            <li>The <strong>mapper computes every possible itemset</strong> in the transaction.</li>
+            <li>The <strong>combiner computes partial supports</strong>.</li>
+            <li>The <strong>reducer computes the final supports</strong>.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li><strong>Naive implementation.</strong></li>
+            <li><strong>Too many key-value pairs generated on the map-side</strong> (even with combiner).</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+<pre><code class="language-text">(TID, items[])
+      │ flatMap
+(itemset, 1)
+      │ reduceByKey
+(itemset, count)
+      │ filter
+(itemset, count)</code></pre>
+
+    <p>Map-side, the algorithm computes the partial support for <strong>every possible itemset</strong> — the entire lattice, lit up for each transaction. Reduce-side, it computes the final support for every possible itemset, and only then filters.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>This design throws away the Apriori principle entirely. A transaction with <em>n</em> items emits 2<sup>n</sup> itemsets, and the combiner can only compress what has already been generated — it cannot un-generate it. One pass over the data sounds like the best possible outcome until you notice that the pass produces an exponential amount of intermediate data, which then has to be shuffled. This is Chapter 8&rsquo;s lesson in a new costume: <strong>the pass count is not the only cost that matters</strong>.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>9. PApriori: a chain of jobs</h2>
+    <p>PApriori (Li, Ning, et al., <em>Parallel implementation of apriori algorithm based on mapreduce</em>, SNPD/ACIS 2012) restores the principle by restoring the levels:</p>
+
+    <table>
+      <tr><th>Summary</th><th>Discussion</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>A <strong>chain of map-reduce jobs</strong>.</li>
+            <li>Each map-reduce job computes the support of <strong>k-itemsets for a given k</strong>.</li>
+            <li>The <strong>frequent k-itemsets are passed as input to the next mapper</strong>.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li><strong>Better than one-pass.</strong></li>
+            <li><strong>Many passes on the transaction set.</strong></li>
+            <li><strong>Still many key-value pairs generated on the map-side.</strong></li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+<pre><code class="language-text">run(k = 1)
+   ↓
+(TID, items[])
+      │ flatMap
+(k-itemset, 1)
+      │ reduceByKey
+(itemset, count)
+      │ filter
+(itemset, count) ──→ save
+      │
+   continue?  ──→ run(k++)</code></pre>
+
+    <p>The first job computes partial support for 1-itemsets on the map side, then final support and filtering on the reduce side. The second job does the same for candidate 2-itemsets, the third for candidate 3-itemsets, and so on — with each level restricted to the candidates the previous level certified.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Be able to state the trade-off between the first two designs in one sentence each. <strong>One-pass FIM</strong> reads the transaction set once but generates the whole lattice per transaction. <strong>PApriori</strong> generates only surviving candidates, but re-reads the entire transaction set once per level — and in Hadoop MapReduce every one of those levels means a fresh job, writing to and reading from HDFS (Chapter 5). The next two designs each attack one of those two costs.</p>
+    </div>
+  </section>
+
+  <section id="s10" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>10. YAFIM and R-Apriori: the Spark generation</h2>
+    <p>PApriori&rsquo;s repeated passes are exactly the pathology Spark was built to remove.</p>
+
+    <h3>YAFIM</h3>
+    <p>(Qiu, Hongjian, et al., <em>Yafim: a parallel frequent itemset mining algorithm with spark</em>, IEEE IPDPS Workshops 2014.)</p>
+    <ul>
+      <li>A <strong>Spark version of PApriori</strong> (k-passes).</li>
+      <li><strong>The transaction set is cached.</strong></li>
+      <li>At each iteration, the frequent k-itemsets are <strong>collected and broadcasted in a HashTree</strong>.</li>
+    </ul>
+    <p><strong>Performance gain: 1 order of magnitude</strong> with respect to PApriori.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Two lines of Chapter 6 and 8 machinery buy a factor of ten. <code>cache()</code> means the k passes read RAM instead of HDFS; the <em>broadcast</em> of the candidate set means every executor gets the current level&rsquo;s candidates without a shuffle. The algorithm did not change — the <em>logic</em> is still PApriori. Only the data movement did.</p>
+    </div>
+
+    <h3>R-Apriori</h3>
+    <p>(Rathee, Sanjay, Manohar Kaul, and Arti Kashyap, <em>R-Apriori: an efficient apriori based algorithm on spark</em>, PIKM/CIKM 2015.)</p>
+    <ul>
+      <li>An <strong>improved version of YAFIM</strong>.</li>
+      <li><strong>Replaces the HashTree with a BloomFilter</strong>, only for the map-side generation of 2-itemsets.</li>
+    </ul>
+    <p>It <strong>effectively drops execution time of the second iteration</strong> — less space requirements, and less time to generate candidates on the map side.</p>
+
+    <p>Why the second iteration specifically? Because that is where the candidate set is largest: after 1-itemset pruning there are still many surviving items, and the number of pairs is quadratic in that count. Level 2 is the bulge in the lattice, so a data structure that is cheaper to consult and smaller to broadcast pays off there and nowhere else.</p>
+  </section>
+
+  <section id="s11" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>11. MRA and IMRA: local frequency as a filter</h2>
+    <p>(Yahya, Othman, Osman Hegazy, and Ehab Ezat, <em>An efficient implementation of A-Priori algorithm based on Hadoop-Mapreduce model</em>, International Journal of Reviews in Computing 12, 2012; Farzanyar, Zahra, and Nick Cercone, <em>Efficient mining of frequent itemsets in social network data based on MapReduce framework</em>, ASONAM 2013.)</p>
+
+    <p>These abandon the level-by-level structure for something cleverer:</p>
+    <ul>
+      <li><strong>Two phase map-reduce jobs.</strong></li>
+      <li>The <strong>first mapper applies sequential Apriori to the local split</strong> — note that the <em>mapper&rsquo;s input is the whole split, not the single transaction</em>.</li>
+      <li>The <strong>first reducer simply outputs the list of candidate frequent itemsets</strong>.</li>
+      <li>The <strong>second map-reduce job restarts from scratch</strong> and calculates the support of the locally frequent itemsets.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the correctness argument</span>
+      <p>The whole design rests on one implication, stated twice in the slides:</p>
+      <p><strong>If the itemset&rsquo;s support is never locally frequent (in any partition), it cannot be globally frequent.</strong> Equivalently: <strong>if the itemset is globally frequent, it has to be locally frequent somewhere.</strong></p>
+      <p>The reasoning is a pigeonhole argument. If an itemset fell below the threshold fraction in <em>every</em> partition, then summing over partitions it must fall below the threshold overall. So the union of the locally frequent sets is a <em>superset</em> of the globally frequent sets — a candidate list with no false negatives, produced in a single distributed pass. The second job then counts exactly that list, which is why no accuracy is lost.</p>
+    </div>
+
+<pre><code class="language-text">(partitionID, items[])                        (partitionID, items[])
+      │ flatMap(apriori on partition)               │ flatMap
+(itemset, partialCount)                       (itemset, 1)
+      │ filter & distinct                           │
+(localFrequentItemset) ──────── join ─────────────→ │
+                                              (itemset, 1)
+                                                    │ reduceByKey
+                                              (itemset, count)
+                                                    │ filter
+                                              (itemset, count)</code></pre>
+
+    <p>Phase one, map side: local Apriori to detect locally frequent itemsets; reduce side: simply output them. Phase two, map side: compute partial support for all candidate itemsets; reduce side: compute their final support.</p>
+
+    <p><strong>Discussion:</strong> a <strong>different approach to parallelization</strong>, which <strong>performs better than k-passes</strong>.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Watch out</span>
+      <p>The mapper receiving <em>the whole split</em> rather than one transaction is a real change of unit, and it is the same move as the prefix sum in section 5: <em>process the entire partitions, not the single items</em>. It also imports a risk. Local Apriori must run inside one task, so the split has to fit the memory and time budget of a single task — and any skew in how transactions are distributed (Chapter 8) now translates directly into a straggler running a full sequential mining algorithm.</p>
+    </div>
+  </section>
+
+  <section id="s12" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>12. DFIMA: boolean vectors</h2>
+    <p>The last design (Zhang, Feng, et al., <em>A distributed frequent itemset mining algorithm using Spark for Big Data analytics</em>, Cluster Computing 18.4, 2015, pp. 1493-1501) changes the representation rather than the schedule.</p>
+
+    <ul>
+      <li>Similar to a two phase map-reduce job, <strong>but the transaction set is cached</strong>.</li>
+      <li><strong>First: compute the frequent 1-itemset.</strong> For each frequent 1-itemset, compute the <strong>boolean vector</strong>: given item <em>i</em>, V<sub>i</sub>[t] = 0 if item <em>i</em> is missing in transaction t &isin; T, and 1 otherwise. The boolean vectors are <strong>broadcasted</strong>.</li>
+      <li>The support of a k-itemset {i, j} is then determined by the <strong>logical AND operation between the items&rsquo; vectors</strong>.</li>
+      <li><strong>Second: use vectors to compute frequent k-itemsets.</strong></li>
+    </ul>
+
+    <p>The worked example from the slide:</p>
+<pre><code class="language-text">i   0 0 1 1 0 1 1 0 1     s({i})   = 5
+j   1 0 0 1 1 0 0 1 1     s({j})   = 5
+                          s({i,j}) = 2</code></pre>
+    <p>AND the two vectors position by position and you get <code>0 0 0 1 0 0 0 0 1</code>: two ones, hence support 2. The counting has become a bitwise operation.</p>
+
+    <div class="bd-w">
+      <h4>Boolean vectors and the AND trick</h4>
+      <p class="bd-sub">Toggle the bits of the two item vectors and watch the supports recompute. This is the DFIMA example from the slides, made editable.</p>
+      <div id="w-dfima"></div>
+    </div>
+
+    <p><strong>Discussion:</strong> <strong>IO cost reduced due to caching</strong>, but <strong>boolean vectors must fit memory</strong>.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The constraint is the examinable half. A boolean vector has one bit per <em>transaction</em>, so its length grows with the size of the dataset, and there is one vector per frequent item. The technique converts a data-scan problem into a memory-residency problem — which is a good trade when the transaction count is moderate and a fatal one when it is not. Every design in this chapter is a trade of exactly this kind, which is the point of studying five of them.</p>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-labelledby="p94t p94d">
+        <title id="p94t">The five parallel formulations compared</title>
+        <desc id="p94d">A table-like diagram showing, for each algorithm, how many passes it makes over the transaction set, how much intermediate data it generates map-side, and what it keeps in memory.</desc>
+        <text x="20" y="26" style="font-family:var(--lk-mono);font-size:12px" fill="var(--lk-ink-soft)">passes over the transaction set (each block = one pass)              map-side blow-up        memory held</text>
+
+        <g style="font-family:var(--lk-mono);font-size:11px">
+          <text x="20" y="66" fill="var(--lk-ink)">One-pass FIM</text>
+          <rect x="150" y="52" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <text x="420" y="66" fill="var(--lk-vermilion)">whole lattice</text>
+          <text x="580" y="66" fill="var(--lk-ink-soft)">—</text>
+
+          <text x="20" y="106" fill="var(--lk-ink)">PApriori</text>
+          <rect x="150" y="92" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <rect x="190" y="92" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <rect x="230" y="92" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <rect x="270" y="92" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <text x="316" y="106" fill="var(--lk-ink-soft)">k passes, on HDFS</text>
+          <text x="420" y="106" fill="var(--lk-vermilion)" opacity="0">x</text>
+          <text x="580" y="106" fill="var(--lk-ink-soft)">—</text>
+
+          <text x="20" y="146" fill="var(--lk-ink)">YAFIM</text>
+          <rect x="150" y="132" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="190" y="132" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="230" y="132" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="270" y="132" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <text x="316" y="146" fill="var(--lk-forest)">k passes, cached</text>
+          <text x="580" y="146" fill="var(--lk-ink-soft)">HashTree</text>
+
+          <text x="20" y="186" fill="var(--lk-ink)">R-Apriori</text>
+          <rect x="150" y="172" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="190" y="172" width="20" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="230" y="172" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="270" y="172" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <text x="316" y="186" fill="var(--lk-forest)">2nd pass cheaper</text>
+          <text x="580" y="186" fill="var(--lk-ink-soft)">BloomFilter</text>
+
+          <text x="20" y="226" fill="var(--lk-ink)">MRA / IMRA</text>
+          <rect x="150" y="212" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <rect x="190" y="212" width="34" height="20" rx="2" fill="var(--lk-cobalt)" opacity=".85"/>
+          <text x="240" y="226" fill="var(--lk-ink-soft)">exactly 2 phases</text>
+          <text x="420" y="226" fill="var(--lk-forest)">locally frequent only</text>
+          <text x="580" y="226" fill="var(--lk-ink-soft)">a split</text>
+
+          <text x="20" y="266" fill="var(--lk-ink)">DFIMA</text>
+          <rect x="150" y="252" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <rect x="190" y="252" width="34" height="20" rx="2" fill="var(--lk-forest)" opacity=".8"/>
+          <text x="240" y="266" fill="var(--lk-forest)">2 phases, cached</text>
+          <text x="420" y="266" fill="var(--lk-forest)">bitwise AND</text>
+          <text x="580" y="266" fill="var(--lk-vermilion)">boolean vectors</text>
+        </g>
+
+        <path d="M20 288 L680 288" stroke="var(--lk-rule-soft)"/>
+        <text x="20" y="312" style="font-family:var(--lk-mono);font-size:11px" fill="var(--lk-ink-soft)">no design wins on every axis: each one moves cost from passes to intermediate data, or from data to memory</text>
+      </svg>
+      <figcaption><b>Plate 9.4</b> — The five formulations on the three axes they actually compete on. Read left to right and the history of the field appears: first remove the lattice blow-up, then remove the HDFS round-trips, then remove the passes themselves — each time by spending a resource the previous design left idle.</figcaption>
+    </figure>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">One-pass FIM</button>
+        <button class="lk-tab">PApriori</button>
+        <button class="lk-tab">YAFIM</button>
+        <button class="lk-tab">R-Apriori</button>
+        <button class="lk-tab">MRA / IMRA</button>
+        <button class="lk-tab">DFIMA</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>A single map-reduce job.</strong> The mapper computes every possible itemset in the transaction, the combiner computes partial supports, the reducer computes the final supports.</p>
+        <p><em>Naive implementation; too many key-value pairs generated on the map-side, even with combiner.</em></p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Chain of map-reduce jobs.</strong> Each job computes the support of k-itemsets for a given k, and the frequent k-itemsets are passed as input to the next mapper.</p>
+        <p><em>Better than one-pass; many passes on the transaction set; still many key-value pairs generated on the map-side.</em></p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Spark version of PApriori</strong> (k-passes). The transaction set is cached; at each iteration the frequent k-itemsets are collected and broadcasted in a HashTree.</p>
+        <p><em>Performance gain of 1 order of magnitude with respect to PApriori.</em></p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Improved version of YAFIM.</strong> Replaces the HashTree with a BloomFilter, only for the map-side generation of 2-itemsets.</p>
+        <p><em>Effectively drops execution time of the second iteration: less space requirements, less time to generate candidates on the map-side.</em></p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Two phase map-reduce jobs.</strong> The first mapper applies sequential Apriori to the local split (its input is the whole split, not the single transaction); the first reducer outputs the list of candidate frequent itemsets; the second job restarts from scratch and calculates the support of the locally frequent itemsets.</p>
+        <p><em>A different approach to parallelization; performs better than k-passes.</em></p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Similar to a two phase map-reduce job, but the transaction set is cached.</strong> First compute the frequent 1-itemsets and their boolean vectors, which are broadcasted; the support of a k-itemset is determined by the logical AND between the items&rsquo; vectors. Then use the vectors to compute frequent k-itemsets.</p>
+        <p><em>IO cost reduced due to caching, but boolean vectors must fit memory.</em></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="BigData 9 Beyond simple MR.pdf">
+    <h2>Test your knowledge</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Does it always make sense to parallelize a sequential algorithm? State Amdahl&rsquo;s law and its consequence.</summary>
+        <p><strong>No.</strong> Amdahl&rsquo;s law says the performance gain depends on the actual percentage of the computation that can be parallelized, and is limited by the portion that cannot be. With P the parallel fraction and S the speedup due to parallelization, the real speedup is 1 / ((1&minus;P) + P/S). As S grows the real speedup tends to <strong>1/(1&minus;P)</strong>, so the serial fraction alone fixes a ceiling that no cluster size can pass. On top of that you must account for the <strong>overhead in parallelization management</strong>, which means past a certain point adding nodes makes things worse rather than merely failing to help.</p>
+      </details>
+
+      <details>
+        <summary>Why is prefix sum hard to parallelize, and how is it solved?</summary>
+        <p>Because <strong>each item requires the previous items to compute the result</strong>: y<sub>i</sub> is the sum of all x<sub>j</sub> with j &le; i, so every output depends on every earlier input. The solution changes the unit of work: <strong>divide input into partitions; process the entire partitions, not the single items; compute partial prefix sums within each partition; save and broadcast the maximum value from each partition; compute final prefix sums by adding to each partial the required offsets.</strong> The sequential dependency is not removed, it is lifted to the level of partitions, where only a handful of numbers need to be combined.</p>
+      </details>
+
+      <details>
+        <summary>What does the Bjoin in the prefix sum design do, and why is a broadcast the right choice there?</summary>
+        <p>It joins each partition with the sums of all partitions whose id is less than or equal to its own — <code>Bjoin(green.partitionID &lt;= blue.partitionID)</code> — so that each partition can compute the offset to add to its local prefix sums. A broadcast join is right because the joined side is <em>tiny</em>: one number per partition. Replicating it to every executor costs far less than shuffling the data itself, which is the same reasoning behind the Broadcast Hash join in Chapter 7 and broadcast variables in Chapter 8.</p>
+      </details>
+
+      <details>
+        <summary>Define itemset, support and frequent itemset, and state the complexity of the naive approach.</summary>
+        <p>An <strong>itemset</strong> is a set of items; a <strong>k-itemset</strong> is a set of k items; <strong>transactions</strong> are occurrences of one or more items. The <strong>support</strong> of an itemset is the fraction of transactions that contain it — for example s({Milk, Bread, Diaper}) = 2/5 in the five-transaction example. A <strong>frequent itemset</strong> is one whose support is higher than a threshold minsup, with 0 &lt; minsup &le; 1, and the problem is to find all frequent itemsets independently of their length. The naive approach matches every candidate against each transaction and is way too complex: given <strong>d</strong> items, the total number of itemsets is <strong>2<sup>d</sup></strong>.</p>
+      </details>
+
+      <details>
+        <summary>State the Apriori principle in both directions and name the property it rests on.</summary>
+        <p><strong>If a k-itemset is frequent, then all (k&minus;1)-itemsets are also frequent.</strong> Equivalently and more usefully: <strong>if a k-itemset is infrequent, then all (k+1)-itemsets are also infrequent.</strong> It follows from the <strong>anti-monotone property of support</strong>: for all X, Y, if X &sube; Y then s(X) &ge; s(Y). It is due to Agrawal and Srikant (VLDB 1994). The second form is what makes the algorithm efficient: pruning one infrequent node deletes its entire superset subtree from the lattice without those nodes ever being generated or counted.</p>
+      </details>
+
+      <details>
+        <summary>In the worked example with threshold 3/5, how much does support-based pruning save, and why?</summary>
+        <p>If every subset is considered the count is <sup>6</sup>C<sub>1</sub> + <sup>6</sup>C<sub>2</sub> + <sup>6</sup>C<sub>3</sub> = 6 + 15 + 20 = <strong>41</strong> itemsets. With support-based pruning it is 6 + 6 + 1 = <strong>13</strong>. The saving comes from the two infrequent 1-itemsets — Coke (count 2) and Eggs (count 1) — because as the slide notes there is then <em>no need to generate those involving Coke or Eggs</em>. Four frequent items leave C(4,2) = 6 candidate pairs instead of 15, and those admit exactly one candidate 3-itemset, {Bread, Milk, Diaper}, whose support of 2/5 falls below the threshold.</p>
+      </details>
+
+      <details>
+        <summary>Which two observations make Apriori parallelizable?</summary>
+        <p>First, <strong>itemsets are inferred from the items in a transaction</strong>, and each transaction is independent from the others — so a map function can return the itemsets in the given transaction. Second, <strong>calculating the support of an itemset means counting its occurrences</strong>, which is pretty much like word counting, so the reduce side is a familiar sum-by-key. What the competing designs then argue about is not the shape but the cost: how many passes over the transaction set, and how many key-value pairs on the map side.</p>
+      </details>
+
+      <details>
+        <summary>Describe One-pass FIM and say why it is unsatisfactory.</summary>
+        <p>A <strong>single map-reduce job</strong>: the mapper computes every possible itemset in the transaction, the combiner computes partial supports, the reducer computes the final supports, and a filter keeps the frequent ones. The design is <strong>naive</strong> and generates <strong>too many key-value pairs on the map-side, even with a combiner</strong>. The deeper problem is that it discards the Apriori principle: a transaction of n items emits 2<sup>n</sup> itemsets, and a combiner can only compress data that has already been generated. One pass over the input is not a win if that pass produces an exponential amount of intermediate data to shuffle.</p>
+      </details>
+
+      <details>
+        <summary>How does PApriori differ, and what does it still cost?</summary>
+        <p>PApriori is a <strong>chain of map-reduce jobs</strong> where each job computes the support of k-itemsets for a given k, and the frequent k-itemsets are passed as input to the next mapper — so candidate generation is restricted level by level, restoring the Apriori pruning. It is <strong>better than one-pass</strong>, but it makes <strong>many passes on the transaction set</strong> and <strong>still generates many key-value pairs on the map-side</strong>. In Hadoop MapReduce each level is a separate job, so every pass means writing to and reading from HDFS.</p>
+      </details>
+
+      <details>
+        <summary>What exactly does YAFIM change, and how much does it gain?</summary>
+        <p>YAFIM is the <strong>Spark version of PApriori</strong>, still k-passes. Two changes: the <strong>transaction set is cached</strong>, so the repeated passes read memory instead of HDFS; and at each iteration the frequent k-itemsets are <strong>collected and broadcasted in a HashTree</strong> rather than shuffled. The gain is <strong>one order of magnitude</strong> over PApriori. Note that the algorithmic logic is unchanged — only the data movement is.</p>
+      </details>
+
+      <details>
+        <summary>What is R-Apriori&rsquo;s single modification, and why does it target the second iteration?</summary>
+        <p>It is an improved YAFIM that <strong>replaces the HashTree with a BloomFilter, only for the map-side generation of 2-itemsets</strong>. It <strong>effectively drops execution time of the second iteration</strong> thanks to less space requirements and less time to generate candidates on the map side. The second iteration is the right target because it is where the candidate set is largest: after 1-itemset pruning many items survive, and the number of candidate pairs is quadratic in that number, so level 2 is the bulge in the lattice.</p>
+      </details>
+
+      <details>
+        <summary>Explain MRA/IMRA and justify why the approach is correct.</summary>
+        <p><strong>Two phase map-reduce jobs.</strong> The first mapper applies <em>sequential Apriori to the local split</em> — its input is the whole split, not the single transaction — and the first reducer simply outputs the list of candidate frequent itemsets. The second map-reduce job restarts from scratch and calculates the support of the locally frequent itemsets. Correctness rests on the principle stated in the slides: <strong>if an itemset&rsquo;s support is never locally frequent in any partition, it cannot be globally frequent</strong>, and conversely <strong>if an itemset is globally frequent it has to be locally frequent somewhere</strong>. So the union of locally frequent sets is a superset of the globally frequent ones — a candidate list with no false negatives. It is a different approach to parallelization and <strong>performs better than k-passes</strong>.</p>
+      </details>
+
+      <details>
+        <summary>How does DFIMA compute support, and what is its limitation?</summary>
+        <p>It is similar to a two phase map-reduce job <strong>but the transaction set is cached</strong>. First it computes the frequent 1-itemsets and, for each, a <strong>boolean vector</strong> where V<sub>i</sub>[t] = 0 if item i is missing in transaction t and 1 otherwise; these vectors are <strong>broadcasted</strong>. The support of a k-itemset is then determined by the <strong>logical AND between the items&rsquo; vectors</strong> — in the slide example, two vectors each with support 5 give s({i,j}) = 2. Then vectors are used to compute frequent k-itemsets. <strong>IO cost is reduced due to caching, but the boolean vectors must fit memory</strong>: each vector has one bit per transaction and there is one per frequent item, so the technique converts a data-scan problem into a memory-residency problem.</p>
+      </details>
+
+      <details>
+        <summary>Looking across all five formulations, what is the general lesson?</summary>
+        <p>That <strong>no design wins on every axis</strong>. Each moves cost from one resource to another: One-pass FIM trades intermediate data for passes; PApriori trades passes for pruning; YAFIM spends memory (caching and broadcasting) to remove HDFS round-trips; R-Apriori spends a smarter data structure to shrink the widest level; MRA/IMRA spends local computation and a per-split memory budget to reduce the pass count to two; DFIMA spends memory on boolean vectors to turn counting into a bitwise operation. Choosing among them is a question about <em>your</em> data — how many transactions, how many items, how much RAM per executor — not a question with a single right answer.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-08-spark-tuning.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-10-streaming.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>BigData 9 Beyond simple MR</em> · Big Data — University of Bologna · Prof. Enrico Gallinucci</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+if (window.hljs) { hljs.highlightAll(); }
+
+/* ---- Bespoke widget: Amdahl calculator ---- */
+(function () {
+  var host = document.getElementById('w-amdahl');
+  if (!host) return;
+  var P = 0.9, S = 16;
+  var ctl = document.createElement('div');
+  ctl.className = 'bd-ctl';
+  ctl.innerHTML = '<label>parallel fraction P <input type="range" id="amP" min="0" max="100" step="1" value="90"> <b id="amPv">90%</b></label>' +
+    '<label>parallel speedup S <input type="range" id="amS" min="1" max="256" step="1" value="16"> <b id="amSv">16x</b></label>';
+  var out = document.createElement('div'); out.className = 'bd-out';
+  var bar = document.createElement('div'); bar.className = 'bd-bar'; bar.style.margin = '.7rem 0';
+  bar.innerHTML = '<i style="width:20%"></i>';
+  host.appendChild(ctl); host.appendChild(bar); host.appendChild(out);
+
+  function render() {
+    var real = 1 / ((1 - P) + (P / S));
+    var ceil = P >= 1 ? Infinity : 1 / (1 - P);
+    var pct = ceil === Infinity ? 100 : Math.min(100, real / ceil * 100);
+    bar.querySelector('i').style.width = pct + '%';
+    out.innerHTML = '';
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['real speedup', real.toFixed(2) + 'x'],
+     ['ceiling 1/(1-P)', ceil === Infinity ? 'unbounded' : ceil.toFixed(2) + 'x'],
+     ['% of ceiling reached', pct.toFixed(0) + '%'],
+     ['wasted parallelism', S <= real ? 'none' : (S / real).toFixed(1) + 'x']].forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ': <b></b>';
+      d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var note = document.createElement('div');
+    note.style.color = 'var(--lk-ink-soft)'; note.style.marginTop = '.4rem';
+    if (P >= 1) {
+      note.textContent = "With nothing serial at all, the speedup is exactly S — but a real job always has a serial part: reading the input, launching tasks, collecting the result.";
+    } else if (pct > 90) {
+      note.textContent = "You are within 10% of the ceiling. Adding more parallelism from here buys almost nothing, while the overhead in parallelization management keeps growing.";
+    } else if (real < 2) {
+      note.textContent = "Barely worth distributing. With this much serial work, a single fast machine may well beat a cluster once you count the scheduling and shuffling overhead.";
+    } else {
+      note.textContent = "Still climbing: parallelism is paying off here. Watch what happens as S grows — the curve flattens towards 1/(1-P) and never passes it.";
+    }
+    out.appendChild(note);
+  }
+  document.getElementById('amP').addEventListener('input', function (e) {
+    P = (+e.target.value) / 100; document.getElementById('amPv').textContent = e.target.value + '%'; render();
+  });
+  document.getElementById('amS').addEventListener('input', function (e) {
+    S = +e.target.value; document.getElementById('amSv').textContent = S + 'x'; render();
+  });
+  render();
+})();
+
+/* ---- Bespoke widget: prefix sum stepper ---- */
+(function () {
+  var host = document.getElementById('w-prefix');
+  if (!host) return;
+  var steps = [
+    { t: '1. Divide input into partitions',
+      d: "The sequence 1 2 3 4 5 6 is split across three partitions. Nothing has been computed yet; the point is only that each machine now owns a contiguous slice.",
+      rows: ['p0:  1   2', 'p1:  3   4', 'p2:  5   6'] },
+    { t: '2-3. Compute partial prefix sums within each partition',
+      d: "Each partition runs the sequential algorithm on its own slice, in parallel, with no communication at all. The results are locally correct and globally wrong: p1 believes its first element is 3, not 6.",
+      rows: ['p0:  1   3', 'p1:  3   7', 'p2:  5   11'] },
+    { t: '4. Save and broadcast the maximum value from each partition',
+      d: "The maximum of a partial prefix sum is that partition total. Three numbers — 3, 7 and 11 — are all the information that has to cross the network.",
+      rows: ['p0 total =  3', 'p1 total =  7', 'p2 total = 11'] },
+    { t: '4b. Turn the totals into offsets',
+      d: "Each partition needs the sum of everything before it. This is itself a prefix sum, but over three values instead of six million, so it is cheap wherever you compute it.",
+      rows: ['p0 offset = 0', 'p1 offset = 3', 'p2 offset = 3 + 7 = 10'] },
+    { t: '5. Add the offsets to the partial results',
+      d: "Every element is corrected locally, in parallel. The result is identical to the sequential answer 1 3 6 10 15 21, obtained with one small broadcast instead of one long chain of dependencies.",
+      rows: ['p0:  1   3', 'p1:  6   10', 'p2:  15   21'] }
+  ];
+  var i = -1;
+  var title = document.createElement('div'); title.className = 'bd-out';
+  var rows = document.createElement('div'); rows.className = 'bd-out'; rows.style.whiteSpace = 'pre';
+  var desc = document.createElement('div'); desc.className = 'bd-out'; desc.style.color = 'var(--lk-ink-soft)';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var next = document.createElement('button'); next.type = 'button'; next.className = 'bd-btn'; next.textContent = 'Next step';
+  var reset = document.createElement('button'); reset.type = 'button'; reset.className = 'bd-btn bd-alt'; reset.textContent = 'Reset';
+
+  function show() {
+    if (i < 0) {
+      title.textContent = 'X = 1 2 3 4 5 6   →   Y = ?';
+      rows.textContent = '(press Next step)';
+      desc.textContent = "Each item requires the previous items to compute the result. Watch how partitioning removes that dependency.";
+      next.disabled = false;
+      return;
+    }
+    title.textContent = steps[i].t;
+    rows.textContent = steps[i].rows.join('\n');
+    desc.textContent = steps[i].d;
+    next.disabled = i >= steps.length - 1;
+  }
+  next.addEventListener('click', function () { if (i < steps.length - 1) { i++; show(); } });
+  reset.addEventListener('click', function () { i = -1; show(); });
+  btns.appendChild(next); btns.appendChild(reset);
+  host.appendChild(title); host.appendChild(rows); host.appendChild(desc); host.appendChild(btns);
+  show();
+})();
+
+/* ---- Bespoke widget: Apriori level by level ---- */
+(function () {
+  var host = document.getElementById('w-apriori');
+  if (!host) return;
+  var T = [
+    ['Bread', 'Milk'],
+    ['Bread', 'Diaper', 'Beer', 'Eggs'],
+    ['Milk', 'Diaper', 'Beer', 'Coke'],
+    ['Bread', 'Milk', 'Diaper', 'Beer'],
+    ['Bread', 'Milk', 'Diaper', 'Coke']
+  ];
+  var MIN = 3;
+  var level = 0, freq = [];
+
+  var head = document.createElement('div'); head.className = 'bd-out';
+  head.textContent = 'threshold = 3/5, i.e. a count of at least 3 out of 5 transactions';
+  var body = document.createElement('div'); body.className = 'bd-out';
+  var note = document.createElement('div'); note.className = 'bd-out'; note.style.color = 'var(--lk-ink-soft)';
+  var btns = document.createElement('div'); btns.className = 'bd-btns';
+  var next = document.createElement('button'); next.type = 'button'; next.className = 'bd-btn'; next.textContent = 'Run next level';
+  var reset = document.createElement('button'); reset.type = 'button'; reset.className = 'bd-btn bd-alt'; reset.textContent = 'Reset';
+
+  function support(set) {
+    var c = 0;
+    T.forEach(function (t) {
+      var all = set.every(function (it) { return t.indexOf(it) >= 0; });
+      if (all) c++;
+    });
+    return c;
+  }
+  function candidates() {
+    if (level === 1) {
+      var items = [];
+      T.forEach(function (t) { t.forEach(function (it) { if (items.indexOf(it) < 0) items.push(it); }); });
+      return items.sort().map(function (it) { return [it]; });
+    }
+    var out = [], seen = {};
+    for (var a = 0; a < freq.length; a++) {
+      for (var b = a + 1; b < freq.length; b++) {
+        var u = freq[a].concat(freq[b].filter(function (x) { return freq[a].indexOf(x) < 0; })).sort();
+        if (u.length !== level) continue;
+        var key = u.join(',');
+        if (seen[key]) continue;
+        seen[key] = 1;
+        out.push(u);
+      }
+    }
+    return out;
+  }
+
+  function run() {
+    level++;
+    var cands = candidates();
+    if (!cands.length) {
+      note.textContent = "No more candidates can be generated: every candidate at this level would contain an infrequent subset. The algorithm terminates, exactly as the pseudocode says — until k = |d| or no more frequent k-itemsets.";
+      next.disabled = true;
+      return;
+    }
+    var kept = [], dropped = [];
+    var wrap = document.createElement('div');
+    var h = document.createElement('div');
+    h.style.color = 'var(--lk-cobalt-dark)'; h.style.fontWeight = '600'; h.style.marginBottom = '.3rem';
+    h.textContent = 'Level k = ' + level + ' — ' + cands.length + ' candidate(s) generated and counted';
+    wrap.appendChild(h);
+    cands.forEach(function (c) {
+      var s = support(c);
+      var chip = document.createElement('span');
+      chip.className = 'bd-chip ' + (s >= MIN ? 'bd-freq' : 'bd-pruned');
+      chip.textContent = '{' + c.join(',') + '} ' + s;
+      wrap.appendChild(chip);
+      if (s >= MIN) kept.push(c); else dropped.push(c);
+    });
+    body.appendChild(wrap);
+    freq = kept;
+    var full = 1;
+    for (var n = 6, r = level, num = 1, den = 1, x = 0; x < r; x++) { num *= (n - x); den *= (x + 1); }
+    full = Math.round(num / den);
+    note.textContent = 'Kept ' + kept.length + ' frequent itemset(s), pruned ' + dropped.length +
+      '. The full lattice has ' + full + ' itemset(s) of this size — the difference is what the Apriori principle saved, because supersets of an infrequent itemset were never generated.';
+    if (!kept.length) {
+      note.textContent += ' Nothing survives, so no level ' + (level + 1) + ' candidate can exist.';
+      next.disabled = true;
+    }
+  }
+  next.addEventListener('click', run);
+  reset.addEventListener('click', function () {
+    level = 0; freq = []; body.innerHTML = ''; next.disabled = false;
+    note.textContent = 'Press Run next level to generate and count the 1-itemsets.';
+  });
+  btns.appendChild(next); btns.appendChild(reset);
+  host.appendChild(head); host.appendChild(body); host.appendChild(note); host.appendChild(btns);
+  note.textContent = 'Press Run next level to generate and count the 1-itemsets.';
+})();
+
+/* ---- Bespoke widget: DFIMA boolean vectors ---- */
+(function () {
+  var host = document.getElementById('w-dfima');
+  if (!host) return;
+  var vi = [0, 0, 1, 1, 0, 1, 1, 0, 1];
+  var vj = [1, 0, 0, 1, 1, 0, 0, 1, 1];
+
+  var rowI = document.createElement('div'); rowI.className = 'bd-btns';
+  var rowJ = document.createElement('div'); rowJ.className = 'bd-btns';
+  var out = document.createElement('div'); out.className = 'bd-out';
+
+  function mkRow(vec, label, row) {
+    var lab = document.createElement('span');
+    lab.className = 'bd-chip';
+    lab.textContent = label;
+    row.appendChild(lab);
+    vec.forEach(function (v, idx) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      function paint() { b.className = vec[idx] ? 'bd-btn' : 'bd-btn bd-alt'; b.textContent = vec[idx]; }
+      b.addEventListener('click', function () { vec[idx] = vec[idx] ? 0 : 1; paint(); render(); });
+      paint();
+      row.appendChild(b);
+    });
+  }
+
+  function render() {
+    var si = vi.reduce(function (a, b) { return a + b; }, 0);
+    var sj = vj.reduce(function (a, b) { return a + b; }, 0);
+    var and = vi.map(function (v, idx) { return v && vj[idx] ? 1 : 0; });
+    var sij = and.reduce(function (a, b) { return a + b; }, 0);
+    out.innerHTML = '';
+    var line = document.createElement('div');
+    line.className = 'bd-vec';
+    line.textContent = 'AND  ' + and.join(' ');
+    out.appendChild(line);
+    var g = document.createElement('div'); g.className = 'bd-grid';
+    [['s({i})', si], ['s({j})', sj], ['s({i,j})', sij]].forEach(function (c) {
+      var d = document.createElement('div'); d.className = 'bd-cell';
+      d.innerHTML = c[0] + ' = <b></b>';
+      d.querySelector('b').textContent = c[1];
+      g.appendChild(d);
+    });
+    out.appendChild(g);
+    var n = document.createElement('div');
+    n.style.color = 'var(--lk-ink-soft)'; n.style.marginTop = '.35rem';
+    n.textContent = "Given item i, V[t] = 0 if the item is missing in transaction t and 1 otherwise. Counting the support of a pair has become a bitwise AND followed by a population count — no scan of the transaction set at all. The price is that every vector has one bit per transaction, and they must all fit in memory.";
+    out.appendChild(n);
+  }
+
+  mkRow(vi, 'i', rowI);
+  mkRow(vj, 'j', rowJ);
+  host.appendChild(rowI); host.appendChild(rowJ); host.appendChild(out);
+  render();
+})();
+</script>
+</body>
+</html>
