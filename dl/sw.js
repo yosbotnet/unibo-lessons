@@ -1,6 +1,6 @@
 /* Deep Learning course PWA. Network-first for course files, cache fallback offline. */
 'use strict';
-const CACHE = 'dl-v1';
+const CACHE = 'dl-v2';
 const FILES = [
   "./",
   "cap-01-introduction.html",
@@ -19,6 +19,8 @@ const FILES = [
   "manifest.webmanifest",
   "assets/lesson-kit.css",
   "assets/lesson-kit.js",
+  "assets/highlight-github.min.css",
+  "assets/highlight.min.js",
   "assets/icon-180.png",
   "assets/icon-192.png",
   "assets/icon-512.png"
