@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 5 — Optimization algorithms · DL</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-04-backpropagation.html">&larr; Ch. 4 — Backpropagation</a>
+    <a href="index.html">Index</a>
+    <a href="cap-06-cnn.html">Ch. 6 — Convolutional neural networks &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Neural networks and training · Chapter 5</div>
+    <h1>Optimization algorithms</h1>
+    <div class="lk-meta"><span>~45 min read</span><span>5 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Optimization versus estimation</a></li>
+      <li><a href="#s2">The three optimization challenges</a></li>
+      <li><a href="#s3">Gradient descent and the learning rate</a></li>
+      <li><a href="#s4">Convexity, and why we do not have it</a></li>
+      <li><a href="#s5">Batch, stochastic and mini-batch</a></li>
+      <li><a href="#s6">Momentum</a></li>
+      <li><a href="#s7">Nesterov accelerated gradient</a></li>
+      <li><a href="#s8">Learning rate scheduling</a></li>
+      <li><a href="#s9">Adaptive learning rates</a></li>
+      <li><a href="#s10">Which algorithm to use?</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="05 - Optimization algorithms URL.pdf#2-5">
+    <h2>1. Optimization versus estimation</h2>
+
+    <p>The chapter opens with a warning: <em>&ldquo;Ultimately, what we really care about is producing a model that performs well on data that we have never seen before. But we can only fit the model to data that we can actually see.&rdquo;</em></p>
+
+    <p>Optimization algorithms matter for a blunt practical reason: <strong>training a complex DL model can take hours, days or even weeks</strong>, and the performance of the optimization algorithm directly affects the model training efficiency. Understanding the principles of the different algorithms and the role of their hyper-parameters lets us tune the trainable parameters in a targeted manner.</p>
+
+    <p>But the goals of optimization and of deep learning are <strong>fundamentally different</strong>, and confusing them is a classic error:</p>
+
+    <table>
+      <tr><th></th><th>Optimization</th><th>Deep learning</th></tr>
+      <tr><td><strong>Concern</strong></td><td>Minimizing an objective</td><td>Finding a suitable model, given a <em>finite</em> amount of data</td></tr>
+      <tr><td><strong>Objective function</strong></td><td>A loss based on the <em>training</em> dataset</td><td>&mdash;</td></tr>
+      <tr><td><strong>Goal</strong></td><td>Reduce the <strong>training error</strong></td><td>Minimize the <strong>generalization error</strong>, producing models whose validity extends beyond the data used to train them</td></tr>
+    </table>
+
+    <p>The two minima do not coincide: the minimum of the training error sits at a different place from the minimum of the test error. So <strong>we need to pay attention to overfitting in addition to using the optimization algorithm to reduce the training error</strong>.</p>
+  </section>
+
+  <section id="s2" data-src="05 - Optimization algorithms URL.pdf#6-9">
+    <h2>2. The three optimization challenges</h2>
+
+    <p>There are many challenges in DL optimization. The slides single out three of the most vexing.</p>
+
+    <table>
+      <tr><th>Challenge</th><th>Definition</th><th>Worked example from the slides</th></tr>
+      <tr>
+        <td><strong>Local minima</strong></td>
+        <td>The smallest values of a function <em>within a given range</em>. A <strong>global minimum</strong> is the smallest value on the entire domain.</td>
+        <td>For <code>f(x) = x &middot; cos(&pi;x)</code> on <code>[&minus;1, 2]</code>, <code>f(&minus;0.25)</code> is a local minimum while <code>f(1.1)</code> is the global minimum.</td>
+      </tr>
+      <tr>
+        <td><strong>Saddle points</strong></td>
+        <td>Any location where all gradients of a function vanish but which is <em>neither a global nor a local minimum</em>.</td>
+        <td>For <code>f(x, y) = x&sup2; &minus; y&sup2;</code>, the point (0, 0) is a maximum with respect to <var>y</var> and a minimum with respect to <var>x</var>; both <code>&part;f/&part;x = 2x</code> and <code>&part;f/&part;y = &minus;2y</code> are zero there.</td>
+      </tr>
+      <tr>
+        <td><strong>Vanishing gradients</strong></td>
+        <td>The gradient becomes vanishingly small, effectively preventing the weight from changing its value.</td>
+        <td>For <code>f(x) = tanh(x)</code>, the output changes very little when the input is very high or very low, so the gradient is close to zero.</td>
+      </tr>
+    </table>
+
+    <p>Two consequences the slides stress:</p>
+    <ul>
+      <li><strong>The loss function of DL models usually has many local minima.</strong> When the initial solution is near a local minimum, the solution obtained by the final iteration may only <em>locally</em> minimize the loss function.</li>
+      <li><strong>There are many more saddle points than minima or maxima.</strong> Optimization might stall at a saddle point even though it is not a minimum, because saddle points are usually surrounded by a <em>plateau of the same error</em>, which is difficult to escape since the gradient is close to zero in all dimensions.</li>
+    </ul>
+    <p>For vanishing gradients the outcome is the same but the cause is different: optimization gets stuck for a long time before making progress, and in the worst case this may completely stop the network from further training.</p>
+
+    <figure class="lk-fig" role="img" aria-label="A one dimensional loss landscape marked with a local minimum, a saddle-like plateau, a global minimum, and a flat region where the gradient vanishes">
+      <svg viewBox="0 0 700 320" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g stroke="var(--lk-rule-soft)" stroke-width="1" fill="none"><path d="M45 265h615M45 30v235"/></g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="2.4">
+          <path d="M60 70 C 110 210, 150 215, 190 175 C 225 140, 255 130, 300 132 C 345 134, 360 138, 400 175 C 445 216, 470 240, 520 240 C 570 240, 610 238, 655 236"/>
+        </g>
+        <g fill="var(--lk-vermilion)">
+          <circle cx="176" cy="190" r="6"/><circle cx="300" cy="132" r="6"/><circle cx="500" cy="240" r="6"/>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="4 3" fill="none">
+          <path d="M176 190v45M300 132v103M500 240v-40"/>
+          <path d="M560 236h95"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="176" y="252">local minimum</text>
+          <text x="300" y="252">saddle / plateau</text>
+          <text x="500" y="192">global minimum</text>
+          <text x="608" y="222">vanishing gradient</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">
+          <text x="38" y="36" text-anchor="end">loss</text>
+          <text x="655" y="286" text-anchor="end">parameter</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="350" y="308">three ways for gradient descent to stop making progress, only one of which is the answer we want</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 5.1</b> &mdash; The landscape gradient descent has to cross. A local minimum traps because the gradient is zero and the curvature is positive; a saddle traps because it sits on a plateau of nearly identical error; a flat saturated region traps because the gradient is close to zero everywhere.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="05 - Optimization algorithms URL.pdf#10-14">
+    <h2>3. Gradient descent and the learning rate</h2>
+
+    <p>Gradient descent is an <strong>iterative optimization algorithm for finding a local minimum of a differentiable function</strong>. To find that minimum we take steps proportional to the negative of the gradient of the function at the current point:</p>
+
+    <pre><code>x &larr; x &minus; &eta; &middot; &nabla;f</code></pre>
+
+    <p>The slides run it on <code>f(x) = x&sup2;</code>, whose gradient is <code>&nabla;f = 2x</code>, starting from <code>x&#8320; = 10</code> with <code>f(x&#8320;) = 100</code>. With <code>&eta; = 0.2</code>:</p>
+    <pre><code>x&#8321; = x&#8320; &minus; &eta; &middot; 2x&#8320; = 10 &minus; 0.2 &middot; 2 &middot; 10 = 6      f(x&#8321;) = 36
+&hellip;
+x&#8321;&#8320; = 0.06                                    f(x&#8321;&#8320;) = 0.004</code></pre>
+
+    <p><code>&eta;</code> determines <strong>how large a step is taken in the opposite direction of the gradient</strong> and is called the <strong>Learning Rate (LR)</strong>. It is one of the most crucial hyper-parameters of an ANN, since it represents the speed at which the network &ldquo;learns&rdquo;. The slides show all three regimes on the same parabola:</p>
+
+    <table>
+      <tr><th>Learning rate</th><th>After 1 step</th><th>After 10 steps</th><th>Diagnosis</th></tr>
+      <tr><td><code>&eta; = 0.05</code> (too small)</td><td><code>x&#8321; = 9</code>, <code>f = 81</code></td><td><code>x&#8321;&#8320; = 3.5</code>, <code>f = 12.16</code></td><td>Updates <var>x</var> very slowly, requiring more iterations to get a better solution.</td></tr>
+      <tr><td><code>&eta; = 0.2</code> (good)</td><td><code>x&#8321; = 6</code>, <code>f = 36</code></td><td><code>x&#8321;&#8320; = 0.06</code>, <code>f = 0.004</code></td><td>Converges quickly to the minimum.</td></tr>
+      <tr><td><code>&eta; = 1.1</code> (too large)</td><td><code>x&#8321; = &minus;12</code>, <code>f = 144</code></td><td><code>x&#8321;&#8320; = 61.9</code>, <code>f = 3833.7</code></td><td><var>x</var> <strong>overshoots the optimal solution and gradually diverges</strong>.</td></tr>
+    </table>
+
+    <p>Reproduce all three yourself: set the learning rate, then step down the parabola.</p>
+
+    <div id="w-lr"></div>
+
+    <p>Analysing the <em>loss trend</em> during training gives the same diagnosis without knowing the true minimum. The slides describe four curves:</p>
+    <ul>
+      <li><strong>low LR</strong> &mdash; the loss decreases but needs a lot more time to converge;</li>
+      <li><strong>high LR</strong> &mdash; the loss achieves a better value than the initial one, but it is still far from optimal;</li>
+      <li><strong>very high LR</strong> &mdash; the loss initially decreases, then it starts to <em>increase</em>;</li>
+      <li><strong>good LR</strong> &mdash; the loss decreases consistently until it reaches the minimum possible value.</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="Four loss curves against epochs showing a slowly decreasing curve for a low learning rate, a curve plateauing above the optimum for a high rate, a curve that decreases then rises for a very high rate, and a curve reaching the minimum for a good rate">
+      <svg viewBox="0 0 700 300" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g stroke="var(--lk-rule-soft)" stroke-width="1" fill="none"><path d="M55 245h600M55 30v215"/></g>
+        <g fill="none" stroke-width="2.4">
+          <path d="M70 55 C 200 105, 380 150, 640 178" stroke="var(--lk-cobalt)"/>
+          <path d="M70 55 C 140 130, 200 152, 640 156" stroke="var(--lk-forest)"/>
+          <path d="M70 55 C 130 145, 190 170, 300 168 C 420 166, 520 110, 640 62" stroke="#B8860B"/>
+          <path d="M70 55 C 130 175, 200 222, 320 231 C 450 238, 540 238, 640 238" stroke="var(--lk-vermilion)"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11">
+          <text x="500" y="200" fill="var(--lk-cobalt)">low LR</text>
+          <text x="500" y="146" fill="var(--lk-forest)">high LR</text>
+          <text x="520" y="76" fill="#B8860B">very high LR</text>
+          <text x="500" y="228" fill="var(--lk-vermilion)">good LR</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">
+          <text x="48" y="36" text-anchor="end">loss</text>
+          <text x="650" y="266" text-anchor="end">epochs</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="350" y="290">the shape of the loss curve alone identifies which of the four regimes you are in</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 5.2</b> &mdash; The four loss trends. Only the vermilion curve reaches the minimum possible value; the amber one, which decreases and then rises, is the signature of a learning rate large enough to overshoot.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s4" data-src="05 - Optimization algorithms URL.pdf#15">
+    <h2>4. Convexity, and why we do not have it</h2>
+
+    <p>Gradient descent finds the <strong>global</strong> minimum if the loss function is <strong>convex</strong>. Unfortunately, almost all optimization problems arising in DL are <strong>non-convex</strong>, and the slides identify the culprit precisely:</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful</span>
+      <p>Introducing non-linearity in the network, by adding hidden layers, makes the loss function <strong>non-convex</strong> and local minima appear. The very thing that gives a deep network its expressive power (Chapter 3) is the thing that destroys the convergence guarantee. In such cases gradient descent only guarantees finding a <em>local</em> minimum, which can be worse than the global one.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="05 - Optimization algorithms URL.pdf#16-25">
+    <h2>5. Batch, stochastic and mini-batch</h2>
+
+    <p>There are three variants of gradient descent, differing in <strong>how much data we use to compute the gradient</strong> of the loss function. Depending on the amount of data, we trade off the <em>accuracy of the parameter update</em> against the <em>time it takes to perform an update</em>.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Batch gradient descent</button>
+        <button class="lk-tab">Stochastic (SGD)</button>
+        <button class="lk-tab">Mini-batch</button>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p>Computes the gradient of the loss function for the <strong>entire training set</strong> and then updates the parameters.</p>
+<pre><code class="language-python">for i in range(num_epochs):
+    grad = compute_gradient(data, params)
+    params = params - learning_rate * grad</code></pre>
+        <p>One <strong>epoch</strong> is when the entire training set is passed forward and backward through the neural network only once.</p>
+        <ul>
+          <li>Guaranteed to converge to the <strong>global</strong> minimum for convex problems and to a <strong>local</strong> minimum for non-convex ones.</li>
+          <li>Can be <strong>very slow</strong> and is <strong>intractable for datasets that do not fit in memory</strong>.</li>
+          <li>Not the best choice for deep neural networks, because it particularly suffers from the local minima and saddle points present in non-convex surfaces.</li>
+        </ul>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p>Performs a parameter update <strong>for each training example</strong>.</p>
+<pre><code class="language-python">for i in range(num_epochs):
+    np.random.shuffle(data)
+    for example in data:
+        grad = compute_gradient(example, params)
+        params = params - learning_rate * grad</code></pre>
+        <p>The training examples are <strong>shuffled to avoid pre-existing order</strong>. SGD is usually much faster than batch gradient descent, but it performs frequent updates with a <strong>high variance</strong> that cause the loss function to fluctuate heavily. That fluctuation cuts both ways:</p>
+        <ul>
+          <li>it <strong>enables SGD to jump to new and potentially better local minima</strong>;</li>
+          <li>it <strong>complicates convergence to the exact minimum</strong>, as SGD keeps overshooting.</li>
+        </ul>
+        <p>It has been demonstrated that when we <em>slowly decrease the learning rate</em>, SGD shows the same convergence behaviour as batch gradient descent.</p>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p>Takes the best from both and performs an update for every <strong>mini-batch</strong> of training examples.</p>
+<pre><code class="language-python">for i in range(num_epochs):
+    np.random.shuffle(data)
+    for batch in get_batches(data, batch_size=64):
+        grad = compute_gradient(batch, params)
+        params = params - learning_rate * grad</code></pre>
+        <p>The <strong>batch size</strong> is the total number of training examples present in a single mini-batch. One <strong>iteration</strong> is when all the training examples of a single mini-batch are passed forward and backward through the network once, so the number of iterations needed to complete one epoch equals the number of batches.</p>
+        <ul>
+          <li>Reduces the variance of the parameter updates, leading to <strong>more stable convergence</strong>.</li>
+          <li>Can make use of highly optimized matrix operations to compute the gradient very efficiently.</li>
+          <li><strong>It is the algorithm typically used to train ANNs</strong>, and the term SGD is usually employed also when mini-batches are used.</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>How to choose the batch size</h3>
+    <p>Typical starting values are <strong>64, 128, 256 or 512</strong>. Increasing the batch size:</p>
+    <ul>
+      <li>allows a computational boost that uses matrix multiplication in the training calculations;</li>
+      <li>requires <strong>fewer epochs</strong> to find a good solution;</li>
+      <li>needs <strong>more memory</strong> for the training process and generally more computational resources.</li>
+    </ul>
+
+    <table>
+      <tr><th></th><th>Stochastic</th><th>Mini-batch</th><th>Batch</th></tr>
+      <tr><td><strong>Batch size</strong></td><td>1</td><td>64 &ndash; 512</td><td>the whole training set</td></tr>
+      <tr><td><strong>Update path</strong></td><td>Heavily fluctuating</td><td>Moderately noisy</td><td>Smooth</td></tr>
+      <tr><td><strong>Computational resources per epoch</strong></td><td>High</td><td>Moderate</td><td>Low</td></tr>
+      <tr><td><strong>Epochs required</strong></td><td>Few</td><td>Moderate</td><td>Many</td></tr>
+    </table>
+
+    <h3>The remaining challenges</h3>
+    <p>Mini-batch gradient descent does not guarantee good convergence and presents a few challenges that need to be addressed &mdash; each of which motivates one of the algorithms in the rest of this chapter:</p>
+    <ul>
+      <li>choosing a proper LR can be difficult;</li>
+      <li>how to adjust the LR during training, by reducing it according to a predefined schedule or when the change in loss between epochs falls below a threshold (&rarr; Section 8);</li>
+      <li>if the data is sparse and the features have very different frequencies, we might not want to update all of them to the same extent, but perform a larger update for rarely occurring features by applying <strong>different LRs to different parameters</strong> (&rarr; Section 9);</li>
+      <li>avoiding getting trapped in the numerous suboptimal local minima of highly non-convex loss functions (&rarr; Sections 6 and 7).</li>
+    </ul>
+  </section>
+
+  <section id="s6" data-src="05 - Optimization algorithms URL.pdf#26-29">
+    <h2>6. Momentum</h2>
+
+    <p>SGD has trouble navigating areas where the surface <strong>curves much more steeply in one dimension than in another</strong>, which are common around local optima. In these scenarios, SGD <em>oscillates across the slopes of the cliff while only making small progress along the bottom</em> towards the local optimum.</p>
+
+    <p>The slides make this concrete with <code>f(x, y) = 0.1x&sup2; + 2y&sup2;</code>, whose gradient is <code>&nabla;f<sup>T</sup> = [0.2x, 4y]</code>, starting from <code>(&minus;5, &minus;2)</code> where <code>f = 10.5</code>, with <code>&eta; = 0.4</code>. Plain gradient descent produces:</p>
+
+    <table>
+      <tr><th>Step</th><th>Update</th><th>Position</th><th>f</th></tr>
+      <tr><td>1</td><td><code>x&#8321; = &minus;5 &minus; 0.4 &middot; 0.2 &middot; (&minus;5)</code>, <code>y&#8321; = &minus;2 &minus; 0.4 &middot; 4 &middot; (&minus;2)</code></td><td>(&minus;4.6, 1.2)</td><td>5</td></tr>
+      <tr><td>2</td><td>same rule</td><td>(&minus;4.2, &minus;0.7)</td><td>2.7</td></tr>
+      <tr><td>3</td><td>same rule</td><td>(&minus;3.9, 0.4)</td><td>1.8</td></tr>
+      <tr><td>4</td><td>same rule</td><td>(&minus;3.6, &minus;0.2)</td><td>1.4</td></tr>
+    </table>
+
+    <p>Look at the <var>y</var> column: <strong>&minus;2, 1.2, &minus;0.7, 0.4, &minus;0.2</strong>. It flips sign every step, wasting the budget on oscillation, while <var>x</var> crawls from &minus;5 to &minus;3.6.</p>
+
+    <p><strong>Momentum</strong> is a method that <em>accelerates SGD in the relevant direction</em> and <em>reduces oscillations</em>. It adds a fraction <code>&beta;</code> of the update vector of the past step to the current update vector:</p>
+
+    <pre><code>v<sub>t</sub> = &beta; &middot; v<sub>t&minus;1</sub> + &nabla;f
+x &larr; x &minus; &eta; &middot; v<sub>t</sub></code></pre>
+
+    <p>The momentum term <code>v<sub>t</sub></code>:</p>
+    <ul>
+      <li><strong>increases</strong> for dimensions whose gradients point in the same directions;</li>
+      <li><strong>reduces</strong> updates for dimensions whose gradients change directions.</li>
+    </ul>
+    <p><code>&beta;</code> is usually set to <strong>0.9</strong> or a similar value. Essentially, when using momentum <em>we push a ball down a hill: the ball accumulates momentum as it rolls downhill, becoming faster and faster on the way</em>. The same thing happens to our parameter updates.</p>
+
+    <p>With <code>&beta; = 0.5</code> and <code>&eta; = 0.4</code> on the same function, the slides get:</p>
+    <table>
+      <tr><th>Step</th><th><code>v<sup>x</sup></code></th><th><code>v<sup>y</sup></code></th><th>Position</th><th>f</th></tr>
+      <tr><td>1</td><td><code>0.5&middot;0 + 0.2&middot;(&minus;5) = &minus;1</code></td><td><code>0.5&middot;0 + 4&middot;(&minus;2) = &minus;8</code></td><td>(&minus;4.6, 1.2)</td><td>5</td></tr>
+      <tr><td>2</td><td><code>&minus;1.4</code></td><td><code>0.8</code></td><td>(&minus;4, 0.9)</td><td>3.2</td></tr>
+      <tr><td>3</td><td><code>&minus;1.5</code></td><td><code>4</code></td><td>(&minus;3.4, &minus;0.7)</td><td>2.1</td></tr>
+      <tr><td>4</td><td><code>&minus;1.4</code></td><td><code>&minus;0.8</code></td><td>(&minus;2.8, &minus;0.4)</td><td>1.1</td></tr>
+    </table>
+    <p>After four steps, momentum has reached <code>f = 1.1</code> where plain gradient descent reached 1.4, and <var>x</var> has travelled from &minus;5 to &minus;2.8 instead of &minus;3.6: the <code>v<sup>x</sup></code> component keeps growing because its gradient always points the same way.</p>
+
+    <figure class="lk-fig" role="img" aria-label="An elongated elliptical valley with a zig-zagging plain gradient descent path making slow progress along the valley floor, next to a momentum path that damps the oscillation and travels further">
+      <svg viewBox="0 0 700 300" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="var(--lk-rule-soft)" stroke-width="1">
+          <ellipse cx="500" cy="150" rx="330" ry="90"/>
+          <ellipse cx="500" cy="150" rx="240" ry="65"/>
+          <ellipse cx="500" cy="150" rx="150" ry="40"/>
+          <ellipse cx="500" cy="150" rx="70" ry="19"/>
+        </g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2">
+          <path d="M195 210 L 220 96 L 245 186 L 268 120 L 288 165"/>
+        </g>
+        <g fill="var(--lk-cobalt)"><circle cx="195" cy="210" r="4"/><circle cx="288" cy="165" r="4"/></g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-width="2.6">
+          <path d="M195 210 L 220 96 L 258 116 L 305 178 L 360 138"/>
+        </g>
+        <g fill="var(--lk-vermilion)"><circle cx="195" cy="210" r="4"/><circle cx="360" cy="138" r="5"/></g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)"><text x="255" y="238">plain gradient descent</text></g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)"><text x="330" y="112">with momentum</text></g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">
+          <text x="170" y="226" text-anchor="end">start</text>
+          <text x="512" y="154">minimum</text>
+        </g>
+        <g fill="var(--lk-ink-soft)"><circle cx="500" cy="150" r="3"/></g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="350" y="278">f(x, y) = 0.1x² + 2y²: steep in y, shallow in x</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 5.3</b> &mdash; The oscillation problem. On a valley that is much steeper in one dimension than the other, plain gradient descent zig-zags across the slopes while barely advancing along the floor. Momentum cancels the alternating component and accumulates the consistent one.</figcaption>
+    </figure>
+
+    <div id="w-momentum"></div>
+  </section>
+
+  <section id="s7" data-src="05 - Optimization algorithms URL.pdf#30-31">
+    <h2>7. Nesterov accelerated gradient</h2>
+
+    <p>The slides then criticise their own metaphor: <em>&ldquo;a ball that rolls down a hill, blindly following the slope, is highly unsatisfactory.&rdquo;</em></p>
+
+    <p><strong>Nesterov Accelerated Gradient (NAG)</strong> uses a smarter momentum term, one that <strong>has a notion of where it is going, so that it knows to slow down before the function slopes up again</strong>:</p>
+
+    <pre><code>v<sub>t</sub> = &beta; &middot; v<sub>t&minus;1</sub> + &nabla;f(x &minus; &eta; &middot; &beta; &middot; v<sub>t&minus;1</sub>)
+x &larr; x &minus; &eta; &middot; v<sub>t</sub></code></pre>
+
+    <p>The change is entirely in <em>where the gradient is evaluated</em>. The quantity <code>x &minus; &eta; &middot; &beta; &middot; v<sub>t&minus;1</sub></code> is an <strong>approximation of the next position</strong> of the parameter <var>x</var>, so we can <em>look ahead</em> by calculating the gradient with respect to the approximate future position rather than the current one.</p>
+
+    <table>
+      <tr><th></th><th>Momentum</th><th>NAG</th></tr>
+      <tr><td>Gradient evaluated at</td><td><code>x</code> (where we are)</td><td><code>x &minus; &eta;&beta;v<sub>t&minus;1</sub></code> (where we are heading)</td></tr>
+      <tr><td>Behaviour approaching a wall</td><td>Keeps accelerating, then overshoots</td><td>Sees the upslope early and brakes</td></tr>
+    </table>
+
+    <p>With <code>&eta; = 0.3</code> and <code>&beta; = 0.9</code> on <code>f(x, y) = 0.1x&sup2; + 2y&sup2;</code> from <code>(&minus;5, &minus;2)</code>, the slides trace: (&minus;4.7, 0.4) with <code>f = 2.5</code>; (&minus;4.2, &minus;0.5) with <code>f = 2.3</code>; (&minus;3.5, 0.3) with <code>f = 1.4</code>; (&minus;2.7, &minus;0.2) with <code>f = 0.8</code>.</p>
+  </section>
+
+  <section id="s8" data-src="05 - Optimization algorithms URL.pdf#32-37">
+    <h2>8. Learning rate scheduling</h2>
+
+    <p><strong>Adjusting the learning rate during training is often just as important as the selection of the optimizer.</strong> The reasoning is geometric:</p>
+    <ul>
+      <li>a <strong>high</strong> LR is desirable <em>at the beginning</em>, since the weights are far away from the minima;</li>
+      <li>a <strong>low</strong> LR is more appropriate <em>at the end phase</em> of learning, because the weights are already close to the minima, which increases the chance of actually reaching the minimum.</li>
+    </ul>
+
+    <p>Three aspects have to be considered:</p>
+    <table>
+      <tr><th>Aspect</th><th>The trade-off</th></tr>
+      <tr><td><strong>Magnitude</strong></td><td>If the LR is too large, optimization diverges; if too small, it takes too long to train or we end up with a suboptimal result.</td></tr>
+      <tr><td><strong>Rate of decay</strong></td><td>If the LR remains large we may bounce around the minimum without reaching it.</td></tr>
+      <tr><td><strong>Initialization</strong></td><td>How the parameters are set initially and how they evolve. Large steps at the beginning might not be useful, because the initial parameters are random and so the initial update directions might be meaningless too.</td></tr>
+    </table>
+
+    <p>Knowing <em>when</em> to decay is itself delicate: <strong>decay it slowly and you waste computation bouncing around with little improvement; decay it too aggressively and the system cools too quickly, unable to reach the best position it can.</strong></p>
+
+    <h3>The three decay schedules</h3>
+    <table>
+      <tr><th>Schedule</th><th>Formula</th><th>Hyper-parameters</th></tr>
+      <tr>
+        <td><strong>Step decay</strong></td>
+        <td><code>&eta; = &eta;&#8320; &middot; &delta;<sup>t/s</sup></code></td>
+        <td>Reduces the initial LR <code>&eta;&#8320;</code> by a factor <code>&delta;</code> every predefined number of epochs or iterations <code>s</code>; <var>t</var> is the number of executed epochs or iterations.</td>
+      </tr>
+      <tr>
+        <td><strong>Exponential decay</strong></td>
+        <td><code>&eta; = &eta;&#8320; &middot; e<sup>&minus;k&middot;t</sup></code></td>
+        <td><code>&eta;&#8320;</code> and <code>k</code>; <var>t</var> is the current epoch or iteration number.</td>
+      </tr>
+      <tr>
+        <td><strong>Time-based decay</strong></td>
+        <td><code>&eta; = &eta;&#8320; / (1 + k &middot; t)</code></td>
+        <td><code>&eta;&#8320;</code> and <code>k</code>.</td>
+      </tr>
+    </table>
+
+    <p>The slides plot all three over 30 epochs with <code>&eta;&#8320; = 0.1</code>, <code>&delta; = 0.2</code>, <code>s = 10</code>, <code>k = 0.05</code>. Compare them below with those exact values, then change them.</p>
+
+    <div id="w-sched"></div>
+
+    <h3>Warmup</h3>
+    <p>In some cases the <strong>random initialization of the parameters does not guarantee a good solution</strong>, especially if a large LR is used at the beginning, leading to divergence. Choosing a sufficiently small LR to prevent early divergence works, but then progress is very slow.</p>
+    <p>A simple solution is a <strong>warmup period</strong>, during which the LR <em>increases</em> to its initial maximum, after which we cool the rate down until the end of the optimization process. The slides plot a warmup rising to about 0.3 over the first 10 epochs before the decay begins.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Learning rate against epochs showing step decay as a staircase, exponential decay and time-based decay as smooth curves, and separately a warmup profile that rises before falling">
+      <svg viewBox="0 0 700 320" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g stroke="var(--lk-rule-soft)" stroke-width="1" fill="none"><path d="M55 240h590M55 30v210"/></g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2">
+          <path d="M60 50h130v75h130v42h130v22h100"/>
+        </g>
+        <g fill="none" stroke="var(--lk-forest)" stroke-width="2.2" stroke-dasharray="7 4">
+          <path d="M60 50 C 130 108, 200 150, 290 180 C 390 212, 500 228, 620 234"/>
+        </g>
+        <g fill="none" stroke="#B8860B" stroke-width="2.2">
+          <path d="M60 50 C 120 96, 190 130, 300 160 C 420 192, 520 208, 620 216"/>
+        </g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-width="2.4">
+          <path d="M60 232 L 150 62 C 260 78, 420 150, 620 205"/>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1" stroke-dasharray="4 3" fill="none"><path d="M150 62v178"/></g>
+        <g font-family="var(--lk-mono)" font-size="11">
+          <text x="330" y="112" fill="var(--lk-cobalt)">step decay (δ = 0.2, s = 10)</text>
+          <text x="330" y="200" fill="var(--lk-forest)">exponential decay (k = 0.05)</text>
+          <text x="440" y="236" fill="#B8860B">time-based decay</text>
+          <text x="160" y="52" fill="var(--lk-vermilion)">warmup, then cool down</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">
+          <text x="48" y="36" text-anchor="end">η</text>
+          <text x="48" y="54" text-anchor="end">η₀</text>
+          <text x="640" y="262" text-anchor="end">epochs</text>
+          <text x="150" y="262" text-anchor="middle">warmup ends</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="350" y="300">step decay drops in cliffs; the other two fall smoothly; warmup climbs first to survive random initialization</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 5.4</b> &mdash; Four learning rate profiles over training. Step decay is a staircase (multiply by <code>&delta;</code> every <code>s</code> epochs); exponential and time-based fall continuously; warmup inverts the start, rising to the maximum before any decay begins.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s9" data-src="05 - Optimization algorithms URL.pdf#38-50">
+    <h2>9. Adaptive learning rates</h2>
+
+    <p>Schedules have two weaknesses. First, <strong>their hyper-parameters have to be defined in advance and they heavily depend on the type of model and problem</strong>. Second, <strong>the same LR is applied to all weight updates</strong> &mdash; but with sparse data we may want to update the weights to different extents.</p>
+
+    <p>We need to decrease the value of the LR <em>differently for each weight</em> as training proceeds. There are four representative methods: <strong>Adagrad</strong>, <strong>RMSProp</strong>, <strong>Adadelta</strong> and <strong>Adam</strong>.</p>
+
+    <h3>The sparse feature problem</h3>
+    <p>The slides motivate it with a single neuron with three inputs and a sigmoid activation. The gradient of <code>out</code> with respect to a particular weight is:</p>
+    <pre><code>&nabla;w<sub>i</sub> = &part;out/&part;w<sub>i</sub> = (&part;&sigma;/&part;net) &middot; in<sub>i</sub> = (1 &minus; &sigma;(net)) &middot; &sigma;(net) &middot; in<sub>i</sub></code></pre>
+    <p>If there are <var>n</var> data points, the total gradient is the sum over all of them. Now ask: <strong>what happens if the feature <code>in<sub>i</sub></code> is very sparse</strong>, that is, its value is 0 for most of the <var>n</var> data points? It is fair to assume that <code>&nabla;w<sub>i</sub></code> will be 0 for most data points, and hence <strong><code>w<sub>i</sub></code> will not get enough updates</strong>. This is a problem if <code>in<sub>i</sub></code> is both sparse <em>and</em> important. We would like to take those rare updates seriously &mdash; but choosing a different LR for each weight by hand is unfeasible with thousands or millions of weights.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Adagrad</button>
+        <button class="lk-tab">RMSProp</button>
+        <button class="lk-tab">Adadelta</button>
+        <button class="lk-tab">Adam</button>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p><strong>Adaptive Gradients</strong> adapts the LR to the parameters, performing <strong>larger updates for infrequent parameters and smaller updates for frequent ones</strong>. For this reason it is well suited to large-scale sparse data. It adjusts the LR in proportion to the update history: <em>more updates means more decay</em>.</p>
+        <pre><code>s<sub>t</sub> = s<sub>t&minus;1</sub> + (&nabla;f)&sup2;
+x &larr; x &minus; &eta; / &radic;(s<sub>t</sub> + &epsilon;) &middot; &nabla;f</code></pre>
+        <p>The history of the gradient is accumulated in <code>s<sub>t</sub></code>, and <code>&epsilon;</code> is a smoothing term to avoid division by zero. The smaller the accumulated gradient, the smaller <code>s<sub>t</sub></code> and therefore the <em>bigger</em> the effective learning rate, since <code>s<sub>t</sub></code> divides <code>&eta;</code>.</p>
+        <table>
+          <tr><th>Benefit</th><th>Weakness</th></tr>
+          <tr>
+            <td>Eliminates the need to manually tune the learning rate.</td>
+            <td>The <strong>accumulation of the squared gradients</strong>: during training the accumulated sum grows, the LR decreases, becoming <em>infinitesimally small</em> until the network is no longer able to acquire additional knowledge.</td>
+          </tr>
+        </table>
+        <p>Slide example with <code>&eta; = 0.4</code>, <code>&epsilon; = 10<sup>&minus;6</sup></code> on <code>f(x, y) = 0.1x&sup2; + 2y&sup2;</code> from (&minus;5, &minus;2): (&minus;4.6, &minus;1.6) with <code>f = 7.2</code>, then (&minus;4.3, &minus;1.3) with <code>f = 5.2</code>, then (&minus;4.1, &minus;1.1) with <code>f = 4.1</code>.</p>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p><strong>Root Mean Squared Propagation</strong> was introduced to reduce the aggressive decreasing of the LR of Adagrad. It changes the gradient accumulation part from a <em>sum</em> of squared gradients to an <strong>exponential weighted average</strong> of squared gradients:</p>
+        <pre><code>s<sub>t</sub> = &gamma; &middot; s<sub>t&minus;1</sub> + (1 &minus; &gamma;) &middot; (&nabla;f)&sup2;
+x &larr; x &minus; &eta; / &radic;(s<sub>t</sub> + &epsilon;) &middot; &nabla;f</code></pre>
+        <p><code>&gamma;</code> is a hyper-parameter usually set to <strong>0.9</strong>. Because old contributions decay geometrically instead of accumulating forever, <code>s<sub>t</sub></code> stops growing without bound and the learning rate stops collapsing.</p>
+        <p>Slide example with <code>&eta; = 0.4</code>, <code>&gamma; = 0.9</code>, <code>&epsilon; = 10<sup>&minus;6</sup></code>: (&minus;3.7, &minus;0.7) with <code>f = 2.3</code>, then (&minus;2.8, &minus;0.2) with <code>f = 0.9</code>, then (&minus;2.1, &minus;0.1) with <code>f = 0.5</code> &mdash; markedly faster than Adagrad on the same problem.</p>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p>Another variant of Adagrad, proposed to overcome its main drawback. Like RMSProp it computes the gradient accumulation as an exponential weighted average of squared gradients, but <strong>differently from RMSProp it does not require a learning rate to be set</strong>, since it uses the <em>amount of change itself</em> as calibration for future change:</p>
+        <pre><code>s<sub>t</sub> = &gamma; &middot; s<sub>t&minus;1</sub> + (1 &minus; &gamma;) &middot; (&nabla;f)&sup2;
+
+&nabla;f&#771; = &radic;(&Delta;x<sub>t&minus;1</sub> + &epsilon;) / &radic;(s<sub>t</sub> + &epsilon;) &middot; &nabla;f
+
+x &larr; x &minus; &nabla;f&#771;
+
+&Delta;x<sub>t</sub> = &gamma; &middot; &Delta;x<sub>t&minus;1</sub> + (1 &minus; &gamma;) &middot; (&nabla;f&#771;)&sup2;</code></pre>
+        <p>Slide example with <code>&gamma; = 0.9</code>, <code>&epsilon; = 10<sup>&minus;2</sup></code>: (&minus;4.7, &minus;1.7) with <code>f = 8</code>, then (&minus;4.4, &minus;1.4) with <code>f = 5.8</code>. Note that no <code>&eta;</code> appears anywhere.</p>
+      </div>
+
+      <div class="lk-tabpanel">
+        <p><strong>Adaptive Moment Estimation</strong> combines the techniques described before into a very efficient learning algorithm. It keeps an exponential weighted average of past gradients, <em>like Momentum</em>:</p>
+        <pre><code>v<sub>t</sub> = &beta;<sub>1</sub> &middot; v<sub>t&minus;1</sub> + (1 &minus; &beta;<sub>1</sub>) &middot; &nabla;f</code></pre>
+        <p>and an exponential weighted average of squared gradients, <em>like RMSProp and Adadelta</em>:</p>
+        <pre><code>s<sub>t</sub> = &beta;<sub>2</sub> &middot; s<sub>t&minus;1</sub> + (1 &minus; &beta;<sub>2</sub>) &middot; (&nabla;f)&sup2;</code></pre>
+        <p><code>&beta;<sub>1</sub></code> and <code>&beta;<sub>2</sub></code> are nonnegative weighting hyper-parameters usually set to <strong>0.9</strong> and <strong>0.999</strong>.</p>
+        <p>The authors observe that both <code>v<sub>t</sub></code> and <code>s<sub>t</sub></code> are <strong>biased towards zero</strong>, during the initial time steps and when the decay rates are small (that is, when the betas are close to 1). To counter these biases a normalization is applied:</p>
+        <pre><code>v&#770;<sub>t</sub> = v<sub>t</sub> / (1 &minus; &beta;<sub>1</sub><sup>t</sup>)
+s&#770;<sub>t</sub> = s<sub>t</sub> / (1 &minus; &beta;<sub>2</sub><sup>t</sup>)</code></pre>
+        <p>and the update equation is:</p>
+        <pre><code>x &larr; x &minus; &eta; / &radic;(s&#770;<sub>t</sub> + &epsilon;) &middot; v&#770;<sub>t</sub></code></pre>
+        <p>Slide example with <code>&eta; = 0.4</code>, <code>&beta;<sub>1</sub> = 0.9</code>, <code>&beta;<sub>2</sub> = 0.999</code>, <code>&epsilon; = 10<sup>&minus;6</sup></code>: from (&minus;5, &minus;2) the first step gives <code>v&#770;<sub>1</sub><sup>x</sup> = &minus;1</code>, <code>s&#770;<sub>1</sub><sup>x</sup> = 1</code> and lands at (&minus;4.6, &minus;1.6) with <code>f = 7.2</code>.</p>
+      </div>
+    </div>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Read the family as one lineage. <strong>Momentum</strong> smooths the <em>gradient</em>. <strong>Adagrad</strong> scales the step by accumulated <em>squared</em> gradients but never forgets. <strong>RMSProp</strong> makes that memory exponential so it can forget. <strong>Adadelta</strong> removes <code>&eta;</code> entirely by calibrating on past changes. <strong>Adam</strong> keeps both a smoothed gradient and a smoothed squared gradient, and corrects both for their initial bias towards zero.</p>
+    </div>
+
+    <div id="w-adaptive"></div>
+  </section>
+
+  <section id="s10" data-src="05 - Optimization algorithms URL.pdf#51-53">
+    <h2>10. Which algorithm to use?</h2>
+
+    <p>The slides give practical guidance rather than a ranking:</p>
+    <ul>
+      <li><strong>SGD usually finds a minimum</strong>, but it might take significantly longer than other optimizers.</li>
+      <li><strong>SGD, Momentum and NAG do not work well with sparse data.</strong></li>
+      <li>If the data is sparse, the best results can be achieved using one of the <strong>adaptive LR methods</strong>.</li>
+      <li><strong>Adam seems to be the default choice.</strong></li>
+    </ul>
+
+    <p>Three caveats follow, and they are the kind of detail that separates a good answer from an excellent one:</p>
+    <ul>
+      <li>While adaptive methods seem best to train an ANN <em>from scratch</em>, they could be <strong>too aggressive in a fine-tuning process</strong> due to the high initial LR. Often in such cases <strong>SGD performs better</strong>.</li>
+      <li>Many papers report that <strong>SGD with momentum</strong> (Nesterov or classical) with a simple LR schedule also works well in practice.</li>
+      <li>If it is necessary to save a model to resume training later, <strong>some optimizers such as Adam need to store their internal state</strong>; otherwise, when training restarts, they operate differently.</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>&ldquo;Which optimizer would you use and why?&rdquo; expects a conditional answer, not a name. Adam as the default; an adaptive method whenever the data is sparse (because SGD, Momentum and NAG handle sparsity badly); SGD, possibly with momentum and a simple schedule, for fine-tuning where an adaptive method would be too aggressive. Add the state-saving caveat and the answer is complete.</p>
+    </div>
+  </section>
+
+  <section id="s11" data-src="05 - Optimization algorithms URL.pdf#54-55">
+    <h2>11. Chapter summary</h2>
+    <ul>
+      <li>Minimizing the training error does not guarantee that we find the best set of parameters to minimize the <strong>generalization</strong> error.</li>
+      <li>The optimization problems may have many <strong>local minima</strong> and <strong>saddle points</strong>; <strong>vanishing gradients</strong> can cause optimization to stall.</li>
+      <li><strong>Learning rates matter.</strong> Too large and we diverge, too small and we do not make progress.</li>
+      <li>Generally, DL problems are <strong>non-convex</strong>, and gradient descent can get stuck in local minima.</li>
+      <li><strong>SGD is more effective and efficient than batch gradient descent.</strong></li>
+      <li><strong>Momentum</strong> added a mechanism for aggregating a history of past gradients to accelerate convergence.</li>
+      <li>Decreasing the LR during training can lead to improved accuracy and reduced overfitting; a <strong>warmup period</strong> before optimization can prevent divergence.</li>
+      <li><strong>Adagrad</strong> used per-coordinate scaling to allow for a computationally efficient preconditioner; <strong>RMSProp</strong> decoupled per-coordinate scaling from a LR adjustment; <strong>Adam</strong> combines features of many optimization algorithms into a fairly robust update rule.</li>
+      <li>Different choices of optimization algorithm and LR scheduling can lead to rather different amounts of <strong>generalization and overfitting</strong>.</li>
+    </ul>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>How do the goals of optimization and of deep learning differ?</summary>
+        <p>Optimization is primarily concerned with <strong>minimizing an objective</strong>; its objective function is a loss based on the <em>training</em> dataset, so its goal is to reduce the <strong>training error</strong>. Deep learning is concerned with <strong>finding a suitable model given a finite amount of data</strong>, producing models whose validity extends beyond the training data, so its goal is to minimize the <strong>generalization error</strong>. The two minima are at different places, which is why overfitting must be watched alongside the optimizer.</p>
+      </details>
+
+      <details>
+        <summary>Define a saddle point and explain why it is worse than it looks.</summary>
+        <p>A saddle point is any location where <strong>all gradients vanish but which is neither a global nor a local minimum</strong> &mdash; for <code>f(x, y) = x&sup2; &minus; y&sup2;</code>, the origin is a minimum in <var>x</var> and a maximum in <var>y</var>. There are <strong>many more saddle points than minima or maxima</strong>, and they are usually surrounded by a <em>plateau of the same error</em>, so escaping is difficult because the gradient is close to zero in all dimensions.</p>
+      </details>
+
+      <details>
+        <summary>Using f(x) = x&sup2; from x&#8320; = 10, show what three different learning rates do.</summary>
+        <p><code>&nabla;f = 2x</code>, so <code>x &larr; x &minus; &eta;&middot;2x</code>. With <code>&eta; = 0.2</code>: <code>x&#8321; = 6</code> and after ten steps <code>x&#8321;&#8320; = 0.06</code> with <code>f = 0.004</code> &mdash; good convergence. With <code>&eta; = 0.05</code>: <code>x&#8321; = 9</code>, and after ten steps only <code>x&#8321;&#8320; = 3.5</code> with <code>f = 12.16</code> &mdash; too slow. With <code>&eta; = 1.1</code>: <code>x&#8321; = &minus;12</code> and after ten steps <code>x&#8321;&#8320; = 61.9</code> with <code>f = 3833.7</code> &mdash; it overshoots and diverges.</p>
+      </details>
+
+      <details>
+        <summary>Why are deep learning loss functions non-convex, and what does that cost us?</summary>
+        <p>Because <strong>introducing non-linearity by adding hidden layers makes the loss function non-convex</strong> and local minima appear. Gradient descent finds the global minimum only for convex functions; on a non-convex surface it guarantees only a <em>local</em> minimum, which can be worse than the global one.</p>
+      </details>
+
+      <details>
+        <summary>Compare the three gradient descent variants.</summary>
+        <p><strong>Batch</strong> computes the gradient over the entire training set: it converges to the global minimum for convex problems and a local one otherwise, but it is very slow, intractable when the data does not fit in memory, and suffers particularly from local minima and saddle points. <strong>SGD</strong> updates for each example after shuffling: much faster, with high-variance updates whose fluctuation both enables jumps to better minima and complicates exact convergence. <strong>Mini-batch</strong> updates per batch (typically 64&ndash;512): reduced variance, more stable convergence, efficient matrix operations, and it is the algorithm typically used to train ANNs.</p>
+      </details>
+
+      <details>
+        <summary>What is the difference between an epoch and an iteration?</summary>
+        <p>An <strong>epoch</strong> is when the entire training set is passed forward and backward through the network once. An <strong>iteration</strong> is when all the training examples of a <em>single mini-batch</em> are passed forward and backward once. The number of iterations needed to complete one epoch equals the number of batches.</p>
+      </details>
+
+      <details>
+        <summary>What does increasing the batch size buy, and what does it cost?</summary>
+        <p>It buys a computational boost from matrix multiplication in the training calculations and requires <strong>fewer epochs</strong> to find a good solution. It costs <strong>more memory</strong> for the training process and generally more computational resources.</p>
+      </details>
+
+      <details>
+        <summary>What problem does momentum solve, and how?</summary>
+        <p>SGD has trouble where the surface <strong>curves much more steeply in one dimension than another</strong>: it oscillates across the slopes while making only small progress along the bottom. Momentum adds a fraction <code>&beta;</code> of the previous update to the current one, <code>v<sub>t</sub> = &beta;v<sub>t&minus;1</sub> + &nabla;f</code> and <code>x &larr; x &minus; &eta;v<sub>t</sub></code>. The momentum term <strong>increases for dimensions whose gradients point the same way</strong> and <strong>reduces updates for dimensions whose gradients change direction</strong>. <code>&beta;</code> is usually 0.9.</p>
+      </details>
+
+      <details>
+        <summary>How does NAG differ from classical momentum?</summary>
+        <p>Only in <em>where the gradient is evaluated</em>. NAG computes <code>v<sub>t</sub> = &beta;v<sub>t&minus;1</sub> + &nabla;f(x &minus; &eta;&beta;v<sub>t&minus;1</sub>)</code>, using the gradient at an <strong>approximation of the next position</strong> rather than the current one. This look-ahead gives it a notion of where it is going, so it knows to <strong>slow down before the function slopes up again</strong>, instead of blindly following the slope like a rolling ball.</p>
+      </details>
+
+      <details>
+        <summary>Write the three learning rate decay schedules.</summary>
+        <p><strong>Step decay</strong>: <code>&eta; = &eta;&#8320; &middot; &delta;<sup>t/s</sup></code>, reducing the initial LR by a factor <code>&delta;</code> every <code>s</code> epochs. <strong>Exponential decay</strong>: <code>&eta; = &eta;&#8320; &middot; e<sup>&minus;kt</sup></code>. <strong>Time-based decay</strong>: <code>&eta; = &eta;&#8320; / (1 + kt)</code>. In all three, <var>t</var> is the number of executed epochs or iterations.</p>
+      </details>
+
+      <details>
+        <summary>What is a warmup period and why is it used?</summary>
+        <p>A period at the start of training during which the LR <strong>increases</strong> to its initial maximum, before being cooled down until the end of optimization. It exists because the random initialization of the parameters does not guarantee a good solution: a large LR at the very beginning can diverge, while a permanently small one makes progress very slow. Warmup avoids both.</p>
+      </details>
+
+      <details>
+        <summary>Why does Adagrad help with sparse features, and what eventually goes wrong?</summary>
+        <p>The gradient for a weight is proportional to its input, so a <strong>sparse feature produces a zero gradient on most data points</strong> and its weight never gets enough updates. Adagrad divides the LR by <code>&radic;(s<sub>t</sub> + &epsilon;)</code> where <code>s<sub>t</sub></code> accumulates squared gradients, so rarely updated parameters keep a large effective LR. The weakness is that this accumulation is a <em>sum</em>: it grows monotonically, the LR becomes infinitesimally small, and the network is no longer able to acquire additional knowledge.</p>
+      </details>
+
+      <details>
+        <summary>How do RMSProp, Adadelta and Adam each improve on Adagrad?</summary>
+        <p><strong>RMSProp</strong> replaces the sum of squared gradients with an <strong>exponential weighted average</strong> (<code>&gamma;</code> usually 0.9), so the accumulator can forget and the LR stops collapsing. <strong>Adadelta</strong> does the same but additionally <strong>removes the learning rate entirely</strong>, using the amount of past change <code>&Delta;x<sub>t&minus;1</sub></code> as calibration for future change. <strong>Adam</strong> keeps <em>both</em> an exponential average of gradients (like momentum, <code>&beta;<sub>1</sub> = 0.9</code>) and of squared gradients (like RMSProp, <code>&beta;<sub>2</sub> = 0.999</code>), and applies a <strong>bias correction</strong> because both are biased towards zero during the initial time steps.</p>
+      </details>
+
+      <details>
+        <summary>When should you not use Adam?</summary>
+        <p>In a <strong>fine-tuning</strong> process: adaptive methods can be too aggressive there because of the high initial LR, and SGD often performs better. Also remember that Adam must <strong>store its internal state</strong> if training is to be paused and resumed, otherwise it operates differently on restart.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-04-backpropagation.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-06-cnn.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Source: deck <em>05 &ndash; Optimization algorithms</em> &middot; Deep Learning (74029), University of Bologna, a.y. 2025/2026 &middot; Prof. Matteo Ferrara</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- helper: build a labelled slider ---- */
+function lkSlider(parent, label, min, max, step, value, fmt, onchange) {
+  var l = document.createElement('label');
+  l.style.cssText = 'font-family:var(--lk-mono);font-size:.8rem;display:flex;flex-direction:column;gap:.2rem';
+  var out = document.createElement('b'); out.textContent = fmt(value);
+  var inp = document.createElement('input');
+  inp.type = 'range'; inp.min = String(min); inp.max = String(max); inp.step = String(step); inp.value = String(value);
+  inp.setAttribute('aria-label', label);
+  inp.addEventListener('input', function () { out.textContent = fmt(+inp.value); onchange(+inp.value); });
+  l.appendChild(document.createTextNode(label));
+  l.appendChild(inp); l.appendChild(out);
+  parent.appendChild(l);
+  return { input: inp, out: out, set: function (v) { inp.value = String(v); out.textContent = fmt(v); } };
+}
+
+/* ---- Bespoke: learning rate stepper on the parabola f(x) = x^2 ---- */
+(function () {
+  var host = document.getElementById('w-lr');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Gradient descent on f(x) = x², step by step</h4>' +
+    '<p class="lk-step-sub">Start at x₀ = 10 where f = 100, exactly as in the slides. The gradient is ∇f = 2x, so each step is x ← x − η·2x.</p>' +
+    '<div class="lr-rows" style="display:flex;flex-wrap:wrap;gap:1.2rem;margin:.6rem 0"></div>' +
+    '<div class="lk-step-btns"><button type="button" class="lr-preset" data-e="0.05">η = 0.05 (too small)</button>' +
+      '<button type="button" class="lr-preset" data-e="0.2">η = 0.2 (good)</button>' +
+      '<button type="button" class="lr-preset" data-e="1.1">η = 1.1 (too large)</button></div>' +
+    '<svg class="lr-plot" viewBox="0 0 640 240" style="width:100%;height:auto;margin:.6rem 0" xmlns="http://www.w3.org/2000/svg"></svg>' +
+    '<div class="lk-step-state">' +
+      '<div class="lk-step-box">step = <b class="lr-n"></b></div>' +
+      '<div class="lk-step-box">x = <b class="lr-x"></b></div>' +
+      '<div class="lk-step-box">f(x) = <b class="lr-f"></b></div>' +
+      '<div class="lk-step-box">∇f = <b class="lr-g"></b></div>' +
+    '</div>' +
+    '<div class="lk-step-verdict lr-v"></div>' +
+    '<div class="lk-step-btns"><button type="button" class="lr-step">Take one step</button><button type="button" class="lr-ten">Take ten steps</button><button type="button" class="lk-step-reset lr-reset">Reset</button></div>';
+  var eta = 0.2, x = 10, n = 0, path = [10];
+  var rows = host.querySelector('.lr-rows');
+  var etaS = lkSlider(rows, 'learning rate η', 0.01, 1.4, 0.01, eta, function (v) { return v.toFixed(2); }, function (v) { eta = v; reset(); });
+  var plot = host.querySelector('.lr-plot');
+  var en = host.querySelector('.lr-n'), ex = host.querySelector('.lr-x'), ef = host.querySelector('.lr-f'), eg = host.querySelector('.lr-g'), ev = host.querySelector('.lr-v');
+  var X0 = 40, X1 = 620, Y0 = 20, Y1 = 200, XR = 14, YMAX = 200;
+  function px(v) { return (X0 + X1) / 2 + v / XR * ((X1 - X0) / 2); }
+  function py(v) { return Y1 - Math.min(v, YMAX) / YMAX * (Y1 - Y0); }
+  function reset() { x = 10; n = 0; path = [10]; render(); }
+  function step() {
+    if (Math.abs(x) > 1e7) return;
+    x = x - eta * 2 * x; n++; path.push(x);
+    if (path.length > 60) path.shift();
+    render();
+  }
+  function render() {
+    var d = '';
+    for (var i = 0; i <= 200; i++) {
+      var v = -XR + 2 * XR * i / 200;
+      d += (i ? 'L' : 'M') + px(v).toFixed(1) + ' ' + py(v * v).toFixed(1) + ' ';
+    }
+    var pts = '', marks = '';
+    path.forEach(function (v, i) {
+      if (Math.abs(v) > XR) return;
+      pts += (pts ? 'L' : 'M') + px(v).toFixed(1) + ' ' + py(v * v).toFixed(1) + ' ';
+      marks += '<circle cx="' + px(v).toFixed(1) + '" cy="' + py(v * v).toFixed(1) + '" r="' + (i === path.length - 1 ? 5 : 3) +
+        '" fill="' + (i === path.length - 1 ? 'var(--lk-vermilion)' : 'var(--lk-cobalt)') + '"/>';
+    });
+    plot.innerHTML =
+      '<g stroke="var(--lk-rule-soft)" stroke-width="1" fill="none"><path d="M' + X0 + ' ' + Y1 + 'H' + X1 + '"/><path d="M' + px(0) + ' ' + Y0 + 'V' + Y1 + '"/></g>' +
+      '<path d="' + d + '" fill="none" stroke="var(--lk-ink-soft)" stroke-width="1.6"/>' +
+      '<path d="' + pts + '" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.4" stroke-dasharray="4 3"/>' + marks +
+      '<text x="' + (px(0) + 6) + '" y="' + (Y1 + 16) + '" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">0</text>' +
+      '<text x="' + px(10) + '" y="' + (Y1 + 16) + '" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">10</text>' +
+      '<text x="' + px(-10) + '" y="' + (Y1 + 16) + '" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">-10</text>';
+    en.textContent = String(n);
+    ex.textContent = Math.abs(x) > 1e4 ? x.toExponential(2) : x.toFixed(3);
+    ef.textContent = Math.abs(x * x) > 1e4 ? (x * x).toExponential(2) : (x * x).toFixed(3);
+    eg.textContent = Math.abs(2 * x) > 1e4 ? (2 * x).toExponential(2) : (2 * x).toFixed(3);
+    var f = x * x;
+    if (eta >= 1) {
+      ev.className = 'lk-step-verdict lr-v bad';
+      ev.textContent = 'η ≥ 1 on this function: each step overshoots past the minimum and lands further away than it started, so x gradually diverges. With η = 1.1 the slides report x₁ = −12 (f = 144) and x₁₀ = 61.9 (f = 3833.7).';
+    } else if (eta < 0.1) {
+      ev.className = 'lk-step-verdict lr-v';
+      ev.textContent = 'A small η updates x very slowly, requiring many more iterations to get a good solution. With η = 0.05 the slides report x₁ = 9 (f = 81) and, after ten steps, only x₁₀ = 3.5 (f = 12.16).';
+    } else if (f < 0.01 && n > 0) {
+      ev.className = 'lk-step-verdict lr-v ok';
+      ev.textContent = 'Converged: f = ' + f.toFixed(4) + '. With η = 0.2 the slides reach x₁₀ = 0.06 and f = 0.004 in ten steps.';
+    } else {
+      ev.className = 'lk-step-verdict lr-v ok';
+      ev.textContent = 'Healthy descent: each step moves against the gradient and the loss falls consistently towards the minimum.';
+    }
+  }
+  host.querySelector('.lr-step').addEventListener('click', step);
+  host.querySelector('.lr-ten').addEventListener('click', function () { for (var i = 0; i < 10; i++) step(); });
+  host.querySelector('.lr-reset').addEventListener('click', reset);
+  [].slice.call(host.querySelectorAll('.lr-preset')).forEach(function (b) {
+    b.addEventListener('click', function () { eta = +b.getAttribute('data-e'); etaS.set(eta); reset(); });
+  });
+  reset();
+})();
+
+/* ---- Bespoke: SGD vs Momentum vs NAG on f(x,y) = 0.1x^2 + 2y^2 ---- */
+(function () {
+  var host = document.getElementById('w-momentum');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Plain descent, momentum and NAG on the same valley</h4>' +
+    '<p class="lk-step-sub">f(x, y) = 0.1x² + 2y², gradient [0.2x, 4y], starting at (−5, −2) where f = 10.5. This is the exact example from the slides.</p>' +
+    '<div class="mo-rows" style="display:flex;flex-wrap:wrap;gap:1.2rem;margin:.6rem 0"></div>' +
+    '<svg class="mo-plot" viewBox="0 0 640 260" style="width:100%;height:auto;margin:.6rem 0" xmlns="http://www.w3.org/2000/svg"></svg>' +
+    '<div style="overflow-x:auto"><table style="margin:.4rem 0"><tr><th>method</th><th>x</th><th>y</th><th>f</th></tr><tbody class="mo-body"></tbody></table></div>' +
+    '<div class="lk-step-verdict mo-v"></div>' +
+    '<div class="lk-step-btns"><button type="button" class="mo-step">Step all three</button><button type="button" class="lk-step-reset mo-reset">Reset</button></div>';
+  var eta = 0.4, beta = 0.5, runs, n = 0;
+  var rows = host.querySelector('.mo-rows');
+  lkSlider(rows, 'learning rate η', 0.05, 0.6, 0.05, eta, function (v) { return v.toFixed(2); }, function (v) { eta = v; reset(); });
+  lkSlider(rows, 'momentum β', 0, 0.95, 0.05, beta, function (v) { return v.toFixed(2); }, function (v) { beta = v; reset(); });
+  var plot = host.querySelector('.mo-plot'), body = host.querySelector('.mo-body'), ev = host.querySelector('.mo-v');
+  function grad(x, y) { return [0.2 * x, 4 * y]; }
+  function f(x, y) { return 0.1 * x * x + 2 * y * y; }
+  function reset() {
+    n = 0;
+    runs = {
+      sgd: { name: 'plain descent', x: -5, y: -2, vx: 0, vy: 0, path: [[-5, -2]], color: 'var(--lk-cobalt)' },
+      mom: { name: 'momentum', x: -5, y: -2, vx: 0, vy: 0, path: [[-5, -2]], color: 'var(--lk-vermilion)' },
+      nag: { name: 'NAG', x: -5, y: -2, vx: 0, vy: 0, path: [[-5, -2]], color: 'var(--lk-forest)' }
+    };
+    render();
+  }
+  function step() {
+    var r = runs.sgd, g = grad(r.x, r.y);
+    r.x -= eta * g[0]; r.y -= eta * g[1]; r.path.push([r.x, r.y]);
+    r = runs.mom; g = grad(r.x, r.y);
+    r.vx = beta * r.vx + g[0]; r.vy = beta * r.vy + g[1];
+    r.x -= eta * r.vx; r.y -= eta * r.vy; r.path.push([r.x, r.y]);
+    r = runs.nag;
+    g = grad(r.x - eta * beta * r.vx, r.y - eta * beta * r.vy);
+    r.vx = beta * r.vx + g[0]; r.vy = beta * r.vy + g[1];
+    r.x -= eta * r.vx; r.y -= eta * r.vy; r.path.push([r.x, r.y]);
+    n++;
+    render();
+  }
+  function px(x) { return 320 + x / 7 * 290; }
+  function py(y) { return 130 - y / 3.2 * 110; }
+  function render() {
+    var rings = '';
+    [1, 3, 6, 10].forEach(function (lv) {
+      rings += '<ellipse cx="' + px(0) + '" cy="' + py(0) + '" rx="' + (Math.sqrt(lv / 0.1) / 7 * 290).toFixed(1) +
+        '" ry="' + (Math.sqrt(lv / 2) / 3.2 * 110).toFixed(1) + '" fill="none" stroke="var(--lk-rule-soft)" stroke-width="1"/>';
+    });
+    var paths = '';
+    Object.keys(runs).forEach(function (k) {
+      var r = runs[k], d = '', dots = '';
+      r.path.forEach(function (p, i) {
+        if (!isFinite(p[0]) || Math.abs(p[0]) > 20 || Math.abs(p[1]) > 20) return;
+        d += (d ? 'L' : 'M') + px(p[0]).toFixed(1) + ' ' + py(p[1]).toFixed(1) + ' ';
+        if (i === r.path.length - 1) dots += '<circle cx="' + px(p[0]).toFixed(1) + '" cy="' + py(p[1]).toFixed(1) + '" r="5" fill="' + r.color + '"/>';
+      });
+      paths += '<path d="' + d + '" fill="none" stroke="' + r.color + '" stroke-width="2.2"/>' + dots;
+    });
+    plot.innerHTML = rings +
+      '<g stroke="var(--lk-rule-soft)" stroke-width=".8" fill="none"><path d="M20 ' + py(0) + 'H620"/><path d="M' + px(0) + ' 15V245"/></g>' +
+      paths +
+      '<text x="26" y="26" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">plain</text>' +
+      '<text x="86" y="26" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">momentum</text>' +
+      '<text x="182" y="26" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">NAG</text>' +
+      '<text x="616" y="' + (py(0) + 16) + '" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">x</text>' +
+      '<text x="' + (px(0) + 8) + '" y="26" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">y</text>';
+    body.innerHTML = '';
+    Object.keys(runs).forEach(function (k) {
+      var r = runs[k], tr = document.createElement('tr');
+      tr.innerHTML = '<td style="color:' + r.color + '">' + r.name + '</td><td>' + r.x.toFixed(2) + '</td><td>' +
+        r.y.toFixed(2) + '</td><td>' + f(r.x, r.y).toFixed(2) + '</td>';
+      body.appendChild(tr);
+    });
+    ev.className = 'lk-step-verdict mo-v';
+    if (n === 0) {
+      ev.textContent = 'All three start at (−5, −2) with f = 10.5. Step them and watch the y coordinate: plain descent will flip its sign every step.';
+    } else {
+      var ys = runs.sgd.path.slice(-4).map(function (p) { return p[1]; });
+      var flips = 0;
+      for (var i = 1; i < ys.length; i++) if (ys[i] * ys[i - 1] < 0) flips++;
+      ev.textContent = 'After ' + n + ' step' + (n > 1 ? 's' : '') + ': plain descent has changed the sign of y ' + flips +
+        ' time' + (flips === 1 ? '' : 's') + ' in the last few steps, spending its budget oscillating across the steep dimension. Momentum keeps accumulating in x, whose gradient always points the same way, and damps y, whose gradient keeps reversing. NAG evaluates the gradient at the look-ahead point, so it brakes earlier.';
+    }
+  }
+  host.querySelector('.mo-step').addEventListener('click', step);
+  host.querySelector('.mo-reset').addEventListener('click', reset);
+  reset();
+})();
+
+/* ---- Bespoke: learning rate schedule comparator ---- */
+(function () {
+  var host = document.getElementById('w-sched');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>The three decay schedules</h4>' +
+    '<p class="lk-step-sub">Defaults are the slide values: η₀ = 0.1, δ = 0.2, s = 10, k = 0.05, over 30 epochs.</p>' +
+    '<div class="sc-rows" style="display:flex;flex-wrap:wrap;gap:1.2rem;margin:.6rem 0"></div>' +
+    '<svg class="sc-plot" viewBox="0 0 640 240" style="width:100%;height:auto;margin:.6rem 0" xmlns="http://www.w3.org/2000/svg"></svg>' +
+    '<div class="lk-step-state">' +
+      '<div class="lk-step-box">at epoch <b class="sc-t"></b>: step = <b class="sc-a"></b></div>' +
+      '<div class="lk-step-box">exponential = <b class="sc-b"></b></div>' +
+      '<div class="lk-step-box">time-based = <b class="sc-c"></b></div>' +
+    '</div>' +
+    '<div class="lk-step-verdict sc-v"></div>';
+  var p = { eta0: 0.1, delta: 0.2, s: 10, k: 0.05, t: 15 };
+  var rows = host.querySelector('.sc-rows');
+  lkSlider(rows, 'η₀', 0.02, 0.5, 0.01, p.eta0, function (v) { return v.toFixed(2); }, function (v) { p.eta0 = v; render(); });
+  lkSlider(rows, 'δ (step decay factor)', 0.1, 0.9, 0.05, p.delta, function (v) { return v.toFixed(2); }, function (v) { p.delta = v; render(); });
+  lkSlider(rows, 's (epochs per drop)', 2, 20, 1, p.s, function (v) { return String(v); }, function (v) { p.s = v; render(); });
+  lkSlider(rows, 'k', 0.01, 0.3, 0.01, p.k, function (v) { return v.toFixed(2); }, function (v) { p.k = v; render(); });
+  lkSlider(rows, 'inspect epoch t', 1, 30, 1, p.t, function (v) { return String(v); }, function (v) { p.t = v; render(); });
+  var plot = host.querySelector('.sc-plot'), ev = host.querySelector('.sc-v');
+  var et = host.querySelector('.sc-t'), ea = host.querySelector('.sc-a'), eb = host.querySelector('.sc-b'), ec = host.querySelector('.sc-c');
+  function stepD(t) { return p.eta0 * Math.pow(p.delta, Math.floor(t / p.s)); }
+  function expD(t) { return p.eta0 * Math.exp(-p.k * t); }
+  function timeD(t) { return p.eta0 / (1 + p.k * t); }
+  function render() {
+    var X0 = 45, X1 = 620, Y0 = 20, Y1 = 200, TM = 30;
+    var ymax = p.eta0 * 1.05;
+    function X(t) { return X0 + t / TM * (X1 - X0); }
+    function Y(v) { return Y1 - v / ymax * (Y1 - Y0); }
+    function build(fn) {
+      var d = '';
+      for (var t = 0; t <= TM; t += 0.25) d += (d ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(fn(t)).toFixed(1) + ' ';
+      return d;
+    }
+    plot.innerHTML =
+      '<g stroke="var(--lk-rule-soft)" stroke-width="1" fill="none"><path d="M' + X0 + ' ' + Y1 + 'H' + X1 + '"/><path d="M' + X0 + ' ' + Y0 + 'V' + Y1 + '"/></g>' +
+      '<path d="' + build(stepD) + '" fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2"/>' +
+      '<path d="' + build(expD) + '" fill="none" stroke="var(--lk-forest)" stroke-width="2.2" stroke-dasharray="7 4"/>' +
+      '<path d="' + build(timeD) + '" fill="none" stroke="#B8860B" stroke-width="2.2"/>' +
+      '<path d="M' + X(p.t).toFixed(1) + ' ' + Y0 + 'V' + Y1 + '" stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>' +
+      '<text x="' + (X0 - 8) + '" y="' + (Y0 + 6) + '" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">' + p.eta0.toFixed(2) + '</text>' +
+      '<text x="' + (X0 - 8) + '" y="' + Y1 + '" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">0</text>' +
+      '<text x="' + X1 + '" y="' + (Y1 + 18) + '" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">30 epochs</text>' +
+      '<text x="' + (X0 + 10) + '" y="' + (Y0 + 16) + '" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">step</text>' +
+      '<text x="' + (X0 + 60) + '" y="' + (Y0 + 16) + '" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">exponential</text>' +
+      '<text x="' + (X0 + 150) + '" y="' + (Y0 + 16) + '" font-family="var(--lk-mono)" font-size="10" fill="#B8860B">time-based</text>';
+    et.textContent = String(p.t);
+    ea.textContent = stepD(p.t).toFixed(4);
+    eb.textContent = expD(p.t).toFixed(4);
+    ec.textContent = timeD(p.t).toFixed(4);
+    var lowest = Math.min(stepD(p.t), expD(p.t), timeD(p.t));
+    var which = lowest === stepD(p.t) ? 'step decay' : (lowest === expD(p.t) ? 'exponential decay' : 'time-based decay');
+    ev.className = 'lk-step-verdict sc-v';
+    ev.textContent = 'At epoch ' + p.t + ' the most aggressive schedule is ' + which + '. Step decay is the only one that holds the rate constant and then drops it in a cliff every ' + p.s +
+      ' epochs; the other two fall continuously, with time-based decaying more gently than exponential in the long run.';
+  }
+  render();
+})();
+
+/* ---- Bespoke: adaptive optimizer comparison ---- */
+(function () {
+  var host = document.getElementById('w-adaptive');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Adagrad, RMSProp and Adam on the same valley</h4>' +
+    '<p class="lk-step-sub">Same function and starting point as before: f(x, y) = 0.1x² + 2y² from (−5, −2), η = 0.4. Watch the accumulator s and what it does to the effective step.</p>' +
+    '<div style="overflow-x:auto"><table style="margin:.5rem 0"><tr><th>optimizer</th><th>x</th><th>y</th><th>f</th><th>sˣ</th><th>effective ηˣ</th></tr><tbody class="ad-body"></tbody></table></div>' +
+    '<div class="lk-step-state"><div class="lk-step-box">steps taken = <b class="ad-n"></b></div></div>' +
+    '<div class="lk-step-verdict ad-v"></div>' +
+    '<div class="lk-step-btns"><button type="button" class="ad-step">Step all three</button><button type="button" class="ad-ten">Ten steps</button><button type="button" class="lk-step-reset ad-reset">Reset</button></div>';
+  var eta = 0.4, eps = 1e-6, gam = 0.9, b1 = 0.9, b2 = 0.999, n = 0, R;
+  var body = host.querySelector('.ad-body'), en = host.querySelector('.ad-n'), ev = host.querySelector('.ad-v');
+  function grad(x, y) { return [0.2 * x, 4 * y]; }
+  function reset() {
+    n = 0;
+    R = {
+      ada: { name: 'Adagrad', x: -5, y: -2, sx: 0, sy: 0 },
+      rms: { name: 'RMSProp', x: -5, y: -2, sx: 0, sy: 0 },
+      adam: { name: 'Adam', x: -5, y: -2, sx: 0, sy: 0, vx: 0, vy: 0 }
+    };
+    render();
+  }
+  function step() {
+    n++;
+    var r = R.ada, g = grad(r.x, r.y);
+    r.sx += g[0] * g[0]; r.sy += g[1] * g[1];
+    r.x -= eta / Math.sqrt(r.sx + eps) * g[0];
+    r.y -= eta / Math.sqrt(r.sy + eps) * g[1];
+    r = R.rms; g = grad(r.x, r.y);
+    r.sx = gam * r.sx + (1 - gam) * g[0] * g[0];
+    r.sy = gam * r.sy + (1 - gam) * g[1] * g[1];
+    r.x -= eta / Math.sqrt(r.sx + eps) * g[0];
+    r.y -= eta / Math.sqrt(r.sy + eps) * g[1];
+    r = R.adam; g = grad(r.x, r.y);
+    r.vx = b1 * r.vx + (1 - b1) * g[0]; r.vy = b1 * r.vy + (1 - b1) * g[1];
+    r.sx = b2 * r.sx + (1 - b2) * g[0] * g[0]; r.sy = b2 * r.sy + (1 - b2) * g[1] * g[1];
+    var vhx = r.vx / (1 - Math.pow(b1, n)), vhy = r.vy / (1 - Math.pow(b1, n));
+    var shx = r.sx / (1 - Math.pow(b2, n)), shy = r.sy / (1 - Math.pow(b2, n));
+    r.x -= eta / (Math.sqrt(shx) + eps) * vhx;
+    r.y -= eta / (Math.sqrt(shy) + eps) * vhy;
+    render();
+  }
+  function render() {
+    body.innerHTML = '';
+    ['ada', 'rms', 'adam'].forEach(function (k) {
+      var r = R[k];
+      var effective = eta / Math.sqrt((k === 'adam' ? r.sx / (1 - Math.pow(b2, Math.max(n, 1))) : r.sx) + eps);
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + r.name + '</td><td>' + r.x.toFixed(2) + '</td><td>' + r.y.toFixed(2) +
+        '</td><td>' + (0.1 * r.x * r.x + 2 * r.y * r.y).toFixed(2) + '</td><td>' + r.sx.toFixed(3) +
+        '</td><td>' + (n === 0 ? '—' : effective.toFixed(3)) + '</td>';
+      body.appendChild(tr);
+    });
+    en.textContent = String(n);
+    ev.className = 'lk-step-verdict ad-v';
+    if (n === 0) {
+      ev.textContent = 'All three start at (−5, −2). Take steps and watch the sˣ column: Adagrad accumulates a plain sum, the other two an exponential average.';
+    } else if (n < 8) {
+      ev.textContent = 'Adagrad divides η by the square root of a growing sum of squared gradients, so its effective learning rate can only shrink. RMSProp uses an exponential weighted average (γ = 0.9), so old gradients decay away and the rate stabilises. Adam adds a smoothed gradient on top, plus bias correction for the first steps.';
+    } else {
+      ev.textContent = 'After ' + n + ' steps Adagrad has the smallest effective learning rate: its accumulator never forgets, which is exactly the weakness the slides describe — the rate becomes infinitesimally small until the network can no longer acquire additional knowledge. RMSProp and Adam keep moving.';
+    }
+  }
+  host.querySelector('.ad-step').addEventListener('click', step);
+  host.querySelector('.ad-ten').addEventListener('click', function () { for (var i = 0; i < 10; i++) step(); });
+  host.querySelector('.ad-reset').addEventListener('click', reset);
+  reset();
+})();
+</script>
+</body>
+</html>

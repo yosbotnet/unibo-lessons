@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 8 — Recurrent neural networks · DL</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-07-cnn-architectures.html">&larr; Ch. 7 — CNN architectures</a>
+    <a href="index.html">Index</a>
+    <a href="cap-09-autoencoders.html">Ch. 9 — Autoencoders &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Architectures for structured data · Chapter 8</div>
+    <h1>Recurrent neural networks</h1>
+    <div class="lk-meta"><span>~40 min read</span><span>4 interactive widgets</span><span>5 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What a recurrent neural network is</a></li>
+      <li><a href="#s2">Sequence data and applications</a></li>
+      <li><a href="#s3">RNN architecture and unrolling</a></li>
+      <li><a href="#s4">Types of recurrent neural networks</a></li>
+      <li><a href="#s5">Backpropagation through time</a></li>
+      <li><a href="#s6">Advantages and drawbacks</a></li>
+      <li><a href="#s7">Truncated BPTT</a></li>
+      <li><a href="#s8">Long short-term memory</a></li>
+      <li><a href="#s9">Gated recurrent units</a></li>
+      <li><a href="#s10">Bidirectional and deep RNNs</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="07 - Recurrent neural networks URL.pdf#2-6">
+    <h2>1. What a recurrent neural network is</h2>
+
+    <p>The chapter opens with a definition from DeepAI: <em>&ldquo;A Recurrent Neural Network is a type of neural network that contains loops, allowing information to be stored within the network.&rdquo;</em></p>
+
+    <p>The motivation is a limitation of everything built so far. <strong>Feed-Forward Neural Networks are really good at learning a pattern between a set of inputs and outputs assuming that all inputs and outputs are independent of each other.</strong> They accept a fixed-sized vector as input (an image) and produce a fixed-sized vector as output (probabilities of different classes). Consequently:</p>
+    <ul>
+      <li>FFNNs are <strong>not well suited to tasks which require previous context</strong> for making future predictions;</li>
+      <li>FFNNs are <strong>not designed to take a series of inputs with no predetermined limit on size</strong>.</li>
+    </ul>
+
+    <p>The slides use a stock price example. A FFNN can make a prediction <code>p<sub>i</sub></code> based on the current time <code>t<sub>i</sub></code> &mdash; but this is <strong>not sufficient to make an accurate prediction, because the current stock price depends on the stock trend and not only on the current time</strong>.</p>
+
+    <p><strong>Recurrent Neural Networks (RNNs)</strong> are a class of neural networks which <strong>not just look at the current input but use sequential data or time series data</strong>. The output of any layer depends not only on the current input but also on <em>the sequence of inputs that have come before</em>. Another way to think about RNNs is that they have a <strong>&ldquo;memory&rdquo; which captures information about what has been previously calculated</strong>.</p>
+
+    <h3>Why not just call a FFNN repeatedly?</h3>
+    <p>An obvious objection: why not run a separate FFNN on each element of the series? The slides answer it directly:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Because <strong>each input item from the series is related to the others and has an influence on its neighbours. Otherwise it is not a series but only many inputs.</strong> RNNs are able to capture this relationship across inputs meaningfully; <var>n</var> independent FFNN calls cannot, by construction.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="07 - Recurrent neural networks URL.pdf#7-8">
+    <h2>2. Sequence data and applications</h2>
+
+    <p>The application list is long enough to be worth reading as a map of the field: machine translation, natural language processing, robot control, time series prediction, speech recognition, speech synthesis, time series anomaly detection, sentiment analysis, rhythm learning, music composition, grammar learning, handwriting recognition, human action recognition, image captioning, video tagging, text summarization.</p>
+
+    <p>The slides then show what &ldquo;sequence data&rdquo; means concretely, and the shape of the problem changes case by case:</p>
+
+    <table>
+      <tr><th>Task</th><th>Input</th><th>Output</th></tr>
+      <tr><td>Speech recognition</td><td>an audio waveform</td><td>&ldquo;The brown fox jumped over the lazy dog.&rdquo;</td></tr>
+      <tr><td>Sentiment analysis</td><td>&ldquo;There is nothing to like in this movie.&rdquo;</td><td>a sentiment</td></tr>
+      <tr><td>Music composition</td><td>a musical sequence</td><td>a musical sequence</td></tr>
+      <tr><td>DNA analysis</td><td><code>AGCCCCTGTGAGGAACTAG</code></td><td><code>AGCCCCTGTGAGGAACTAG</code> annotated</td></tr>
+      <tr><td>Machine translation</td><td>&ldquo;Do you want to dance with me?&rdquo;</td><td>&ldquo;Vuoi ballare con me?&rdquo;</td></tr>
+    </table>
+  </section>
+
+  <section id="s3" data-src="07 - Recurrent neural networks URL.pdf#9-11">
+    <h2>3. RNN architecture and unrolling</h2>
+
+    <p>The standard diagram shows an RNN being <strong>unrolled (or unfolded) into a full network</strong>. Unrolling means that <strong>the network is written out for the complete sequence</strong>.</p>
+
+    <table>
+      <tr><th>Symbol</th><th>Meaning</th></tr>
+      <tr><td><code>x<sub>t</sub></code></td><td>the input at time step <var>t</var></td></tr>
+      <tr><td><code>h<sub>t</sub></code></td><td>the hidden state at time step <var>t</var></td></tr>
+      <tr><td><code>o<sub>t</sub></code></td><td>the output at time step <var>t</var></td></tr>
+    </table>
+
+    <p>For each time step, the hidden state and the output are computed as:</p>
+    <pre><code>h<sub>t</sub> = f<sub>h</sub>( U x<sub>t</sub> + W h<sub>t&minus;1</sub> )
+o<sub>t</sub> = f<sub>o</sub>( V h<sub>t</sub> )</code></pre>
+    <p>where <code>U</code>, <code>W</code> and <code>V</code> are <strong>temporally shared weights</strong> and <code>f<sub>h</sub></code>, <code>f<sub>o</sub></code> are activation functions.</p>
+
+    <p>Four properties follow, and they are the whole architecture in four lines:</p>
+    <ul>
+      <li><code>h<sub>t</sub></code> is the <strong>memory of the network at time <var>t</var></strong>: it stores information about what happened in <em>all</em> the previous time steps.</li>
+      <li>The output <code>o<sub>t</sub></code> is calculated <strong>solely based on the memory at time <var>t</var></strong>.</li>
+      <li><code>h&#8320;</code> is typically initialized to all zeroes.</li>
+      <li>An RNN <strong>shares the same weights (U, V, W) across all steps</strong>, because it performs the same task at each step, just with different inputs. <strong>This greatly reduces the total number of trainable weights.</strong></li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="An RNN drawn folded with a self-loop on the left, and unrolled on the right into a chain of identical cells passing the hidden state forward through time steps one to n">
+      <svg viewBox="0 0 700 300" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.6">
+          <rect x="40" y="120" width="70" height="46" rx="3"/>
+          <path d="M75 120V78M75 166v42"/>
+          <path d="M110 143h22a16 16 0 0 0 0-32h-8"/>
+        </g>
+        <g fill="var(--lk-cobalt)"><path d="M75 82l-4 -10h8zM124 111l10 4v-8z"/></g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="75" y="148">RNN</text><text x="75" y="70">o</text><text x="75" y="224">x</text>
+          <text x="152" y="100">h</text>
+        </g>
+        <g fill="none" stroke="var(--lk-rule)" stroke-width="1.2"><path d="M180 143h44"/></g>
+        <g fill="var(--lk-rule)"><path d="M224 143l-10-4v8z"/></g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="202" y="134">unrolling</text></g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.6">
+          <rect x="255" y="120" width="62" height="46" rx="3"/>
+          <rect x="355" y="120" width="62" height="46" rx="3"/>
+          <rect x="455" y="120" width="62" height="46" rx="3"/>
+          <rect x="590" y="120" width="62" height="46" rx="3"/>
+          <path d="M286 120V82M386 120V82M486 120V82M621 120V82"/>
+          <path d="M286 166v40M386 166v40M486 166v40M621 166v40"/>
+        </g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-width="2"><path d="M317 143h38M417 143h38M517 143h26M563 143h27"/></g>
+        <g fill="var(--lk-vermilion)"><path d="M355 143l-10-4v8zM455 143l-10-4v8zM543 143l-10-4v8zM590 143l-10-4v8z"/></g>
+        <g fill="var(--lk-cobalt)"><path d="M286 86l-4 -10h8zM386 86l-4 -10h8zM486 86l-4 -10h8zM621 86l-4 -10h8z"/></g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="286" y="148">RNN</text><text x="386" y="148">RNN</text><text x="486" y="148">RNN</text><text x="621" y="148">RNN</text>
+          <text x="286" y="72">o₁</text><text x="386" y="72">o₂</text><text x="486" y="72">o₃</text><text x="621" y="72">oₙ</text>
+          <text x="286" y="220">x₁</text><text x="386" y="220">x₂</text><text x="486" y="220">x₃</text><text x="621" y="220">xₙ</text>
+          <text x="556" y="148">…</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="239" y="134">h₀</text><text x="336" y="134">h₁</text><text x="436" y="134">h₂</text><text x="530" y="134">h₃</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="450" y="264">the same U, V, W at every step: the weights are temporally shared</text>
+          <text x="450" y="282">h₀ is typically initialized to all zeroes</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 8.1</b> &mdash; The same network, folded and unrolled. The vermilion arrow is the hidden state, the memory that carries information from every previous step. All cells are copies of one cell: the weights are shared across time.</figcaption>
+    </figure>
+
+    <figure class="lk-fig" role="img" aria-label="Inside one RNN cell: the input is multiplied by U, the previous hidden state by W, the two are added and passed through the hidden activation to give the new hidden state, which is multiplied by V and passed through the output activation">
+      <svg viewBox="0 0 700 280" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5">
+          <circle cx="230" cy="180" r="18"/><circle cx="230" cy="90" r="18"/>
+          <circle cx="330" cy="135" r="18"/><circle cx="410" cy="135" r="18"/>
+          <circle cx="500" cy="135" r="18"/><circle cx="580" cy="135" r="18"/>
+          <path d="M120 180h92M120 90h92M248 180l64 -36M248 90l64 36M348 135h44M428 135h54M518 135h44M598 135h58"/>
+          <path d="M410 153v70H120"/>
+        </g>
+        <g fill="var(--lk-cobalt)">
+          <path d="M212 180l-10-4v8zM212 90l-10-4v8zM312 144l-10-2v8zM392 135l-10-4v8zM482 135l-10-4v8zM562 135l-10-4v8zM656 135l-10-4v8zM124 223l10 -4v8z"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="230" y="185">×</text><text x="230" y="95">×</text>
+          <text x="330" y="140">+</text>
+          <text x="410" y="139" font-size="10">f&#8341;</text>
+          <text x="500" y="140">×</text>
+          <text x="580" y="139" font-size="10">f&#8338;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">
+          <text x="66" y="184">x&#8348;</text><text x="60" y="94">h&#8348;₋₁</text><text x="666" y="139">o&#8348;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="230" y="212">U</text><text x="230" y="66">W</text><text x="500" y="108">V</text>
+          <text x="452" y="126">h&#8348;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="270" y="243">h&#8348; is fed back as the previous hidden state of the next time step</text>
+          <text x="350" y="42">h&#8348; = f&#8341;(U x&#8348; + W h&#8348;₋₁)          o&#8348; = f&#8338;(V h&#8348;)</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 8.2</b> &mdash; Inside one cell. Three weight matrices: <code>U</code> reads the input, <code>W</code> reads the previous memory, <code>V</code> writes the output. The new hidden state is fed back, which is the loop the folded diagram draws as a self-arrow.</figcaption>
+    </figure>
+
+    <div id="w-unroll"></div>
+  </section>
+
+  <section id="s4" data-src="07 - Recurrent neural networks URL.pdf#12-17">
+    <h2>4. Types of recurrent neural networks</h2>
+
+    <p>FFNNs map one input to one output, while <strong>RNN inputs and outputs can vary in length</strong>. RNNs are classified by the number of their inputs and outputs.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">One-to-one</button>
+        <button class="lk-tab">Many-to-one</button>
+        <button class="lk-tab">One-to-many</button>
+        <button class="lk-tab">Many-to-many (T&#8339; = T&#8342;)</button>
+        <button class="lk-tab">Many-to-many (T&#8339; &ne; T&#8342;)</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><code>T&#8339; = T&#8342; = 1</code>. This is the <strong>traditional FFNN</strong>: one fixed-size input, one fixed-size output.</p>
+        <p>Example from the slides: an image in, the label &ldquo;Cat&rdquo; out.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><code>T&#8339; &gt; 1, T&#8342; = 1</code>. A whole sequence is consumed and a single value comes out.</p>
+        <p>Applications: <strong>sentiment analysis</strong>, <strong>movie rating</strong>, <strong>video activity recognition</strong>.</p>
+        <p>Example: &ldquo;This caf&eacute; is great, the staff is really friendly and the coffee is delicious&rdquo; &rarr; <em>Positive</em>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><code>T&#8339; = 1, T&#8342; &gt; 1</code>. One input produces a whole sequence.</p>
+        <p>Applications: <strong>music composition</strong>, <strong>image captioning</strong>.</p>
+        <p>Example: an image &rarr; &ldquo;Dog is running through the water&rdquo;.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><code>T&#8339; = T&#8342; &gt; 1</code>. Every input element produces its own output element, in lockstep.</p>
+        <p>Applications: <strong>named-entity recognition</strong>, <strong>video classification of each frame</strong>.</p>
+        <p>Example: &ldquo;Luke joined Google as a data scientists in Mountain view&rdquo; &rarr; &ldquo;Luke<sub>PERSON</sub> joined Google<sub>ORG</sub> as a data scientists in Mountain view<sub>PLACE</sub>&rdquo;.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><code>T&#8339; &ne; T&#8342;</code>, both greater than 1. The input and the output are both sequences, but of <em>different</em> lengths.</p>
+        <p>Applications: <strong>machine translation</strong>, <strong>speech recognition</strong>.</p>
+        <p>Example: &ldquo;Do you want to dance with me?&rdquo; (7 tokens) &rarr; &ldquo;Vuoi ballare con me?&rdquo; (4 tokens).</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s5" data-src="07 - Recurrent neural networks URL.pdf#18-25">
+    <h2>5. Backpropagation through time</h2>
+
+    <p><strong>BackPropagation Through Time (BPTT)</strong> is the application of the backpropagation training algorithm to RNNs. The complication is the weight sharing: <strong>because the weights of an RNN are shared by all time steps, the gradient at each output depends not only on the calculations of the current time step, but also on the previous time steps.</strong></p>
+
+    <p>Two questions follow: what is the total error, and how do we update <code>U</code>, <code>W</code> and <code>V</code>?</p>
+
+    <h3>Total error</h3>
+    <p>Each full sequence is typically treated as <strong>one training example</strong>, so the total error is the <em>sum of the errors at each time step</em>:</p>
+    <pre><code>E(y, o) = &sum;<sub>t=1</sub><sup>n</sup> E<sub>t</sub>(y<sub>t</sub>, o<sub>t</sub>)</code></pre>
+
+    <h3>Gradients</h3>
+    <p>Similarly, the gradient of <code>E</code> with respect to each weight matrix is the sum of the gradients at each time step:</p>
+    <pre><code>&part;E/&part;U = &sum;<sub>t=1</sub><sup>n</sup> &part;E<sub>t</sub>/&part;U
+&part;E/&part;V = &sum;<sub>t=1</sub><sup>n</sup> &part;E<sub>t</sub>/&part;V
+&part;E/&part;W = &sum;<sub>t=1</sub><sup>n</sup> &part;E<sub>t</sub>/&part;W</code></pre>
+
+    <p>But the three are not equally easy:</p>
+    <ul>
+      <li>the derivative with respect to <strong><code>V</code></strong> is <em>quite easy</em>, as it only depends on the values at the current time step;</li>
+      <li>the derivative with respect to <strong><code>U</code> and <code>W</code></strong> is <em>not so easy</em>, because it <strong>recursively depends on previous time steps</strong>.</li>
+    </ul>
+
+    <p>The slides make this concrete by drawing the unrolled RNN as a computational graph for a three-step input, then running one backward pass per time step: at <code>t = 1</code> only the first cell contributes; at <code>t = 2</code> the gradient flows back through two cells; at <code>t = 3</code> through three.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>The slides close the section with the deflationary summary: <strong>this is exactly the same procedure as the standard backpropagation algorithm we use in FFNNs. The key difference is that we sum up the gradients at each time step</strong>, because in a traditional network we do not share parameters across layers and so have nothing to sum. <em>In conclusion BPTT is just the standard backpropagation on an unrolled RNN.</em></p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="07 - Recurrent neural networks URL.pdf#26-30">
+    <h2>6. Advantages and drawbacks</h2>
+
+    <table>
+      <tr><th>Advantages</th><th>Drawbacks</th></tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Possibility of processing input of <strong>any length</strong>.</li>
+            <li>Model size <strong>not increasing</strong> with size of input.</li>
+            <li>Computation takes into account <strong>historical information</strong>.</li>
+            <li><strong>Weights are shared</strong> across time.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>Computation being <strong>slow</strong>.</li>
+            <li><strong>Exploding and vanishing gradient</strong>.</li>
+            <li>Difficulty of accessing information from a long time ago (<strong>short-term memory</strong>).</li>
+            <li><strong>Cannot consider any future input</strong> for the current state.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+
+    <h3>Why the gradient problems bite harder here</h3>
+    <p><strong>Because unrolled RNNs are often very deep, they particularly suffer from problems related to vanishing and exploding gradients.</strong> The consequences the slides list:</p>
+    <ul>
+      <li><strong>long training time</strong> &mdash; the lower the gradient is, the harder it is for the network to update the parameters and the longer it takes to get optimal weights;</li>
+      <li><strong>poor training</strong> &mdash; the output of the earlier layers is used as the input for the further layers, so the training for the last time points is based on inputs coming from <em>untrained</em> layers, and the whole network is not trained properly;</li>
+      <li><strong>bad accuracy</strong>.</li>
+    </ul>
+
+    <h3>Short-term memory</h3>
+    <p>Because of the vanishing and exploding gradient problems, RNNs suffer from <strong>short-term memory</strong>: they are not able to memorize data for a long time and begin to forget their previous inputs. The slides give the canonical example:</p>
+
+    <blockquote style="border-left:3px solid var(--lk-rule-soft);margin:1.2rem 0;padding-left:1rem;font-style:italic">
+      &ldquo;I grew up in France &hellip; I speak fluent <strong>French</strong>&rdquo;
+    </blockquote>
+
+    <p>Recent information suggests that the next word is probably the name of a language. But <strong>to narrow down <em>which</em> language, we need the context of &ldquo;France&rdquo;, from further back</strong>. Unfortunately, <strong>as the gap between the relevant information and the point where it is needed grows, RNNs become unable to learn to connect the information</strong>.</p>
+
+    <p>Two further difficulties the slides note: some tokens are <strong>irrelevant</strong> because they carry no pertinent observation, and there can be a <strong>logical break</strong> between parts of a sequence, such as a transition between chapters in a book.</p>
+
+    <div id="w-memory"></div>
+
+    <h3>The map of the solutions</h3>
+    <p>Every remaining section of this chapter is one of these cures:</p>
+    <table>
+      <tr><th>Problem</th><th>Possible solutions</th></tr>
+      <tr><td>Exploding and vanishing gradient</td><td><strong>gradient clipping</strong> (Chapter 4); <strong>truncated backpropagation through time</strong></td></tr>
+      <tr><td>Difficulty of accessing information from a long time ago (short-term memory)</td><td><strong>long short-term memory</strong>; <strong>gated recurrent unit</strong></td></tr>
+      <tr><td>Cannot consider any future input for the current state</td><td><strong>bidirectional recurrent neural networks</strong></td></tr>
+    </table>
+  </section>
+
+  <section id="s7" data-src="07 - Recurrent neural networks URL.pdf#31">
+    <h2>7. Truncated BPTT</h2>
+
+    <p><strong>Truncated BackPropagation Through Time (TBPTT)</strong> is a modified version of the BPTT algorithm where <strong>the sequence is processed one time step at a time and periodically the BPTT update is performed back for a fixed number of time steps</strong>.</p>
+
+    <p>Instead of unrolling the whole sequence and backpropagating through all of it, the backward pass is cut off after a window. The gradient never travels far enough to vanish or explode, at the cost of never learning dependencies longer than the window.</p>
+  </section>
+
+  <section id="s8" data-src="07 - Recurrent neural networks URL.pdf#32-39">
+    <h2>8. Long short-term memory</h2>
+
+    <p><strong>Long Short-Term Memory networks (LSTMs)</strong> are a special kind of RNN, <strong>capable of learning long-term dependencies</strong>. An LSTM contains internal mechanisms called <strong>gates</strong> to regulate the information flow. <strong>These gates can learn which data in a sequence is important to keep or throw away</strong>, passing relevant information down the long chain of sequences to make predictions and discarding non relevant data.</p>
+
+    <p>An LSTM has a similar control flow to an RNN: it processes data, passing on information as it propagates forward. <strong>The differences are the operations within the LSTM cells.</strong></p>
+
+    <h3>The cell state</h3>
+    <p>The core concept of an LSTM is the <strong>cell state <code>c<sub>t</sub></code></strong>, and its various gates.</p>
+    <ul>
+      <li>The cell state acts as a <strong>transport highway that transfers relative information all the way down the sequence chain</strong>. You can think of it as the memory of the network.</li>
+      <li>The cell state can carry relevant information throughout the processing of the sequence, so that <strong>even information from the earlier time steps can make its way to later time steps, reducing the effects of short-term memory</strong>.</li>
+      <li>As the cell state goes on its journey, <strong>information is added or removed via gates</strong>. The gates are different neural networks that decide which information is allowed on the cell state.</li>
+    </ul>
+
+    <h3>What a gate is</h3>
+    <p>Gates are a way to <strong>optionally let information through</strong>. They are composed by a <strong>sigmoid neural network layer</strong>, so a gate returns values between 0 and 1 describing <strong>how much of each component should be let through</strong>: a value of <strong>0 means &ldquo;forget information&rdquo;</strong> while a value of <strong>1 means &ldquo;keep information as is&rdquo;</strong>.</p>
+
+    <p>An LSTM has <strong>three</strong> of these gates, to protect and control the cell state:</p>
+    <table>
+      <tr><th>Gate</th><th>Decides</th><th>Equation</th></tr>
+      <tr><td><strong>Forget gate</strong> <code>f<sub>t</sub></code></td><td>what is relevant to keep from prior steps</td><td><code>f<sub>t</sub> = &sigma;(W<sub>f</sub> h<sub>t&minus;1</sub> + U<sub>f</sub> x<sub>t</sub>)</code></td></tr>
+      <tr><td><strong>Input gate</strong> <code>i<sub>t</sub></code></td><td>what information is relevant to add from the current step</td><td><code>i<sub>t</sub> = &sigma;(W<sub>i</sub> h<sub>t&minus;1</sub> + U<sub>i</sub> x<sub>t</sub>)</code></td></tr>
+      <tr><td><strong>Output gate</strong> <code>o<sub>t</sub></code></td><td>what the next hidden state should be</td><td><code>o<sub>t</sub> = &sigma;(W<sub>o</sub> h<sub>t&minus;1</sub> + U<sub>o</sub> x<sub>t</sub>)</code></td></tr>
+    </table>
+
+    <h3>The four steps</h3>
+    <ol>
+      <li><strong>What to forget.</strong> The first step decides what information from the previous cell state <code>c<sub>t&minus;1</sub></code> should be kept. The forget gate looks at the previous hidden state <code>h<sub>t&minus;1</sub></code> and the current input <code>x<sub>t</sub></code> and outputs a value between 0 and 1 <em>for each element</em> of <code>c<sub>t&minus;1</sub></code>.</li>
+      <li><strong>What to add.</strong> The input gate decides which values will be updated, and a <strong>tanh layer creates a vector of new candidate values</strong> <code>c&#771;<sub>t</sub> = tanh(W<sub>c</sub> h<sub>t&minus;1</sub> + U<sub>c</sub> x<sub>t</sub>)</code> that could be added to the new cell state.</li>
+      <li><strong>Update the cell state.</strong> The previous cell state is multiplied by the forget gate output to remove what we decided to forget, and the new weighted candidate values are added:
+        <pre><code>c<sub>t</sub> = f<sub>t</sub> &#8857; c<sub>t&minus;1</sub> + i<sub>t</sub> &#8857; c&#771;<sub>t</sub></code></pre>
+      </li>
+      <li><strong>Produce the hidden state.</strong> The new hidden state is a <em>filtered version</em> of the new cell state: <code>h<sub>t&minus;1</sub></code> and <code>x<sub>t</sub></code> go into the output gate while <code>c<sub>t</sub></code> is passed through a tanh, and the two are multiplied:
+        <pre><code>h<sub>t</sub> = o<sub>t</sub> &#8857; tanh(c<sub>t</sub>)</code></pre>
+      </li>
+    </ol>
+
+    <figure class="lk-fig" role="img" aria-label="An LSTM cell showing the cell state travelling straight across the top through a multiplication by the forget gate and an addition of the gated candidate, with the forget, input and output gates fed by the previous hidden state and the current input">
+      <svg viewBox="0 0 700 340" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="var(--lk-rule-soft)" stroke-width="1.4"><rect x="120" y="45" width="460" height="230" rx="4"/></g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-width="2.6">
+          <path d="M40 90h172M248 90h132M416 90h224"/>
+        </g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5">
+          <circle cx="230" cy="90" r="18"/><circle cx="398" cy="90" r="18"/><circle cx="520" cy="196" r="18"/>
+          <circle cx="365" cy="152" r="16"/>
+          <rect x="170" y="180" width="66" height="34" rx="3"/>
+          <rect x="270" y="180" width="66" height="34" rx="3"/>
+          <rect x="340" y="228" width="66" height="34" rx="3"/>
+          <rect x="470" y="118" width="66" height="34" rx="3"/>
+          <path d="M203 180v-72M303 180v-16M373 228v-58M503 118V90"/>
+          <path d="M365 136V108"/>
+          <path d="M40 250h130M236 250h34M336 250h4M406 250h94v-64"/>
+          <path d="M538 196h102"/>
+        </g>
+        <g fill="var(--lk-vermilion)"><path d="M640 90l-11-4v8z"/></g>
+        <g fill="var(--lk-cobalt)"><path d="M640 196l-11-4v8z"/><path d="M203 112l-4 -10h8zM303 168l-4 -10h8zM365 112l-4 -10h8zM503 94l-4 -10h8z"/></g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="230" y="95">×</text><text x="398" y="95">+</text><text x="520" y="201">×</text><text x="365" y="157">×</text>
+          <text x="203" y="201">σ  f&#8348;</text><text x="303" y="201">σ  i&#8348;</text>
+          <text x="373" y="249">tanh c&#771;&#8348;</text><text x="503" y="139">σ  o&#8348;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">
+          <text x="8" y="94">c&#8348;₋₁</text><text x="8" y="254">h&#8348;₋₁</text>
+          <text x="648" y="94">c&#8348;</text><text x="648" y="200">h&#8348;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="350" y="292">x&#8348;</text>
+          <text x="180" y="72">forget gate</text><text x="300" y="72">input gate</text><text x="560" y="112">output gate</text>
+        </g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5"><path d="M350 300v-38"/></g>
+        <g fill="var(--lk-cobalt)"><path d="M350 258l-4 10h8z"/></g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="350" y="325">the cell state is the highway across the top: multiplied by f&#8348;, then added to i&#8348; ⊙ c&#771;&#8348;</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 8.3</b> &mdash; The LSTM cell. The vermilion line is the cell state, running almost undisturbed from left to right: it is multiplied by the forget gate and has the gated candidate added to it. That near-linear path is why information from early time steps can survive.</figcaption>
+    </figure>
+
+    <div id="w-lstm"></div>
+  </section>
+
+  <section id="s9" data-src="07 - Recurrent neural networks URL.pdf#40-41">
+    <h2>9. Gated recurrent units</h2>
+
+    <p>The <strong>Gated Recurrent Unit (GRU)</strong> belongs to the newer generation of RNNs. It is <strong>similar to an LSTM but with fewer parameters, as it lacks an output gate</strong>. GRU has only two gates:</p>
+
+    <table>
+      <tr><th>Gate</th><th>Role</th><th>Equation</th></tr>
+      <tr><td><strong>Reset gate</strong> <code>r<sub>t</sub></code></td><td>decides <strong>how much past information to forget</strong></td><td><code>r<sub>t</sub> = &sigma;(W<sub>r</sub> h<sub>t&minus;1</sub> + U<sub>r</sub> x<sub>t</sub>)</code></td></tr>
+      <tr><td><strong>Update gate</strong> <code>u<sub>t</sub></code></td><td>acts like the <strong>forget and input gates of an LSTM combined</strong>: it decides what information to throw away and what new information to add</td><td><code>u<sub>t</sub> = &sigma;(W<sub>u</sub> h<sub>t&minus;1</sub> + U<sub>u</sub> x<sub>t</sub>)</code></td></tr>
+    </table>
+
+    <p>The candidate and the new state:</p>
+    <pre><code>h&#771;<sub>t</sub> = tanh( W<sub>h</sub> (r<sub>t</sub> &#8857; h<sub>t&minus;1</sub>) + U<sub>h</sub> x<sub>t</sub> )
+o<sub>t</sub> = h<sub>t</sub> = u<sub>t</sub> &#8857; h<sub>t&minus;1</sub> + (1 &minus; u<sub>t</sub>) &#8857; h&#771;<sub>t</sub></code></pre>
+
+    <p><strong>Note that in a GRU the new hidden state and the new output are the same.</strong> There is no separate cell state and no output gate: the interpolation between the old state and the candidate <em>is</em> the memory mechanism.</p>
+
+    <p>How they compare, according to the slides:</p>
+    <ul>
+      <li>GRU performance on certain tasks was found to be <strong>similar or even better</strong> than that of LSTM.</li>
+      <li>GRU <strong>uses less memory and is faster</strong> than LSTM.</li>
+      <li>In general <strong>LSTM outperforms GRU especially when using datasets with longer sequences</strong>.</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="A GRU cell showing the previous hidden state and current input feeding the reset and update gates, the reset gate scaling the previous state before the tanh candidate, and the update gate interpolating between the previous state and the candidate">
+      <svg viewBox="0 0 700 300" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="var(--lk-rule-soft)" stroke-width="1.4"><rect x="110" y="40" width="470" height="200" rx="4"/></g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5">
+          <rect x="160" y="146" width="66" height="32" rx="3"/>
+          <rect x="290" y="188" width="66" height="32" rx="3"/>
+          <rect x="380" y="120" width="72" height="32" rx="3"/>
+          <circle cx="260" cy="100" r="17"/><circle cx="500" cy="100" r="17"/><circle cx="500" cy="176" r="17"/>
+          <path d="M193 146V116"/>
+          <path d="M226 162h34"/>
+          <path d="M260 117v-1"/>
+          <path d="M40 100h203M277 100h86"/>
+          <path d="M452 136h31v-19"/>
+          <path d="M323 188v-52"/>
+          <path d="M323 220v20h160v-47"/>
+          <path d="M517 100h20v76h-20"/>
+          <path d="M517 176h123"/>
+        </g>
+        <g fill="var(--lk-cobalt)">
+          <path d="M243 100l-10-4v8zM363 100l-10-4v8zM483 117l-3 -10h8zM640 176l-11-4v8zM193 120l-4 -10h8z"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="193" y="166">σ  r&#8348;</text><text x="323" y="208">σ  u&#8348;</text><text x="416" y="140">tanh h&#771;&#8348;</text>
+          <text x="260" y="105">×</text><text x="500" y="105">×</text><text x="500" y="181">+</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">
+          <text x="6" y="104">h&#8348;₋₁</text><text x="648" y="180">h&#8348; = o&#8348;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="345" y="278">x&#8348;</text>
+          <text x="193" y="130">reset gate</text><text x="323" y="128">update gate</text>
+        </g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5"><path d="M345 286v-24"/></g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="350" y="26">two gates instead of three, no cell state, and the hidden state is also the output</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 8.4</b> &mdash; The GRU cell. The reset gate scales the previous state before the candidate is formed; the update gate interpolates between the old state and the candidate. Fewer parameters, less memory, faster &mdash; and no separate cell state.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s10" data-src="07 - Recurrent neural networks URL.pdf#42-47">
+    <h2>10. Bidirectional and deep RNNs</h2>
+
+    <h3>Bidirectional RNNs</h3>
+    <p>The objective in a typical sequence learning scenario is to model the next output given a sequence of past information. But <strong>sometimes it is not enough to learn from the past to predict the future: it is also important to look into the future to fix the past</strong>. The slides prove it with a fill-in-the-blank:</p>
+
+    <table>
+      <tr><th>Sentence</th><th>Plausible fill</th></tr>
+      <tr><td>&ldquo;I am ___&rdquo;</td><td>happy</td></tr>
+      <tr><td>&ldquo;I am ___ hungry&rdquo;</td><td>not</td></tr>
+      <tr><td>&ldquo;I am ___ hungry, and I can eat half a pig&rdquo;</td><td>very</td></tr>
+    </table>
+    <p>Depending on the amount of information available, we might fill in the blank with <strong>very different words</strong>. A sequence model unable to take advantage of future information will perform very poorly here.</p>
+
+    <p><strong>Bidirectional Recurrent Neural Networks (BRNNs)</strong> are modified RNNs with the <strong>ability to look both back and forth at every time step</strong>. A BRNN is composed of <strong>two RNNs running in opposite directions</strong>:</p>
+    <ul>
+      <li>the input sequence of the first RNN is fed in <strong>normal time order</strong>;</li>
+      <li>the input sequence of the second RNN is fed in <strong>reverse time order</strong>;</li>
+      <li>the outputs of the two RNNs are <strong>concatenated at each time step</strong>.</li>
+    </ul>
+    <p>BRNNs are trained with similar algorithms to RNNs, <strong>since the two RNNs do not interact with each other</strong>.</p>
+
+    <figure class="lk-fig" role="img" aria-label="A bidirectional RNN unrolled: a forward chain of cells running left to right above a backward chain running right to left, with the two outputs concatenated at each time step">
+      <svg viewBox="0 0 700 300" width="700" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5">
+          <rect x="90" y="150" width="70" height="38" rx="3"/>
+          <rect x="250" y="150" width="70" height="38" rx="3"/>
+          <rect x="490" y="150" width="70" height="38" rx="3"/>
+        </g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-width="1.5">
+          <rect x="90" y="80" width="70" height="38" rx="3"/>
+          <rect x="250" y="80" width="70" height="38" rx="3"/>
+          <rect x="490" y="80" width="70" height="38" rx="3"/>
+        </g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.8"><path d="M160 169h84M320 169h84M436 169h48"/></g>
+        <g fill="var(--lk-cobalt)"><path d="M244 169l-10-4v8zM404 169l-10-4v8zM484 169l-10-4v8z"/></g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-width="1.8"><path d="M490 99h-86M404 99h-84M244 99h-84"/></g>
+        <g fill="var(--lk-vermilion)"><path d="M404 99l10-4v8zM244 99l10-4v8zM160 99l10-4v8z"/></g>
+        <g fill="none" stroke="var(--lk-rule)" stroke-width="1.2">
+          <path d="M125 150v-32M285 150v-32M525 150v-32"/>
+          <path d="M125 226v-38M285 226v-38M525 226v-38"/>
+          <path d="M125 62V44M285 62V44M525 62V44"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)" text-anchor="middle">
+          <text x="125" y="174">RNN&#7584;</text><text x="285" y="174">RNN&#7584;</text><text x="525" y="174">RNN&#7584;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="125" y="104">RNN&#7495;</text><text x="285" y="104">RNN&#7495;</text><text x="525" y="104">RNN&#7495;</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="125" y="244">x₁</text><text x="285" y="244">x₂</text><text x="525" y="244">xₙ</text>
+          <text x="125" y="38">o₁</text><text x="285" y="38">o₂</text><text x="525" y="38">oₙ</text>
+          <text x="440" y="174">…</text><text x="440" y="104">…</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="350" y="276">forward chain in normal time order, backward chain in reverse; the two outputs are concatenated at each step</text>
+          <text x="620" y="174">forward</text><text x="620" y="104">backward</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 8.5</b> &mdash; A bidirectional RNN. The two chains never interact; each sees the sequence from one end, and their outputs are concatenated so that every position carries both past and future context.</figcaption>
+    </figure>
+
+    <h3>Deep RNNs</h3>
+    <p>Can an RNN be made deep? The question is subtler than it looks. <strong>Depth is defined, in the case of FFNNs, as having multiple nonlinear layers between input and output.</strong> Unfortunately this definition <strong>does not apply trivially to an RNN because of its temporal structure</strong>: <em>any RNN when unfolded in time is already deep</em>, since the path between the input at time <var>k</var> and the output at time <var>t</var> crosses several nonlinear layers.</p>
+
+    <p>The genuine extension is to <strong>stack multiple recurrent hidden layers on top of each other</strong>. Each hidden state <code>h<sup>i</sup><sub>j</sub></code> is continuously passed to <em>both</em>:</p>
+    <ul>
+      <li>the <strong>next time step <code>j+1</code> of the current layer</strong> RNN<sup>i</sup>, and</li>
+      <li>the <strong>current time step <code>j</code> of the next layer</strong> RNN<sup>i+1</sup>.</li>
+    </ul>
+
+    <pre><code>h&sup1;<sub>t</sub> = f<sub>h</sub>&sup1;( U&sup1; x<sub>t</sub> + W&sup1; h&sup1;<sub>t&minus;1</sub> )
+h<sup>i</sup><sub>t</sub> = f<sub>h</sub><sup>i</sup>( U<sup>i</sup> h<sup>i&minus;1</sup><sub>t</sub> + W<sup>i</sup> h<sup>i</sup><sub>t&minus;1</sub> )
+o<sub>t</sub> = f<sub>o</sub><sup>l</sup>( V<sup>l</sup> h<sup>l</sup><sub>t</sub> )
+
+with  1 &le; t &le; n   and   2 &le; i &le; l</code></pre>
+  </section>
+
+  <section id="s11" data-src="07 - Recurrent neural networks URL.pdf#48-50">
+    <h2>11. Chapter summary</h2>
+    <ul>
+      <li>FFNNs take in a fixed size vector as input, which limits their usage in situations involving an input sequence with <strong>no predetermined size</strong>.</li>
+      <li>RNNs are neural networks designed to analyze streams of data by means of <strong>recurrent computation and hidden states</strong>.</li>
+      <li>The hidden state of an RNN can <strong>capture historical information</strong> of the sequence up to the current time step.</li>
+      <li>The number of RNN model parameters <strong>does not grow as the number of time steps increases</strong>.</li>
+      <li><strong>BPTT is merely an application of backpropagation to sequence models with a hidden state.</strong></li>
+      <li>RNNs are particularly affected by the <strong>vanishing/exploding gradient</strong> and <strong>short-term memory</strong> problems; the former can be mitigated by <strong>truncated BPTT</strong> and <strong>gradient clipping</strong>.</li>
+      <li><strong>LSTMs and GRUs</strong> face the short-term memory problem by learning long-term dependencies. LSTMs have three gates (input, forget, output); a GRU is very similar to an LSTM <strong>without the output gate</strong>, having only a reset and an update gate.</li>
+      <li><strong>BRNNs</strong> are composed of two RNNs running in opposite directions, acquiring the ability to look both back and forth at every time step.</li>
+      <li><strong>Deep RNNs</strong> stack multiple recurrent hidden layers, passing each hidden state to the next time step of the current layer <em>and</em> the current time step of the next layer.</li>
+    </ul>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Why can a FFNN not handle sequences, and why is calling it repeatedly not a fix?</summary>
+        <p>A FFNN assumes all inputs and outputs are <strong>independent of each other</strong>, accepts a fixed-sized vector and is not designed to take a series of inputs with no predetermined limit on size, so it cannot use previous context. Calling it once per element does not help because <strong>each input item from the series is related to the others and has an influence on its neighbours &mdash; otherwise it is not a series but only many inputs</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Write the two RNN equations and say what is shared.</summary>
+        <p><code>h<sub>t</sub> = f<sub>h</sub>(U x<sub>t</sub> + W h<sub>t&minus;1</sub>)</code> and <code>o<sub>t</sub> = f<sub>o</sub>(V h<sub>t</sub>)</code>. The matrices <strong>U, W and V are temporally shared</strong>: the same weights are used at every time step because the network performs the same task at each step, just with different inputs. This greatly reduces the total number of trainable weights and means the model size does not grow with the input length.</p>
+      </details>
+
+      <details>
+        <summary>What exactly is the hidden state?</summary>
+        <p><code>h<sub>t</sub></code> is <strong>the memory of the network at time <var>t</var></strong>: it stores information about what happened in all the previous time steps. The output <code>o<sub>t</sub></code> is calculated <strong>solely based on the memory at time <var>t</var></strong>, and <code>h&#8320;</code> is typically initialized to all zeroes.</p>
+      </details>
+
+      <details>
+        <summary>Match each RNN type to an application.</summary>
+        <p><strong>One-to-one</strong> (<code>T&#8339; = T&#8342; = 1</code>): the traditional FFNN. <strong>Many-to-one</strong>: sentiment analysis, movie rating, video activity recognition. <strong>One-to-many</strong>: music composition, image captioning. <strong>Many-to-many with <code>T&#8339; = T&#8342;</code></strong>: named-entity recognition, video classification of each frame. <strong>Many-to-many with <code>T&#8339; &ne; T&#8342;</code></strong>: machine translation, speech recognition.</p>
+      </details>
+
+      <details>
+        <summary>How does BPTT differ from ordinary backpropagation?</summary>
+        <p>Only in one respect: <strong>the gradients at each time step are summed up</strong>. Each full sequence is treated as one training example so <code>E = &sum;<sub>t</sub> E<sub>t</sub></code>, and likewise <code>&part;E/&part;U</code>, <code>&part;E/&part;V</code> and <code>&part;E/&part;W</code> are sums over time steps. This summation is needed precisely because the weights are shared across time; in a traditional network parameters are not shared across layers, so there is nothing to sum. BPTT is just standard backpropagation on an unrolled RNN.</p>
+      </details>
+
+      <details>
+        <summary>Why is the gradient with respect to V easier than with respect to U and W?</summary>
+        <p>Because <code>V</code> only appears in <code>o<sub>t</sub> = f<sub>o</sub>(V h<sub>t</sub>)</code>, so its derivative <strong>only depends on the values at the current time step</strong>. <code>U</code> and <code>W</code> enter the hidden state recursion, so their derivatives <strong>recursively depend on previous time steps</strong> and the chain has to be unrolled backwards through the whole sequence.</p>
+      </details>
+
+      <details>
+        <summary>List the advantages and the drawbacks of RNNs.</summary>
+        <p><strong>Advantages</strong>: possibility of processing input of any length; model size not increasing with the size of the input; computation takes historical information into account; weights are shared across time. <strong>Drawbacks</strong>: computation being slow; exploding and vanishing gradient; difficulty of accessing information from a long time ago (short-term memory); cannot consider any future input for the current state.</p>
+      </details>
+
+      <details>
+        <summary>Explain the &ldquo;I grew up in France … I speak fluent French&rdquo; example.</summary>
+        <p>It illustrates <strong>short-term memory</strong>. Recent information tells us the next word is probably the name of a language, but to narrow down <em>which</em> language we need the context of &ldquo;France&rdquo; from much further back. <strong>As the gap between the relevant information and the point where it is needed grows, RNNs become unable to learn to connect the information</strong>, because of the vanishing and exploding gradient problems.</p>
+      </details>
+
+      <details>
+        <summary>What is truncated BPTT?</summary>
+        <p>A modified version of BPTT where <strong>the sequence is processed one time step at a time and periodically the BPTT update is performed back for a fixed number of time steps</strong>, instead of through the entire unrolled sequence. It bounds how far the gradient travels, which mitigates vanishing and exploding gradients at the cost of not learning dependencies longer than the window.</p>
+      </details>
+
+      <details>
+        <summary>What is the cell state, and why does it solve short-term memory?</summary>
+        <p>The cell state <code>c<sub>t</sub></code> is the core concept of an LSTM: a <strong>transport highway that transfers relevant information all the way down the sequence chain</strong>, the memory of the network. Information is added or removed only via gates, and the path itself is a multiplication by the forget gate plus an addition &mdash; not a chain of squashing non-linearities. This lets <strong>information from earlier time steps make its way to later time steps</strong>, reducing the effects of short-term memory.</p>
+      </details>
+
+      <details>
+        <summary>Name the three LSTM gates and what each decides.</summary>
+        <p>The <strong>forget gate</strong> decides what is relevant to keep from prior steps; the <strong>input gate</strong> decides what information is relevant to add from the current step; the <strong>output gate</strong> determines what the next hidden state should be. All three are sigmoid layers returning values between 0 and 1, where <strong>0 means forget the information and 1 means keep it as is</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Write the cell state and hidden state update equations of an LSTM.</summary>
+        <p><code>c<sub>t</sub> = f<sub>t</sub> &#8857; c<sub>t&minus;1</sub> + i<sub>t</sub> &#8857; c&#771;<sub>t</sub></code>, where <code>c&#771;<sub>t</sub> = tanh(W<sub>c</sub> h<sub>t&minus;1</sub> + U<sub>c</sub> x<sub>t</sub>)</code> is the candidate. Then <code>h<sub>t</sub> = o<sub>t</sub> &#8857; tanh(c<sub>t</sub>)</code>: the new hidden state is a filtered version of the new cell state.</p>
+      </details>
+
+      <details>
+        <summary>How does a GRU differ from an LSTM?</summary>
+        <p>A GRU <strong>lacks an output gate</strong>, so it has fewer parameters and only two gates: the <strong>reset gate</strong> (how much past information to forget) and the <strong>update gate</strong> (which acts like the forget and input gates of an LSTM combined). There is no separate cell state, and <strong>the new hidden state and the new output are the same</strong>. GRUs use less memory and are faster; performance can be similar or even better on certain tasks, but <strong>in general LSTM outperforms GRU especially with longer sequences</strong>.</p>
+      </details>
+
+      <details>
+        <summary>What problem do bidirectional RNNs solve and how are they built?</summary>
+        <p>They solve the inability to <strong>consider future input for the current state</strong> &mdash; as in &ldquo;I am ___ hungry, and I can eat half a pig&rdquo;, where the fill depends on words that come after the blank. A BRNN is composed of <strong>two RNNs running in opposite directions</strong>: one fed in normal time order, one in reverse time order, with <strong>the outputs concatenated at each time step</strong>. They are trained with similar algorithms to RNNs since the two RNNs do not interact.</p>
+      </details>
+
+      <details>
+        <summary>Why is &ldquo;deep RNN&rdquo; a slippery term, and what does the real construction look like?</summary>
+        <p>Because depth for a FFNN means multiple nonlinear layers between input and output, and <strong>any RNN unfolded in time is already deep</strong>: the path from the input at time <var>k</var> to the output at time <var>t</var> crosses several nonlinear layers. The genuine extension <strong>stacks multiple recurrent hidden layers</strong>, with each hidden state passed both to the <em>next time step of the current layer</em> and the <em>current time step of the next layer</em>: <code>h<sup>i</sup><sub>t</sub> = f<sub>h</sub><sup>i</sup>(U<sup>i</sup> h<sup>i&minus;1</sup><sub>t</sub> + W<sup>i</sup> h<sup>i</sup><sub>t&minus;1</sub>)</code>.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-07-cnn-architectures.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-09-autoencoders.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Source: deck <em>07 &ndash; Recurrent neural networks</em> &middot; Deep Learning (74029), University of Bologna, a.y. 2025/2026 &middot; Prof. Matteo Ferrara</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+function lkSlider(parent, label, min, max, step, value, fmt, onchange) {
+  var l = document.createElement('label');
+  l.style.cssText = 'font-family:var(--lk-mono);font-size:.8rem;display:flex;flex-direction:column;gap:.2rem';
+  var out = document.createElement('b'); out.textContent = fmt(value);
+  var inp = document.createElement('input');
+  inp.type = 'range'; inp.min = String(min); inp.max = String(max); inp.step = String(step); inp.value = String(value);
+  inp.setAttribute('aria-label', label);
+  inp.addEventListener('input', function () { out.textContent = fmt(+inp.value); onchange(+inp.value); });
+  l.appendChild(document.createTextNode(label));
+  l.appendChild(inp); l.appendChild(out);
+  parent.appendChild(l);
+  return { set: function (v) { inp.value = String(v); out.textContent = fmt(v); } };
+}
+
+/* ---- Stepper: unrolling an RNN over a short sequence ---- */
+LessonKit.stepper('#w-unroll', {
+  title: 'Unrolling an RNN, one time step at a time',
+  sub: 'A tiny scalar RNN with U = 0.6, W = 0.8, V = 1.0 and tanh as f_h. The inputs are x = (1, 0, 0, 0): a single pulse at the first step, then silence.',
+  shared: { t: 0, x: '-', h: 0, o: '-' },
+  watch: ['t', 'x', 'h', 'o'],
+  threads: {
+    S: {
+      name: 'sequence',
+      steps: [
+        { label: 't = 1: x = 1', run: function (s) { s.t = 1; s.x = 1; s.h = Math.round(Math.tanh(0.6 * 1 + 0.8 * 0) * 1000) / 1000; s.o = s.h; } },
+        { label: 't = 2: x = 0', run: function (s) { s.t = 2; s.x = 0; s.h = Math.round(Math.tanh(0.6 * 0 + 0.8 * s.h) * 1000) / 1000; s.o = s.h; } },
+        { label: 't = 3: x = 0', run: function (s) { s.t = 3; s.x = 0; s.h = Math.round(Math.tanh(0.6 * 0 + 0.8 * s.h) * 1000) / 1000; s.o = s.h; } },
+        { label: 't = 4: x = 0', run: function (s) { s.t = 4; s.x = 0; s.h = Math.round(Math.tanh(0.6 * 0 + 0.8 * s.h) * 1000) / 1000; s.o = s.h; } }
+      ]
+    }
+  },
+  verdict: function (s, done) {
+    if (s.t === 0) return { status: '', text: 'The hidden state starts at zero. Advance the sequence and watch the memory of the first pulse survive into later steps.' };
+    if (!done) return { status: '', text: 'At t = ' + s.t + ' the hidden state is ' + s.h + '. Even though the input is now zero, h is non-zero: the network still remembers the pulse from step 1. That memory is the whole point of the recurrence.' };
+    return { status: 'ok', text: 'After four steps the trace of the first input has decayed to ' + s.h + '. Nothing was reset and no new input arrived: the decay comes from multiplying by W and squashing with tanh at every step. Multiply that decay over hundreds of steps and you have the short-term memory problem.' };
+  }
+});
+
+/* ---- Bespoke: memory decay across time steps ---- */
+(function () {
+  var host = document.getElementById('w-memory');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>How far back can the network see?</h4>' +
+    '<p class="lk-step-sub">A single piece of information enters at step 1 and is carried forward by the recurrence. Set the per-step retention and the gap, and read how much survives.</p>' +
+    '<div class="mm-rows" style="display:flex;flex-wrap:wrap;gap:1.1rem;margin:.6rem 0"></div>' +
+    '<div class="mm-bars" style="display:flex;align-items:flex-end;gap:2px;height:74px;margin:.6rem 0"></div>' +
+    '<div class="lk-step-state"><div class="lk-step-box">signal remaining = <b class="mm-v"></b></div><div class="lk-step-box">usable steps back = <b class="mm-h"></b></div></div>' +
+    '<div class="lk-step-verdict mm-msg"></div>';
+  var st = { keep: 0.8, gap: 20 };
+  var rows = host.querySelector('.mm-rows');
+  lkSlider(rows, 'retention per step', 0.5, 1, 0.01, st.keep, function (v) { return v.toFixed(2); }, function (v) { st.keep = v; render(); });
+  lkSlider(rows, 'gap in time steps', 2, 60, 1, st.gap, function (v) { return String(v); }, function (v) { st.gap = v; render(); });
+  var bars = host.querySelector('.mm-bars'), ev = host.querySelector('.mm-v'), eh = host.querySelector('.mm-h'), msg = host.querySelector('.mm-msg');
+  function render() {
+    var v = Math.pow(st.keep, st.gap);
+    ev.textContent = v < 1e-4 ? v.toExponential(2) : v.toFixed(4);
+    var usable = st.keep >= 1 ? '∞' : Math.round(Math.log(0.01) / Math.log(st.keep));
+    eh.textContent = String(usable);
+    bars.innerHTML = '';
+    for (var i = 1; i <= st.gap; i++) {
+      var h = Math.max(1, Math.pow(st.keep, i) * 70);
+      var b = document.createElement('span');
+      b.style.cssText = 'flex:1;min-width:2px;height:' + h.toFixed(0) + 'px;background:' + (i === st.gap ? 'var(--lk-vermilion)' : 'var(--lk-cobalt)');
+      b.title = 'step ' + i + ': ' + Math.pow(st.keep, i).toExponential(2);
+      bars.appendChild(b);
+    }
+    msg.className = 'lk-step-verdict mm-msg ' + (v < 0.01 ? 'bad' : 'ok');
+    msg.textContent = v < 0.01
+      ? 'Only ' + (v * 100).toFixed(3) + '% of the original signal survives the ' + st.gap + '-step gap. This is the "I grew up in France … I speak fluent French" situation: the recent context is intact but the word that disambiguates it has effectively been forgotten. LSTM and GRU exist because of this curve.'
+      : (v * 100).toFixed(1) + '% of the signal is still present after ' + st.gap + ' steps, so the dependency is still learnable. Note how quickly the picture changes when the retention drops even slightly: the gap sits in the exponent.';
+  }
+  render();
+})();
+
+/* ---- Bespoke: LSTM gate playground ---- */
+(function () {
+  var host = document.getElementById('w-lstm');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Driving the three gates by hand</h4>' +
+    '<p class="lk-step-sub">One scalar cell. Set the gate values (a sigmoid would produce them, here you set them directly) and watch the cell state and the hidden state update.</p>' +
+    '<div class="ls-rows" style="display:flex;flex-wrap:wrap;gap:1.1rem;margin:.6rem 0"></div>' +
+    '<div class="lk-step-state">' +
+      '<div class="lk-step-box">c<sub>t−1</sub> = <b class="ls-cp"></b></div>' +
+      '<div class="lk-step-box">kept = f · c<sub>t−1</sub> = <b class="ls-keep"></b></div>' +
+      '<div class="lk-step-box">added = i · c&#771; = <b class="ls-add"></b></div>' +
+      '<div class="lk-step-box">c<sub>t</sub> = <b class="ls-c"></b></div>' +
+      '<div class="lk-step-box">h<sub>t</sub> = o · tanh(c<sub>t</sub>) = <b class="ls-h"></b></div>' +
+    '</div>' +
+    '<div class="lk-step-verdict ls-v"></div>' +
+    '<div class="lk-step-btns"><button type="button" class="ls-adv">Advance one time step</button><button type="button" class="lk-step-reset ls-reset">Reset</button></div>';
+  var g = { f: 0.9, i: 0.5, cand: 0.8, o: 0.7 }, cprev = 1.0, steps = 0;
+  var rows = host.querySelector('.ls-rows');
+  lkSlider(rows, 'forget gate f', 0, 1, 0.05, g.f, function (v) { return v.toFixed(2); }, function (v) { g.f = v; render(); });
+  lkSlider(rows, 'input gate i', 0, 1, 0.05, g.i, function (v) { return v.toFixed(2); }, function (v) { g.i = v; render(); });
+  lkSlider(rows, 'candidate c̃', -1, 1, 0.05, g.cand, function (v) { return v.toFixed(2); }, function (v) { g.cand = v; render(); });
+  lkSlider(rows, 'output gate o', 0, 1, 0.05, g.o, function (v) { return v.toFixed(2); }, function (v) { g.o = v; render(); });
+  var ecp = host.querySelector('.ls-cp'), ekeep = host.querySelector('.ls-keep'), eadd = host.querySelector('.ls-add');
+  var ec = host.querySelector('.ls-c'), eh = host.querySelector('.ls-h'), ev = host.querySelector('.ls-v');
+  function calc() {
+    var keep = g.f * cprev, add = g.i * g.cand, c = keep + add;
+    return { keep: keep, add: add, c: c, h: g.o * Math.tanh(c) };
+  }
+  function render() {
+    var r = calc();
+    ecp.textContent = cprev.toFixed(3);
+    ekeep.textContent = r.keep.toFixed(3);
+    eadd.textContent = r.add.toFixed(3);
+    ec.textContent = r.c.toFixed(3);
+    eh.textContent = r.h.toFixed(3);
+    ev.className = 'lk-step-verdict ls-v';
+    var parts = [];
+    if (g.f > 0.85) parts.push('the forget gate is near 1, so the previous cell state is kept almost as is, which is exactly how information from early time steps survives');
+    else if (g.f < 0.2) parts.push('the forget gate is near 0, so the previous cell state is almost entirely discarded: this is the logical break the slides mention, such as a transition between chapters');
+    else parts.push('the forget gate is partially open, so some of the previous state is retained');
+    if (g.i < 0.15) parts.push('the input gate is nearly closed, so the current step contributes almost nothing: an irrelevant token carrying no pertinent observation');
+    if (g.o < 0.15) parts.push('the output gate is nearly closed, so the cell keeps its memory but hides it from the rest of the network this step');
+    ev.textContent = 'After ' + steps + ' step' + (steps === 1 ? '' : 's') + ': ' + parts.join('; ') + '.';
+  }
+  host.querySelector('.ls-adv').addEventListener('click', function () { cprev = calc().c; steps++; render(); });
+  host.querySelector('.ls-reset').addEventListener('click', function () { cprev = 1.0; steps = 0; render(); });
+  render();
+})();
+</script>
+</body>
+</html>
