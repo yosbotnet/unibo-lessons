@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 14 — Firewalls, monitoring and network IDS · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-13-sdn-nfv-mobile.html">&larr; Ch. 13 — SDN and NFV for the mobile network</a>
+    <a href="index.html">Index</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part V — Security and monitoring · Chapter 14</div>
+    <h1>Firewalls, monitoring and network IDS</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>6 interactive widgets</span><span>8 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Firewalls: the perimeter and its techniques</a></li>
+      <li><a href="#s2">iptables and Netfilter: stateful filtering in practice</a></li>
+      <li><a href="#s3">nftables: the modern replacement</a></li>
+      <li><a href="#s4">Monitoring: IDS, IPS, SIEM and logging</a></li>
+      <li><a href="#s5">Suricata: a modern NIDS in practice</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Slides - firewall.pdf">
+    <h2>1. Firewalls: the perimeter and its techniques</h2>
+    <p>The course opened (chapter 1) with the <strong>proliferation of middleboxes</strong> — firewall, NAT, proxy, IDS, traffic profilers — as one of the causes of network ossification. This closing chapter studies those middleboxes properly: what a firewall can and cannot do, how the Linux kernel implements it (iptables and nftables), and how the network watches itself (IDS/IPS/SIEM, with Suricata as the worked example).</p>
+
+    <p>A <strong>firewall</strong> is a device that joins two networks and filters the traffic crossing the boundary, according to a security policy. The classical image is the <strong>perimeter defence</strong>: all traffic between the internal network and the outside must pass through the firewall, only the traffic authorized by the policy may pass, and the firewall itself must be immune to compromise. Three basic principles follow:</p>
+    <ol>
+      <li><strong>Choke point</strong> — there is exactly one path between inside and outside, and the firewall sits on it. No alternative route exists, or the filter is pointless.</li>
+      <li><strong>Default deny</strong> — what is not explicitly allowed is denied. The policy is expressed as exceptions to a closed world, not as a list of prohibitions in an open one.</li>
+      <li><strong>Self-protection</strong> — the firewall is a bastion: a hardened machine, stripped of everything not needed to filter, so that a compromise of the network does not automatically become a compromise of the filter.</li>
+    </ol>
+
+    <p>The lecture distinguishes three <strong>control techniques</strong>, which operate at different layers:</p>
+    <table>
+      <tr><th>Technique</th><th>Layer / object inspected</th><th>Decision</th></tr>
+      <tr>
+        <td><strong>Packet filter</strong></td>
+        <td>Network and transport headers of each packet, in isolation: IP addresses, protocol, TCP/UDP ports, flags.</td>
+        <td>Fast, stateless by default; cannot see the application, cannot reassemble streams. The classic router ACL.</td>
+      </tr>
+      <tr>
+        <td><strong>Application Level Gateway (ALG)</strong> — proxy</td>
+        <td>The application protocol itself: the firewall terminates the connection and re-originates it, inspecting and rewriting the application payload (FTP commands, HTTP, SMTP…).</td>
+        <td>Deepest control, per-protocol logic; expensive and protocol-specific. Each application needs its own proxy.</td>
+      </tr>
+      <tr>
+        <td><strong>Circuit Level Gateway (CLG)</strong></td>
+        <td>The TCP connection as a whole, not the individual packets: the gateway relays the session between the client and the server (e.g. SOCKS).</td>
+        <td>Middle ground: no application knowledge, but the connection is established, tracked and torn down explicitly.</td>
+      </tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam — the three techniques</span>
+      <p>Know the three control techniques and where each one looks: <strong>packet filter</strong> (single packets, L3/L4 headers), <strong>ALG</strong> (application data, protocol-aware proxy), <strong>CLG</strong> (the whole circuit/connection, relayed without application knowledge). A modern firewall combines them: a packet filter for speed, state tracking to make it stateful, and ALGs where the protocol demands it.</p>
+    </div>
+
+    <p>The pure packet filter has well-known <strong>vulnerabilities</strong>, all of which amount to the same weakness: it judges each packet in isolation, so it can be fooled about what a stream of packets means:</p>
+    <ul>
+      <li><strong>Fragmentation</strong> — the filter sees fragments, not the reassembled datagram. Tiny fragments or overlapping offsets can hide a payload that the receiving host reassembles differently than the filter expected.</li>
+      <li><strong>Spoofing</strong> — the source address is not authenticated: an attacker outside can send packets claiming to be from the internal network. Filters must therefore block, at the perimeter, any packet whose source address belongs to the internal network (anti-spoofing rules), and stateless rules cannot do much more.</li>
+      <li><strong>Source routing</strong> — the IP source-route option lets the sender dictate the return path, bypassing the choke point. A filter at the perimeter should simply drop packets with source-routing options.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful — the stateful answer</span>
+      <p>The stateless packet filter has a second, subtler limitation: <strong>directionality is a lie</strong>. A rule allowing outbound HTTP must also let the responses come back — but a stateless filter cannot tell a response from an unsolicited inbound connection, so it must open the return ports completely or break the service. The answer is the <strong>stateful packet filter</strong>, which keeps a <strong>state table</strong> of active connections: only the <em>first</em> packet of a connection is checked against the rules; the following packets are matched against the state table and admitted if they belong to an established connection. Directionality is recovered, because the table knows which side initiated.</p>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-labelledby="p14-1-title">
+        <title id="p14-1-title">Three firewall topologies: screened single-homed host, dual-homed host, and screened subnet with DMZ</title>
+        <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-cobalt)">
+          <text x="20" y="22">a) Screened single-homed</text>
+          <text x="255" y="22">b) Dual-homed</text>
+          <text x="490" y="22">c) Screened subnet (DMZ)</text>
+        </g>
+        <g stroke="var(--lk-rule-soft)" stroke-width="1">
+          <path d="M20 40h200v250h-200zM250 40h200v250h-200zM480 40h200v250h-200z"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="120" y="55">Internet</text><text x="350" y="55">Internet</text><text x="580" y="55">Internet</text>
+          <text x="120" y="278">Internal net</text><text x="350" y="278">Internal net</text><text x="580" y="278">Internal net</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2">
+          <rect x="45" y="90" width="150" height="34" rx="2"/>
+          <rect x="275" y="90" width="150" height="34" rx="2"/>
+          <rect x="505" y="70" width="150" height="34" rx="2"/>
+          <rect x="505" y="150" width="150" height="34" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="120" y="111">bastion host</text>
+          <text x="350" y="111">bastion host</text>
+          <text x="580" y="91">packet filter</text>
+          <text x="580" y="171">bastion host</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="120" y="142">packet filter</text>
+          <text x="350" y="142">no filter: both NICs</text>
+          <text x="350" y="153">on the same host</text>
+          <text x="580" y="127">DMZ</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none">
+          <path d="M120 70v20M120 124v118M350 70v20M350 124v118"/>
+          <path d="M580 60v10M580 104v46M580 184v58"/>
+        </g>
+        <g fill="var(--lk-cobalt)"><path d="M120 70l-4-8h8zM350 70l-4-8h8zM580 70l-4-8h8z"/></g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-vermilion)">
+          <text x="45" y="270">dual-homed: internal and external</text>
+          <text x="45" y="280">NICs never routed through</text>
+          <text x="275" y="270">DMZ servers isolated by</text>
+          <text x="275" y="280">a second filter</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.1</b> — Perimeter topologies. (a) A single packet filter screens a bastion host; (b) a dual-homed host has no filter at all — the bastion is the only path, its two NICs never routed through; (c) the screened subnet places public servers in a DMZ, isolated from both Internet and internal net by filters.</figcaption>
+    </figure>
+
+    <p>The <strong>bastion host</strong> is the hardened machine that implements the policy — the machine an attacker would have to compromise first, and the one that must survive an attack on the perimeter. A <strong>personal firewall</strong> is the same idea reduced to a single host: a software filter on the endpoint that controls what that host accepts and originates, the last line of defence once the perimeter has been crossed (and the first, for mobile hosts that leave the perimeter entirely).</p>
+
+    <p>A famous case shows why state matters beyond the headers: <strong>FTP</strong>. In <em>active</em> mode the client connects to the server's port 21, but the <em>server</em> then opens the data connection <em>back</em> to the client — an inbound connection the perimeter never asked for. A stateless filter must choose between blocking FTP data entirely and opening a huge port range. The stateful filter can do better, but the port is negotiated <em>inside</em> the application protocol: only an <strong>FTP ALG</strong> (or an nftables/iptables <code>ftp</code> helper) can read the PORT command, open exactly the negotiated port, and close it when the transfer ends. This is the standard example of why application awareness still matters on top of state tracking.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="100%" role="img" aria-labelledby="p14-2-title">
+        <title id="p14-2-title">Stateless filter judges each packet alone; stateful filter keeps a state table and only checks the first packet of a connection</title>
+        <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-cobalt)">
+          <text x="20" y="24">Stateless: every packet vs. rules</text>
+          <text x="380" y="24">Stateful: first packet vs. rules, then vs. state</text>
+        </g>
+        <g stroke="var(--lk-rule-soft)" stroke-width="1"><path d="M20 40h310v180h-310zM360 40h320v180h-320z"/></g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="70" y="80">pkt 1</text><text x="70" y="120">pkt 2</text><text x="70" y="160">pkt 3</text><text x="70" y="200">pkt n</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2">
+          <rect x="130" y="60" width="140" height="30" rx="2"/>
+          <rect x="130" y="100" width="140" height="30" rx="2"/>
+          <rect x="130" y="140" width="140" height="30" rx="2"/>
+          <rect x="130" y="180" width="140" height="30" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="200" y="79">rule set</text><text x="200" y="119">rule set</text><text x="200" y="159">rule set</text><text x="200" y="199">rule set</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="200" y="52">same check, n times</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4">
+          <rect x="400" y="60" width="130" height="30" rx="2"/>
+          <rect x="570" y="60" width="90" height="30" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="465" y="79">first packet</text>
+          <text x="615" y="79">rule set</text>
+          <text x="465" y="130">state table</text>
+        </g>
+        <g fill="none" stroke="var(--lk-cobalt)" stroke-width="1.3">
+          <path d="M470 90v30M465 130h-0M465 90h105M400 75h-20v55h20"/>
+        </g>
+        <g fill="var(--lk-cobalt)"><path d="M400 90l-6-3v6z"/></g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="400" y="150">pkt 2..n: lookup state, no rule check</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="500" y="200">state = &ldquo;who started it, is it answered?&rdquo;</text>
+          <text x="500" y="212">directionality recovered</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.2</b> — Stateless vs stateful filtering. The stateless filter pays the same rule-set cost for every packet; the stateful filter checks the first packet against the rules and matches the rest against the state table, which knows which side initiated the connection.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s2" data-src="Slides - firewall.pdf">
+    <h2>2. iptables and Netfilter: stateful filtering in practice</h2>
+    <p>On Linux, all of this is <strong>Netfilter</strong>: the packet-processing framework in the kernel, exposed to the administrator through <strong>iptables</strong>. The mental model is a pipeline of five <strong>hooks</strong> — fixed points in the kernel's journey of a packet where registered chains are consulted:</p>
+    <ol>
+      <li><strong>PREROUTING</strong> — the packet arrives; before any routing decision. Home of DNAT and raw.</li>
+      <li><strong>INPUT</strong> — the packet is addressed to the local machine.</li>
+      <li><strong>FORWARD</strong> — the packet is addressed to someone else and will be routed through this machine (the classic router/firewall path).</li>
+      <li><strong>OUTPUT</strong> — a packet generated locally leaves the machine.</li>
+      <li><strong>POSTROUTING</strong> — after the routing decision and before the packet goes out on the wire. Home of SNAT/MASQUERADE.</li>
+    </ol>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p14-3-title">
+        <title id="p14-3-title">The five Netfilter hooks along the kernel packet path: PREROUTING, INPUT, FORWARD, OUTPUT, POSTROUTING</title>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="70" y="40">incoming</text><text x="630" y="40">outgoing</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.5" fill="none">
+          <path d="M80 60h130v120h-30M60 60h20"/>
+          <path d="M290 60h120v120h30"/>
+          <path d="M80 180h90"/>
+        </g>
+        <g fill="var(--lk-cobalt)"><path d="M80 60l-6-3v6zM290 60l-6-3v6z"/></g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4">
+          <rect x="150" y="45" width="140" height="30" rx="2"/>
+          <rect x="150" y="165" width="140" height="30" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="220" y="63">PREROUTING</text>
+          <text x="220" y="183">POSTROUTING</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3">
+          <rect x="360" y="45" width="120" height="30" rx="2"/>
+          <rect x="360" y="165" width="120" height="30" rx="2"/>
+          <rect x="360" y="105" width="120" height="30" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="420" y="63">INPUT (to local)</text>
+          <text x="420" y="183">OUTPUT (from local)</text>
+          <text x="420" y="123">FORWARD (routed)</text>
+        </g>
+        <g stroke="var(--lk-ink)" stroke-width="1.2" fill="none">
+          <path d="M290 60h70M360 120h-70M290 180h70M480 60h80M480 180h80"/>
+          <path d="M560 75C590 90 590 150 560 165" stroke-dasharray="4 3"/>
+        </g>
+        <g fill="var(--lk-ink)"><path d="M360 60l-6-3v6zM360 120l-6-3v6zM360 180l-6-3v6zM560 75l-3-6h6z"/></g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="510" y="118">routing decision</text>
+          <text x="610" y="120">DNAT: PREROUTING</text>
+          <text x="610" y="132">SNAT/MASQ: POSTROUTING</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.3</b> — The Netfilter hooks. Inbound traffic traverses PREROUTING, then either INPUT (to the machine) or FORWARD (through it); locally generated traffic enters at OUTPUT; everything leaves through POSTROUTING. Rules live in chains attached to these hooks.</figcaption>
+    </figure>
+
+    <p>Rules are organized in <strong>tables</strong> by purpose — <code>filter</code> (allow/deny decisions), <code>nat</code> (address translation), <code>mangle</code> (packet alteration: TOS, TTL, marks), <code>raw</code> (exemption from connection tracking) — and each table has <strong>built-in chains</strong> corresponding to the hooks it cares about. A <strong>rule</strong> is a set of match conditions and a <strong>target</strong>: <code>ACCEPT</code>, <code>DROP</code>, <code>REJECT</code> (like DROP but answers with an error packet), <code>LOG</code> (log and continue), <code>JUMP</code> to a custom chain, or the NAT targets <code>SNAT</code>, <code>MASQUERADE</code>, <code>DNAT</code>, <code>REDIRECT</code>. Rules are evaluated in order; the first matching target decides, and each chain has a <strong>policy</strong> (default target) for packets that match nothing.</p>
+
+    <p>The stateful heart is <strong>connection tracking</strong> (<code>conntrack</code>), which the course has been promising since chapter 4's NAT lab: the kernel keeps a table of active flows and labels each packet with a <strong>state</strong> — <code>NEW</code> (first packet of a connection), <code>ESTABLISHED</code> (part of a connection that has been seen in both directions), <code>RELATED</code> (a new connection started by an established one, e.g. the FTP data channel), <code>INVALID</code> (packet that matches no connection and cannot be classified). A stateful filter needs only a handful of rules: allow <code>ESTABLISHED,RELATED</code> back in, and apply the policy to <code>NEW</code> only.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="100%" role="img" aria-labelledby="p14-4-title">
+        <title id="p14-4-title">Connection tracking states: a NEW flow becomes ESTABLISHED once seen in both directions; RELATED covers child connections; INVALID is dropped</title>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5">
+          <rect x="40" y="40" width="130" height="40" rx="2"/>
+          <rect x="285" y="40" width="150" height="40" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)" text-anchor="middle">
+          <text x="105" y="64">NEW</text>
+          <text x="360" y="64">ESTABLISHED</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4">
+          <rect x="285" y="150" width="150" height="40" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)" text-anchor="middle">
+          <text x="360" y="174">RELATED</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4">
+          <rect x="530" y="40" width="140" height="40" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="600" y="64">INVALID</text>
+        </g>
+        <g stroke="var(--lk-ink)" stroke-width="1.3" fill="none">
+          <path d="M170 60h115"/>
+          <path d="M360 80v70"/>
+          <path d="M435 60h95"/>
+        </g>
+        <g fill="var(--lk-ink)"><path d="M285 60l-6-3v6zM360 150l-3-6h6zM530 60l-6-3v6z"/></g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">
+          <text x="195" y="50">first packet, policy applied</text>
+          <text x="368" y="125">reply seen: flow known in both directions</text>
+          <text x="368" y="205">child flow (FTP data, ICMP errors) — admitted like its parent</text>
+          <text x="445" y="50">unclassifiable: drop</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.4</b> — Connection tracking states. The state is the filter's memory: NEW is the only state the security policy really needs to judge; ESTABLISHED and RELATED are admitted; INVALID is dropped before it can do anything.</figcaption>
+    </figure>
+
+    <p>The classic stateful ruleset for a router/firewall is short, and every line is a decision about the course's own continuum (chapters 2–4): the firewall is a namespace with forwarding enabled, and iptables is how its kernel treats the packets that cross it. The widget below is that ruleset, annotated line by line.</p>
+
+    <div id="ac-iptables"></div>
+
+    <p>Two iptables details complete the picture. <strong>Custom chains</strong> exist because a chain is just a list of rules: by jumping into a named chain you factor a policy into reusable, readable units (the widget's <code>LAN_NEW</code>). And <strong>counters</strong> are the firewall's built-in observability: <code>iptables -L -v</code> shows per-rule packet and byte counters, <code>-Z</code> zeroes them — the cheapest monitoring instrument in the course, and the one that tells you whether a rule is ever matched (a drop rule with zero hits is a rule nobody asked for).</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note — NAT completes the stateful story</span>
+      <p>Chapter 4's lab left two questions open: <em>when to remove NAT entries?</em> and <em>what if both ends are behind NAT?</em> The answers live here. Entries are removed when the tracked connection expires or closes — the state table drives the NAT table, not the other way round. And both-ends-behind-NAT is exactly the problem of the NAT traversal techniques (STUN/TURN, hole punching) that the course's mobile chapters assume, and that no firewall rule alone can solve: the stateful firewall knows a flow exists, not where the peer is. That is why <code>MASQUERADE</code> — SNAT with the output interface's address, per the firewall deck — is the natural gateway rule, and why it is configured at POSTROUTING.</p>
+    </div>
+
+    <div id="se-conntrack"></div>
+  </section>
+
+  <section id="s3" data-src="Slides - firewall.pdf">
+    <h2>3. nftables: the modern replacement</h2>
+    <p><strong>nftables</strong> is Netfilter's successor framework, the native replacement for iptables (the <code>iptables-nft</code> compatibility layer translates old commands onto it). The model is the same hooks and tables, but the language is a single coherent ruleset instead of a pile of per-table commands:</p>
+    <ul>
+      <li><strong>Tables</strong> are created per address family (<code>ip</code>, <code>ip6</code>, <code>inet</code> for both at once, <code>arp</code>, <code>bridge</code>) and contain the chains.</li>
+      <li><strong>Chains</strong> declare their <em>type</em> (<code>filter</code>, <code>nat</code>, <code>route</code>…), the <em>hook</em> they attach to, and a <em>priority</em> — hook ordering is explicit, not implied by table names.</li>
+      <li><strong>Rules</strong> are match expressions and a <strong>verdict</strong>: <code>accept</code>, <code>drop</code>, <code>reject</code>, <code>jump</code>/<code>goto</code> (to a chain), <code>return</code>, <code>queue</code>, or <code>continue</code>.</li>
+      <li><strong>Sets</strong> (named or anonymous), <strong>maps</strong> (key &rarr; value) and <strong>vmaps</strong> (key &rarr; verdict) replace the long chains of identical iptables rules with single rule statements backed by kernel data structures.</li>
+    </ul>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Same job</button>
+        <button class="lk-tab">The iptables way</button>
+        <button class="lk-tab">The nftables way</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Both frameworks expose the same Netfilter hooks (PREROUTING, INPUT, FORWARD, OUTPUT, POSTROUTING), the same tables by purpose (filter, nat, mangle, raw), the same connection tracking, and the same NAT operations. The difference is <strong>expression</strong>: iptables is a command language — one command per rule, tables implied by <code>-t</code>; nftables is a <strong>ruleset language</strong> — one file, tables and chains declared explicitly, hooks and priorities visible.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>iptables: <code>iptables -t filter -A FORWARD -i eth0 -m conntrack --ctstate NEW -j LAN_NEW</code>. The table is a flag, the chain is a positional argument, matches are extensions (<code>-m</code>), and every change is a separate command executed in order. Reading a policy means replaying a shell history; there is no single document that says what the firewall does.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>nftables: the same intent is a line inside a declared table and chain — <code>chain forward { type filter hook forward priority filter; policy drop; iifname "eth0" ct state new jump lan_new }</code>. The whole firewall is one <code>nft -f</code> file, reloadable atomically, with set/map lookups replacing rule repetition and <code>nft list ruleset</code> printing the entire effective policy.</p>
+      </div>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p14-5-title">
+        <title id="p14-5-title">nftables structure: a table holds chains bound to hooks with priorities; rules use sets, maps and vmaps; verdicts decide the packet's fate</title>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5">
+          <rect x="30" y="40" width="300" height="200" rx="3"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)" text-anchor="middle">
+          <text x="180" y="60">table inet filter</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2">
+          <rect x="50" y="75" width="260" height="58" rx="2"/>
+          <rect x="50" y="150" width="260" height="58" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)" text-anchor="start">
+          <text x="60" y="94">chain input — hook input, prio filter</text>
+          <text x="60" y="112">  policy drop</text>
+          <text x="60" y="128">  ct state established,related accept</text>
+          <text x="60" y="169">chain forward — hook forward, prio filter</text>
+          <text x="60" y="187">  policy drop</text>
+          <text x="60" y="203">  ip daddr @lan ct state new accept</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="start">
+          <text x="60" y="225">hook + priority explicit, not implied</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4">
+          <rect x="400" y="40" width="270" height="56" rx="2"/>
+          <rect x="400" y="112" width="270" height="56" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)" text-anchor="start">
+          <text x="410" y="59">set lan { type ipv4_addr; flags interval; }</text>
+          <text x="410" y="75">elements = { 192.168.0.0/24, 10.0.1.5 }</text>
+          <text x="410" y="131">vmap dmz_policy { type ipv4_addr : verdict; }</text>
+          <text x="410" y="147">10.0.1.10 -> accept&nbsp;&nbsp;10.0.1.20 -> drop</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4">
+          <rect x="400" y="196" width="270" height="44" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-forest)" text-anchor="start">
+          <text x="410" y="215">verdicts: accept · drop · reject · jump/goto</text>
+          <text x="410" y="231">return · queue · continue</text>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none">
+          <path d="M310 100h90"/>
+          <path d="M310 179h90"/>
+        </g>
+        <g fill="var(--lk-vermilion)"><path d="M400 100l-6-3v6zM400 179l-6-3v6z"/></g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="start">
+          <text x="325" y="92">@lan</text>
+          <text x="325" y="171">@dmz_policy</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.5</b> — nftables structure. A table holds chains bound to hooks with explicit priorities; rules reference sets (address groups), maps (key &rarr; value) and vmaps (key &rarr; verdict) instead of repeating rules; the verdict decides the packet's fate.</figcaption>
+    </figure>
+
+    <div id="ac-nftables"></div>
+
+    <p>NAT in nftables lives in <code>nat</code>-type chains on the same hooks as iptables — <code>masquerade</code> at postrouting, <code>dnat</code> at prerouting — and <code>notrack</code> is the explicit counterpart of iptables' raw table: a statement that tells conntrack to leave a flow alone (used when connection tracking itself is the cost, or the traffic is known-safe). Two final properties make nftables the better citizen for this course: the ruleset is <strong>data</strong> — it can be generated, versioned and validated like the YANG configs of chapter 13 — and it is available inside every network namespace, which means the entire lab world of chapters 2–4 can carry a real firewall in a few lines.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the pipeline is the same, the language changed</span>
+      <p>Do not memorize nftables as a new firewall. It is the <em>same</em> Netfilter pipeline (hooks, tables, conntrack) with a better language: declarative tables and chains, explicit hook priorities, sets/maps instead of rule repetition, atomic reloads. Every concept of section 2 — states, NAT, custom chains, counters — survives unchanged; only the syntax is new. And <code>iptables-nft</code> means old commands keep working on the new engine.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="Slides - firewall.pdf">
+    <h2>4. Monitoring: IDS, IPS, SIEM and logging</h2>
+    <p>A firewall decides what may cross; <strong>monitoring</strong> decides what the network is actually doing. The lecture's stack has three instruments with different jobs:</p>
+    <ul>
+      <li><strong>IDS — Intrusion Detection System</strong>: observes traffic (or host activity) and <em>reports</em> suspicious behaviour. Passive: it sits on a mirror port and never touches the packets.</li>
+      <li><strong>IPS — Intrusion Prevention System</strong>: the same detection logic placed <em>inline</em>, able to drop or reset the offending traffic. The IDS's verdict becomes an action.</li>
+      <li><strong>SIEM — Security Information and Event Management</strong>: the aggregation and correlation layer. It ingests logs and alerts from everywhere (firewalls, IDS, hosts, applications), normalizes them, correlates events across sources and time, and drives the operator's dashboards and incident workflow.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 270" width="100%" role="img" aria-labelledby="p14-6-title">
+        <title id="p14-6-title">Placement of security instruments: IPS inline at the perimeter, NIDS on a mirror port, HIDS and EDR on the hosts, all feeding the SIEM</title>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="60" y="30">Internet</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2">
+          <rect x="30" y="40" width="70" height="34" rx="2"/>
+          <rect x="140" y="40" width="70" height="34" rx="2"/>
+          <rect x="250" y="40" width="80" height="34" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="65" y="59">firewall</text>
+          <text x="175" y="59">IPS inline</text>
+          <text x="290" y="59">switch</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none">
+          <path d="M100 57h40M210 57h40M330 57h120"/>
+        </g>
+        <g fill="var(--lk-cobalt)"><path d="M140 57l-6-3v6zM250 57l-6-3v6z"/></g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5">
+          <rect x="330" y="120" width="130" height="36" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)" text-anchor="middle">
+          <text x="395" y="142">NIDS (mirror port)</text>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="4 3" fill="none">
+          <path d="M350 74v46"/>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4">
+          <rect x="80" y="190" width="120" height="36" rx="2"/>
+          <rect x="280" y="190" width="120" height="36" rx="2"/>
+          <rect x="480" y="190" width="130" height="36" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-forest)" text-anchor="middle">
+          <text x="140" y="211">host with HIDS/EDR</text>
+          <text x="340" y="211">host with HIDS/EDR</text>
+          <text x="545" y="211">DMZ server</text>
+        </g>
+        <g stroke="var(--lk-ink)" stroke-width="1.2" fill="none">
+          <path d="M450 57h130v133h-80"/>
+        </g>
+        <g fill="var(--lk-ink)"><path d="M500 190l-6-3v6z"/></g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt-dark)" stroke-width="1.5">
+          <rect x="520" y="90" width="150" height="40" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-cobalt-dark)" text-anchor="middle">
+          <text x="595" y="114">SIEM</text>
+        </g>
+        <g stroke="var(--lk-cobalt-dark)" stroke-width="1.2" stroke-dasharray="3 3" fill="none">
+          <path d="M545 130v60M395 156v60M140 190v-20M340 190v-20"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="460" y="170">logs &amp; alerts</text>
+          <text x="200" y="175">syslog / auditd / agents</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.6</b> — Where the instruments sit. The IPS is inline and can act; the NIDS watches a mirrored copy and can only report; the hosts carry HIDS/EDR agents; everything streams logs and alerts to the SIEM for correlation.</figcaption>
+    </figure>
+
+    <p>Detection is a statistical decision, and the lecture is explicit about its two failure modes. A <strong>false positive (FP)</strong> is an alert when there is no attack — noise that exhausts the analyst; a <strong>false negative (FN)</strong> is an attack that produces no alert — the failure that actually hurts. The two trade off against each other: push sensitivity up and the FP flood drowns the real signals; push it down and attacks pass silently. A good rule set is measured on both numbers, not on "alerts fired".</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="100%" role="img" aria-labelledby="p14-7-title">
+        <title id="p14-7-title">Detection outcomes: true/false positives and negatives in a two-by-two matrix</title>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="300" y="40">alert raised</text>
+          <text x="550" y="40">no alert</text>
+          <text x="130" y="110">attack</text>
+          <text x="130" y="190">no attack</text>
+        </g>
+        <g fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.4">
+          <rect x="220" y="60" width="150" height="70" rx="2"/>
+        </g>
+        <g fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.4">
+          <rect x="470" y="60" width="150" height="70" rx="2"/>
+          <rect x="220" y="140" width="150" height="70" rx="2"/>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2">
+          <rect x="470" y="140" width="150" height="70" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="295" y="92">True Positive</text>
+          <text x="545" y="92">False Negative</text>
+          <text x="295" y="172">False Positive</text>
+          <text x="545" y="172">True Negative</text>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="295" y="108">attack detected</text>
+          <text x="545" y="108">attack missed — worst case</text>
+          <text x="295" y="188">noise, analyst time burned</text>
+          <text x="545" y="188">quiet, correctly</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.7</b> — The detection matrix. False negatives are the dangerous failure (an attack the defenders never see); false positives are the expensive one (analyst attention wasted on noise, which is how real attacks hide).</figcaption>
+    </figure>
+
+    <p>The instruments split by what they watch. A <strong>NIDS</strong> (network-based) watches the wire — signature and anomaly detection over traffic; a <strong>HIDS</strong> (host-based) watches a single machine — files, processes, system calls, logs; <strong>EDR</strong> (Endpoint Detection and Response) is the modern HIDS: an endpoint agent that detects, and also <em>responds</em> (isolating a host, killing a process) under the SOC's control. Complementary, not competing: the NIDS sees the attack crossing the network; the HIDS/EDR sees what it did once it arrived.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam — integrity checkers and logging</span>
+      <p><strong>Integrity checkers</strong> (AIDE, AFICK, Tripwire) are the HIDS's oldest trick: a baseline snapshot of file hashes (and metadata) is computed in a trusted state; later scans compare the live filesystem against the baseline and report changes — the file that was modified when nobody should have modified it. AIDE and AFICK are both Tripwire-style tools, AIDE being the widely deployed one (e.g. on Linux distributions and network appliances). <strong>Logging</strong> is the raw material of everything else: <code>syslog</code> (the traditional facility/severity log stream over UDP/TCP, or the <code>journald</code> binary journal on systemd systems) carries application and kernel events; <code>auditd</code> records security-relevant actions (who opened which file, which syscall, from which process). Log analysis is what turns that stream into knowledge; a SIEM is the analysis at fleet scale.</p>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="100%" role="img" aria-labelledby="p14-8-title">
+        <title id="p14-8-title">The SIEM pipeline: sources stream events, which are normalized, correlated and turned into alerts and dashboards</title>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="70" y="30">sources</text><text x="250" y="30">ingest</text><text x="420" y="30">processing</text><text x="600" y="30">consumers</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2">
+          <rect x="20" y="45" width="100" height="30" rx="2"/>
+          <rect x="20" y="85" width="100" height="30" rx="2"/>
+          <rect x="20" y="125" width="100" height="30" rx="2"/>
+          <rect x="20" y="165" width="100" height="30" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink)" text-anchor="middle">
+          <text x="70" y="63">firewall / NIDS</text>
+          <text x="70" y="103">syslog / journald</text>
+          <text x="70" y="143">auditd</text>
+          <text x="70" y="183">EDR agents</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4">
+          <rect x="180" y="70" width="120" height="60" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt)" text-anchor="middle">
+          <text x="240" y="99">collect &amp; normalize</text>
+          <text x="240" y="113">(Elastic / Wazuh)</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt-dark)" stroke-width="1.4">
+          <rect x="360" y="70" width="120" height="60" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt-dark)" text-anchor="middle">
+          <text x="420" y="99">correlate &amp; alert</text>
+          <text x="420" y="113">rules, thresholds</text>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4">
+          <rect x="540" y="70" width="130" height="60" rx="2"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-forest)" text-anchor="middle">
+          <text x="605" y="99">dashboards, tickets</text>
+          <text x="605" y="113">incident response</text>
+        </g>
+        <g stroke="var(--lk-ink)" stroke-width="1.3" fill="none">
+          <path d="M120 60h60M120 100h60M120 140h60M120 180h60"/>
+          <path d="M300 100h60M480 100h60"/>
+        </g>
+        <g fill="var(--lk-ink)"><path d="M180 60l-6-3v6zM180 100l-6-3v6zM180 140l-6-3v6zM180 180l-6-3v6zM360 100l-6-3v6zM540 100l-6-3v6z"/></g>
+        <g font-family="var(--lk-mono)" font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="240" y="160">OSSEC / Wazuh: HIDS with SIEM role</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 14.8</b> — The SIEM pipeline. Raw events from every instrument are collected and normalized into one schema, correlated (an alert from the NIDS + a file change on a host + a login at the same time is a story, not three facts), and surfaced to the analyst.</figcaption>
+    </figure>
+
+    <p>The lecture's concrete stack is the open-source mainstream: the <strong>Elastic Stack</strong> (Elasticsearch, Logstash/Beats, Kibana) as the collection/storage/visualization platform, <strong>Wazuh</strong> as the open-source HIDS/SIEM built on it (file integrity, log analysis, vulnerability detection, active response), and <strong>OSSEC</strong> as the classical agent-based HIDS that Wazuh derives from. The architecture is exactly plate 14.8: agents on the hosts, rules on the collection layer, correlation in the engine, dashboards for the humans.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful — monitoring is a cost model</span>
+      <p>Every instrument in this section has a price. The NIDS costs a mirror port and CPU per packet; the HIDS/EDR costs an agent on every host; the SIEM costs storage for every log, and analyst time for every alert. The FP/FN trade-off of plate 14.7 is an economic decision: a rule set tuned to zero false positives is usually tuned to blindness. Chapter 10's cyber range exists precisely to test IDS rules and detection coverage in a safe replica before the policy hits production — the monitoring of this chapter and the testing of chapter 10 are one workflow.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="Slides - firewall.pdf">
+    <h2>5. Suricata: a modern NIDS in practice</h2>
+    <p><strong>Suricata</strong> is the course's worked NIDS: an open-source, multi-threaded engine that performs intrusion detection (and prevention, inline) and network security monitoring. Its rule language descends from Snort's, and reading a rule is the fastest way to understand what an NIDS rule set actually says. A rule is one line with three parts: the <strong>action</strong> (<code>alert</code>, <code>drop</code>, <code>reject</code>, <code>pass</code>), the <strong>header</strong> (protocol, source address/port, direction, destination address/port), and the <strong>options</strong> in parentheses: content matches, metadata, and the rule's identity.</p>
+
+    <div id="ac-suricata"></div>
+
+    <p>The <strong>meta settings</strong> are the rule's paperwork: <code>msg</code> (the human-readable alert text), <code>sid</code> (a globally unique rule ID — the community convention reserves ranges, and your own rules start at <code>2000000</code>+ to avoid collisions), <code>rev</code> (revision, incremented on every edit), <code>classtype</code> (the attack category, mapped to priority), <code>priority</code> (1–4 severity) and <code>metadata</code> (free-form tags for filtering). The <code>content</code> options are the detection itself: literal byte sequences, hex escapes, PCRE, case-insensitive modifiers — matched against the payload (or, with the right keywords, against the headers).</p>
+
+    <p>Suricata's <strong>CLI</strong> is built for exactly the workflow the course's labs need — testing rules against captured traffic without touching a live network:</p>
+    <ul>
+      <li><code>suricata -T -c suricata.yaml -S local.rules</code> — <strong>test mode</strong>: validates the configuration and every rule, printing errors for rules that do not compile. Always run this before anything else.</li>
+      <li><code>suricata -r capture.pcap -l out/ -S local.rules</code> — <strong>offline mode</strong>: replays a pcap through the detection engine; no interfaces touched, fully reproducible. The companion of the Wireshark captures of chapters 4 and 11.</li>
+      <li><code>suricata -i eth0</code> — live mode on an interface (or with <code>--af-packet</code> on a mirror port) for real deployment.</li>
+      <li>The results land in <strong>EVE JSON</strong>: <code>out/eve.json</code>, one JSON object per event (alert, flow, http, dns…), consumable by jq, Elasticsearch, or any SIEM — the machine-readable counterpart of the log streams of section 4.</li>
+    </ul>
+
+    <div id="suricata-step"></div>
+
+    <div class="callout note">
+      <span class="callout-label">For the lab — the exercise loop</span>
+      <p>The lab exercises follow one loop: <strong>capture &rarr; write a rule &rarr; test &rarr; replay &rarr; read the alert</strong>. Capture a suspicious exchange in Wireshark (or use a supplied pcap), write a rule that matches its signature (the <code>content</code> bytes, the right ports, the right <code>sid</code>), validate with <code>-T</code>, replay with <code>-r</code>, then confirm the alert in <code>eve.json</code> — checking that <em>your</em> <code>sid</code> fired and the <code>msg</code> says what you intended. A rule that never fires in the pcap is a rule whose signature does not match the traffic: the FP/FN lesson of section 4, experienced directly. Iterate: widen or narrow the content match, bump <code>rev</code>, re-run.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What are the three basic principles of perimeter defence?</summary>
+        <p>(1) <strong>Choke point</strong> — all traffic between inside and outside passes through the firewall, and there is no alternative route; (2) <strong>default deny</strong> — what is not explicitly allowed is denied; (3) <strong>self-protection</strong> — the firewall itself must be immune to compromise (a hardened bastion).</p>
+      </details>
+
+      <details>
+        <summary>Name and characterize the three firewall control techniques.</summary>
+        <p><strong>Packet filter</strong> — inspects each packet's L3/L4 headers (addresses, protocol, ports) in isolation; fast and stateless. <strong>Application Level Gateway (ALG)</strong> — a protocol-aware proxy that terminates and re-originates connections, inspecting application data (FTP, HTTP…); deepest control, most expensive. <strong>Circuit Level Gateway (CLG)</strong> — relays whole connections without application knowledge (e.g. SOCKS); middle ground.</p>
+      </details>
+
+      <details>
+        <summary>Why is a pure packet filter vulnerable to fragmentation, spoofing and source routing?</summary>
+        <p>Because it judges each packet in isolation. <strong>Fragmentation</strong>: the filter sees fragments, not the reassembled datagram, and overlapping fragments can hide a payload. <strong>Spoofing</strong>: the source address is not authenticated, so a filter must block internal-looking source addresses at the perimeter — and nothing more can be done statelessly. <strong>Source routing</strong>: the IP source-route option dictates the return path, bypassing the choke point — such packets should be dropped at the perimeter.</p>
+      </details>
+
+      <details>
+        <summary>What does the state table add to a packet filter?</summary>
+        <p>The state table remembers active connections, so only the <strong>first packet</strong> of a connection is judged against the rules; the rest are admitted if they belong to an established connection. This recovers <strong>directionality</strong>: a filter can allow outbound HTTP and admit only the responses, without opening the return ports to everyone. It is the difference between judging packets and judging connections.</p>
+      </details>
+
+      <details>
+        <summary>Why does FTP break stateless and stateful filters, and what fixes it?</summary>
+        <p>Active FTP opens the data connection <em>from the server back to the client</em>, on a port negotiated inside the PORT command. A stateless filter cannot handle the inbound connection safely; a stateful filter knows the connection exists but cannot see the negotiated port, because it is inside the application payload. The fix is an <strong>FTP ALG</strong> (or the kernel's ftp helper): it reads the PORT command, opens exactly the negotiated port, and closes it when the transfer ends.</p>
+      </details>
+
+      <details>
+        <summary>List the five Netfilter hooks and what happens at each.</summary>
+        <p><strong>PREROUTING</strong> — first stop on arrival, before routing (DNAT lives here); <strong>INPUT</strong> — traffic addressed to the local machine; <strong>FORWARD</strong> — traffic routed through the machine (the router/firewall path); <strong>OUTPUT</strong> — locally generated traffic; <strong>POSTROUTING</strong> — after routing, before leaving (SNAT/MASQUERADE live here).</p>
+      </details>
+
+      <details>
+        <summary>What are the iptables tables, and what is each for?</summary>
+        <p><code>filter</code> — the allow/deny decisions; <code>nat</code> — address translation (SNAT/MASQUERADE/DNAT/REDIRECT); <code>mangle</code> — packet alteration (TOS, TTL, marks); <code>raw</code> — exemption from connection tracking. Each table has built-in chains on the hooks it uses; rules are evaluated in order and each chain ends with a policy (default target).</p>
+      </details>
+
+      <details>
+        <summary>Explain the connection tracking states NEW, ESTABLISHED, RELATED and INVALID.</summary>
+        <p><strong>NEW</strong> — first packet of a connection, not seen before: the only state the security policy really judges. <strong>ESTABLISHED</strong> — the connection has been seen in both directions. <strong>RELATED</strong> — a new connection started by an established one (FTP data channel, ICMP errors), admitted like its parent. <strong>INVALID</strong> — unclassifiable, to be dropped. A stateful filter needs rules for ESTABLISHED,RELATED inbound and a policy for NEW.</p>
+      </details>
+
+      <details>
+        <summary>How do NAT and connection tracking interact?</summary>
+        <p>Connection tracking drives NAT: the first packet is rewritten by the nat table (SNAT/MASQUERADE at POSTROUTING, DNAT at PREROUTING) and its translation is recorded in the state table; the rest of the flow is rewritten automatically from that record, replies are restored to the original address, and entries are removed when the tracked connection closes or expires. This answers chapter 4's question of <em>when to remove NAT entries</em>: when the flow ends.</p>
+      </details>
+
+      <details>
+        <summary>What are the main differences between iptables and nftables?</summary>
+        <p>Same Netfilter hooks and tables, different language. iptables is a command language — one command per rule, table as a flag, matches as extensions, no single view of the policy. nftables is a <strong>ruleset language</strong>: tables and chains declared per family (ip/ip6/inet), hooks and priorities explicit, verdicts (accept/drop/reject/jump/return/queue/continue), <strong>sets, maps and vmaps</strong> replacing repeated rules, atomic reloads with <code>nft -f</code>, and <code>notrack</code> as the explicit counterpart of the raw table. <code>iptables-nft</code> provides compatibility.</p>
+      </details>
+
+      <details>
+        <summary>What is the difference between IDS, IPS and SIEM?</summary>
+        <p><strong>IDS</strong> — detection and reporting only, passive (e.g. on a mirror port). <strong>IPS</strong> — the same detection placed inline, able to drop or reset the offending traffic. <strong>SIEM</strong> — the aggregation and correlation layer: it collects logs and alerts from all sources, normalizes and correlates them, and drives dashboards and incident workflows.</p>
+      </details>
+
+      <details>
+        <summary>What are false positives and false negatives, and which is the dangerous one?</summary>
+        <p>A <strong>false positive</strong> is an alert when there is no attack (noise that burns analyst time); a <strong>false negative</strong> is an attack that produces no alert. The <strong>false negative is the dangerous failure</strong> — the attack the defenders never see — but they trade off against each other: higher sensitivity means more FPs, lower sensitivity means more FNs.</p>
+      </details>
+
+      <details>
+        <summary>What is the difference between a NIDS, a HIDS and EDR?</summary>
+        <p><strong>NIDS</strong> — network-based, watches traffic (signature/anomaly detection). <strong>HIDS</strong> — host-based, watches one machine: files, processes, system calls, logs (integrity checkers like AIDE/AFICK are its classic tool). <strong>EDR</strong> — the modern endpoint agent that detects <em>and responds</em> (isolating a host, killing a process) under the SOC's control. Complementary: the NIDS sees the attack cross the network, the endpoint agent sees what it did.</p>
+      </details>
+
+      <details>
+        <summary>What do AIDE/AFICK, syslog/journald and auditd each contribute to monitoring?</summary>
+        <p><strong>AIDE/AFICK</strong> are Tripwire-style integrity checkers: a baseline of file hashes and metadata is compared against later scans to reveal unauthorized changes. <strong>syslog/journald</strong> carry the application and kernel log streams (journald being systemd's binary journal). <strong>auditd</strong> records security-relevant actions — which process performed which syscall on which file. Together they are the raw material the SIEM normalizes and correlates.</p>
+      </details>
+
+      <details>
+        <summary>Describe the parts of a Suricata rule and the meta settings.</summary>
+        <p>One line: <strong>action</strong> (alert/drop/reject/pass), <strong>header</strong> (protocol, source address/port, direction arrow, destination address/port), and <strong>options</strong> in parentheses — content matches (byte sequences, hex escapes, PCRE) plus meta settings: <code>msg</code> (alert text), <code>sid</code> (globally unique rule ID; local rules start at 2000000+), <code>rev</code> (revision), <code>classtype</code> (category mapped to priority), <code>priority</code> (severity 1–4) and <code>metadata</code> (free-form tags).</p>
+      </details>
+
+      <details>
+        <summary>What is the Suricata workflow for testing rules against captured traffic?</summary>
+        <p>Validate the ruleset and config with <code>suricata -T -c suricata.yaml -S local.rules</code>; replay the capture offline with <code>suricata -r capture.pcap -l out/ -S local.rules</code>; then read the alerts from <code>out/eve.json</code> (one JSON object per event), checking that the intended <code>sid</code> fired. A rule that never fires in the pcap means the signature does not match the traffic — iterate, bump <code>rev</code>, re-run. Live deployment uses <code>suricata -i</code> on an interface (or af-packet on a mirror port).</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-13-sdn-nfv-mobile.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+    </nav>
+    <p>Sources: <em>Slides - firewall</em> (course deck) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo · Prof. F. Callegati, A. Melis, L. Rinieri</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Annotated code: a stateful iptables ruleset ---- */
+LessonKit.annotatedCode('#ac-iptables', {
+  lang: 'bash',
+  lines: [
+    ['# A stateful router/firewall in iptables', 'The policy: the firewall is a router (FORWARD is its main path), and everything not explicitly allowed is denied. Default-deny is set once, at the chain policy.'],
+    ['iptables -P FORWARD DROP', 'The FORWARD chain policy: any packet that matches no rule is dropped. This single line is the whole perimeter philosophy of section 1.'],
+    ['iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT', 'The stateful core: packets belonging to connections we already saw in both directions (ESTABLISHED) — and their child connections (RELATED) — are admitted without further checks. This is what makes the filter remember.'],
+    ['iptables -N LAN_NEW', 'A custom chain: a named list of rules. Custom chains are how a policy becomes readable — here, the treatment of NEW connections coming from the internal network.'],
+    ['iptables -A FORWARD -i eth0 -m conntrack --ctstate NEW -j LAN_NEW', 'Only NEW packets from the internal interface are sent to the custom chain. Anything else inbound is judged by the rest of FORWARD — which, with the policy above, drops it.'],
+    ['iptables -A LAN_NEW -p tcp --dport 80 -j ACCEPT', 'Inside the custom chain: outbound web traffic is allowed. Note what is not said: no return-port rules are needed, because the state table (ESTABLISHED) already admitted the answers.'],
+    ['iptables -A LAN_NEW -p tcp --dport 443 -j ACCEPT', 'HTTPS, same reasoning: the first packet is judged here, the whole TLS session rides the state table.'],
+    ['iptables -A LAN_NEW -j LOG --log-prefix "LAN_NEW:DROP "', 'Everything else that reaches this point is a NEW outbound connection the policy does not allow. LOG records it (with a greppable prefix) and continues to the next rule — logging must not be a verdict.'],
+    ['iptables -A LAN_NEW -j DROP', 'And now the verdict: drop. Counters on this rule (iptables -L -v) count the refused connections — the firewall\'s cheapest telemetry, and the answer to "is my policy ever exercised?".']
+  ]
+});
+
+/* ---- State explorer: a connection through conntrack ---- */
+LessonKit.stateExplorer('#se-conntrack', {
+  title: 'A connection through conntrack',
+  start: 'First packet arrives (NEW)',
+  states: {
+    'First packet arrives (NEW)': {
+      desc: 'The first packet of a flow the kernel has never seen. This is the only packet the security policy fully judges: the rule set runs, the NAT table may rewrite it (SNAT/MASQUERADE at POSTROUTING), and the flow is recorded in the state table.',
+      to: [['reply traffic observed', 'ESTABLISHED'], ['unclassifiable (bad checksums, wrong sequence)', 'INVALID']]
+    },
+    'ESTABLISHED': {
+      desc: 'The connection has now been seen in both directions: a reply came back. From here on, every packet is matched against the state table, not against the rule set — which is why the return path needs no open ports.',
+      to: [['a child flow starts (FTP data, ICMP error)', 'RELATED'], ['the flow ends (FIN/RST or timeout)', 'Flow expires']]
+    },
+    'RELATED': {
+      desc: 'A new connection started by an established one, e.g. the FTP data channel negotiated inside the control connection, or ICMP errors belonging to a tracked flow. RELATED inherits the parent\'s admission: no new rule decision needed.',
+      to: [['it becomes a normal tracked flow', 'ESTABLISHED']]
+    },
+    'INVALID': {
+      desc: 'The packet matches no connection and cannot be classified. A stateful filter drops INVALID at the door: it is the signature of scanning, spoofing or broken stacks, and nothing legitimate looks like it.',
+      to: []
+    },
+    'Flow expires': {
+      desc: 'The connection closed (FIN/RST seen in both directions) or timed out. Its state-table entry — and with it, its NAT translation — is removed. This is chapter 4\'s "when to remove NAT entries?" answered: when the flow ends.',
+      to: []
+    }
+  }
+});
+
+/* ---- Annotated code: an nftables ruleset ---- */
+LessonKit.annotatedCode('#ac-nftables', {
+  lang: 'nft',
+  lines: [
+    ['table inet filter {', 'A table in the inet family: IPv4 and IPv6 handled by the same rules. The whole firewall lives in one named container, not in scattered commands.'],
+    ['  set lan { type ipv4_addr; flags interval;', 'A named set: a kernel-resident data structure holding IPv4 addresses/ranges. Sets replace dozens of identical iptables rules with one lookup.'],
+    ['    elements = { 192.168.0.0/24, 10.0.0.1 } }', 'The set contents: the internal network and a specific host. The interval flag allows prefix/range elements.'],
+    ['  chain input { type filter hook input priority filter; policy drop;', 'A chain with its hook declared inline: type filter, attached to the input hook, default policy drop. Hook and priority are explicit — no hidden ordering like the old -t table flags.'],
+    ['    ct state established,related accept', 'The stateful core, identical in spirit to the iptables rule: admitted traffic is matched by connection state, not re-judged packet by packet.'],
+    ['    ip saddr @lan accept', 'A set lookup: accept packets whose source address is in the @lan set. One rule, one kernel lookup — the set scales far beyond what a rule chain could.'],
+    ['  }', 'End of the input chain.'],
+    ['  chain forward { type filter hook forward priority filter; policy drop;', 'The routing path again: the router/firewall\'s main chain, default deny.'],
+    ['    ip daddr @lan ct state new accept', 'New connections destined to the internal network are allowed in; their replies are already handled by the state rule in the same chain (or by the per-chain state policy).'],
+    ['  }', 'End of forward.'],
+    ['}', 'End of the inet filter table. The entire policy is one file, validated and applied atomically with nft -f.'],
+    ['table ip nat {', 'A second table, in the ip family, for address translation — the separation of concerns the old nat table also expressed.'],
+    ['  chain postrouting { type nat hook postrouting priority srcnat;', 'A nat-type chain on the postrouting hook, with the srcnat priority: this is where outbound source translation happens.'],
+    ['    oifname "eth0" masquerade', 'The chapter 4 rule in nftables: MASQUERADE everything leaving eth0 — SNAT that automatically uses the output interface\'s address. Connection tracking makes the replies come back to the originals.'],
+    ['  }', 'End of postrouting.'],
+    ['}', 'End of the nat table. dnat for inbound translation would live in a nat chain on prerouting, with priority dstnat.']
+  ]
+});
+
+/* ---- Annotated code: a Suricata rule ---- */
+LessonKit.annotatedCode('#ac-suricata', {
+  lang: 'text',
+  lines: [
+    ['alert tcp $HOME_NET any -> $EXTERNAL_NET 80 (', 'The head of the rule: action alert (report only — drop/reject would make it an IPS rule), protocol tcp, source $HOME_NET:any, direction arrow, destination $EXTERNAL_NET:80. Variables make rules portable across deployments.'],
+    ['  msg:"ET SCAN Potential SSH Scan";', 'The message shown on the alert: a human-readable description of what was detected. First thing an analyst reads in the SIEM.'],
+    ['  flow:to_server,established;', 'A flow keyword: only match packets of established connections travelling to the server — the stateful filter\'s lesson, now inside the rule language.'],
+    ['  content:"SSH-"; nocase;', 'A content match: the literal bytes "SSH-" anywhere in the payload, case-insensitive. Content is the heart of signature detection.'],
+    ['  metadata: former_category SCAN;', 'Metadata tags for grouping and filtering — the rule\'s filing cabinet.'],
+    ['  reference:url,attack.mitre.org/techniques/T1046;', 'A reference to external knowledge: MITRE ATT&CK technique T1046 (network service scanning). Rules are intelligence, not just regexes.'],
+    ['  classtype:attempted-recon; priority:2;', 'The classification: mapped to a category and a priority (1–4). Correlating alerts by classtype is how a SIEM builds an attack story.'],
+    ['  sid:2000001; rev:1;)', 'Identity and version: sid is the globally unique rule ID (local rules start at 2000000+ to avoid collisions with the community rulesets), rev increments on every edit. Never re-use a sid. — test with suricata -T, replay with suricata -r, confirm the alert in eve.json.']
+  ]
+});
+
+/* ---- Stepper: the Suricata offline analysis workflow ---- */
+LessonKit.stepper('#suricata-step', {
+  title: 'Suricata offline analysis: from rule to alert',
+  sub: 'Advance the analyst through the lab loop. Each step blocks until its prerequisite is done.',
+  shared: { stage: 'capture ready', alerts: '0' },
+  watch: ['stage', 'alerts'],
+  threads: {
+    analyst: {
+      name: 'Analyst',
+      steps: [
+        { label: '1. Capture or obtain the pcap (Wireshark / supplied)', run: function (S) { S.stage = 'capture ready'; } },
+        { label: '2. Write the rule in rules/local.rules (content, ports, sid)', run: function (S) { if (S.stage !== 'capture ready') return 'block'; S.stage = 'rule written'; } },
+        { label: '3. Validate: suricata -T -c suricata.yaml -S local.rules', run: function (S) { if (S.stage !== 'rule written') return 'block'; S.stage = 'rules validated'; } },
+        { label: '4. Replay: suricata -r capture.pcap -l out/ -S local.rules', run: function (S) { if (S.stage !== 'rules validated') return 'block'; S.stage = 'pcap replayed'; } },
+        { label: '5. Read the alert: jq on out/eve.json, find the sid', run: function (S) { if (S.stage !== 'pcap replayed') return 'block'; S.stage = 'alert read'; S.alerts = S.alerts === '0' ? '1' : S.alerts; } },
+        { label: '6. Tune: no alert? adjust content/ports, bump rev, re-run', run: function (S) { if (S.stage !== 'alert read') return 'block'; S.stage = 'tuned'; } }
+      ]
+    }
+  },
+  verdict: function (S, allDone) {
+    if (allDone && S.stage === 'tuned') return { status: 'ok', text: 'Loop complete: the rule was validated, replayed against the capture, and its alert confirmed in eve.json — detection is now reproducible and testable, exactly like the P4 pipeline in chapter 7.' };
+    if (S.stage === 'tuned') return { status: 'bad', text: 'The loop was completed out of order — every step must follow its prerequisite. Restart and advance in sequence.' };
+    return { status: '', text: 'Advance the analyst. Each step blocks until the previous one is done: capture, write, test, replay, read, tune.' };
+  }
+});
+</script>
+</body>
+</html>

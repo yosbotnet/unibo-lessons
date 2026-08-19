@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 5 — The programmable data plane · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-04-virtual-network-lab.html">&larr; Ch. 4 — The virtual network lab</a>
+    <a href="index.html">Index</a>
+    <a href="cap-06-p4-language.html">Ch. 6 — The P4 language &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Hands-on networking · Chapter 5</div>
+    <h1>The programmable data plane</h1>
+    <div class="lk-meta"><span>~35 min read</span><span>4 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What the data plane is</a></li>
+      <li><a href="#s2">The functions that live in the data plane</a></li>
+      <li><a href="#s3">Access control lists and TCAMs</a></li>
+      <li><a href="#s4">Buffering, marking and scheduling</a></li>
+      <li><a href="#s5">Where OpenFlow stopped being enough</a></li>
+      <li><a href="#s6">The hardware caught up: PISA switch ASICs</a></li>
+      <li><a href="#s7">The three goals of a programmable interface</a></li>
+      <li><a href="#s8">Top-down versus bottom-up design</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Slide P4 - intro.pdf">
+    <h2>1. What the data plane is</h2>
+    <p>The P4 introduction, delivered by <strong>Andrea Melis</strong>, opens with a definition of the object the whole rest of the course programs. The data plane is about <strong>processing packet streams</strong>, and every word carries weight: <em>large volume</em>, packets arriving in <em>streams</em>, algorithms that process them. The consequence is a hard constraint:</p>
+
+    <ul>
+      <li>It must be <strong>super fast</strong> — a small time to process a single packet.</li>
+      <li>It works by <strong>matching bitfields</strong> and applying <strong>simple actions</strong>.</li>
+      <li>It runs <strong>at end hosts</strong> in the NIC, and <strong>inside the network</strong> in routers, switches and firewalls.</li>
+    </ul>
+
+    <p>That is the whole tension of the field in one slide: the data plane must do useful, increasingly sophisticated things, and it must do them in the few nanoseconds a packet spends in the device. Everything in chapters 5 to 8 is about widening what "useful things" can mean without losing the "few nanoseconds".</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>The data plane is defined by a budget, not by a feature list: constant, tiny work per packet. This is why the P4 language later forbids loops, recursion, floating point and dynamic memory (chapter 6) — not out of minimalism, but because anything whose cost is not bounded per byte of header cannot run at line rate.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="Slide P4 - intro.pdf">
+    <h2>2. The functions that live in the data plane</h2>
+    <p>The data plane is a bunch of different functionality, and the slides enumerate it. This list is worth memorising because it is the catalogue of everything a programmable data plane might be asked to become:</p>
+
+    <table>
+      <tr><th>Function</th><th>Where you meet it in this course</th></tr>
+      <tr><td><strong>Packet forwarding</strong> (switch)</td><td>The P4 basic router, chapters 6 and 7</td></tr>
+      <tr><td><strong>Access control</strong> (firewall)</td><td>ACLs below; iptables/nftables in chapter 14</td></tr>
+      <tr><td><strong>Tunneling</strong></td><td>The P4 myTunnel exercise, chapter 7; GRE/VXLAN, chapter 4</td></tr>
+      <tr><td><strong>Traffic monitoring</strong></td><td>P4 counters and INT, chapter 7; monitoring, chapter 14</td></tr>
+      <tr><td><strong>Buffering and marking</strong></td><td>ECN marking, chapter 7</td></tr>
+      <tr><td><strong>Shaping and scheduling</strong></td><td>P4 meters, chapter 7</td></tr>
+      <tr><td><strong>Deep packet inspection</strong> (DPI box)</td><td>Modbus parsing in P4, chapters 10 and 11</td></tr>
+    </table>
+
+    <p>Historically each of these was a separate box — the plethora of middleboxes from chapter 2. The claim of the programmable data plane is that they are all the same kind of thing: parse some headers, match some bitfields, apply some actions. If that is true, then they can all be <em>programs</em> for one kind of device, and the physical boxes collapse into one programmable box.</p>
+  </section>
+
+  <section id="s3" data-src="Slide P4 - intro.pdf">
+    <h2>3. Access control lists and TCAMs</h2>
+    <p>Access control is the archetype, so the slides develop it. <strong>Packet filtering</strong> is done with <strong>Access Control Lists (ACLs)</strong> that match on source and destination IP address, source and destination ports, and protocol ID. Beyond stateless filtering there are <strong>stateful operations</strong> — also for security, for example blocking all TCP SYN packets from outside — which require parsing TCP headers and maintaining per-flow state.</p>
+
+    <p>The structure of an ACL is exactly the structure you saw in the OpenFlow flow table of chapter 3, and it is worth naming the three properties precisely:</p>
+    <ul>
+      <li>Actions are <strong>accept or drop</strong>, in an <strong>ordered list</strong>.</li>
+      <li><strong>Wildcard rules</strong> are possible, and list entries <strong>can overlap</strong> — which is resolved by <strong>priority</strong>.</li>
+      <li>Packet classification means matching header fields and identifying the match with the highest priority.</li>
+    </ul>
+
+    <p>The interesting engineering detail is <em>how</em> this is done fast. The slides mention multi-dimensional classification algorithms, and then the hardware answer: <strong>TCAMs — ternary content addressable memory</strong>. A TCAM is what makes wildcard matching at line rate possible; it is the same memory technology that OpenFlow relied on, and the reason both OpenFlow and P4 speak in terms of exact, ternary and longest-prefix matches (chapter 6).</p>
+
+    <h3>Network Address Translation</h3>
+    <p>NAT is developed as a second stateful example: a <strong>mapping between internal and external addresses</strong>, at the level of IP addresses (between end-hosts and the NAT) and ports (so each connection is unique). The <strong>NAT table</strong> entries are created dynamically, which immediately raises the two hard questions the slides pose and leave open: <em>when to remove entries?</em> and <em>what if both ends are behind NAT?</em> These are exactly the questions Netfilter's connection tracking answers in chapter 14.</p>
+
+    <p>Try the priority-and-wildcard mechanics directly on an ACL below.</p>
+
+    <div id="acl-walk"></div>
+  </section>
+
+  <section id="s4" data-src="Slide P4 - intro.pdf">
+    <h2>4. Buffering, marking and scheduling</h2>
+    <p>The slides devote real space to queue management, because it is where the data plane stops being about single packets and starts being about the interaction between packets. Four topics appear, and they progress from crude to subtle:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Buffering</button>
+        <button class="lk-tab">Marking</button>
+        <button class="lk-tab">Scheduling</button>
+        <button class="lk-tab">Classification</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>FIFO / Drop Tail</strong>: packets served in arrival order; if the queue is full, the arriving packet is dropped. <strong>Random Early Detection (RED)</strong>: drop earlier as a function of buffer size, or <em>mark</em> to signal congestion to end hosts, and handle different traffic classes differently. <strong>Active Queue Management (AQM)</strong>: the queue autotunes to a latency target — CoDel, PIE, FqCoDel, packet-value-based dropping.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Mark a packet to signal something downstream or to the end hosts. <strong>ECN — Explicit Congestion Notification</strong> reuses IP header fields (the Type of Service bits) to carry buffer state. Two hard questions the slides raise: for end-host marking, <em>how can the network trust the endpoints?</em>; for network marking, <em>how can the network infer application requirements?</em> Both are answered pragmatically by classifying flows on a five-tuple.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Scheduling determines the serving order when there are multiple queues. <strong>Strict priority</strong>: always serve the highest-priority non-empty queue first. <strong>Round robin</strong>: cycle through the queues. <strong>Weighted fair scheduling</strong>: assign weights and serve proportionally. Each is a different fairness policy, and each is a few lines of logic — the kind of logic a programmable data plane can express.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Multiple traffic classes get a separate FIFO queue each — for each flow or class (voice, video) — and a scheduler decides the serving order. Traffic classes are identified using a flow specification based on the five-tuple, with rate limitations distinguishing what conforms to the profile from what is out of profile.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>ECN reappears as a concrete P4 exercise in chapter 7: the switch compares the enqueue queue depth against a threshold and, only for packets whose end host opted in, sets the ECN bits to congestion-encountered. What looks like a page of theory here becomes a dozen lines of P4 there — which is exactly the point of a programmable data plane.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="Slide P4 - intro.pdf">
+    <h2>5. Where OpenFlow stopped being enough</h2>
+    <p>Chapter 3 left OpenFlow at a cliffhanger: 12 header fields in 2009, 41 by 2013, and <em>still not enough</em>. The P4 introduction picks up exactly there and states what future SDN switches must therefore have:</p>
+
+    <ul>
+      <li>A <strong>configurable packet parser</strong> — not tied to a specific header format.</li>
+      <li><strong>Flexible match+action tables</strong> — multiple tables in series and/or parallel, able to match on all defined fields.</li>
+      <li><strong>General packet-processing primitives</strong> — copy, add, remove and modify, for both header fields and metadata.</li>
+    </ul>
+
+    <p>The slides are honest about why this did not happen sooner. Programmable switches always existed, but they had four fatal problems: <strong>hard to program</strong>, <strong>lack of a standard</strong>, <strong>lack of a common interface</strong>, and — bluntly — <strong>definitely not performant</strong> and <strong>definitely not supported</strong>. A configurable switch was a research toy, not a product.</p>
+  </section>
+
+  <section id="s6" data-src="Slide P4 - intro.pdf,Slide P4 - p4.pdf">
+    <h2>6. The hardware caught up: PISA switch ASICs</h2>
+    <p>Then the hardware changed. A new generation of switch ASICs appeared — the slides name <strong>Intel FlexPipe</strong>, <strong>Cisco Doppler</strong> and <strong>Tofino</strong> — that were finally performant. The abstract machine model behind them is <strong>PISA: the Protocol-Independent Switch Architecture</strong>, and it is the shape of every P4 target you will meet.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p5-1-title">
+        <title id="p5-1-title">The PISA pipeline: a programmable parser, followed by a programmable match-action pipeline of several stages, followed by a programmable deparser</title>
+        <rect x="20" y="80" width="120" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="34" y="112" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">Programmable</text>
+        <text x="34" y="130" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">Parser</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.3" fill="var(--lk-paper-light)">
+          <rect x="180" y="80" width="90" height="80"/>
+          <rect x="290" y="80" width="90" height="80"/>
+          <rect x="400" y="80" width="90" height="80"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">
+          <text x="196" y="112">match +</text><text x="196" y="128">action</text>
+          <text x="306" y="112">match +</text><text x="306" y="128">action</text>
+          <text x="416" y="112">match +</text><text x="416" y="128">action</text>
+        </g>
+        <text x="180" y="180" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">programmable match-action pipeline (stages in series)</text>
+        <rect x="530" y="80" width="120" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="544" y="112" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">Programmable</text>
+        <text x="544" y="130" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">Deparser</text>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.3" fill="none">
+          <path d="M0 120 L20 120"/><path d="M140 120 L180 120"/><path d="M270 120 L290 120"/>
+          <path d="M380 120 L400 120"/><path d="M490 120 L530 120"/><path d="M650 120 L680 120"/>
+        </g>
+        <text x="20" y="52" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Programmer declares the headers</text>
+        <text x="20" y="68" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">and their order in the packet</text>
+        <text x="240" y="52" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">defines the tables and the</text>
+        <text x="240" y="68" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">exact processing algorithm</text>
+        <text x="500" y="52" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">declares how the output</text>
+        <text x="500" y="68" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">packet looks on the wire</text>
+        <text x="20" y="216" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Parse &rarr; match/modify/add/remove headers and metadata &rarr; deparse (serialise) back onto the wire.</text>
+        <text x="20" y="236" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Every block marked "programmable" is what a P4 program defines.</text>
+      </svg>
+      <figcaption><b>Plate 5.1</b> — PISA in action. A packet is parsed into headers, the headers and intermediate results feed match-action stages that can modify/add/remove them, and the deparser serialises the result. The blue blocks are what you write.</figcaption>
+    </figure>
+
+    <p>PISA still has a catch, and the slides name it: even with these ASICs you <strong>still need a standard interface</strong>, because the vendor-specific interfaces are custom and <strong>low-level, akin to microcode programming</strong>. Fast hardware without a common language is the programmable switch of ten years earlier, just faster. That missing language is P4.</p>
+  </section>
+
+  <section id="s7" data-src="Slide P4 - intro.pdf">
+    <h2>7. The three goals of a programmable interface</h2>
+    <p>The slides state exactly three goals for the programmable interface, and these three goals <em>are</em> the design brief of the P4 language. Learn them as a triple:</p>
+
+    <table>
+      <tr><th>Goal</th><th>What it demands</th></tr>
+      <tr><td><strong>1. Protocol independence</strong></td><td>Configure a packet parser; define a set of typed match+action tables. The switch is not born knowing Ethernet or IP — you tell it.</td></tr>
+      <tr><td><strong>2. Target independence</strong></td><td>Program without knowledge of switch details; rely on the compiler to configure the target switch. The same program should run on an ASIC, an FPGA, an NPU or a CPU.</td></tr>
+      <tr><td><strong>3. Reconfigurability</strong></td><td>Change parsing and processing <em>in the field</em>, without swapping hardware.</td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Protocol independence, target independence, reconfigurability. If you can state these three and explain that P4 achieves protocol independence with a configurable parser and typed tables, target independence by leaning on the compiler, and reconfigurability by allowing a new program to be pushed to a running switch — you have the spine of the whole P4 half of the course.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="Slide P4 - intro.pdf,Slide P4 - p4.pdf">
+    <h2>8. Top-down versus bottom-up design</h2>
+    <p>The p4.org slides frame the shift as a reversal of the direction of authority. The status quo was <strong>bottom-up design</strong>: the ASIC datasheet defines the rules — <em>"this is how I know to process packets"</em> — and the network demands have to fit whatever the fixed-function ASIC already does. OpenFlow was, in this framing, <em>a compromise</em>: any new header-field match required updates to the protocol specification and changes to the runtime at the switch.</p>
+
+    <p>P4 proposes <strong>top-down design</strong>: the user or controller makes the rules — <em>"this is how I want the network to behave and how to switch packets"</em> — and a compiler configures the target below. The datasheet no longer dictates; it is a compilation target.</p>
+
+    <div id="se-topdown"></div>
+
+    <p>The benefits the slides list follow directly from that reversal, and the closing slogan is the one to remember: <em>think programming rather than protocols</em>.</p>
+
+    <table>
+      <tr><th>Benefit</th><th>Because the data plane is now software</th></tr>
+      <tr><td>New features</td><td>Add new protocols.</td></tr>
+      <tr><td>Reduced complexity</td><td>Remove unused protocols.</td></tr>
+      <tr><td>Efficient use of resources</td><td>Flexible use of tables.</td></tr>
+      <tr><td>Greater visibility</td><td>New diagnostic techniques, telemetry.</td></tr>
+      <tr><td>Software-style development</td><td>Rapid design cycle, fast innovation, fix data-plane bugs in the field.</td></tr>
+      <tr><td>You keep your own ideas</td><td>The behaviour is yours, not the vendor's.</td></tr>
+    </table>
+
+    <p>The list of what people have actually built with P4 is the proof that this is not theoretical: a Layer 4 load balancer (SilkRoad), low-latency congestion control (NDP), <strong>In-band Network Telemetry (INT)</strong>, in-network caching and coordination (NetCache, NetChain), aggregation for MapReduce — and much more. The programmable devices that run them span the full range: <strong>PISA ASICs</strong> (Tofino, FlexPipe, Doppler, Cavium/Xpliant), <strong>NPUs</strong> (EZchip, Netronome), <strong>CPUs</strong> (Open vSwitch, eBPF, DPDK, VPP) and <strong>FPGAs</strong> (Xilinx, Altera).</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>"Think programming rather than protocols" is not a slogan about convenience. In the bottom-up world a protocol is a treaty that everyone must ratify before anyone can use it; in the top-down world a protocol is a data structure you declare in your program. The cost of a new protocol drops from years to a recompile — which is the same argument as chapter 3's field-count table, now stated as a principle.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>How does the course define the data plane, and what constraint defines it?</summary>
+        <p>Processing packet streams: large volume, packets in streams, algorithms processing them. The defining constraint is that it must be <strong>super fast</strong> — a small time to process each packet — matching bitfields and applying simple actions, at end hosts (NIC) and inside the network (router, switch, firewall). The budget is constant, tiny work per packet.</p>
+      </details>
+
+      <details>
+        <summary>List the functions the slides place in the data plane.</summary>
+        <p>Packet forwarding (switch), access control (firewall), tunneling, traffic monitoring, buffering and marking, shaping and scheduling, and deep packet inspection (DPI box). The claim of the programmable data plane is that these are all the same kind of thing — parse, match, act — and so can be programs for one device.</p>
+      </details>
+
+      <details>
+        <summary>What are the three defining properties of an ACL, and what hardware makes it fast?</summary>
+        <p>Accept/drop actions in an ordered list; wildcard rules that can overlap, resolved by priority; classification by matching header fields and taking the highest-priority match. The hardware is the <strong>TCAM (ternary content addressable memory)</strong>, which makes wildcard matching possible at line rate.</p>
+      </details>
+
+      <details>
+        <summary>What two open questions does NAT raise in the slides?</summary>
+        <p>NAT maps internal to external addresses (IP and ports) with dynamically created table entries, which raises <em>when to remove entries?</em> and <em>what if both ends are behind NAT?</em> These are the questions connection tracking answers in chapter 14.</p>
+      </details>
+
+      <details>
+        <summary>Compare Drop Tail, RED and AQM.</summary>
+        <p><strong>Drop Tail (FIFO)</strong>: serve in arrival order, drop on a full queue. <strong>RED</strong>: drop earlier as a function of buffer size, or mark to signal congestion, and treat classes differently. <strong>AQM</strong> (CoDel, PIE, FqCoDel): the queue autotunes to a latency target. The progression is from crude tail-dropping to latency-aware self-tuning.</p>
+      </details>
+
+      <details>
+        <summary>What is ECN and which two trust questions does marking raise?</summary>
+        <p>Explicit Congestion Notification reuses IP header fields (Type of Service bits) to carry buffer state, marking packets to signal congestion instead of dropping them. The two questions: for end-host marking, how can the network trust the endpoints? and for network marking, how can the network infer application requirements? Both are addressed by classifying flows on the five-tuple.</p>
+      </details>
+
+      <details>
+        <summary>What must a future SDN switch have that OpenFlow lacked?</summary>
+        <p>A configurable packet parser (not tied to a specific header format); flexible match+action tables (multiple, in series and/or parallel, matching on all defined fields); and general packet-processing primitives (copy, add, remove, modify header fields and metadata).</p>
+      </details>
+
+      <details>
+        <summary>Why did programmable switches not succeed earlier, and what changed?</summary>
+        <p>Earlier programmable switches were hard to program, lacked a standard and a common interface, and were not performant or supported. What changed was a new generation of switch ASICs — Intel FlexPipe, Cisco Doppler, Tofino — that were finally fast, built on the PISA architecture. But they still needed a standard interface, because the vendor interfaces were custom and low-level, akin to microcode.</p>
+      </details>
+
+      <details>
+        <summary>Describe the PISA pipeline.</summary>
+        <p>A <strong>programmable parser</strong> (the programmer declares the headers and their order), a <strong>programmable match-action pipeline</strong> of several stages in series (the programmer defines the tables and the exact processing algorithm, which can match, modify, add or remove headers and metadata), and a <strong>programmable deparser</strong> (the programmer declares how the output packet looks on the wire). Then the packet is serialised back out.</p>
+      </details>
+
+      <details>
+        <summary>State the three goals of a programmable interface.</summary>
+        <p><strong>Protocol independence</strong> (configure a parser, define typed match+action tables), <strong>target independence</strong> (program without switch details, rely on the compiler), and <strong>reconfigurability</strong> (change parsing and processing in the field). These three goals are the design brief of P4.</p>
+      </details>
+
+      <details>
+        <summary>Contrast bottom-up and top-down design.</summary>
+        <p><strong>Bottom-up</strong>: the ASIC datasheet defines the rules ("this is how I know to process packets"); network demands must fit fixed-function silicon, and OpenFlow was a compromise where each new match needed a spec update and a runtime change. <strong>Top-down</strong>: the user/controller defines the behaviour ("this is how I want the network to behave"), and the compiler configures the target. The slogan is <em>think programming rather than protocols</em>.</p>
+      </details>
+
+      <details>
+        <summary>Name some things built with P4 and the kinds of devices that run it.</summary>
+        <p>Built: a Layer 4 load balancer (SilkRoad), low-latency congestion control (NDP), In-band Network Telemetry (INT), in-network caching/coordination (NetCache, NetChain), MapReduce aggregation. Devices: PISA ASICs (Tofino, FlexPipe, Doppler, Cavium), NPUs (EZchip, Netronome), CPUs (Open vSwitch, eBPF, DPDK, VPP), and FPGAs (Xilinx, Altera).</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-04-virtual-network-lab.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-06-p4-language.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>Slide P4 - intro</em>, <em>Slide P4 - p4</em> (Andrea Melis) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Bespoke widget: ACL priority + wildcard walker ---- */
+(function () {
+  var host = document.getElementById('acl-walk');
+  if (!host) return;
+  var rules = [
+    { prio: 40, src: '10.0.0.0/8', dport: '22', proto: 'tcp', action: 'DROP' },
+    { prio: 30, src: '10.0.1.5/32', dport: '*', proto: 'tcp', action: 'ACCEPT' },
+    { prio: 20, src: '*', dport: '502', proto: 'tcp', action: 'ACCEPT' },
+    { prio: 10, src: '*', dport: '*', proto: '*', action: 'DROP (default)' }
+  ];
+  var packets = [
+    { name: 'SSH from 10.0.1.5', src: '10.0.1.5', dport: '22', proto: 'tcp' },
+    { name: 'Modbus from 10.0.1.5', src: '10.0.1.5', dport: '502', proto: 'tcp' },
+    { name: 'SSH from 10.0.9.9', src: '10.0.9.9', dport: '22', proto: 'tcp' },
+    { name: 'HTTP from 192.168.0.4', src: '192.168.0.4', dport: '80', proto: 'tcp' }
+  ];
+  var pIdx = 0, cursor = -1, hit = -1;
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'ACL: ordered, wildcarded, first match wins';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'The classic access-control structure the P4 pipeline inherits. Note how the specific rule for 10.0.1.5 must sit above the broad DROP for 10.0.0.0/8, or it would never fire.';
+  host.appendChild(sub);
+  var sel = document.createElement('div');
+  sel.className = 'lk-step-btns';
+  packets.forEach(function (p, i) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = p.name;
+    b.addEventListener('click', function () { pIdx = i; cursor = -1; hit = -1; render(); });
+    sel.appendChild(b);
+  });
+  host.appendChild(sel);
+  var tbl = document.createElement('table');
+  host.appendChild(tbl);
+  var bar = document.createElement('div');
+  bar.className = 'lk-step-state';
+  host.appendChild(bar);
+  var verdict = document.createElement('div');
+  verdict.className = 'lk-step-verdict';
+  host.appendChild(verdict);
+  var ctl = document.createElement('div');
+  ctl.className = 'lk-step-btns';
+  var next = document.createElement('button');
+  next.type = 'button';
+  next.textContent = 'Test next entry';
+  next.addEventListener('click', function () {
+    if (hit >= 0) return;
+    if (cursor < rules.length - 1) { cursor++; if (m(rules[cursor], packets[pIdx])) hit = cursor; }
+    render();
+  });
+  var rst = document.createElement('button');
+  rst.type = 'button';
+  rst.className = 'lk-step-reset';
+  rst.textContent = 'Reset';
+  rst.addEventListener('click', function () { cursor = -1; hit = -1; render(); });
+  ctl.appendChild(next); ctl.appendChild(rst);
+  host.appendChild(ctl);
+  function inSub(ip, spec) {
+    if (spec === '*') return true;
+    var pr = spec.split('/'), len = parseInt(pr[1], 10);
+    var a = ip.split('.'), b = pr[0].split('.'), bytes = Math.floor(len / 8);
+    if (len % 8 !== 0) { /* /8, /32 only in this demo */ }
+    for (var i = 0; i < bytes; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  function m(r, p) {
+    if (!inSub(p.src, r.src)) return false;
+    if (r.dport !== '*' && r.dport !== p.dport) return false;
+    if (r.proto !== '*' && r.proto !== p.proto) return false;
+    return true;
+  }
+  function render() {
+    var p = packets[pIdx];
+    tbl.innerHTML = '';
+    var head = tbl.insertRow();
+    ['prio', 'src', 'dport', 'proto', 'action'].forEach(function (t) { var th = document.createElement('th'); th.textContent = t; head.appendChild(th); });
+    rules.forEach(function (r, i) {
+      var row = tbl.insertRow();
+      [r.prio, r.src, r.dport, r.proto, r.action].forEach(function (v) { row.insertCell().textContent = v; });
+      if (i === hit) row.style.outline = '2px solid var(--lk-forest)';
+      else if (i <= cursor) row.style.opacity = '.45';
+    });
+    bar.innerHTML = '';
+    [['packet', p.name], ['src', p.src], ['dport', p.dport], ['proto', p.proto]].forEach(function (pr) {
+      var d = document.createElement('div'); d.className = 'lk-step-box';
+      d.innerHTML = pr[0] + ' = <b></b>'; d.querySelector('b').textContent = pr[1]; bar.appendChild(d);
+    });
+    if (hit >= 0) {
+      verdict.className = 'lk-step-verdict ' + (rules[hit].action.indexOf('ACCEPT') === 0 ? 'ok' : 'bad');
+      verdict.textContent = 'Priority ' + rules[hit].prio + ' matched: ' + rules[hit].action + '. Lower entries are never consulted — order is meaning.';
+    } else if (cursor < 0) {
+      verdict.className = 'lk-step-verdict';
+      verdict.textContent = 'Press "Test next entry" to walk the list top to bottom.';
+    } else {
+      verdict.className = 'lk-step-verdict';
+      verdict.textContent = 'Entry ' + (cursor + 1) + ' did not match; keep going.';
+    }
+  }
+  render();
+})();
+
+/* ---- State explorer: bottom-up vs top-down design ---- */
+LessonKit.stateExplorer('#se-topdown', {
+  title: 'Who makes the rules?',
+  start: 'Bottom-up: the ASIC decides',
+  states: {
+    'Bottom-up: the ASIC decides': {
+      desc: 'The ASIC datasheet says "this is how I know to process packets". Network demands must fit whatever the fixed-function silicon already supports. The datasheet is the authority.',
+      to: [['a new protocol is needed', 'OpenFlow: the compromise']]
+    },
+    'OpenFlow: the compromise': {
+      desc: 'OpenFlow standardises the match/action interface, but any new header-field match still requires an update to the protocol specification and a change to the runtime at the switch. Better, but the authority still sits below the operator.',
+      to: [['the field count explodes (12 to 41)', 'The wall'], ['invert the direction', 'Top-down: the program decides']]
+    },
+    'The wall': {
+      desc: '12 header fields in 2009, 41 by 2013, plus multiple heterogeneous table stages — and still not enough for VXLAN, NVGRE, STT. Every new protocol is a treaty everyone must ratify. This is the dead end.',
+      to: [['there must be another way', 'Top-down: the program decides']]
+    },
+    'Top-down: the program decides': {
+      desc: 'The user or controller says "this is how I want the network to behave and how to switch packets". A P4 program declares the headers, the tables and the output format; the compiler configures the target below. The datasheet becomes a compilation target, not an authority.',
+      to: [['compile and push to the switch', 'Reconfigurable in the field']]
+    },
+    'Reconfigurable in the field': {
+      desc: 'A new protocol is now a data structure you declare and recompile, not a standard you wait for. New features, less complexity, greater visibility, software-style development — and you keep your own ideas. Think programming rather than protocols.',
+      to: []
+    }
+  }
+});
+</script>
+</body>
+</html>

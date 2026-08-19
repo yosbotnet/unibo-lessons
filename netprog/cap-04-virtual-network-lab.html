@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 4 — The virtual network lab · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-03-sdn-and-openflow.html">&larr; Ch. 3 — SDN, OpenFlow and service function chaining</a>
+    <a href="index.html">Index</a>
+    <a href="cap-05-programmable-data-plane.html">Ch. 5 — The programmable data plane &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Hands-on networking · Chapter 4</div>
+    <h1>The virtual network lab: namespaces, bridges and OvS</h1>
+    <div class="lk-meta"><span>~45 min read</span><span>5 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Why build a virtual network at all</a></li>
+      <li><a href="#s2">The building blocks: namespaces, veth, bridges, switches</a></li>
+      <li><a href="#s3">Exercises 1 to 3: two hosts, three ways to connect them</a></li>
+      <li><a href="#s4">One switch, one LAN, then two LANs</a></li>
+      <li><a href="#s5">Adding a router: inter-LAN routing</a></li>
+      <li><a href="#s6">ARP, ip neigh and ARP poisoning</a></li>
+      <li><a href="#s7">NAT and MASQUERADE</a></li>
+      <li><a href="#s8">Forwarding tables and the two paths</a></li>
+      <li><a href="#s9">Virtual LANs and IEEE 802.1Q</a></li>
+      <li><a href="#s10">Tunnels: GRE and VXLAN</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Lab session 1 - How to use Linux Namespaces and OpenVSwitch.pdf,Implementation of VNIs using network namespaces.pdf">
+    <h2>1. Why build a virtual network at all</h2>
+    <p>The virtual network infrastructure of chapter 2 was described from the outside; here it is built from the inside, by hand, on a single Linux machine. The motivation stated in the lab is the same one that justified emulation in general: computer networks are complex — several devices, several interfaces, several protocols running, and physical interconnections that originate complex topologies — and you cannot experiment on a live one.</p>
+
+    <p>The physical picture the lab starts from is worth keeping in mind, because the whole exercise is to reproduce it on one host:</p>
+    <ul>
+      <li>A <strong>physical network</strong> is a TCP/IP protocol stack, bound to a Network Interface Card, plugged by a cable into a Layer 2 switch (bridge).</li>
+      <li>A <strong>virtual network</strong> runs <em>many</em> separate TCP/IP stacks on the <em>same</em> physical machine, each attached to a virtual network interface, all wired to a software Layer 2 switch, which finally reaches the one physical NIC.</li>
+    </ul>
+
+    <p>The mapping from physical roles to Linux constructs is the plan for the whole chapter:</p>
+
+    <table>
+      <tr><th>Role</th><th>Virtual construct</th></tr>
+      <tr><td>Host</td><td>Linux <strong>network namespace</strong> — a separate protocol stack with its own IP addresses, routing tables and forwarding strategies</td></tr>
+      <tr><td>Switch</td><td><strong>Linux bridge</strong> (unmanaged) or <strong>Open vSwitch</strong> (more advanced)</td></tr>
+      <tr><td>Cable</td><td><strong>veth</strong> pair — a virtual Ethernet link with a plug at each end</td></tr>
+      <tr><td>Router / application gateway</td><td>A namespace (or container / VM) that segregates processes and forwards between stacks</td></tr>
+    </table>
+
+    <p>Why namespaces first? Because <strong>network namespaces are the foundation of network isolation in Linux</strong>: they isolate network devices, isolate the IPv4 and IPv6 stacks, isolate routing tables and firewall rules, and isolate sockets and port spaces. They are the basic building block behind many virtual networking systems — including the Docker <code>bridge</code> driver from chapter 2 and the Kathará containers of chapter 11.</p>
+  </section>
+
+  <section id="s2" data-src="Implementation of VNIs using network namespaces.pdf">
+    <h2>2. The building blocks: namespaces, veth, bridges, switches</h2>
+    <p>The lab uses the modern <code>ip</code> suite throughout. The commands below are the complete vocabulary you need to build any topology in this chapter; the annotated view groups them by the object they act on.</p>
+
+    <div id="ac-iptools"></div>
+
+    <h3>Managing namespaces</h3>
+    <pre><code class="language-bash">ip netns add NAMESPACE       # create a namespace
+ip netns del NAMESPACE       # delete a namespace
+ip netns list                # list existing namespaces
+ip netns exec NAMESPACE CMD  # run CMD inside NAMESPACE
+ip netns monitor             # report namespace events</code></pre>
+
+    <h3>Creating links and connecting them</h3>
+    <pre><code class="language-bash"># a virtual Ethernet cable with two plugs
+ip link add NAME1 type veth peer name NAME2
+
+# a plug can be given a fixed MAC address
+ip link add veth0 address "00:00:00:11:11:11" type veth peer name eth-H11
+
+# a Linux bridge: an unmanaged Ethernet LAN switch
+ip link add NAME type bridge
+
+# plug one end of a veth into a namespace, the other into a bridge
+ip link set NAME netns NAMESPACE     # attach the plug to a namespace
+ip link set NAME master BRIDGE       # attach the plug to a bridge</code></pre>
+
+    <h3>Open vSwitch</h3>
+    <pre><code class="language-bash">ovs-vsctl show                  # list the active switches
+ovs-vsctl add-br SW             # create a new switch
+ovs-vsctl add-port N_SW N_VETH  # connect a veth end to a switch</code></pre>
+
+    <p>Open vSwitch is described as a <strong>more recent implementation with more advanced features than the Linux bridge</strong>. That difference is not cosmetic: the Linux bridge is a plain unmanaged switch, while OvS is OpenFlow-enabled and is exactly the kind of programmable virtual switch a controller can drive — the reason chapter 3's controller had something to talk to, and the reason the VLAN and tunnelling exercises later in this chapter reach for <code>ovs-vsctl</code>.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>There are also the older <code>bridge</code> command (manage the forwarding database with <code>bridge fdb</code>, set link properties with <code>bridge link</code>) and the deprecated <code>arp</code> command. The lab is explicit that <code>arp</code> is deprecated and that the current tool is <code>ip neigh</code> — a small but exam-relevant modernisation.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="Lab session 1 - How to use Linux Namespaces and OpenVSwitch.pdf">
+    <h2>3. Exercises 1 to 3: two hosts, three ways to connect them</h2>
+    <p>The first three exercises are the same goal — a point-to-point IP network between two namespaces on <code>172.0.0.0/30</code> — solved with three different Layer 2 fabrics. Doing the same thing three ways is the point: it isolates what the fabric does from what the hosts do.</p>
+
+    <table>
+      <tr><th>Exercise</th><th>Fabric between Host1 and Host2</th><th>What it teaches</th></tr>
+      <tr><td>1</td><td>A direct <strong>veth pair</strong> (veth1 &harr; veth2)</td><td>The cable itself; no switching at all</td></tr>
+      <tr><td>2</td><td>A <strong>Linux bridge</strong> SW1 in between</td><td>Software Layer 2 switching, unmanaged</td></tr>
+      <tr><td>3</td><td>An <strong>Open vSwitch</strong> SW1 in between</td><td>The programmable switch, same wiring</td></tr>
+    </table>
+
+    <p>Three checks are required after each: names must be unique within each namespace, the <strong>ARP tables</strong> must be inspected, and <strong>connectivity</strong> must be verified. The reference topology for exercise 2/3 is one namespace on each side, a veth from each into the switch:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="100%" role="img" aria-labelledby="p4-1-title">
+        <title id="p4-1-title">Host1 and Host2 namespaces each connected by a veth into a central switch SW1 on the 172.0.0.0/30 network</title>
+        <rect x="40" y="90" width="130" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <rect x="530" y="90" width="130" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="70" y="118" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">Host1</text>
+        <text x="560" y="118" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">Host2</text>
+        <text x="52" y="138" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">172.0.0.1/30</text>
+        <text x="542" y="138" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">172.0.0.2/30</text>
+        <rect x="290" y="86" width="120" height="68" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.6"/>
+        <text x="318" y="116" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-ink)">SW1</text>
+        <text x="300" y="136" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">bridge or OvS</text>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none">
+          <path d="M170 120 L290 120"/>
+          <path d="M410 120 L530 120"/>
+        </g>
+        <text x="196" y="110" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">veth1</text>
+        <text x="452" y="110" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">veth2</text>
+        <text x="40" y="200" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Exercise 1 removes SW1 and joins veth1 directly to veth2 — the same hosts, no switch.</text>
+      </svg>
+      <figcaption><b>Plate 4.1</b> — The base topology of Lab 1. Only the box in the middle changes across exercises 1 to 3.</figcaption>
+    </figure>
+
+    <p>A concrete, complete version of exercise 3 (Open vSwitch) reads as follows. Every line maps to one of the building blocks above:</p>
+
+    <pre><code class="language-bash"># 1. create the two host namespaces
+ip netns add Host1
+ip netns add Host2
+
+# 2. create two veth cables and hand one plug of each to a host
+ip link add veth1 type veth peer name sw-p1
+ip link add veth2 type veth peer name sw-p2
+ip link set veth1 netns Host1
+ip link set veth2 netns Host2
+
+# 3. create the switch and plug the other ends into it
+ovs-vsctl add-br SW1
+ovs-vsctl add-port SW1 sw-p1
+ovs-vsctl add-port SW1 sw-p2
+ip link set sw-p1 up
+ip link set sw-p2 up
+
+# 4. address the hosts on 172.0.0.0/30 and bring the plugs up
+ip netns exec Host1 ip addr add 172.0.0.1/30 dev veth1
+ip netns exec Host1 ip link set veth1 up
+ip netns exec Host2 ip addr add 172.0.0.2/30 dev veth2
+ip netns exec Host2 ip link set veth2 up
+
+# 5. check
+ip netns exec Host1 ping -c1 172.0.0.2
+ip netns exec Host1 ip neigh          # the arp table, the modern way</code></pre>
+  </section>
+
+  <section id="s4" data-src="Lab session 1 - How to use Linux Namespaces and OpenVSwitch.pdf">
+    <h2>4. One switch, one LAN, then two LANs</h2>
+    <p>Exercise 4 scales the switch out: one SW1 with four hosts, all on a single <code>10.0.1.0/24</code> network — one switch corresponds to one LAN, a single broadcast domain. Connectivity is tested across all four.</p>
+
+    <p>Exercise 5 makes the pivotal change with almost no new equipment: the same four hosts, the same single switch, but the addresses are split into <strong>two IP networks</strong>, <code>10.0.1.0/24</code> and <code>10.0.2.0/24</code>. Reachability is tested — and the lesson is delivered by what fails. Two hosts on the same switch but on different IP networks cannot reach each other, because a switch does not route between IP networks; it only forwards within one broadcast domain.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Exercise 5 separates two ideas that beginners fuse: <em>Layer 2 reachability</em> (are we on the same switch?) and <em>Layer 3 reachability</em> (are we in the same IP network?). Being on the same switch is necessary but not sufficient; crossing IP networks needs a router, which is exactly what exercise 6 adds.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="Lab session 1 - How to use Linux Namespaces and OpenVSwitch.pdf,Lab session 2 - Inter LAN routing.pdf">
+    <h2>5. Adding a router: inter-LAN routing</h2>
+    <p>Exercise 6 adds a router R1 with one leg in each network — <code>10.0.1.254</code> on the first, <code>10.0.2.254</code> on the second — so the two IP networks can finally talk. A namespace becomes a router the moment it is allowed to forward between its interfaces (IP forwarding enabled) and the hosts point their default route at it.</p>
+
+    <p>Lab session 2 refines this into a routed topology with <em>two</em> switches, one per LAN, both connected to R1, and then chains more routers (R1, R2, R3, R4) across intermediate <code>/30</code> networks. The single most important sentence of the whole routing lab is stated as the "main message to remember":</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>For the network to work properly, <strong>all the network prefixes must appear in the forwarding tables of all the gateways/routers</strong>. A prefix may appear on its own, or be summarised into a more general prefix, or be covered by the default route — but it must be reachable from every router that has to forward towards it. A missing prefix in a single router breaks the path.</p>
+    </div>
+
+    <p>Manual routes are added with a single command, repeated on every router that needs to know about a remote network:</p>
+    <pre><code class="language-bash">ip route add &lt;network&gt; via &lt;gateway address&gt;
+
+# e.g. on R1, teach it how to reach the far LAN through R2
+ip netns exec R1 ip route add 10.0.2.0/24 via 192.168.0.5</code></pre>
+
+    <p>Use the reachability walker below to feel the "every router must know every prefix" rule directly: remove one route and watch a path go dark.</p>
+
+    <div id="route-check"></div>
+  </section>
+
+  <section id="s6" data-src="Lab session 2 - Inter LAN routing.pdf">
+    <h2>6. ARP, ip neigh and ARP poisoning</h2>
+    <p>The lab makes the deprecation explicit: the <code>arp</code> command is deprecated, and the current tool to manage the ARP table is <strong><code>ip neigh</code></strong>. It shows a table with the IP address, the interface the information was received on, the corresponding MAC address, and a <strong>state</strong>. The states are worth knowing because they explain the timing behaviour of a LAN:</p>
+
+    <table>
+      <tr><th>State</th><th>Meaning</th></tr>
+      <tr><td><code>REACHABLE</code></td><td>Neighbour recently confirmed reachable; timer running (usually about 30 seconds in Linux).</td></tr>
+      <tr><td><code>STALE</code></td><td>Entry is old, no recent confirmation, still usable but needs verification soon.</td></tr>
+      <tr><td><code>DELAY</code></td><td>System waiting briefly before probing; gives upper-layer protocols a chance to confirm reachability.</td></tr>
+      <tr><td><code>PROBE</code></td><td>Actively sending ARP requests, trying to confirm the neighbour is alive.</td></tr>
+      <tr><td><code>INCOMPLETE</code></td><td>ARP request sent, no reply yet, MAC address unknown.</td></tr>
+      <tr><td><code>FAILED</code></td><td>No response after multiple probes; entry considered unreachable.</td></tr>
+    </table>
+
+    <h3>ARP poisoning</h3>
+    <p>The security exercise turns this machinery into an attack, in the classic three phases. An attacker A (played in the lab by host H12) is connected to the LAN and:</p>
+    <ol>
+      <li><strong>Reconnaissance</strong> — gather useful information, in this case which IP hosts are active: <code>arp-scan 10.0.1.0/24</code>.</li>
+      <li><strong>Scanning</strong> — capture traffic with Wireshark to understand which host is the network gateway.</li>
+      <li><strong>Execution</strong> — launch the ARP poisoning to become Man In The Middle: <code>arpspoof -i veth0 -t 10.0.0.11 -r 10.0.0.254</code>.</li>
+    </ol>
+
+    <p>The study steps use Wireshark on the gateway interface, print the ARP cache in H11 and R1, and run <code>traceroute</code> from H11 to H21 to see the detour. The attack is then made stealthy:</p>
+    <pre><code class="language-bash"># stop the kernel from advertising a shorter path back
+sysctl -w net.ipv4.conf.veth0.send_redirects=0
+sysctl -w net.ipv4.conf.all.send_redirects=0
+
+# hide the extra hop from traceroute
+iptables -A OUTPUT -o veth0 -p icmp --icmp-type time-exceeded -j DROP</code></pre>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful</span>
+      <p>The two stealth measures are not decorative. Disabling ICMP redirects stops the router from telling H11 "you can reach the gateway directly, skip me", which would undo the poisoning; dropping <code>time-exceeded</code> replies stops <code>traceroute</code> from revealing the attacker as an extra hop. Both attack the diagnostic feedback the network normally gives you — which is exactly why a network IDS (chapter 14) watches for anomalies rather than trusting the endpoints.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="Lab session 2 - Inter LAN routing.pdf,Slides - firewall.pdf">
+    <h2>7. NAT and MASQUERADE</h2>
+    <p>Exercise 6 is then reworked so that the far side is a private network <code>192.168.0.0/24</code>, and NAT is applied in R1. The lab uses <code>iptables</code> in the <code>nat</code> table:</p>
+
+    <pre><code class="language-bash"># translate everything leaving R1, taking the source from the output interface
+iptables -t nat -A POSTROUTING -j MASQUERADE
+
+# reset the nat table and apply NAT one way only, on a specific interface
+iptables -t nat -F
+iptables -t nat -A POSTROUTING -o veth2 -j MASQUERADE</code></pre>
+
+    <p>The verification method is instructive: open Wireshark <em>in R1</em>, ping from H11 to H21 analysing <code>veth1</code> first and <code>veth2</code> second, then ping the other way analysing <code>veth2</code> first and <code>veth1</code> second. Watching the same ping on the two legs of the router is how you actually see the address being rewritten.</p>
+
+    <p><strong>MASQUERADE</strong> is a special case of source NAT: as the firewall deck (chapter 14) states, it works like <code>SNAT</code> but automatically assigns the packet the address of the output interface — which is why it is the natural choice for a gateway whose external address may change. The connection tracking that makes this work — first packet rewritten by the <code>nat</code> table, the rest handled automatically by conntrack, replies restored to the original address — is developed fully in chapter 14.</p>
+  </section>
+
+  <section id="s8" data-src="Lab session 2 - Inter LAN routing.pdf">
+    <h2>8. Forwarding tables and the two paths</h2>
+    <p>The routing lab ends on a subtle and genuinely important point about the difference between a connection and its two directions. The observations from exercise 9 (the four-router topology) are:</p>
+    <ul>
+      <li>Interconnection <strong>does not work if forward and backward paths are not configured correctly</strong>.</li>
+      <li>But <strong>forward and backward paths do not need to be the same</strong>.</li>
+      <li>Analyse the forwarding tables of R1 and R2: <strong>who decides the forward and backward paths?</strong></li>
+    </ul>
+
+    <p>The answer the question is fishing for is that <em>each router independently decides the next hop for a packet based on its own forwarding table and the packet's destination</em>. Nobody decides a whole path; a path is what emerges from a sequence of independent local decisions. That is why a forward path and a return path can legitimately differ (asymmetric routing), and why a single wrong or missing entry anywhere along either direction is enough to break connectivity even though every other router is configured perfectly.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>A path is not an object anyone owns; it is the trace left by many routers each answering the same tiny question — "given this destination, what is my next hop?" — from its own table. This is the local-decision principle that P4's match-action tables (chapter 6) make explicit and programmable.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="Lab session 3 - Virtual LANs.pdf">
+    <h2>9. Virtual LANs and IEEE 802.1Q</h2>
+    <p>Lab session 3 attacks the broadcast-domain problem from section 4. In general one switch corresponds to one LAN: broadcast messages go to all ports regardless of IP configuration, a single broadcast domain. For <strong>security and efficiency</strong> reasons it is better to separate the broadcast domains of different IP networks, and the switch must be configured accordingly. That is a <strong>Virtual LAN</strong>.</p>
+
+    <table>
+      <tr><th>VLAN classification</th><th>How membership is decided</th></tr>
+      <tr><td><strong>Static (port-based)</strong></td><td>Each switch port belongs to one or more VLANs; a host belongs to a VLAN based on the port it is connected to. To move a host, reconfigure the switch port.</td></tr>
+      <tr><td><strong>Dynamic</strong></td><td>A host belongs to a VLAN based on its MAC or IP address, regardless of the port. To move a host, change the address-to-VLAN configuration.</td></tr>
+    </table>
+
+    <h3>The problem with extended LANs</h3>
+    <p>The interesting case is an extended LAN with multiple switches: <em>how can we say to which VLAN an Ethernet frame belongs when it crosses the inter-switch interface?</em> The answer is <strong>IEEE 802.1Q</strong>, which allows an Ethernet frame to specify its VLAN by adding a tag to the Ethernet header. Both ends of the cable must support 802.1Q, and the tag is also used to create virtual sub-interfaces on hosts and routers.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 200" width="100%" role="img" aria-labelledby="p4-2-title">
+        <title id="p4-2-title">The four-byte IEEE 802.1Q tag: 16-bit Tag Protocol Identifier, 3-bit priority, 1-bit CFI, and 12-bit VLAN identifier</title>
+        <rect x="40" y="60" width="200" height="56" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <rect x="240" y="60" width="90" height="56" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <rect x="330" y="60" width="60" height="56" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <rect x="390" y="60" width="270" height="56" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="70" y="84" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">TPID — 16 bit</text>
+        <text x="70" y="104" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">usually 0x8100</text>
+        <text x="248" y="84" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Priority</text>
+        <text x="248" y="104" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">3 bit</text>
+        <text x="340" y="84" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">CFI</text>
+        <text x="340" y="104" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">1 bit</text>
+        <text x="410" y="84" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">VID — VLAN identifier, 12 bit</text>
+        <text x="410" y="104" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">VLAN number, 0 to 4095</text>
+        <text x="40" y="150" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Four bytes inserted into the Ethernet header. 12 bits of VID is why there are at most 4096 VLANs —</text>
+        <text x="40" y="170" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">and why VXLAN's 24-bit VNI (16M segments) exists.</text>
+      </svg>
+      <figcaption><b>Plate 4.2</b> — The 802.1Q tag. The 12-bit VID caps VLANs at 4096, a limit that directly motivates the tunnelling of section 10.</figcaption>
+    </figure>
+
+    <h3>Port modes and the commands</h3>
+    <table>
+      <tr><th>Access mode</th><th>Trunk mode</th></tr>
+      <tr>
+        <td>Port belongs to a <strong>single</strong> VLAN; 802.1Q tagging not required; typical for ports connected to simple hosts.</td>
+        <td>Port belongs to <strong>multiple</strong> VLANs; 802.1Q tagging required to tell which VLAN a frame belongs to; can carry one untagged "native" VLAN and several tagged VLANs at once; typical for ports connected to switches and routers.</td>
+      </tr>
+    </table>
+
+    <pre><code class="language-bash"># Open vSwitch: an access port on one VLAN
+ovs-vsctl set port &lt;interface&gt; tag=&lt;VLAN ID&gt;
+
+# a trunk port carrying several VLANs
+ovs-vsctl set port &lt;interface&gt; trunks=ID1,ID2,ID3
+
+# reset
+ovs-vsctl clear port &lt;interface&gt; tag trunks vlan_mode
+
+# on a namespace: a tagged sub-interface (router-on-a-stick)
+ip link add link &lt;interface&gt; name &lt;sub-interface&gt; type vlan id &lt;VLAN ID&gt;
+ip link del &lt;sub-interface&gt;</code></pre>
+
+    <p>The last command is the mechanism behind the <em>gateway with a single interface</em> design: a router R1 with one physical leg carries both <code>10.0.1.254</code> and <code>10.0.2.254</code> as tagged sub-interfaces, and routes between the two VLANs over that one wire.</p>
+
+    <div id="vlan-tag"></div>
+  </section>
+
+  <section id="s10" data-src="Lab session 4 - Tunneling_ GRE and VxLAN.pdf">
+    <h2>10. Tunnels: GRE and VXLAN</h2>
+    <p>Lab session 4 starts from a concrete problem. Routing between R1 and R2 requires exchanging routing information across a wide area network — but what if the infrastructure is <strong>private</strong> and must not be disclosed to the public network? The solution: create a <strong>virtual direct connection</strong> between R1 and R2 over which the private routing information is exchanged. That virtual wire is a tunnel.</p>
+
+    <h3>GRE</h3>
+    <p><strong>Generic Routing Encapsulation (GRE, RFC 1701)</strong> is a tunnelling protocol over IP for generic protocols. It prepends an outer IP header and a GRE header in front of the original packet — allowing, among other things, <strong>IP over IP</strong>. The GRE header carries a version, a protocol type (which protocol is encapsulated) and options: <em>checksum</em>, <em>key</em> (authentication of the packet source), <em>sequence number</em> (so the destination can reorder), and <em>routing</em> (source routing policy).</p>
+
+    <div id="ac-gre"></div>
+
+    <pre><code class="language-bash"># enable GRE, then create the tunnel endpoint in each router
+modprobe ip_gre
+
+ip netns exec R1 ip tunnel add GT1 mode gre \
+    remote 192.168.0.5 local 192.168.0.1 ttl 63
+ip netns exec R1 ip link set GT1 up
+
+# give the tunnel interface an address on both ends
+ip netns exec R1 ip addr add 192.168.100.1/30 dev GT1
+
+# route the tenant networks through the tunnel
+ip netns exec R1 ip route add 10.0.2.0/24 via 192.168.100.2
+ip netns exec R2 ip route add 10.0.1.0/24 via 192.168.100.1</code></pre>
+
+    <h3>VXLAN</h3>
+    <p><strong>Virtual Extensible LAN (VXLAN)</strong> is a highly scalable distributed Layer 2 overlay network for tenant traffic isolation in cloud computing environments. Its defining properties, straight from the slides:</p>
+    <ul>
+      <li>It <strong>encapsulates Layer 2 traffic in UDP packets</strong> (destination port <strong>4789</strong>).</li>
+      <li>It builds <strong>stateless tunnels</strong> between <strong>VXLAN Tunnel End Points (VTEPs)</strong>.</li>
+      <li>Each isolated L2 segment is identified by a <strong>24-bit VXLAN Network Identifier (VNI)</strong> &rarr; <strong>16 million</strong> VNIs.</li>
+    </ul>
+
+    <p>That last figure is the punchline of the whole VLAN-to-VXLAN progression: 802.1Q gives you 12 bits and about 4000 segments; VXLAN gives you 24 bits and 16 million — enough to give every tenant of a large cloud its own isolated Layer 2 segment. The application scenario in the lab is exactly that: one single IP network extended over the global network, VXLAN transporting Ethernet frames — including ARP requests — over an IP network so that hosts on <code>192.168.1.0/24</code> behave as if they shared one LAN even though a routed network sits between them.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p4-3-title">
+        <title id="p4-3-title">Two sites each with a virtual bridge and a VTEP, joined by a VXLAN tunnel over an IP network, so that hosts appear to share one Layer 2 segment</title>
+        <rect x="30" y="30" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <rect x="30" y="80" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="44" y="55" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">H1 192.168.1.1</text>
+        <text x="44" y="105" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">H2 192.168.1.2</text>
+        <rect x="190" y="55" width="90" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="204" y="80" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">br100</text>
+        <text x="204" y="100" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">VTEP R1</text>
+        <rect x="550" y="30" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <rect x="550" y="80" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="564" y="55" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">H3 192.168.1.3</text>
+        <text x="564" y="105" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">H4 192.168.1.4</text>
+        <rect x="420" y="55" width="90" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="434" y="80" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">br100</text>
+        <text x="434" y="100" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">VTEP R2</text>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.2" fill="none">
+          <path d="M150 70 L190 78"/><path d="M150 100 L190 92"/>
+          <path d="M510 78 L550 70"/><path d="M510 92 L550 100"/>
+        </g>
+        <path d="M280 85 C 330 40, 370 40, 420 85" stroke="var(--lk-vermilion)" stroke-width="1.8" fill="none"/>
+        <text x="300" y="45" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">VXLAN tunnel — VNI 100</text>
+        <rect x="250" y="150" width="200" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="264" y="172" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">IP Network (UDP dport 4789)</text>
+        <g stroke="var(--lk-ink)" stroke-width="1" fill="none" stroke-dasharray="3 3">
+          <path d="M280 115 L320 150"/><path d="M420 115 L380 150"/>
+        </g>
+        <text x="30" y="220" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">The virtual bridges make an L2 broadcast domain; the VTEPs carry its frames across the routed IP network.</text>
+        <text x="30" y="240" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">To the four hosts it is one flat 192.168.1.0/24 LAN.</text>
+      </svg>
+      <figcaption><b>Plate 4.3</b> — VXLAN overlay. The virtual bridges create a Layer 2 broadcast domain that the stateless VTEP tunnels stretch over an IP network.</figcaption>
+    </figure>
+
+    <pre><code class="language-bash"># a VXLAN interface: segment 100, UDP-encapsulated between two VTEPs
+ip link add &lt;name&gt; type vxlan id 100 \
+    local &lt;local IP&gt; remote &lt;remote IP&gt; nolearning dstport 4789</code></pre>
+
+    <p>To make VXLAN carry a broadcast domain, the lab creates a <strong>virtual layer-2 broadcast domain using virtual bridges</strong> in the routers at the edges of the tunnel, and connects to those bridges every interface whose packets must cross the tunnel. GRE gave a point-to-point virtual wire between two routers; VXLAN gives a whole virtual switch stretched across an IP network.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Contrast the two tunnels cleanly. <strong>GRE</strong>: RFC 1701, encapsulates a packet (IP over IP possible) with an outer IP + GRE header; a point-to-point Layer 3 virtual link, used here to carry private routing information across a public WAN. <strong>VXLAN</strong>: Layer 2 over UDP (port 4789), stateless VTEP-to-VTEP tunnels, a 24-bit VNI giving 16 million segments; a Layer 2 overlay used to stretch one broadcast domain across an IP network for tenant isolation in the cloud.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Why are network namespaces studied first, and what do they isolate?</summary>
+        <p>Because they are the foundation of network isolation in Linux and the basic building block behind many virtual networking systems. A network namespace isolates network devices, the IPv4 and IPv6 stacks, routing tables and firewall rules, and sockets and port spaces. Running many namespaces on one machine is running many separate protocol stacks on one machine.</p>
+      </details>
+
+      <details>
+        <summary>Map each physical network role to its Linux virtual construct.</summary>
+        <p>Host &rarr; <strong>network namespace</strong>; switch &rarr; <strong>Linux bridge</strong> (unmanaged) or <strong>Open vSwitch</strong> (advanced); cable &rarr; <strong>veth pair</strong> (a virtual Ethernet link with a plug at each end); router or application gateway &rarr; a namespace/container/VM that segregates processes and forwards between stacks.</p>
+      </details>
+
+      <details>
+        <summary>Exercises 1 to 3 connect the same two hosts three ways. What are the three fabrics and why do it three times?</summary>
+        <p>A direct veth pair; a Linux bridge; an Open vSwitch — all on <code>172.0.0.0/30</code>. Repeating the same goal with three fabrics isolates the fabric's behaviour from the hosts' behaviour, and introduces the difference between an unmanaged bridge and a programmable OvS.</p>
+      </details>
+
+      <details>
+        <summary>Two hosts are on the same switch but on 10.0.1.0/24 and 10.0.2.0/24. Can they reach each other?</summary>
+        <p>No. A switch forwards within a single broadcast domain but does not route between IP networks. Being on the same switch is Layer 2 reachability; crossing IP networks is Layer 3 reachability and needs a router with a leg in each network (for example R1 at 10.0.1.254 and 10.0.2.254).</p>
+      </details>
+
+      <details>
+        <summary>What is the "main message to remember" about forwarding tables?</summary>
+        <p>For the network to work properly, <strong>all the network prefixes must appear in the forwarding tables of all the gateways/routers</strong>. A prefix can appear on its own, be summarised into a more general prefix, or be covered by the default — but every router that must forward towards it needs to know how. One missing entry breaks the path.</p>
+      </details>
+
+      <details>
+        <summary>Which command replaced arp, and what do the neighbour states mean?</summary>
+        <p><code>ip neigh</code> replaced the deprecated <code>arp</code>. States: <code>REACHABLE</code> (recently confirmed, ~30 s timer), <code>STALE</code> (old but usable, needs reverification), <code>DELAY</code> (waiting briefly before probing), <code>PROBE</code> (actively sending ARP requests), <code>INCOMPLETE</code> (request sent, no reply, MAC unknown), <code>FAILED</code> (unreachable after multiple probes).</p>
+      </details>
+
+      <details>
+        <summary>Describe the three phases of the ARP-poisoning exercise and the two stealth measures.</summary>
+        <p><strong>Reconnaissance</strong> (<code>arp-scan</code> to find active hosts), <strong>scanning</strong> (Wireshark to find the gateway), <strong>execution</strong> (<code>arpspoof</code> to become man-in-the-middle). Stealth: disable ICMP redirects (<code>sysctl ... send_redirects=0</code>) so the router does not advertise a direct path, and drop outgoing ICMP <code>time-exceeded</code> with iptables so traceroute cannot reveal the extra hop.</p>
+      </details>
+
+      <details>
+        <summary>What is MASQUERADE and why suit it a gateway?</summary>
+        <p>It is a form of source NAT that works like SNAT but automatically assigns the packet the address of the output interface. That makes it ideal for a gateway whose external address may change, since you do not have to hard-code a source address. In the lab, <code>iptables -t nat -A POSTROUTING -j MASQUERADE</code> on R1, verified with Wireshark on R1 watching both legs.</p>
+      </details>
+
+      <details>
+        <summary>Can the forward and backward paths differ, and who decides them?</summary>
+        <p>Yes — forward and backward paths do not need to be the same. Nobody decides a whole path: each router independently chooses the next hop for a packet from its own forwarding table and the packet's destination. A path is the emergent trace of many independent local decisions, which is why asymmetric routing is legitimate and why one wrong entry anywhere breaks connectivity.</p>
+      </details>
+
+      <details>
+        <summary>Why are VLANs needed and how does 802.1Q solve the extended-LAN problem?</summary>
+        <p>One switch is one broadcast domain; for security and efficiency it is better to separate the broadcast domains of different IP networks. When a frame crosses an inter-switch link you cannot otherwise tell which VLAN it belongs to. IEEE 802.1Q adds a 4-byte tag to the Ethernet header (TPID usually 0x8100, 3-bit priority, 1-bit CFI, 12-bit VID, 0–4095); both ends must support it. Access ports carry one untagged VLAN, trunk ports carry several tagged VLANs.</p>
+      </details>
+
+      <details>
+        <summary>Contrast GRE and VXLAN.</summary>
+        <p><strong>GRE</strong> (RFC 1701): a tunnelling protocol over IP for generic protocols, prepending an outer IP + GRE header (IP over IP possible); a point-to-point Layer 3 virtual link, used to carry private routing info across a public WAN. <strong>VXLAN</strong>: a Layer 2 overlay encapsulating Ethernet in UDP (port 4789), stateless VTEP-to-VTEP tunnels, each segment a 24-bit VNI (16 million segments); used to stretch one broadcast domain across an IP network for tenant isolation.</p>
+      </details>
+
+      <details>
+        <summary>Why is the 24-bit VNI significant compared to the 802.1Q VID?</summary>
+        <p>The 802.1Q VID is 12 bits, capping VLANs at 4096 segments — too few for a large multi-tenant cloud. The VXLAN VNI is 24 bits, giving about 16 million segments, enough to give every tenant its own isolated Layer 2 segment. The jump from 12 to 24 bits is the whole reason VXLAN exists.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-03-sdn-and-openflow.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-05-programmable-data-plane.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>Implementation of VNIs using network namespaces</em>, <em>Lab session 1</em>, <em>Lab session 2</em>, <em>Lab session 3</em>, <em>Lab session 4</em> (Franco Callegati) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Annotated code: the ip tooling vocabulary ---- */
+LessonKit.annotatedCode('#ac-iptools', {
+  lang: 'bash',
+  lines: [
+    ['ip netns add Host1', 'Create a network namespace. From now on "Host1" is an independent protocol stack: its own interfaces, routing table, firewall rules and port space.'],
+    ['ip link add veth1 type veth peer name sw-p1', 'Create a virtual Ethernet cable. It always comes as a pair of plugs — veth1 and sw-p1 — and whatever enters one end leaves the other.'],
+    ['ip link set veth1 netns Host1', 'Move one plug into the Host1 namespace. The plug disappears from the host and reappears inside Host1, exactly like plugging a cable into a machine.'],
+    ['ip link add SW1 type bridge', 'Create a Linux bridge: an unmanaged Ethernet switch in software. (For the programmable switch you would use ovs-vsctl add-br SW1 instead.)'],
+    ['ip link set sw-p1 master SW1', 'Plug the other end of the cable into the switch. master means "this interface is now a port of that bridge".'],
+    ['ip netns exec Host1 ip addr add 172.0.0.1/30 dev veth1', 'Run a command inside a namespace. Here Host1 gives its plug an IP address — the host outside cannot see or use this address.'],
+    ['ip netns exec Host1 ip link set veth1 up', 'Bring the interface up inside the namespace. A plug that is administratively down carries nothing, a common first-try mistake.'],
+    ['ip netns exec Host1 ip neigh', 'Inspect the ARP table the modern way. ip neigh replaces the deprecated arp command and shows IP, interface, MAC and neighbour state.']
+  ]
+});
+
+/* ---- Bespoke widget: reachability across a chain of routers ---- */
+(function () {
+  var host = document.getElementById('route-check');
+  if (!host) return;
+  // Topology: LAN_A --R1--(net1)--R2--(net2)--R3-- LAN_B, R1..R3 each need the far prefixes.
+  var routers = [
+    { id: 'R1', has: true, needs: 'route to 10.0.2.0/24 (LAN_B) via R2' },
+    { id: 'R2', has: true, needs: 'routes to both 10.0.1.0/24 and 10.0.2.0/24' },
+    { id: 'R3', has: true, needs: 'route to 10.0.1.0/24 (LAN_A) via R2' }
+  ];
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'Every router must know every prefix';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'A ping from LAN_A to LAN_B must cross R1, R2 and R3, and the reply must come all the way back. Untick any router’s route and watch the path fail — even though the other two are perfect.';
+  host.appendChild(sub);
+  var cols = document.createElement('div');
+  cols.className = 'lk-step-cols';
+  var col = document.createElement('div');
+  col.className = 'lk-step-th';
+  var ul = document.createElement('ul');
+  ul.className = 'lk-step-ins';
+  ul.style.listStyle = 'none';
+  var inputs = [];
+  routers.forEach(function (r) {
+    var li = document.createElement('li');
+    var lab = document.createElement('label');
+    lab.style.cursor = 'pointer';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.style.marginRight = '.5rem';
+    cb.addEventListener('change', render);
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(r.id + ' — has ' + r.needs));
+    li.appendChild(lab);
+    ul.appendChild(li);
+    inputs.push(cb);
+  });
+  col.appendChild(ul);
+  cols.appendChild(col);
+  host.appendChild(cols);
+  var verdict = document.createElement('div');
+  verdict.className = 'lk-step-verdict';
+  host.appendChild(verdict);
+  function render() {
+    var missing = [];
+    inputs.forEach(function (cb, i) { if (!cb.checked) missing.push(routers[i].id); });
+    if (missing.length === 0) {
+      verdict.className = 'lk-step-verdict ok';
+      verdict.textContent = 'All prefixes present in all forwarding tables: the ping reaches LAN_B and the reply returns. This is the only configuration in which end-to-end connectivity works.';
+    } else {
+      verdict.className = 'lk-step-verdict bad';
+      verdict.textContent = 'Broken at ' + missing.join(' and ') + '. Every other router is configured correctly, but the packet (or its reply) reaches a router with no entry for the destination prefix and is dropped. A path fails at its weakest table, not at its average one.';
+    }
+  }
+  render();
+})();
+
+/* ---- Bespoke widget: 802.1Q access vs trunk ---- */
+(function () {
+  var host = document.getElementById('vlan-tag');
+  if (!host) return;
+  var i = 0;
+  var scenarios = [
+    { label: 'Frame from a host on an ACCESS port (VLAN 10)', tagged: false, vid: 10,
+      note: 'The host sends an ordinary untagged Ethernet frame. The switch knows the port belongs to VLAN 10, so it associates the frame with VLAN 10 internally — no 802.1Q tag is required on an access port.' },
+    { label: 'Same frame leaving on a TRUNK port to another switch', tagged: true, vid: 10,
+      note: 'To cross the inter-switch link the frame is tagged: the switch inserts the 802.1Q header with VID = 10 so the far switch can tell which VLAN it belongs to. This is exactly the extended-LAN question the tag answers.' },
+    { label: 'Frame arriving on the far TRUNK, delivered to an ACCESS port', tagged: false, vid: 10,
+      note: 'The receiving switch reads VID = 10, strips the tag, and forwards the now-untagged frame out of an access port that belongs to VLAN 10. The end host never sees the tag — tagging exists only between the switches.' }
+  ];
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'Where the 802.1Q tag lives';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'Follow one frame across two switches. The tag appears only on the trunk between them.';
+  host.appendChild(sub);
+  var cols = document.createElement('div');
+  cols.className = 'lk-step-cols';
+  var col = document.createElement('div');
+  col.className = 'lk-step-th';
+  var ul = document.createElement('ul');
+  ul.className = 'lk-step-ins';
+  scenarios.forEach(function (s) {
+    var li = document.createElement('li');
+    li.textContent = s.label;
+    ul.appendChild(li);
+  });
+  col.appendChild(ul);
+  cols.appendChild(col);
+  host.appendChild(cols);
+  var bar = document.createElement('div');
+  bar.className = 'lk-step-state';
+  host.appendChild(bar);
+  var verdict = document.createElement('div');
+  verdict.className = 'lk-step-verdict';
+  host.appendChild(verdict);
+  var btns = document.createElement('div');
+  btns.className = 'lk-step-btns';
+  var nb = document.createElement('button');
+  nb.type = 'button';
+  nb.textContent = 'Next step';
+  nb.addEventListener('click', function () { if (i < scenarios.length - 1) { i++; render(); } });
+  var rb = document.createElement('button');
+  rb.type = 'button';
+  rb.className = 'lk-step-reset';
+  rb.textContent = 'Reset';
+  rb.addEventListener('click', function () { i = 0; render(); });
+  btns.appendChild(nb); btns.appendChild(rb);
+  host.appendChild(btns);
+  function render() {
+    var lis = ul.children;
+    for (var k = 0; k < lis.length; k++) { lis[k].className = k < i ? 'done' : (k === i ? 'on' : ''); }
+    var s = scenarios[i];
+    bar.innerHTML = '';
+    [['802.1Q tag on the wire', s.tagged ? 'yes' : 'no'], ['VLAN', s.vid], ['port type', i === 1 ? 'trunk' : 'access']].forEach(function (p) {
+      var d = document.createElement('div');
+      d.className = 'lk-step-box';
+      d.innerHTML = p[0] + ' = <b></b>';
+      d.querySelector('b').textContent = p[1];
+      bar.appendChild(d);
+    });
+    verdict.className = 'lk-step-verdict' + (i === scenarios.length - 1 ? ' ok' : '');
+    verdict.textContent = s.note;
+    nb.disabled = i >= scenarios.length - 1;
+  }
+  render();
+})();
+
+/* ---- Annotated code: the GRE encapsulation ---- */
+LessonKit.annotatedCode('#ac-gre', {
+  lang: 'text',
+  lines: [
+    ['[ outer IP ][ GRE ][ inner IP ][ data ]', 'The shape of a GRE-tunnelled packet: the original inner IP packet is wrapped in a GRE header and a new outer IP header. IP over IP.'],
+    ['outer IP: src = local tunnel IP, dst = remote tunnel IP', 'The outer header carries the packet across the public WAN between the two tunnel endpoints. Only the endpoints are visible to the outside network.'],
+    ['GRE: version, protocol type, options', 'The GRE header says which protocol is encapsulated (protocol type) and can carry options: checksum, key (source authentication), sequence number (reordering), routing (source routing).'],
+    ['inner IP: src = 10.0.1.x, dst = 10.0.2.x', 'The private packet, whose addresses never appear on the public network. This is what lets R1 and R2 exchange private routing information across an infrastructure that must not see it.']
+  ]
+});
+</script>
+</body>
+</html>

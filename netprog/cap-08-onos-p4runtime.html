@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 8 — ONOS and P4Runtime · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-07-p4-in-practice.html">&larr; Ch. 7 — P4 in practice</a>
+    <a href="index.html">Index</a>
+    <a href="cap-09-industrial-networks.html">Ch. 9 — Industrial control systems and networks &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Hands-on networking · Chapter 8</div>
+    <h1>ONOS and P4Runtime: controlling a P4 data plane</h1>
+    <div class="lk-meta"><span>~40 min read</span><span>4 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The big picture: from a P4 idea to an app</a></li>
+      <li><a href="#s2">Why yet another data-plane control API</a></li>
+      <li><a href="#s3">protobuf and gRPC in one page</a></li>
+      <li><a href="#s4">P4Runtime: the write request and the table entry</a></li>
+      <li><a href="#s5">P4Info: the contract between the planes</a></li>
+      <li><a href="#s6">SetForwardingPipelineConfig</a></li>
+      <li><a href="#s7">ONOS: a network operating system</a></li>
+      <li><a href="#s8">FlowRule versus FlowObjective</a></li>
+      <li><a href="#s9">Pipeconf: bring your own pipeline</a></li>
+      <li><a href="#s10">A worked controller: DDoS pre-filtering and digests</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>1. The big picture: from a P4 idea to an app</h2>
+    <p>The ONOS+P4 tutorial (materials from the Open Networking Foundation) sets a concrete goal: acquire enough knowledge to <strong>build full-stack network applications</strong> — to go from a P4 idea to an end-to-end solution. The full stack is four layers, and the whole chapter is about the interfaces between them:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 280" width="100%" role="img" aria-labelledby="p8-1-title">
+        <title id="p8-1-title">Four-layer stack: your app on top, then ONOS, then P4Runtime, then your P4 program on the switch</title>
+        <rect x="140" y="26" width="420" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="160" y="53" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">Your App</text>
+        <text x="470" y="53" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">SDN apps</text>
+        <rect x="140" y="86" width="420" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <text x="160" y="113" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-ink)">ONOS</text>
+        <text x="430" y="113" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">SDN control plane</text>
+        <rect x="140" y="146" width="420" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="160" y="173" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-vermilion)">P4Runtime</text>
+        <text x="430" y="173" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">runtime control</text>
+        <rect x="140" y="206" width="420" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <text x="160" y="233" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-ink)">Your P4 program</text>
+        <text x="470" y="233" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">P4 switch</text>
+        <g stroke="var(--lk-ink)" stroke-width="1" fill="none">
+          <path d="M350 70 L350 86"/><path d="M350 130 L350 146"/><path d="M350 190 L350 206"/>
+        </g>
+        <text x="140" y="272" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Chapters 6–7 built the bottom layer. This chapter builds the three interfaces above it.</text>
+      </svg>
+      <figcaption><b>Plate 8.1</b> — The full stack. Your P4 program defines the switch; P4Runtime controls it at runtime; ONOS is the control plane; your app rides on top.</figcaption>
+    </figure>
+
+    <p>The bottom is familiar: a P4 <strong>pipeline</strong> is a pipeline of match-action tables (chapter 6), realised on an ASIC, FPGA, NPU or CPU. What is new here is everything above the switch.</p>
+  </section>
+
+  <section id="s2" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>2. Why yet another data-plane control API</h2>
+    <p>The tutorial asks the obvious question — can't we reuse OpenFlow or SAI? — and answers it with a table that is the clearest single justification for P4Runtime. Three kinds of independence are wanted, and only P4Runtime has all three:</p>
+
+    <table>
+      <tr><th></th><th>Target-independent</th><th>Protocol-independent</th><th>Pipeline-independent</th></tr>
+      <tr><td><strong>OpenFlow</strong></td><td>yes</td><td><strong>no</strong> — headers and actions are hard-coded in the spec</td><td>yes, only with TTP</td></tr>
+      <tr><td><strong>Switch Abstraction Interface (SAI)</strong></td><td>yes</td><td><strong>no</strong> — designed for legacy L2/L3/ACL pipelines</td><td><strong>no</strong> — implicit fixed-function pipeline</td></tr>
+      <tr><td><strong>P4Runtime</strong></td><td>yes</td><td><strong>yes</strong></td><td><strong>yes, with P4</strong></td></tr>
+    </table>
+
+    <p>The three independences read as: the <em>same API works with different switches from different vendors</em> (target); the <em>same API controls any data-plane protocol, standard or custom</em> (protocol); the <em>same API controls many arbitrary pipelines, formally specified</em> (pipeline). The properties of P4Runtime that deliver this: it is designed around the PSA architecture but extensible to others; it is community-developed (initial contribution by Google and Barefoot); it is <strong>gRPC/protobuf-based</strong>; it is <strong>P4 program-independent</strong> — the API does not change with the P4 program — and it enables <strong>field reconfigurability</strong>, the ability to push a new P4 program and re-configure the pipeline without recompiling the switch software stack.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Read this table against chapter 3's OpenFlow field-count table. OpenFlow's "no" under protocol-independence is precisely the 12-to-41-fields problem: the protocol is baked into the specification. P4Runtime moves the protocol definition into the P4 program and out of the API — which is why the same API survives a program change.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>3. protobuf and gRPC in one page</h2>
+    <p>P4Runtime is built on two Google technologies, and the tutorial teaches just enough of each.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Protocol Buffers</button>
+        <button class="lk-tab">gRPC</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>protobuf</strong> is a language for describing data for serialization in a structured way: strongly typed, platform-neutral, extensible and backwards compatible, with code generators for a long list of languages (C, C++, Java, Python, Go, Rust, …). You describe a message once and auto-generate the code to serialize and deserialize it.</p>
+        <pre><code class="language-protobuf">syntax = "proto3";
+message Person {
+  string name = 1;
+  int32  id   = 2;
+  string email = 3;
+}</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>gRPC</strong> uses protobuf to define a service API and its messages, and auto-generates native client and server code in many languages. It transports over <strong>HTTP/2.0 and TLS</strong>, an efficient single-TCP-connection implementation that supports bidirectional streaming. That streaming is what lets a controller and a switch exchange packet-in / packet-out and notifications over one channel.</p>
+      </div>
+    </div>
+
+    <p>The P4Runtime service itself, <code>p4runtime.proto</code>, is a gRPC service that lets a local or remote control plane load the pipeline, read and write pipeline state, exchange packets, and arbitrate mastership for distributed control planes:</p>
+
+    <pre><code class="language-protobuf">service P4Runtime {
+  rpc Write(WriteRequest) returns (WriteResponse) {}
+  rpc Read(ReadRequest) returns (stream ReadResponse) {}
+  rpc SetForwardingPipelineConfig(...) returns (...) {}
+  rpc GetForwardingPipelineConfig(...) returns (...) {}
+  rpc StreamChannel(stream StreamMessageRequest)
+      returns (stream StreamMessageResponse) {}
+}</code></pre>
+  </section>
+
+  <section id="s4" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>4. P4Runtime: the write request and the table entry</h2>
+    <p>Installing a rule means sending a <code>WriteRequest</code> containing one or more <code>Update</code>s, each an <code>INSERT</code>, <code>MODIFY</code> or <code>DELETE</code> of an <code>Entity</code>. The entity can be many things — a table entry, an action-profile member or group, a meter entry, a counter entry, a register entry, a packet-replication-engine entry — which is the API being pipeline-independent in one message definition.</p>
+
+    <pre><code class="language-protobuf">message Update {
+  enum Type { UNSPECIFIED = 0; INSERT = 1; MODIFY = 2; DELETE = 3; }
+  Type   type = 1;
+  Entity entity = 2;
+}</code></pre>
+
+    <p>To add a table entry the control plane must know three kinds of thing, and this list is the reason P4Info (next section) has to exist:</p>
+    <ul>
+      <li>The <strong>IDs of the P4 entities</strong> — tables, field matches, actions, parameters.</li>
+      <li>The <strong>field matches for the particular table</strong> — match type, bit width.</li>
+      <li>The <strong>parameters for the particular action</strong>.</li>
+    </ul>
+
+    <p>A logical table entry such as <code>hdr.ipv4.dstAddr = 10.0.1.1/32 -&gt; ipv4_forward(00:00:00:00:00:10, 7)</code> becomes a protobuf <code>TableEntry</code> whose fields are all <em>numeric IDs and raw bytes</em>:</p>
+
+    <pre><code class="language-protobuf">table_entry {
+  table_id: 33581985
+  match {
+    field_id: 1
+    lpm { value: "\n\000\001\001"  prefix_len: 32 }
+  }
+  action {
+    action_id: 16786453
+    params { param_id: 1  value: "\000\000\000\000\000\n" }
+    params { param_id: 2  value: "\000\007" }
+  }
+}</code></pre>
+
+    <div id="se-writeflow"></div>
+  </section>
+
+  <section id="s5" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>5. P4Info: the contract between the planes</h2>
+    <p>Notice that the <code>TableEntry</code> above contained no names, only numbers: <code>table_id: 33581985</code>, <code>action_id: 16786453</code>. Something has to translate the human names in the P4 program into those IDs, and that something is <strong>P4Info</strong>.</p>
+
+    <p>The P4 compiler generates <strong>two outputs</strong>, and this pairing is the heart of the whole architecture:</p>
+    <table>
+      <tr><th>Output</th><th>Role</th></tr>
+      <tr><td><strong>Target-specific binaries</strong></td><td>Realise the switch pipeline — a binary config for an ASIC, a bitstream for an FPGA, the BMv2 JSON for the software switch.</td></tr>
+      <tr><td><strong>P4Info file</strong></td><td>Describes the "schema" of the pipeline for runtime control: the program's tables, actions and parameters. Protobuf-based and <strong>target-independent</strong> — the same P4Info for a software switch, an ASIC, anything.</td></tr>
+    </table>
+
+    <p>The P4Info entry for the <code>ipv4_forward</code> action and the <code>ipv4_lpm</code> table records exactly the names, IDs, bit widths and match types the control plane needs:</p>
+
+    <pre><code class="language-protobuf">actions {
+  id: 16786453
+  name: "ipv4_forward"
+  params { id: 1  name: "dstAddr"  bitwidth: 48 }
+  params { id: 2  name: "port"     bitwidth: 9  }
+}
+tables {
+  id: 33581985
+  name: "ipv4_lpm"
+  match_fields { id: 1  name: "hdr.ipv4.dstAddr"  bitwidth: 32  match_type: LPM }
+  action_ref_id: 16786453
+}</code></pre>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>State the role of P4Info in one sentence: it is the <strong>contract between the control plane and the data plane</strong>, generated by the P4 compiler, needed by the control plane to format the body of P4Runtime messages (for example to add a table entry). It maps the names in the P4 program to the numeric IDs on the wire, and it is target-independent — the same P4Info describes the program on a BMv2 switch and on a Tofino ASIC.</p>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="100%" role="img" aria-labelledby="p8-2-title">
+        <title id="p8-2-title">The P4 compiler produces target binaries for the switch and a P4Info file for the control plane, which uses it to format P4Runtime messages</title>
+        <rect x="40" y="30" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="70" y="55" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">test.p4</text>
+        <rect x="230" y="30" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="256" y="55" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">p4c</text>
+        <path d="M160 50 L230 50" stroke="var(--lk-ink)" stroke-width="1.2" fill="none" marker-end="url(#a8)"/>
+        <defs><marker id="a8" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink)"/></marker></defs>
+        <rect x="430" y="20" width="150" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <text x="444" y="45" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">test.p4info</text>
+        <rect x="430" y="80" width="150" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="444" y="105" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">test.bin / json</text>
+        <path d="M350 44 L430 36" stroke="var(--lk-vermilion)" stroke-width="1.2" fill="none" marker-end="url(#a8)"/>
+        <path d="M350 56 L430 96" stroke="var(--lk-ink)" stroke-width="1.2" fill="none" marker-end="url(#a8)"/>
+        <text x="360" y="30" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">schema for control</text>
+        <text x="360" y="118" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">config for the switch</text>
+        <rect x="430" y="160" width="150" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="444" y="185" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">Control plane</text>
+        <rect x="430" y="210" width="150" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="444" y="232" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">P4Runtime server + driver</text>
+        <path d="M505 60 L505 160" stroke="var(--lk-vermilion)" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#a8)"/>
+        <text x="512" y="140" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">reads P4Info to</text>
+        <text x="512" y="152" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">build messages</text>
+        <path d="M505 200 L505 210" stroke="var(--lk-ink)" stroke-width="1.2" fill="none"/>
+        <text x="40" y="150" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Same P4Info for a software switch, an ASIC or an FPGA — it is target-independent.</text>
+      </svg>
+      <figcaption><b>Plate 8.2</b> — The two compiler outputs. The binary configures the switch; the P4Info lets the controller speak to it. Neither alone is enough.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s6" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>6. SetForwardingPipelineConfig</h2>
+    <p>Pushing a whole P4 program to a switch — the field reconfigurability that distinguishes P4Runtime — is done with <code>SetForwardingPipelineConfig</code>. The request bundles the <strong>P4Info</strong> and the <strong>target-specific configuration bits</strong> into one <code>ForwardingPipelineConfig</code>, and an <code>Action</code> field controls the commit semantics (<code>VERIFY</code>, <code>VERIFY_AND_SAVE</code>, <code>VERIFY_AND_COMMIT</code>, <code>COMMIT</code>, <code>RECONCILE_AND_COMMIT</code>).</p>
+
+    <pre><code class="language-protobuf">message ForwardingPipelineConfig {
+  config.P4Info p4info = 1;
+  bytes p4_device_config = 2;   // target-specific P4 configuration
+}</code></pre>
+
+    <p>The tutorial's punchline is <strong>silicon-independent remote control</strong>: the same target-independent protobuf table entry, sent over gRPC, reaches a programmable Tofino from vendor A, a fixed-function switch from vendor B and another from vendor C — each with its own P4Runtime server and target driver, each carrying its own P4Info. One controller, many silicons, one message format.</p>
+  </section>
+
+  <section id="s7" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>7. ONOS: a network operating system</h2>
+    <p><strong>ONOS — the Open Network Operating System</strong> — provides the control plane for a software-defined network: a logically centralised remote controller, with APIs that make it easy to write apps to control a network. It focuses on service-provider access/edge applications, and it runs as a <strong>distributed system across many servers</strong> for scalability, high availability and performance. It is open source (created by ON.Lab, hosted by the Linux Foundation). P4Runtime support first arrived in the Loon (1.11.0) release, August 2017.</p>
+
+    <p>Its architecture is layered, and the layering is what lets one app control OpenFlow and P4Runtime devices alike:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 280" width="100%" role="img" aria-labelledby="p8-3-title">
+        <title id="p8-3-title">ONOS layered architecture: apps on top, a northbound API, a distributed core, device drivers, and shared protocol libraries at the bottom including OpenFlow, P4Runtime and NETCONF</title>
+        <rect x="480" y="20" width="180" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="494" y="43" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">Apps</text>
+        <rect x="40" y="70" width="620" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="54" y="88" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">Northbound API — device/protocol-agnostic (Java, REST, CLI, gRPC)</text>
+        <text x="54" y="103" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">Topology · FlowRule · FlowObjective · Intent · Packet · ...</text>
+        <rect x="40" y="124" width="620" height="40" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.3"/>
+        <text x="54" y="142" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">Distributed core</text>
+        <text x="54" y="157" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">state management, notifications, high-availability, scale-out</text>
+        <rect x="40" y="178" width="620" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="54" y="200" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">Device drivers — device-specific variants of standard protocols</text>
+        <rect x="40" y="228" width="620" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="54" y="246" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">Shared protocol libraries</text>
+        <text x="54" y="261" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt)">OpenFlow    P4Runtime    NETCONF    ...more</text>
+        <text x="40" y="18" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">control and configure with a global topology view, independent of device-specific details</text>
+      </svg>
+      <figcaption><b>Plate 8.3</b> — ONOS architecture. Apps talk to a device-agnostic northbound API; the distributed core provides the global view; drivers and shared protocol libraries (OpenFlow, P4Runtime, NETCONF) reach the devices.</figcaption>
+    </figure>
+
+    <p>ONOS interacts with devices through <strong>behaviors</strong> — Java interfaces — bundled into <strong>drivers</strong>. Named behaviors include <code>DeviceDescriptionDiscovery</code> (read device info and ports), <code>FlowRuleProgrammable</code> (write/read flow rules), <code>PortStatisticsDiscovery</code> (port packet/byte counters) and <code>Pipeliner</code> (FlowObjective-to-FlowRules mapping). A driver is a collection of behavior implementations that use ONOS's protocol libraries to reach the device — and the key takeaway is that <strong>apps are independent of the switch control protocol</strong>: the same app can work with OpenFlow and P4Runtime devices.</p>
+  </section>
+
+  <section id="s8" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>8. FlowRule versus FlowObjective</h2>
+    <p>ONOS offers two network-programming APIs, and choosing between them is choosing between control and portability:</p>
+
+    <table>
+      <tr><th>FlowRule API</th><th>FlowObjective API</th></tr>
+      <tr>
+        <td><strong>Pipeline-dependent.</strong> You write a flow rule for a specific pipeline; you get precise control, but the rule is tied to how that pipeline is structured.</td>
+        <td><strong>Pipeline-independent.</strong> You state an objective; drivers translate <em>one FlowObjective into many FlowRules</em> via the pipeline's <code>Pipeliner</code>. The same objective works on switches with different pipelines — including switches running different P4 programs.</td>
+      </tr>
+    </table>
+
+    <p>The FlowObjective API is what enables application portability: an app using FlowObjectives can work with switches whose pipelines differ. The mechanism is a three-phase translation, and it is worth knowing as three concrete rewrites:</p>
+
+    <ol>
+      <li><strong>Flow Objective &rarr; Flow Rule.</strong> One objective maps to many flow rules (the <code>Pipeliner</code>).</li>
+      <li><strong>Flow Rule &rarr; Table Entry.</strong> Standard headers/actions are mapped to the P4-defined ones — for example <code>ETH_DST</code> &rarr; <code>hdr.ethernet.dst_addr</code> (the <code>Pipeline Interpreter</code>).</li>
+      <li><strong>Table Entry &rarr; P4Runtime message.</strong> P4 names are mapped to P4Info numeric IDs.</li>
+    </ol>
+
+    <div id="se-flowobj"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>Step 2 exposes a genuine impedance mismatch the tutorial flags: <strong>P4 allows only one action per table entry, while ONOS (like OpenFlow) allows many</strong>. A rule that rewrites a header and outputs on a port is two actions in ONOS but must become one P4 action with two parameters. Resolving that needs interpretation logic — actual Java code in the Pipeline Interpreter — which is why "bring your own pipeline" is a programming task, not a configuration file.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="Slide P4 - ONOS_P4.pdf">
+    <h2>9. Pipeconf: bring your own pipeline</h2>
+    <p>How does ONOS learn to control an arbitrary P4 pipeline? Through a <strong>pipeconf</strong>: a package that bundles everything ONOS needs to understand, control and deploy a pipeline, provided to ONOS as an app (distributable as an <code>.oar</code> binary). A pipeconf has three parts:</p>
+
+    <table>
+      <tr><th>Part</th><th>What it is</th></tr>
+      <tr><td><strong>1. Pipeline model</strong></td><td>The description of the pipeline understood by ONOS, <strong>automatically derived from P4Info</strong>.</td></tr>
+      <tr><td><strong>2. Target-specific binaries</strong></td><td>To deploy the pipeline to the device — BMv2 JSON, Tofino binary, FPGA bitstream.</td></tr>
+      <tr><td><strong>3. Pipeline-specific driver behaviors</strong></td><td>The <code>Pipeliner</code> (map FlowObjectives to the P4 pipeline) and the <code>Pipeline Interpreter</code> (map ONOS known headers/actions to P4 program entities).</td></tr>
+    </table>
+
+    <p>The workflow recap ties the whole chapter together: write the P4 program and compile it (obtaining P4Info and target binaries); create the pipeconf (implement the pipeliner and interpreter behaviors in Java); then either use existing pipeline-agnostic apps that program the network with FlowObjectives, or write new pipeline-aware apps that use the same string names of tables, headers and actions as in the P4 program.</p>
+
+    <p>A note of realism from the ONOS 1.14 (Owl) support matrix: not everything was supported. Table entries, packet-in/out, action profiles, meters (indirect) and counters mapped to ONOS services, but <strong>parser value sets, registers, digests and clone sessions</strong> were listed as unsupported, "community help needed" — a useful reminder that the stack is real software with real gaps.</p>
+  </section>
+
+  <section id="s10" data-src="Guida P4 Controller.pdf,Slide P4 - ONOS_P4.pdf">
+    <h2>10. A worked controller: DDoS pre-filtering and digests</h2>
+    <p>The CCNC tutorial guide walks through a concrete P4Runtime controller application (a Go P4Runtime client) that combines the data plane and a machine-learning back end. It is the clearest demonstration in the course of <em>why</em> you would push work into the data plane at all.</p>
+
+    <h3>Exercise 1: DDoS detection with and without data-plane pre-filtering</h3>
+    <p>The setup runs a data plane, a controller, and a CNN (a convolutional neural network detector, "lucid"), then launches an attack from the <strong>CIC2017 dataset</strong> — which contains a single malicious flow, attacker <code>172.16.0.1</code>, victim <code>192.168.10.50</code>. The result is inspected at <code>localhost:3333/ddos</code>.</p>
+
+    <table>
+      <tr><th>Exercise 1a — no pre-filtering</th><th>Exercise 1b — count-min pre-filtering in P4</th></tr>
+      <tr>
+        <td>Despite there being only a few genuinely suspect flows, an <strong>unexpectedly high number</strong> of flows are deemed suspect or malicious. The cause named in the guide: <em>the traffic is not pre-filtered on the data plane</em>, so noise reaches the detector.</td>
+        <td>A count-min-filtered P4 program (<code>p4_packet_management_countmin_filtered.p4</code>) filters on the data plane first. With the pre-filtering stage the number of <strong>false positives drops drastically</strong>.</td>
+      </tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>This is the whole thesis of the programmable data plane made measurable. The neural network did not get smarter between 1a and 1b; the data plane got a count-min sketch that shed noise at line rate before it ever reached the detector. Moving a little state into the switch (a sketch — a register array, chapter 7) improved an ML pipeline's accuracy. Speed and visibility in the data plane translate directly into quality upstream.</p>
+    </div>
+
+    <h3>Exercise 2: digests</h3>
+    <p>The second exercise (<code>simple_digest.p4</code>) sends <strong>aggregated data from the data plane to the control plane</strong>: the details of 1 out of every 10 packets are sent to the controller — here just the source IP and port and the destination IP and port, though more could be included. The guide names it precisely: this is <strong>the building component that makes the interaction between the data plane and the CNN possible</strong>. A digest is P4's answer to chapter 6's limitation "pure P4 cannot communicate to the control plane" — an external object, a learning provider, that samples and reports.</p>
+
+    <div id="se-ddos"></div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What are the four layers of the ONOS+P4 full stack?</summary>
+        <p>Your app (SDN apps) on top, ONOS (SDN control plane), P4Runtime (runtime control), and your P4 program on the P4 switch at the bottom. Chapters 6–7 built the bottom layer; this chapter builds the three interfaces above it.</p>
+      </details>
+
+      <details>
+        <summary>Why is P4Runtime preferred over OpenFlow and SAI?</summary>
+        <p>Because it is target-, protocol- and pipeline-independent all at once. OpenFlow is not protocol-independent (headers and actions are hard-coded in the spec); SAI is neither protocol- nor pipeline-independent (legacy L2/L3/ACL, implicit fixed pipeline). P4Runtime achieves all three, with pipeline-independence "with P4".</p>
+      </details>
+
+      <details>
+        <summary>On what technologies is P4Runtime built, and what does each contribute?</summary>
+        <p><strong>protobuf</strong> — a strongly-typed, platform-neutral language for describing serializable messages, with multi-language code generation. <strong>gRPC</strong> — uses protobuf to define the service API, auto-generates client/server code, and transports over HTTP/2 and TLS with bidirectional streaming (used for packet-in/out and notifications).</p>
+      </details>
+
+      <details>
+        <summary>What three kinds of information must the control plane know to add a table entry?</summary>
+        <p>The IDs of the P4 entities (tables, field matches, actions, parameters); the field matches for the particular table (match type, bit width); and the parameters for the particular action. All of these come from the P4Info file.</p>
+      </details>
+
+      <details>
+        <summary>What is P4Info, and why is it target-independent?</summary>
+        <p>P4Info is one of the two P4-compiler outputs (the other being target-specific binaries). It is a protobuf describing the pipeline schema — tables, actions, parameters, with names, IDs, bit widths and match types — and is the contract the control plane uses to format P4Runtime messages. It is target-independent because it describes the <em>program</em>, not the hardware: the same P4Info applies whether the program runs on BMv2 or a Tofino ASIC.</p>
+      </details>
+
+      <details>
+        <summary>What does SetForwardingPipelineConfig do?</summary>
+        <p>It pushes a whole P4 program to a switch — the field-reconfigurability feature. The request carries a <code>ForwardingPipelineConfig</code> bundling the P4Info and the target-specific config bits, plus an Action controlling commit semantics (VERIFY, VERIFY_AND_SAVE, VERIFY_AND_COMMIT, COMMIT, RECONCILE_AND_COMMIT).</p>
+      </details>
+
+      <details>
+        <summary>What is ONOS, and how does it stay device-agnostic?</summary>
+        <p>ONOS is the Open Network Operating System: a logically centralised, distributed SDN control plane with app-friendly APIs. It stays device-agnostic through a layered architecture — a device/protocol-agnostic northbound API, a distributed core with a global topology view, device drivers made of behaviors, and shared protocol libraries (OpenFlow, P4Runtime, NETCONF). The same app can control OpenFlow and P4Runtime devices.</p>
+      </details>
+
+      <details>
+        <summary>Contrast the FlowRule and FlowObjective APIs.</summary>
+        <p><strong>FlowRule</strong> is pipeline-dependent: precise control, tied to a specific pipeline. <strong>FlowObjective</strong> is pipeline-independent: one objective is translated by the Pipeliner into many flow rules, so the same app works on switches with different pipelines (including different P4 programs). FlowObjective enables application portability.</p>
+      </details>
+
+      <details>
+        <summary>Describe the three-phase FlowObjective translation and the one-action mismatch.</summary>
+        <p>Flow Objective &rarr; Flow Rule (Pipeliner, one-to-many); Flow Rule &rarr; Table Entry (Pipeline Interpreter maps standard headers/actions to P4 names, e.g. ETH_DST &rarr; hdr.ethernet.dst_addr); Table Entry &rarr; P4Runtime message (P4 names to P4Info IDs). The mismatch: P4 allows only one action per entry, while ONOS/OpenFlow allow many, so a rewrite-plus-output becomes one P4 action with two parameters — needing interpretation logic in Java.</p>
+      </details>
+
+      <details>
+        <summary>What are the three parts of a pipeconf?</summary>
+        <p>(1) the pipeline model, automatically derived from P4Info; (2) target-specific binaries to deploy the pipeline (BMv2 JSON, Tofino binary, FPGA bitstream); (3) pipeline-specific driver behaviors — the Pipeliner and the Pipeline Interpreter. It is delivered to ONOS as an app, distributable as an <code>.oar</code>.</p>
+      </details>
+
+      <details>
+        <summary>In the DDoS exercise, why did data-plane pre-filtering reduce false positives?</summary>
+        <p>Because in exercise 1a the traffic was not pre-filtered on the data plane, so noise reached the CNN and inflated the count of suspect/malicious flows. In 1b a count-min-filtered P4 program shed that noise at line rate before it reached the detector, drastically reducing false positives — the detector was unchanged; the data plane did the cleaning.</p>
+      </details>
+
+      <details>
+        <summary>What is a digest, and what problem does it solve?</summary>
+        <p>A digest sends aggregated data from the data plane to the control plane — in the exercise, the source/destination IP and port of 1 in every 10 packets. It is the building component that makes data-plane-to-CNN interaction possible, and it is P4's external-object answer to the language limitation that pure P4 cannot communicate with the control plane.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-07-p4-in-practice.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-09-industrial-networks.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>Slide P4 - ONOS_P4</em> (Andrea Melis, ONF materials), <em>Guida P4 Controller</em> (CCNC tutorial) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- State explorer: from a logical rule to a P4Runtime write ---- */
+LessonKit.stateExplorer('#se-writeflow', {
+  title: 'From a rule you can read to bytes on the wire',
+  start: 'Logical rule',
+  states: {
+    'Logical rule': {
+      desc: 'What a human writes: hdr.ipv4.dstAddr = 10.0.1.1/32 -> ipv4_forward(00:00:00:00:00:10, 7). Names and human-readable values.',
+      to: [['look up the names in P4Info', 'Resolve names to IDs']]
+    },
+    'Resolve names to IDs': {
+      desc: 'The control plane consults P4Info: ipv4_lpm becomes table_id 33581985, ipv4_forward becomes action_id 16786453, dstAddr becomes param_id 1, port becomes param_id 2. This is the only step that needs the P4Info contract.',
+      to: [['encode the values as bytes', 'Encode the TableEntry']]
+    },
+    'Encode the TableEntry': {
+      desc: 'Values become raw bytes: 10.0.1.1 -> "\\n\\000\\001\\001" with prefix_len 32; the MAC and port become byte strings in the action params. The result is a protobuf TableEntry containing only numbers and bytes.',
+      to: [['wrap in an Update', 'WriteRequest']]
+    },
+    'WriteRequest': {
+      desc: 'The TableEntry is wrapped in an Update with type INSERT and placed in a WriteRequest, sent over gRPC to the switch’s P4Runtime server. The same message shape would carry a MODIFY, a DELETE, a meter entry or a register entry — the API is pipeline-independent.',
+      to: [['gRPC to the switch', 'Installed in the pipeline']]
+    },
+    'Installed in the pipeline': {
+      desc: 'The P4Runtime server and target driver install the entry into the real table. From now on, matching packets get ipv4_forward. The same protobuf would have reached an ASIC, an FPGA or BMv2 unchanged — silicon-independent remote control.',
+      to: []
+    }
+  }
+});
+
+/* ---- State explorer: FlowObjective three-phase translation ---- */
+LessonKit.stateExplorer('#se-flowobj', {
+  title: 'One FlowObjective, three rewrites',
+  start: 'FlowObjective (pipeline-agnostic)',
+  states: {
+    'FlowObjective (pipeline-agnostic)': {
+      desc: 'A pipeline-agnostic app states an objective, e.g. "match on ETH_DST, output on port 3". It knows nothing about the switch’s pipeline or its P4 program.',
+      to: [['Pipeliner maps 1 to many', 'Flow Rules (many)']]
+    },
+    'Flow Rules (many)': {
+      desc: 'The pipeconf’s Pipeliner turns the single objective into as many flow rules as this pipeline needs. A pipeline with separate L2 and ACL tables may need several rules where another needs one.',
+      to: [['Pipeline Interpreter maps names', 'Table Entries']]
+    },
+    'Table Entries': {
+      desc: 'The Pipeline Interpreter maps standard ONOS headers and actions to the P4 program’s own names: ETH_DST becomes hdr.ethernet.dst_addr. Here it must also resolve the one-action-per-entry mismatch, combining an ONOS rewrite+output into one P4 action with parameters.',
+      to: [['map P4 names to P4Info IDs', 'P4Runtime messages']]
+    },
+    'P4Runtime messages': {
+      desc: 'Finally the table entries are turned into P4Runtime protobuf messages by mapping P4 names to P4Info numeric IDs — the same encoding as any other write. The app never had to know which pipeline it was driving.',
+      to: []
+    }
+  }
+});
+
+/* ---- State explorer: the DDoS pre-filtering pipeline ---- */
+LessonKit.stateExplorer('#se-ddos', {
+  title: 'Why pushing a sketch into the data plane helps the CNN',
+  start: 'Attack traffic arrives',
+  states: {
+    'Attack traffic arrives': {
+      desc: 'The CIC2017 dataset replays traffic with a single malicious flow (attacker 172.16.0.1, victim 192.168.10.50) buried in normal traffic.',
+      to: [['no data-plane filter (1a)', 'CNN sees everything'], ['count-min filter in P4 (1b)', 'Data plane sheds noise']]
+    },
+    'CNN sees everything': {
+      desc: 'Without pre-filtering, all the noise reaches the detector. The CNN flags an unexpectedly high number of flows as suspect or malicious — many of them false positives — because it is drowning in raw traffic.',
+      to: [['add a data-plane filter', 'Data plane sheds noise']]
+    },
+    'Data plane sheds noise': {
+      desc: 'A count-min sketch (a register array, chapter 7) runs at line rate in the P4 switch, filtering the traffic before it reaches the CNN. Cheap, in-network, per-packet.',
+      to: [['forward only what matters', 'CNN sees clean input']]
+    },
+    'CNN sees clean input': {
+      desc: 'The same neural network now receives pre-filtered traffic and its false-positive rate drops drastically. Nothing about the model changed — the data plane did the cleaning. This is the measurable case for in-network processing.',
+      to: [['sample 1 in 10 packets to the controller', 'Digest closes the loop']]
+    },
+    'Digest closes the loop': {
+      desc: 'A digest (simple_digest.p4) sends the 5-tuple of 1 in 10 packets up to the controller — the building component that connects the data plane to the CNN. Data plane and control plane cooperate: the switch filters and samples, the controller learns and reacts.',
+      to: []
+    }
+  }
+});
+</script>
+</body>
+</html>

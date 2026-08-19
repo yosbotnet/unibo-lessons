@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 11 — Kathará and the industrial P4 labs · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-10-ot-security.html">&larr; Ch. 10 — AAS, IEC 62443 and programmable OT security</a>
+    <a href="index.html">Index</a>
+    <a href="cap-12-mobile-radio-networks.html">Ch. 12 — Mobile radio networks: from 2G to 5G &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Industrial networks · Chapter 11</div>
+    <h1>Kathará and the industrial P4 labs</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>5 interactive widgets</span><span>7 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">From namespaces to orchestration</a></li>
+      <li><a href="#s2">Kathará: containers as network devices</a></li>
+      <li><a href="#s3">Commands, labs and startup files</a></li>
+      <li><a href="#s4">Lab 1 — the Modbus secure tunnel testbed</a></li>
+      <li><a href="#s5">Parsing Modbus with P4</a></li>
+      <li><a href="#s6">P4 externs: AES and HMAC in the data plane</a></li>
+      <li><a href="#s7">Ingress processing and the modbus_sec table</a></li>
+      <li><a href="#s8">Installing rules: CLI, registers and Wireshark</a></li>
+      <li><a href="#s9">Lab 2 — from programmable packets to programmable assets</a></li>
+      <li><a href="#s10">The nine final project challenges</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>1. From namespaces to orchestration</h2>
+    <p>Computer networks are complex objects: several devices, several interfaces, several protocols running, physical interconnections that originate complex topologies. Performing experiments on a <em>live</em> network is unfeasible — it hosts services that are critical for the company, it would require coordinating different departments, and network equipment is expensive. The answer is a virtual environment for tests, experiments and measures, and the course is careful to distinguish the two flavours:</p>
+
+    <table>
+      <tr><th>Simulation</th><th>Emulation</th></tr>
+      <tr>
+        <td>Aims at reproducing the <strong>performance</strong> of a real-life system — latency, packet loss, throughput. Examples: <code>ns</code>, <code>real</code>.</td>
+        <td>Aims at accurately reproducing the <strong>functionalities</strong> of a real-life system — configurations, architectures, protocols — with limited attention to performance.</td>
+      </tr>
+    </table>
+
+    <p>The basic idea of emulation: several containers are created inside a single host machine, connected to virtual collision domains so they can communicate. Each container can play the role of a regular host, a router, a switch, an application. Chapter 4 built this by hand with <strong>network namespaces</strong>, and this chapter is where the course explains why that approach stops scaling. Namespaces give isolation for processes, interfaces and routing stacks — they are fine for simple point-to-point or small manual experiments, but they become hard to manage when the lab includes many nodes, startup scripts, multiple images and repeatable experiments.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — the problem is orchestration, not isolation</span>
+      <p>With raw namespaces you still manage manually: how many nodes you need, how nodes are connected, startup commands for each node, configuration order, cleanup and reset, reproducibility across machines. Isolation was solved in chapter 4; the open problem is <strong>orchestration</strong>. Kathará exists to automate exactly that list.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>2. Kathará: containers as network devices</h2>
+    <p><strong>Kathará is based on Docker</strong>: each emulated network device is a container. Several container images are available out of the box:</p>
+    <ul>
+      <li><strong>Base</strong> — DNS, web server, network utilities.</li>
+      <li><strong>Quagga</strong> — standard routing protocols.</li>
+      <li><strong>FRRouting</strong> — standard routing protocols plus EVPN and MPLS.</li>
+      <li><strong>Open vSwitch</strong> — OpenFlow-enabled switch.</li>
+      <li><strong>Behavioral Model</strong> — software implementation of a P4 switch (BMv2).</li>
+    </ul>
+
+    <p>Each device has a <strong>console</strong> (a terminal window), a <strong>memory</strong>, a <strong>filesystem</strong> and zero, one or more <strong>network interfaces</strong>. Each interface is connected to a single virtual collision domain, and each virtual collision domain can be connected to several interfaces — so a domain is exactly the shared segment of chapter 4, but created and destroyed by Kathará instead of by hand.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-labelledby="p11-1-title">
+        <title id="p11-1-title">Three Kathará devices pc1, pc2, pc3 connected through two collision domains A and B, all running inside a single host machine with one console per device</title>
+        <rect x="20" y="20" width="660" height="120" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2" stroke-dasharray="6 4"/>
+        <text x="34" y="42" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">host machine — Docker engine + Kathará</text>
+        <rect x="60" y="60" width="140" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="130" y="84" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">pc1</text>
+        <text x="130" y="102" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">root@pc1:~$ █</text>
+        <rect x="280" y="60" width="140" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="350" y="84" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">pc2</text>
+        <text x="350" y="102" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">root@pc2:~$ █</text>
+        <rect x="500" y="60" width="140" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="570" y="84" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">pc3</text>
+        <text x="570" y="102" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">root@pc3:~$ █</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.4" fill="none">
+          <path d="M200 86 L280 86"/>
+          <path d="M420 86 L500 86"/>
+        </g>
+        <rect x="118" y="168" width="200" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <text x="218" y="192" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">collision domain A</text>
+        <rect x="380" y="168" width="200" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <text x="480" y="192" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">collision domain B</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.4" fill="none">
+          <path d="M130 112 L130 168"/><path d="M350 112 L350 168"/><path d="M570 112 L570 168"/>
+        </g>
+        <text x="218" y="240" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">pc1[0]=A · pc2[0]=A pc2[1]=B · pc3[0]=B</text>
+        <text x="218" y="266" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">Each device has a console, a memory, a filesystem and one or more interfaces.</text>
+        <text x="218" y="288" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">Interfaces connect to collision domains; a domain may host several interfaces.</text>
+      </svg>
+      <figcaption><b>Plate 11.1</b> — A Kathará lab. The emulated network is a set of containers inside one host; the topology is a graph of devices and virtual collision domains.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>3. Commands, labs and startup files</h2>
+    <p>Kathará provides three sets of commands:</p>
+    <table>
+      <tr><th>Family</th><th>Role</th><th>Commands</th></tr>
+      <tr><td><strong>v-commands</strong></td><td>Low-level tools for configuring and starting a <em>single</em> device</td><td><code>vstart</code>, <code>vconfig</code>, <code>vclean</code></td></tr>
+      <tr><td><strong>l-commands</strong></td><td>Easier environment for complex labs with several devices</td><td><code>lstart</code>, <code>lclean</code>, <code>lconfig</code>, <code>lrestart</code>, <code>linfo</code></td></tr>
+      <tr><td><strong>Global commands</strong></td><td>Management</td><td><code>check</code>, <code>connect</code>, <code>list</code>, <code>settings</code>, <code>wipe</code></td></tr>
+    </table>
+
+    <p>A <strong>Kathará lab</strong> is a set of preconfigured devices that can be started and halted together. A basic lab is a directory tree containing:</p>
+    <ul>
+      <li>a <code>lab.conf</code> file describing the network topology;</li>
+      <li>a set of subdirectories with the configuration settings of each device;</li>
+      <li><code>&lt;device_name&gt;.startup</code> files describing actions performed when a device starts.</li>
+    </ul>
+
+    <p><code>lab.conf</code> contains a list of <code>machine[arg]=value</code> lines: if <code>arg</code> is a number, <code>value</code> is the name of the collision domain to which <code>eth<var>arg</var></code> is attached; if <code>arg</code> is not a number, it is an option and <code>value</code> its argument.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="100%" role="img" aria-labelledby="p11-2-title">
+        <title id="p11-2-title">A lab directory tree with lab.conf, device subdirectories and startup files</title>
+        <rect x="40" y="20" width="240" height="200" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="56" y="44" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">my_lab/</text>
+        <text x="72" y="72" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">lab.conf</text>
+        <text x="72" y="96" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">s1/</text>
+        <text x="72" y="120" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">s2/</text>
+        <text x="72" y="144" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">modbusclient/</text>
+        <text x="72" y="168" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">modbusserver/</text>
+        <text x="72" y="192" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">s1.startup</text>
+        <text x="72" y="212" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">s2.startup</text>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">
+          <text x="330" y="44">lab.conf — the topology:</text>
+          <text x="330" y="66">pc1[0]=A  pc2[0]=A  pc2[1]=B  pc3[0]=B</text>
+          <text x="330" y="96">device subdirectories are copied</text>
+          <text x="330" y="114">into the root of the device filesystem,</text>
+          <text x="330" y="132">e.g. pc1/foo/file.txt &rarr; /foo/file.txt</text>
+          <text x="330" y="162">.startup files run inside the device</text>
+          <text x="330" y="180">right after its startup:</text>
+          <text x="330" y="200">ip address add 10.0.0.1/24 dev eth0</text>
+          <text x="330" y="218">systemctl start frr</text>
+        </g>
+      </svg>
+      <figcaption><b>Plate 11.2</b> — The anatomy of a Kathará lab: topology in <code>lab.conf</code>, configuration in subdirectories, behaviour in <code>.startup</code> scripts.</figcaption>
+    </figure>
+
+    <p>Files can be shared between host and devices in two ways. <strong>Mirrored</strong> sharing reflects changes in both directions: the <code>/shared</code> directory inside a device points to the lab's shared directory (enabled by default), and <code>/hosthome</code> points to the host's home directory (disabled by default). <strong>Copied</strong> sharing creates two independent copies, through the device subdirectories. The typical workflow is simple: enter the lab directory, then <code>kathara lstart</code>, <code>kathara lclean</code>, <code>kathara lrestart</code>.</p>
+
+    <div id="cmd-step"></div>
+  </section>
+
+  <section id="s4" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>4. Lab 1 — the Modbus secure tunnel testbed</h2>
+    <p>The two industrial labs take the two halves of the course and aim them at one problem. <strong>Lab 1</strong> (<code>lab1_P4_modbus.zip</code>) focuses on <em>data-plane programmability</em>: Modbus packet processing inside a P4 switch, using P4 to inspect industrial traffic at packet level and building the foundation for secure conduits with symmetric encryption. <strong>Lab 2</strong> (<code>lab2_P4_AAS.7z</code>) focuses on <em>control-plane programmability</em>: using the Asset Administration Shell to expose network elements as assets, treating both data plane and control plane as manageable entities.</p>
+
+    <p>The Lab 1 testbed is a Kathará lab: a <strong>modbus client</strong> and a <strong>modbus server</strong> (simulating a working machine and a plant controller that collects its data), two <strong>P4 switches s1 and s2</strong> running BMv2 between them, plus a <strong>wireshark</strong> node attached to domains A, B and C with port 3000/tcp published to the host. The switches carry the same pipeline; the secure conduit is realized by the two switches together, exactly as in chapter 10 — the devices are unchanged and speak plain Modbus.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p11-3-title">
+        <title id="p11-3-title">The Lab 1 testbed: Modbus client, switches s1 and s2, Modbus server, Wireshark node and host</title>
+        <rect x="20" y="100" width="110" height="50" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="75" y="124" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">modbus</text>
+        <text x="75" y="140" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">client</text>
+        <rect x="180" y="92" width="110" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="235" y="118" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">s1 (BMv2)</text>
+        <text x="235" y="138" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">cipher</text>
+        <rect x="410" y="92" width="110" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="465" y="118" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">s2 (BMv2)</text>
+        <text x="465" y="138" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">decipher</text>
+        <rect x="570" y="100" width="110" height="50" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="625" y="124" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">modbus</text>
+        <text x="625" y="140" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">server</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.3" fill="none">
+          <path d="M130 125 L180 125"/><path d="M520 125 L570 125"/>
+        </g>
+        <path d="M290 125 L410 125" stroke="var(--lk-forest)" stroke-width="2.4" fill="none"/>
+        <text x="305" y="116" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">AES-encrypted conduit</text>
+        <rect x="240" y="20" width="220" height="42" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="350" y="46" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">host: http://localhost:3000</text>
+        <rect x="300" y="196" width="110" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4"/>
+        <text x="355" y="218" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">wireshark</text>
+        <text x="355" y="232" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">domains A, B, C</text>
+        <g stroke="var(--lk-forest)" stroke-width="1.1" fill="none" stroke-dasharray="4 3">
+          <path d="M290 166 L340 196"/><path d="M410 166 L370 196"/>
+        </g>
+        <text x="30" y="180" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">start: kathara lstart</text>
+      </svg>
+      <figcaption><b>Plate 11.3</b> — The Lab 1 testbed. Both switches load the same P4 pipeline; the difference in behaviour comes from the rules installed at startup.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s5" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>5. Parsing Modbus with P4</h2>
+    <p>The P4 parsing pipeline handles the <strong>variable length of the Modbus payload</strong> in five steps:</p>
+    <ol>
+      <li>The parser extracts the <strong>Ethernet</strong> and <strong>IP</strong> headers from each packet.</li>
+      <li>If the Protocol field of the IPv4 header is 6 (<code>TCP</code>), the <strong>TCP header</strong> is extracted.</li>
+      <li>Knowing the IPv4 <em>Total Length</em> and the TCP <em>Data Offset</em>, the parser computes the actual TCP header length (including options) and the total payload size.</li>
+      <li>If source and destination ports are equal to <strong>502</strong>, the <strong>Modbus Application (MBAP) header</strong> is parsed.</li>
+      <li>Finally, the Modbus payload is extracted depending on the value of the <strong>Length</strong> field in the MBAP header.</li>
+    </ol>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="100%" role="img" aria-labelledby="p11-4-title">
+        <title id="p11-4-title">The parsing pipeline: Ethernet, IPv4, TCP, MBAP and variable-length Modbus payload</title>
+        <g font-family="var(--lk-mono)" fill="var(--lk-ink)">
+          <rect x="30" y="90" width="100" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+          <text x="80" y="116" text-anchor="middle" font-size="11">Ethernet</text>
+          <rect x="170" y="90" width="100" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+          <text x="220" y="116" text-anchor="middle" font-size="11">IPv4</text>
+          <rect x="310" y="90" width="100" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+          <text x="360" y="116" text-anchor="middle" font-size="11">TCP</text>
+          <rect x="450" y="90" width="100" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+          <text x="500" y="116" text-anchor="middle" font-size="11">MBAP</text>
+          <rect x="590" y="90" width="90" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <text x="635" y="116" text-anchor="middle" font-size="11" fill="var(--lk-vermilion)">payload</text>
+        </g>
+        <g stroke="var(--lk-ink)" stroke-width="1.3" fill="none" marker-end="url(#a11)">
+          <path d="M130 112 L170 112"/><path d="M270 112 L310 112"/><path d="M410 112 L450 112"/><path d="M550 112 L590 112"/>
+        </g>
+        <defs><marker id="a11" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink)"/></marker></defs>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">
+          <text x="30" y="80">always</text>
+          <text x="170" y="80">proto = 6 ?</text>
+          <text x="310" y="72">ports = 502 ?</text>
+          <text x="310" y="84">(else stop parsing)</text>
+          <text x="450" y="80">length from MBAP</text>
+        </g>
+        <text x="30" y="180" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">IPv4 Total Length and TCP Data Offset give the TCP header length and payload size;</text>
+        <text x="30" y="200" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">the MBAP Length field then drives the variable-length payload extraction.</text>
+        <text x="30" y="226" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">Parsing stops early for non-TCP or non-Modbus traffic — that traffic is just forwarded.</text>
+      </svg>
+      <figcaption><b>Plate 11.4</b> — Parsing Modbus in P4. The pipeline is gated: only TCP on port 502 reaches the MBAP header, and the payload length is taken from the protocol itself.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s6" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>6. P4 externs: AES and HMAC in the data plane</h2>
+    <p>Section 4.3 of the P4 language specification introduces the <strong>extern</strong>: P4 syntax used to define interfaces between P4 programs and architecture-specific functionality that resides outside those programs. Two varieties exist: <strong>extern functions</strong> (interface described as a function declaration) and <strong>extern objects</strong> (interface described as an object providing method declarations, like a C++ class).</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — fixed-function, called but not implemented</span>
+      <p>Externs are <strong>fixed-function objects that a P4 program can call, but not implement in P4 itself</strong>. P4 describes parsing, header processing and match-action behaviour; some operations are too target-specific or too complex to express directly. The extern mechanism extends the program with custom functionality that resides outside it — especially useful when an efficient implementation in P4 is difficult. Recall chapter 6's table: encryption is exactly the operation the course maps to externs.</p>
+    </div>
+
+    <p>The extern interface is declared in P4 and implemented in C++: <code>declaration.p4</code> defines the extern functions visible to the P4 program; <code>definition.cpp</code> contains the actual implementation; the C++ code is compiled as a shared object library (<code>.so</code>); and the shared library is loaded by <strong>BMv2 at switch startup</strong> and dynamically linked to the compiled P4 program.</p>
+
+    <p>From <code>declaration.p4</code> the program can invoke four functions:</p>
+    <table>
+      <tr><th>Extern function</th><th>Purpose</th></tr>
+      <tr><td><code>Encrypt(...)</code> / <code>Decrypt(...)</code></td><td><strong>Confidentiality</strong> through symmetric encryption: AES with keys of 128, 192 or 256 bits.</td></tr>
+      <tr><td><code>sha256_hash_1024(...)</code></td><td><strong>Integrity and authentication</strong>: HMAC-SHA256 tag computed over the data.</td></tr>
+      <tr><td><code>verify_hash_equals(...)</code></td><td>Checks the HMAC tag on reception.</td></tr>
+    </table>
+
+    <p><strong>AES</strong> is a symmetric block cipher operating on 128-bit blocks with 128/192/256-bit keys. Each round applies four steps: <strong>SubBytes</strong> (replace each byte using a lookup table), <strong>ShiftRows</strong> (move bytes around in the rows), <strong>MixColumns</strong> (Galois multiplication on the columns), <strong>AddRoundKey</strong> (XOR with the round key). <strong>HMAC</strong> (Hash-Based Message Authentication Code) ensures integrity and authenticity using a hash function and a secret key, returning a fixed-size digest. Together, the four externs let the switch build a protected conduit for industrial traffic.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 220" width="100%" role="img" aria-labelledby="p11-5-title">
+        <title id="p11-5-title">The extern architecture: declaration.p4 visible to the P4 program, definition.cpp compiled to a shared library loaded by BMv2</title>
+        <rect x="40" y="30" width="220" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="56" y="56" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">declaration.p4</text>
+        <text x="56" y="76" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">extern sha256_hash_1024 / verify_hash_equals</text>
+        <text x="56" y="88" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">extern Encrypt / Decrypt — callable by the program</text>
+        <rect x="40" y="130" width="220" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="56" y="156" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">definition.cpp</text>
+        <text x="56" y="176" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">AES-128/192/256 · HMAC-SHA256 implementation</text>
+        <text x="150" y="120" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">compiled to</text>
+        <rect x="320" y="60" width="180" height="100" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+        <text x="336" y="92" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">shared object .so</text>
+        <text x="336" y="112" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">loaded by BMv2 at startup,</text>
+        <text x="336" y="126" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">dynamically linked to the</text>
+        <text x="336" y="140" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">switch's compiled P4 program</text>
+        <rect x="560" y="70" width="110" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.4"/>
+        <text x="615" y="98" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">BMv2</text>
+        <text x="615" y="116" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">P4 program</text>
+        <text x="615" y="130" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">calls externs</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.2" fill="none">
+          <path d="M260 90 L320 90"/><path d="M500 110 L560 110"/>
+        </g>
+      </svg>
+      <figcaption><b>Plate 11.5</b> — The extern interface. The P4 program sees only the declaration; the implementation lives in C++ and is loaded dynamically.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s7" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>7. Ingress processing and the modbus_sec table</h2>
+    <p>In ingress, the pipeline is deliberately ordered: <code>ipv4_lpm</code> decides basic forwarding first, and <code>modbus_sec</code> is applied <em>only</em> for recognized industrial traffic. The security table matches on <code>standard_metadata.egress_spec</code> — the output port chosen by forwarding — and offers three actions:</p>
+    <ul>
+      <li><code>no_cipher</code> — default, traffic passes untouched;</li>
+      <li><code>cipher</code> — encrypt with AES and tag with HMAC;</li>
+      <li><code>decipher</code> — verify the tag and decrypt.</li>
+    </ul>
+
+    <p>The interpretation is worth stating slowly: <strong>forwarding is decided first; security treatment is decided after the egress direction is known</strong>. The secure conduit is enforced through table-driven switch behaviour — the same philosophy as chapter 10's in-network encryption, now with an explicit table you can inspect and modify.</p>
+
+    <pre><code class="language-p4">table modbus_sec {
+    key = {
+        standard_metadata.egress_spec: exact;
+    }
+    actions = {
+        no_cipher;
+        cipher;
+        decipher;
+    }
+    size = 2;
+    default_action = no_cipher();
+}
+
+apply {
+    if (hdr.ipv4.isValid()) {
+        ipv4_lpm.apply();
+
+        if (hdr.tcp.isValid() &amp;&amp; hdr.modbus_tcp.isValid()) {
+            modbus_sec.apply();
+        }
+    }
+}</code></pre>
+
+    <div id="se-conduit"></div>
+
+    <h3>The exercise: from egress port to destination address</h3>
+    <p>The lab then asks the question that turns the toy table into a policy: the secure conduit is specified per <em>output port</em>, but a real requirement is per <em>destination</em>. The exercise: make the secure conduit apply only to a specific IP address. Start from the table above, add a second Modbus server with a different IP to the lab, change the client script to connect to it — and remember to update the P4 rules. The solution changes the match key from <code>egress_spec</code> to <code>hdr.ipv4.dstAddr</code>, grows <code>size</code> to 16, and the CLI rules become address-based:</p>
+
+    <pre><code class="language-text"># s1 or s2 — cipher towards the protected servers
+table_add modbus_sec cipher 200.1.1.7 =&gt;
+table_add modbus_sec cipher 200.1.1.8 =&gt;
+table_add modbus_sec cipher 200.1.1.9 =&gt;
+
+# and decipher towards the clients
+table_add modbus_sec decipher 195.11.14.5 =&gt;
+table_add modbus_sec decipher 195.11.14.6 =&gt;
+table_add modbus_sec decipher 195.11.14.7 =&gt;</code></pre>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note — the takeaway of Lab 1</span>
+      <p>The same pipeline runs on both switches. The <em>actual behaviour comes from CLI-installed rules and key registers</em>, not from the P4 code itself. This is the course's recurring lesson in concrete form: the data plane is a programmable asset whose behaviour is configuration, and the comparison with Modbus TLS is the chapter 10 evaluation — in-network encryption performs better than Modbus TLS and almost in line with unencrypted Modbus.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>8. Installing rules: CLI, registers and Wireshark</h2>
+    <p>How are the P4 rules installed? The initial configuration happens at switch startup: <code>s1.startup</code> and <code>s2.startup</code> wait for <code>simple_switch_CLI</code> and then load <code>auto_test_commands.txt</code>. That file installs:</p>
+    <ul>
+      <li><code>ipv4_lpm</code> forwarding rules;</li>
+      <li><code>register_write</code> <code>key</code> <code>value</code> commands — the key words written into <code>keys[0..7]</code>;</li>
+      <li><code>modbus_sec</code> rules: <code>decipher</code> on port 1, <code>cipher</code> on port 2.</li>
+    </ul>
+
+    <pre><code class="language-text"># both s1.startup and s2.startup do, after BMv2 is up:
+simple_switch_CLI &lt;&lt;&lt; $(cat auto_test_commands.txt)
+
+# auto_test_commands.txt installs:
+#   ipv4_lpm entries
+#   register_write keys 0..7 &lt;key words&gt;
+#   table_add modbus_sec decipher 1 =&gt;
+#   table_add modbus_sec cipher 2 =&gt;</code></pre>
+
+    <p>The keys live in <strong>registers</strong> on the data plane — the same in-memory state chapter 7 introduced — and the externs read them at cipher/decipher time. The client side is a Python script inside the <code>modbusclient</code> node: <code>python3 modbus_client.py --read</code>, <code>--write</code>, <code>--rw</code>, <code>--test-rtt-read 128</code>, <code>--test-rtt-write 256</code>, <code>--test-read no-encryption</code>. The <strong>Wireshark</strong> node uses the image <code>lscr.io/linuxserver/wireshark</code>, is attached to domains A, B and C, publishes port 3000/tcp to the host, and is reached at <code>http://localhost:3000</code> after <code>kathara lstart</code> — that is how you verify the payload is ciphertext between the switches and plaintext at the ends.</p>
+  </section>
+
+  <section id="s9" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt">
+    <h2>9. Lab 2 — from programmable packets to programmable assets</h2>
+    <p>Lab 1 focused on packet treatment inside the switch: parsing protocol fields, applying packet-level security treatment, programming the data plane. <strong>Lab 2 changes perspective</strong>: the network is no longer only a forwarding system — network components become explicitly modelled entities, and control and data plane can be treated as <strong>assets</strong>. The course states the transition in one line: <em>in the first lab we programmed packet behaviour; in the second lab we program a network that can describe and expose itself</em>.</p>
+
+    <p>This is exactly the Asset Administration Shell of chapter 10 applied to the network: the AAS is the standardized digital twin of an asset; it provides a structured digital representation, defines software structure, interfaces and semantics, and describes different aspects through submodels. Submodels are the content of the AAS — each represents one aspect, functional, structural or content-related — so an asset becomes a composition of meaningful views. The reason matters here is stated bluntly in the lab: <strong>we do not want a monolithic "network object"; we want separate views for infrastructure, control, and managed behaviour</strong>.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea — why AAS in network programmability</span>
+      <p>A programmable network includes forwarding elements, control logic, installed policies and exposed operational behaviour. With AAS, these components are modelled as assets instead of hidden implementation details: <strong>data plane = programmable asset</strong>, <strong>control plane = programmable asset</strong>, <strong>network behaviour = asset-exposed functionality</strong>. The AAS is not the physical asset; it is the standardized digital representation used to expose information and functions.</p>
+    </div>
+
+    <h3>What is already implemented</h3>
+    <p>The provided Java project (built with Gradle) already creates the shell and two controllers:</p>
+    <ul>
+      <li><code>App.java</code> creates a <strong>Network Control Plane AAS</strong>;</li>
+      <li><code>NetworkControlPlane.java</code> creates two <strong>controller submodels</strong> — <code>Controller(1)</code> and <code>Controller(2)</code>;</li>
+      <li><code>Controller.java</code> currently exposes <code>GetSwitchRules</code>, <code>DeleteSwitchRules</code> and <code>RefreshRules</code>, plus <code>CreateRules_CNTx</code> submodels populated from <code>getRuleDescribers(...)</code>;</li>
+      <li>the switch configuration lives in <code>App/app/src/main/resources/net-config.yml</code>: top-level keys identify the switches (<code>s1</code>, <code>s2</code>), under each switch a list of program definitions, each program starting with a <code>program:</code> field and containing a <code>rules:</code> section, each rule specifying the target table, match key values, action and action parameters.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p11-6-title">
+        <title id="p11-6-title">The Lab 2 AAS structure: Network Control Plane shell, two controller submodels and their operations</title>
+        <rect x="200" y="20" width="300" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="350" y="47" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">Network Control Plane AAS</text>
+        <path d="M350 64 L350 82" stroke="var(--lk-ink)" stroke-width="1.2" fill="none"/>
+        <rect x="60" y="82" width="250" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="76" y="104" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Controller(1) submodel</text>
+        <text x="76" y="122" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">GetSwitchRules · DeleteSwitchRules · RefreshRules</text>
+        <rect x="390" y="82" width="250" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="406" y="104" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Controller(2) submodel</text>
+        <text x="406" y="122" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">GetSwitchRules · DeleteSwitchRules · RefreshRules</text>
+        <path d="M185 134 L185 160" stroke="var(--lk-ink)" stroke-width="1.2" fill="none"/>
+        <rect x="30" y="160" width="310" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="46" y="182" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">YOUR TASK — add three operations per controller:</text>
+        <text x="46" y="202" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">GetCurrentProgram · GetAvailablePrograms · ChangeProgram</text>
+        <text x="46" y="220" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">after a program change, refresh the rule-creation submodel</text>
+        <text x="430" y="190" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">net-config.yml: s1/s2 &rarr; programs &rarr; rules</text>
+        <text x="430" y="210" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">(table, match keys, action, parameters)</text>
+      </svg>
+      <figcaption><b>Plate 11.6</b> — Lab 2's starting point and the exercise: expose the active program, the available programs and a change operation through the AAS.</figcaption>
+    </figure>
+
+    <h3>The exercise: extend the Control Plane AAS with program management</h3>
+    <p>The current AAS already allows users to inspect, add, delete and refresh switch rules. The exercise asks to extend the Java code so that each controller asset also exposes:</p>
+    <ol>
+      <li><strong>GetCurrentProgram</strong> — the currently active program is shown in the AAS;</li>
+      <li><strong>GetAvailablePrograms</strong> — the list of installable programs is shown;</li>
+      <li><strong>ChangeProgram</strong> — the user activates a selected program from the AAS UI;</li>
+    </ol>
+    <p>with the expected behaviour that <strong>after the change, the rule-describer submodel is refreshed</strong> — the AAS stays a truthful view of the control plane. Build with <code>gradle build</code> in the <code>App</code> folder after every source change.</p>
+
+    <div id="ac-aas"></div>
+  </section>
+
+  <section id="s10" data-src="2 - LAB_ Industrial Network Programmability - 2-Industrial_Network_Programmability_Lab.txt,Final Project Challenges.txt">
+    <h2>10. The nine final project challenges</h2>
+    <p>The final project for this course is a set of <strong>nine challenges</strong> built on one shared environment: an industrial network composed of 2 hosts with 2 switches plus the Asset Administration Shell management infrastructure. The two hosts are a working machine (<strong>client</strong>) and a plant controller (<strong>server</strong>) that collects data of the working machines; they communicate using the <strong>Modbus protocol</strong>. Every challenge is phrased the same way — <em>implement a P4 behaviour, then implement a new AAS submodel that exposes it</em> — which is chapter 10's note made literal: the submodel is the unit of work in the project.</p>
+
+    <div id="challenges-widget"></div>
+
+    <table>
+      <tr><th>#</th><th>P4 behaviour to implement</th><th>AAS submodel to expose</th></tr>
+      <tr><td>1</td><td>Mirror to the observer all Modbus traffic with <strong>function code 4</strong></td><td>Enable / disable the mirroring</td></tr>
+      <tr><td>2</td><td>Mirror all Modbus traffic with <strong>function codes 1 and 2</strong></td><td>How many packets have been mirrored since start-up</td></tr>
+      <tr><td>3</td><td>Count all packets with <strong>function codes 1 to 6</strong></td><td>How many packets counted per function code since start-up</td></tr>
+      <tr><td>4</td><td>Count packets with <strong>function codes 1 to 6</strong></td><td>Count of function-code-4 packets, with an <strong>alarm if larger than 20</strong></td></tr>
+      <tr><td>5</td><td>Monitor traffic (function codes 1 to 6)</td><td><strong>Block</strong> client&harr;server traffic when packets of a user-selected function code exceed 20</td></tr>
+      <tr><td>6</td><td>Monitor traffic</td><td><strong>Block</strong> client&harr;server traffic when function-code-1 packets exceed a user-selected threshold</td></tr>
+      <tr><td>7</td><td>Encrypt traffic with the <strong>provided</strong> P4 program</td><td><strong>Activate the encrypted tunnel</strong> when packets of a user-selected function code exceed a user-selected threshold</td></tr>
+      <tr><td>8</td><td>Encrypt traffic, counting encrypted packets <strong>per function code</strong> (one counter per code 1–6)</td><td>Number of packets encrypted per function code (user selects the code)</td></tr>
+      <tr><td>9</td><td>Encrypt traffic <strong>only for specific function codes</strong></td><td>Enable the encrypted tunnel for a user-selected function code</td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam — the pattern behind all nine</span>
+      <p>Every challenge decomposes into the same three layers: (1) a <strong>P4 program</strong> that observes or modifies Modbus traffic (mirror, count, block, encrypt) keyed on <strong>function codes 1–6</strong>; (2) an <strong>AAS submodel</strong> that reads the resulting state (counters, alarms, mirror status) or invokes an operation (enable mirroring, block, activate tunnel) — with parameters <strong>selected by the user from the AAS UI</strong>; (3) the bridge between them, through registers/counters in the data plane and the controller's rule installation. If you can say, for a given challenge, which P4 construct (clone, counter, register, extern) and which BaSyx component (submodel repository, DataBridge) you would touch, you have the whole project in your head.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What is the difference between simulation and emulation, as defined by the lab?</summary>
+        <p><strong>Simulation</strong> aims at reproducing the <em>performance</em> of a real-life system — latency time, packet loss, etc. (examples: <code>ns</code>, <code>real</code>). <strong>Emulation</strong> aims at accurately reproducing the <em>functionalities</em> of a real-life system — configurations, architectures, protocols — with limited attention to performance.</p>
+      </details>
+
+      <details>
+        <summary>Why are network namespaces "not enough anymore" for the labs?</summary>
+        <p>Namespaces give isolation for processes, interfaces and routing stacks — fine for simple point-to-point or small manual experiments, but hard to manage when the lab includes many nodes, startup scripts, multiple images and repeatable experiments. With raw namespaces you still manage manually how many nodes you need, how they are connected, startup commands, configuration order, cleanup/reset and reproducibility. The problem is no longer isolation; it is <strong>orchestration</strong>.</p>
+      </details>
+
+      <details>
+        <summary>What is Kathará, and which container images does it provide?</summary>
+        <p>Kathará is an emulation system <strong>based on Docker</strong>: each emulated network device is a container with a console, a memory, a filesystem and zero or more network interfaces, each connected to a virtual collision domain. Images include Base (DNS, web server, utilities), Quagga, FRRouting (with EVPN/MPLS), Open vSwitch and Behavioral Model (BMv2, the software P4 switch).</p>
+      </details>
+
+      <details>
+        <summary>Name the three Kathará command families and give an example command for each.</summary>
+        <p><strong>v-commands</strong> configure and start a single device (<code>vstart</code>, <code>vconfig</code>, <code>vclean</code>). <strong>l-commands</strong> set up complex labs of several devices (<code>lstart</code>, <code>lclean</code>, <code>lconfig</code>, <code>lrestart</code>, <code>linfo</code>). <strong>Global commands</strong> manage the system (<code>check</code>, <code>connect</code>, <code>list</code>, <code>settings</code>, <code>wipe</code>).</p>
+      </details>
+
+      <details>
+        <summary>What does a basic Kathará lab directory contain?</summary>
+        <p>A <code>lab.conf</code> file describing the topology (lines like <code>pc1[0]=A</code>, attaching <code>eth0</code> of <code>pc1</code> to collision domain A; non-numeric args are options), subdirectories whose contents are copied into the root of each device's filesystem, and <code>&lt;device&gt;.startup</code> files — shell scripts executed inside the device right after startup (e.g. <code>ip address add 10.0.0.1/24 dev eth0</code>, <code>systemctl start frr</code>).</p>
+      </details>
+
+      <details>
+        <summary>Describe the two ways to share files between host and devices.</summary>
+        <p><strong>Mirrored</strong>: changes reflect in both directions — <code>/shared</code> points to the lab's shared directory (enabled by default) and <code>/hosthome</code> to the host home (disabled by default). <strong>Copied</strong>: two independent copies, done through the device subdirectories of the lab (e.g. <code>pc1/foo/file.txt</code> becomes <code>/foo/file.txt</code> inside pc1).</p>
+      </details>
+
+      <details>
+        <summary>List the five steps of the Modbus parsing pipeline in P4.</summary>
+        <p>(1) Extract Ethernet and IP headers; (2) if IPv4 protocol is 6 (TCP), extract the TCP header; (3) using IPv4 Total Length and TCP Data Offset, compute the real TCP header length and payload size; (4) if source and destination ports are 502, parse the MBAP header; (5) extract the Modbus payload based on the MBAP Length field.</p>
+      </details>
+
+      <details>
+        <summary>What is a P4 extern, and how is the encryption extern implemented?</summary>
+        <p>An extern is P4 syntax defining an interface to architecture-specific functionality that resides outside the program — fixed-function objects the program can call but not implement in P4. Two varieties: extern functions and extern objects. Implementation: <code>declaration.p4</code> declares the interface, <code>definition.cpp</code> implements it, compiled to a <code>.so</code> loaded by BMv2 at switch startup and dynamically linked. The four functions are <code>sha256_hash_1024</code>, <code>verify_hash_equals</code>, <code>Encrypt</code> and <code>Decrypt</code> (AES 128/192/256 + HMAC-SHA256).</p>
+      </details>
+
+      <details>
+        <summary>What does the modbus_sec table match on, what are its actions, and what does the exercise change?</summary>
+        <p>It matches on <code>standard_metadata.egress_spec</code> (exact) with actions <code>no_cipher</code> (default), <code>cipher</code>, <code>decipher</code>. Forwarding (<code>ipv4_lpm</code>) is applied first, then security only for recognized industrial traffic (valid IPv4 + valid TCP + valid Modbus). The exercise changes the key to <code>hdr.ipv4.dstAddr</code> (size 16) so the conduit is specified per destination IP, with rules like <code>table_add modbus_sec cipher 200.1.1.7 =&gt;</code>.</p>
+      </details>
+
+      <details>
+        <summary>How are the P4 rules installed at switch startup?</summary>
+        <p><code>s1.startup</code> and <code>s2.startup</code> wait for <code>simple_switch_CLI</code> and load <code>auto_test_commands.txt</code>, which installs <code>ipv4_lpm</code> forwarding entries, writes key words into <code>keys[0..7]</code> registers (<code>register_write keys &lt;n&gt; &lt;value&gt;</code>), and adds <code>modbus_sec</code> rules — decipher on port 1, cipher on port 2. Both switches run the same pipeline; the behaviour difference is pure configuration.</p>
+      </details>
+
+      <details>
+        <summary>What is Lab 2 about, and what is its starting Java structure?</summary>
+        <p>Lab 2 applies the AAS to the network: the network becomes a set of modelled assets with data plane, control plane and network behaviour exposed as asset functionality. <code>App.java</code> creates the Network Control Plane AAS; <code>NetworkControlPlane.java</code> creates two controller submodels; <code>Controller.java</code> exposes GetSwitchRules, DeleteSwitchRules, RefreshRules plus dynamic CreateRules_CNTx submodels from <code>getRuleDescribers(...)</code>. Switch programs and rules are read from <code>net-config.yml</code>.</p>
+      </details>
+
+      <details>
+        <summary>What are the three operations to add per controller in Lab 2's exercise?</summary>
+        <p><strong>GetCurrentProgram</strong> (the currently active program), <strong>GetAvailablePrograms</strong> (the list of installable programs), and <strong>ChangeProgram</strong> (activate a selected program from the AAS UI). Expected behaviour: after a program change, the rule-creation submodel must be refreshed so the AAS stays truthful. Rebuild with <code>gradle build</code>.</p>
+      </details>
+
+      <details>
+        <summary>Summarize the nine final project challenges in one pattern.</summary>
+        <p>All nine share the same environment (client, server, two switches, AAS infrastructure, Modbus) and the same two-part task: a P4 behaviour keyed on function codes 1–6 — mirror (1, 2), count (3, 4), block (5, 6), encrypt (7, 8, 9) — plus a new AAS submodel that reads its state (counters, alarms) or triggers its operation (enable mirroring, block, activate tunnel), with function code and threshold selected by the user from the AAS UI where required.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-10-ot-security.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-12-mobile-radio-networks.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>2 - LAB: Industrial Network Programmability</em>, <em>Final Project Challenges</em> (Lorenzo Rinieri) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Bespoke widget: which Kathará command for which job? ---- */
+(function () {
+  var host = document.getElementById('cmd-step');
+  if (!host) return;
+  var cases = [
+    { text: 'Start a single device called pc1 attached to collision domain A.', cmd: 'kathara vstart -n pc1 --eth 0:A', why: 'vstart is the low-level tool to start a single device with arbitrary configurations.' },
+    { text: 'Start every device of the lab whose directory contains a lab.conf.', cmd: 'kathara lstart', why: 'lstart starts the whole lab; it reads lab.conf and the device subdirectories/startup files.' },
+    { text: 'Stop a single device you started by hand.', cmd: 'kathara vclean -n pc1', why: 'vclean halts a device started with vstart.' },
+    { text: 'Halt all the devices of the lab and start them again.', cmd: 'kathara lrestart', why: 'lrestart halts all devices of a lab and starts them again — useful after editing P4 rules or configs.' },
+    { text: 'Verify that the system environment can run Kathará.', cmd: 'kathara check', why: 'check runs automatic tests on your environment; it is the first command after installing Docker and Kathará.' },
+    { text: 'Open a terminal on a running Kathará machine.', cmd: 'kathara connect', why: 'connect attaches to a running Kathará machine (the console of the device).' },
+    { text: 'Delete all Kathará machines and links.', cmd: 'kathara wipe', why: 'wipe deletes all Kathará machines and links, optionally also settings — the global cleanup.' }
+  ];
+  var i = 0, done = false;
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'Choose the right Kathará command';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'Each task below needs exactly one command. Pick the correct one, then check.';
+  host.appendChild(sub);
+  var qp = document.createElement('p');
+  qp.style.fontWeight = '600';
+  host.appendChild(qp);
+  var btns = document.createElement('div');
+  btns.className = 'lk-step-btns';
+  var opts = ['vstart', 'vclean', 'lstart', 'lrestart', 'check', 'connect', 'wipe', 'settings'];
+  var optBtns = [];
+  opts.forEach(function (o) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = o;
+    b.addEventListener('click', function () { judge(o); });
+    btns.appendChild(b); optBtns.push(b);
+  });
+  host.appendChild(btns);
+  var verdict = document.createElement('div');
+  verdict.className = 'lk-step-verdict';
+  host.appendChild(verdict);
+  var nav = document.createElement('div');
+  nav.className = 'lk-step-btns';
+  var nb = document.createElement('button');
+  nb.type = 'button';
+  nb.textContent = 'Next case';
+  nb.addEventListener('click', function () { i = (i + 1) % cases.length; done = false; render(); });
+  nav.appendChild(nb);
+  host.appendChild(nav);
+  function judge(answer) {
+    var c = cases[i];
+    done = true;
+    var expected = c.cmd.split(' ')[1];
+    if (answer === expected) {
+      verdict.className = 'lk-step-verdict ok';
+      verdict.textContent = 'Correct — ' + c.cmd + '. ' + c.why;
+    } else {
+      verdict.className = 'lk-step-verdict bad';
+      verdict.textContent = 'Not quite. The command is ' + c.cmd + '. ' + c.why;
+    }
+  }
+  function render() {
+    qp.textContent = cases[i].text;
+    verdict.className = 'lk-step-verdict';
+    verdict.textContent = done ? '' : 'Which command?';
+  }
+  render();
+})();
+
+/* ---- State explorer: a Modbus packet through Lab 1's pipeline ---- */
+LessonKit.stateExplorer('#se-conduit', {
+  title: 'A Modbus read request through the secure conduit',
+  start: 'Packet arrives at s1',
+  states: {
+    'Packet arrives at s1': {
+      desc: 'A Modbus/TCP read request from the client reaches the ingress of s1. Ethernet and IPv4 headers are parsed; the IPv4 protocol field is 6, so TCP is parsed; the port pair is 502, so the MBAP header and then the variable-length Modbus payload are extracted.',
+      to: [['forwarding decides the egress port', 'ipv4_lpm sets egress_spec']]
+    },
+    'ipv4_lpm sets egress_spec': {
+      desc: 'The longest-prefix-match table chooses the output port — say port 2 towards s2. Only now that the egress direction is known is the security treatment decided.',
+      to: [['modbus_sec matches on egress_spec', 'cipher action selected']]
+    },
+    'cipher action selected': {
+      desc: 'modbus_sec matches standard_metadata.egress_spec with the cipher action. The Encrypt extern runs AES in the data plane using the key words stored in registers keys[0..7] (written at startup by register_write); the HMAC tag is added for integrity.',
+      to: [['forward across the plant network', 'Encrypted transit between s1 and s2']]
+    },
+    'Encrypted transit between s1 and s2': {
+      desc: 'Between the two switches the Modbus payload is ciphertext. A Wireshark node attached to the domains shows an unintelligible payload — the secure conduit of chapter 10, now table-driven.',
+      to: [['arrives at s2', 'decipher action selected']]
+    },
+    'decipher action selected': {
+      desc: 'On s2 the same pipeline runs; the rule for the destination direction selects decipher. verify_hash_equals checks the HMAC tag, then Decrypt restores the plaintext Modbus request before forwarding to the server.',
+      to: [['deliver to the plant controller', 'Server receives plain Modbus']]
+    },
+    'Server receives plain Modbus': {
+      desc: 'The server receives exactly the request the client sent. Neither end knows the traffic was protected: the protection exists only between the switches, activated through rules — not by touching the industrial devices.',
+      to: []
+    }
+  }
+});
+
+/* ---- Annotated code: the Lab 2 exercise in one flow ---- */
+LessonKit.annotatedCode('#ac-aas', {
+  lang: 'text',
+  lines: [
+    ['1. READ the configuration — net-config.yml', 'Top-level keys identify the switches (s1, s2). Under each switch there is a list of program definitions; each program starts with a program: field and contains a rules: section.'],
+    ['2. Each rule specifies', 'the target table (e.g. ipv4_lpm or modbus_sec), the match key values, the action, and the action parameters. This file is the single source of truth for what a controller can install.'],
+    ['3. GetCurrentProgram', 'A new AAS operation per controller that reports the currently active program — the AAS must reflect what the data plane is actually running.'],
+    ['4. GetAvailablePrograms', 'Lists the installable programs for that controller, read from the configuration — the catalogue of programs the user may activate.'],
+    ['5. ChangeProgram(program)', 'An AAS operation that activates the selected program, parameters chosen by the user from the AAS UI — the control-plane equivalent of installing a new P4 configuration.'],
+    ['6. REFRESH the rule-creation submodel', 'After a program change, the rule-describer submodel must be refreshed: the AAS stays a truthful view of the control plane, never a stale one.'],
+    ['7. gradle build', 'Every time the Java sources change, rebuild the App project — the AAS implementation is a Gradle project. The build produces the updated AAS application exposing the new operations.']
+  ]
+});
+
+/* ---- Bespoke widget: the nine challenges explorer ---- */
+(function () {
+  var host = document.getElementById('challenges-widget');
+  if (!host) return;
+  var challenges = [
+    { n: 1, p4: 'Mirror to the observer all Modbus traffic related to function code 4 (clone the packets to the observer port).', aas: 'A new AAS submodel in the network infrastructure AAS that enable and disable the mirroring to the observer.' },
+    { n: 2, p4: 'Mirror to the observer all Modbus traffic related to function codes 1 and 2.', aas: 'A submodel that shows how many packets have been mirrored since the system start up.' },
+    { n: 3, p4: 'Monitor the Modbus traffic counting all the packets related to function codes 1 to 6 (counters in P4).', aas: 'A submodel that shows how many packets are counted per function code since the system start up.' },
+    { n: 4, p4: 'Count packets related to function codes 1 to 6 (same counting pipeline as challenge 3).', aas: 'A submodel showing the number of function-code-4 packets exchanged since start up, with an alarm if the number is larger than 20.' },
+    { n: 5, p4: 'Monitor the Modbus traffic between client and server via a P4 program.', aas: 'A submodel that blocks the traffic between client and server when the number of packets per given function code exceeds a threshold of 20; the function code is selected by the user from the AAS UI (codes 1–6).' },
+    { n: 6, p4: 'Monitor the Modbus traffic between client and server via a P4 program.', aas: 'A submodel that blocks traffic when the number of packets per function code 1 exceeds a threshold selected by the user from the AAS UI.' },
+    { n: 7, p4: 'Encrypt the Modbus traffic via the provided P4 encryption program.', aas: 'A submodel that activates the encrypted tunnel between client and server when the number of packets per user-selected function code exceeds a user-selected threshold.' },
+    { n: 8, p4: 'Encrypt traffic and count the number of encrypted packets for each function code — a different counter per code (1–6).', aas: 'A submodel showing the number of packets encrypted per function code; the code is selected by the user from the AAS UI.' },
+    { n: 9, p4: 'Encrypt the Modbus traffic only for specific function codes.', aas: 'A submodel that enables the encrypted tunnel for a specific function code selected by the user from the AAS UI (codes 1–6).' }
+  ];
+  var i = 0;
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'The nine final project challenges';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'Explore each challenge: what the P4 program must do, and what the new AAS submodel must expose.';
+  host.appendChild(sub);
+  var num = document.createElement('p');
+  num.style.fontWeight = '600';
+  num.style.fontFamily = 'var(--lk-mono)';
+  host.appendChild(num);
+  var p4 = document.createElement('p');
+  var aas = document.createElement('p');
+  host.appendChild(p4); host.appendChild(aas);
+  var nav = document.createElement('div');
+  nav.className = 'lk-step-btns';
+  var prev = document.createElement('button');
+  prev.type = 'button'; prev.textContent = 'Previous challenge';
+  var next = document.createElement('button');
+  next.type = 'button'; next.textContent = 'Next challenge';
+  prev.addEventListener('click', function () { i = (i + challenges.length - 1) % challenges.length; render(); });
+  next.addEventListener('click', function () { i = (i + 1) % challenges.length; render(); });
+  nav.appendChild(prev); nav.appendChild(next);
+  host.appendChild(nav);
+  function render() {
+    var c = challenges[i];
+    num.textContent = 'Challenge #' + c.n + ' of 9';
+    p4.innerHTML = '<strong>P4 program:</strong> ' + c.p4;
+    aas.innerHTML = '<strong>AAS submodel:</strong> ' + c.aas;
+  }
+  render();
+})();
+</script>
+</body>
+</html>

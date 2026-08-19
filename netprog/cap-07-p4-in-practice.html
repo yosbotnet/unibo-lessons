@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 7 — P4 in practice: BMv2, tables and stateful constructs · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-06-p4-language.html">&larr; Ch. 6 — The P4 language</a>
+    <a href="index.html">Index</a>
+    <a href="cap-08-onos-p4runtime.html">Ch. 8 — ONOS and P4Runtime &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Hands-on networking · Chapter 7</div>
+    <h1>P4 in practice: BMv2, tables and stateful constructs</h1>
+    <div class="lk-meta"><span>~45 min read</span><span>5 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The running example: a basic router</a></li>
+      <li><a href="#s2">The toolchain under the Makefile</a></li>
+      <li><a href="#s3">Bringing up BMv2 and its CLI</a></li>
+      <li><a href="#s4">Installing rules by hand: table_add</a></li>
+      <li><a href="#s5">Exercise 2: basic tunneling</a></li>
+      <li><a href="#s6">Cloning packets</a></li>
+      <li><a href="#s7">Exercise 3: ECN marking</a></li>
+      <li><a href="#s8">Debugging BMv2</a></li>
+      <li><a href="#s9">Stateful constructs: registers, counters, meters</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Slide P4 - lab1.pdf">
+    <h2>1. The running example: a basic router</h2>
+    <p>The P4 lab uses one application throughout, <code>basic.p4</code>, a basic router, to illustrate the main features of P4<sub>16</sub>. Its job is the canonical six steps of an IP router, and every step maps onto a piece of the language from chapter 6:</p>
+    <ol>
+      <li>Parse the Ethernet and IPv4 headers from the packet.</li>
+      <li>Find the destination in the IPv4 routing table.</li>
+      <li>Update the source and destination MAC addresses.</li>
+      <li>Decrement the time-to-live (TTL) field.</li>
+      <li>Set the egress port.</li>
+      <li>Deparse the headers back into a packet.</li>
+    </ol>
+
+    <p>The starter code comes with the Ethernet and IPv4 headers already defined and added to the <code>headers</code> struct, but the parser block empty. The coding homework — which is a good self-test of chapter 6 — is to fill it in: define the states, start in <code>start</code>, transition to <code>parse_ethernet</code>, extract the Ethernet header, branch on <code>etherType</code> with a <code>select</code> to <code>parse_ipv4</code> if it equals the IPv4 type, otherwise finish; and in <code>parse_ipv4</code>, simply extract the IPv4 header.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p7-1-title">
+        <title id="p7-1-title">The basic forwarding topology: hosts h1, h2, h3 connected through switches s1, s2, s3 in a triangle</title>
+        <rect x="40" y="40" width="90" height="38" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="54" y="58" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">h1</text>
+        <text x="48" y="72" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">10.0.1.1</text>
+        <rect x="570" y="40" width="90" height="38" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="584" y="58" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">h2</text>
+        <text x="578" y="72" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">10.0.2.2</text>
+        <rect x="305" y="210" width="90" height="38" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="319" y="228" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">h3</text>
+        <text x="313" y="242" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">10.0.3.3</text>
+        <rect x="120" y="120" width="80" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+        <text x="146" y="146" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">s1</text>
+        <rect x="500" y="120" width="80" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+        <text x="526" y="146" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">s2</text>
+        <rect x="310" y="140" width="80" height="44" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+        <text x="336" y="166" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">s3</text>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.3" fill="none">
+          <path d="M85 78 L150 120"/>
+          <path d="M615 78 L545 120"/>
+          <path d="M350 210 L350 184"/>
+          <path d="M200 142 L500 142"/>
+          <path d="M180 160 L318 158"/>
+          <path d="M520 160 L382 158"/>
+        </g>
+        <text x="40" y="200" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Three hosts, three switches in a triangle. The same basic.p4 pipeline runs on s1, s2 and s3.</text>
+      </svg>
+      <figcaption><b>Plate 7.1</b> — The basic forwarding topology used throughout the lab. One P4 program, three switches, and per-switch rules installed by the control plane.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s2" data-src="Slide P4 - lab1.pdf">
+    <h2>2. The toolchain under the Makefile</h2>
+    <p>The <code>make</code> targets hide a pipeline of tools, and knowing them is knowing how a P4 program becomes a running switch. In pseudocode the Makefile does:</p>
+
+    <pre><code class="language-makefile">P4C_ARGS   = --p4runtime-file $(basename $@).p4info --p4runtime-format text
+RUN_SCRIPT = ../../utils/run_exercise.py
+TOPO       = topology.json
+
+build:   # for each P4 program, generate the BMv2 json
+    p4c-bm2-ss --p4v 16 $(P4C_ARGS) -o $@ $&lt;
+run:     # build, then launch Mininet with the topology   [default target]
+    sudo python $(RUN_SCRIPT) -t $(TOPO)
+stop:
+    sudo mn -c</code></pre>
+
+    <p>The build step, <code>p4c-bm2-ss -o test.json test.p4</code>, produces <strong><code>test.json</code></strong>, a JSON description of the forwarding pipeline compiled from <code>test.p4</code>, required by the BMv2 <code>simple_switch</code> binary. Optionally it also emits a <strong>P4Info</strong> message — a protobuf describing the data model the control plane will use to generate P4Runtime requests (the subject of chapter 8).</p>
+
+    <div id="ac-toolchain"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>Two outputs, two audiences. The <code>.json</code> configures the <em>data plane</em> — it tells BMv2 how to parse and process. The <code>.p4info</code> describes the same program to the <em>control plane</em> — it is the contract by which a controller knows the names and IDs of tables, keys and actions. The same compiler run serves both, which is the whole point of a shared language.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="Slide P4 - lab1.pdf">
+    <h2>3. Bringing up BMv2 and its CLI</h2>
+    <p>Running the switch is a three-step dance, and each step corresponds to one of the boxes in the BMv2 diagram: prepare interfaces, start the model, start the CLI.</p>
+
+    <pre><code class="language-bash"># step 2 — prepare veth interfaces first, then start the software switch
+ip link add name veth0 type veth peer name veth1
+for iface in "veth0 veth1"; do
+    ip link set dev ${iface} up
+    sysctl net.ipv6.conf.${iface}.disable_ipv6=1
+done
+
+sudo simple_switch --log-console --dump-packet-data 64 \
+     -i 0@veth0 -i 1@veth2 ... test.json
+
+# step 3 — start the runtime CLI (talks to the control server over a Thrift TCP socket)
+simple_switch_CLI</code></pre>
+
+    <p>The interaction with the control plane is stated plainly by the slides: the P4 program defines the packet-processing pipeline, but the <strong>rules within a table are entered by the control plane at runtime</strong> (via P4Runtime, chapter 8). When a rule matches a packet, its action is invoked with the parameters supplied by the control plane as part of the rule. In the exercises, booting the Mininet instance with <code>make run</code> installs the packet-processing rules in each switch's tables from the <code>sX-commands.txt</code> files, where <code>X</code> is the switch number; the <code>sX-runtime.json</code> files instead drive P4Runtime and refer to specific names of tables, keys and actions as defined in the P4Info file.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-labelledby="p7-2-title">
+        <title id="p7-2-title">BMv2 simple_switch internals: simple_switch_CLI and a program-independent control server on top, over test.json feeding parser, ingress, traffic manager, egress and deparser, on top of the Linux kernel and veth interfaces</title>
+        <rect x="430" y="20" width="230" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="444" y="40" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">simple_switch_CLI (client)</text>
+        <rect x="430" y="54" width="230" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="444" y="74" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">Program-independent Control Server</text>
+        <text x="430" y="100" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">Thrift TCP socket</text>
+        <rect x="40" y="100" width="620" height="90" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.4"/>
+        <text x="54" y="120" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">simple_switch (BMv2) — configured by test.json</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.2" fill="var(--lk-soft)">
+          <rect x="60" y="132" width="90" height="44"/>
+          <rect x="165" y="132" width="90" height="44"/>
+          <rect x="270" y="132" width="110" height="44"/>
+          <rect x="395" y="132" width="90" height="44"/>
+          <rect x="500" y="132" width="90" height="44"/>
+        </g>
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)">
+          <text x="88" y="158">Parser</text>
+          <text x="182" y="158">Ingress</text>
+          <text x="288" y="152">Traffic</text><text x="288" y="166">Manager</text>
+          <text x="418" y="158">Egress</text>
+          <text x="516" y="158">Deparser</text>
+        </g>
+        <rect x="40" y="200" width="620" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.3"/>
+        <text x="54" y="220" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">Linux Kernel — veth0..n (packet generator, sniffer)</text>
+        <path d="M545 84 L545 100" stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none"/>
+        <text x="40" y="252" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">The CLI does not forward packets; it installs and queries the rules the pipeline forwards by.</text>
+      </svg>
+      <figcaption><b>Plate 7.2</b> — BMv2 under the hood. The pipeline of chapter 6 made concrete, with the CLI talking to a control server over a Thrift socket.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s4" data-src="Slide P4 - lab1.pdf">
+    <h2>4. Installing rules by hand: table_add</h2>
+    <p>Inside <code>simple_switch_CLI</code> you drive the tables directly. The syntax is worth memorising because it reappears verbatim in the industrial lab (chapter 11), where <code>table_add modbus_sec cipher 2 =&gt;</code> installs the encryption rules.</p>
+
+    <pre><code class="language-text">RuntimeCmd: show_tables
+m_filter
+m_table
+
+RuntimeCmd: table_add m_table m_action \
+    01:00:00:00:00:00&amp;&amp;&amp;01:00:00:00:00:00 =&gt; 1 0
+Adding entry to ternary match table m_table
+SUCCESS
+entry has been added with handle 1
+
+RuntimeCmd: table_delete m_table 1</code></pre>
+
+    <p>Three pieces of syntax carry the meaning:</p>
+    <table>
+      <tr><th>Token</th><th>Meaning</th></tr>
+      <tr><td><code>value&amp;&amp;&amp;mask</code></td><td>A ternary match: value and mask, <strong>no spaces</strong> around the <code>&amp;&amp;&amp;</code>.</td></tr>
+      <tr><td><code>=&gt;</code></td><td>Separates the match key from the action data.</td></tr>
+      <tr><td>entry handle</td><td>Returned on add; all subsequent operations (e.g. <code>table_delete</code>) use it.</td></tr>
+    </table>
+
+    <p>The final piece of the run is traffic. In some exercises a <code>send.py</code> / <code>receive.py</code> pair is used; in others, standard Linux programs like <code>ping</code>; and <strong>scapy</strong> can build and sniff packets directly:</p>
+    <pre><code class="language-python">p = Ethernet()/IP()/UDP()/"Payload"
+sendp(p, iface="veth0")
+sniff(iface="veth9", prn=lambda x: x.show())</code></pre>
+
+    <div id="table-add-parse"></div>
+  </section>
+
+  <section id="s5" data-src="Slide P4 - lab1.pdf">
+    <h2>5. Exercise 2: basic tunneling</h2>
+    <p>Tunneling is presented as a main feature for data center networks, mobile core networks (the Evolved Packet Core of chapter 13), network virtualization (VXLAN, GRE — chapter 4), mobility management (Mobile IP) and overlay routing. The mechanism is universal: <strong>encapsulate a packet into another by prepending a new header</strong>.</p>
+
+    <p>The exercise adds tunneling to the basic router by defining a new header type, <code>myTunnel</code>, that encapsulates the IP packet. It carries just two fields:</p>
+    <table>
+      <tr><th>Field</th><th>Purpose</th></tr>
+      <tr><td><code>proto_id</code></td><td>The type of packet being encapsulated.</td></tr>
+      <tr><td><code>dst_id</code></td><td>The ID of the destination host.</td></tr>
+    </table>
+
+    <p>The key idea in the slides is that once a tunnel header is present the switch does routing on the <em>tunnel</em> header, so that <strong>changing the inner IP address will not change the path</strong>. The to-do list is a compact tour of everything in chapter 6:</p>
+    <ol>
+      <li>Define the <code>myTunnel_t</code> header type and add it to the <code>headers</code> struct.</li>
+      <li>Update the parser to branch on <code>etherType</code> = <code>0x1212</code> (tunnel).</li>
+      <li>Define the <code>myTunnel_forward</code> action and the <code>myTunnel_exact</code> table.</li>
+      <li>Update the table-application logic in the ingress <code>apply</code> block.</li>
+      <li>Update the deparser.</li>
+      <li>Add forwarding rules: a <code>myTunnel_ingress</code> rule to encapsulate on the ingress switch, a <code>myTunnel_forward</code> rule to forward, and a <code>myTunnel_egress</code> rule to decapsulate and forward on the egress switch.</li>
+      <li>Read the tunnel ingress and egress counters every 2 seconds.</li>
+    </ol>
+
+    <div id="se-tunnel"></div>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Steps 1, 2, 5 and 6 are exactly the parse/deparse validity mechanism from chapter 6, section 9. Encapsulation is "set the tunnel header valid and emit it"; decapsulation is "set it invalid so the deparser skips it". No special construct is needed — a tunnel is just a header whose validity the pipeline toggles.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="Slide P4 - lab1.pdf">
+    <h2>6. Cloning packets</h2>
+    <p>Making a copy of a packet — for mirroring to an observer, exactly the final-project challenge of chapter 11 — is done with the <code>clone3</code> primitive. The slides give the action and, in comments, the operational context:</p>
+
+    <pre><code class="language-cpp">action do_clone_i2e(bit&lt;32&gt; packet) {
+  // BMv2 simple_switch can have multiple clone "sessions" at once.
+  // Each can be configured to go to an independent output port,
+  // via the simple_switch_CLI command mirroring_add.
+  // A "mirroring session" and a "clone session" are the same thing.
+  //   first parameter:  clone type
+  //   second parameter: the session
+  //   third parameter:  the metadata to carry across
+  clone3(CloneType.I2E, I2E_CLONE_SESSION_ID, standard_metadata);
+}</code></pre>
+
+    <p>The <code>I2E</code> in <code>CloneType.I2E</code> means <em>ingress-to-egress</em>: the clone is made in ingress and delivered in egress. The clone session, configured with <code>mirroring_add</code> in the CLI, decides which port the copy leaves on. This one primitive is the entire mechanism behind "mirror all Modbus traffic to the observer" in the project challenges.</p>
+  </section>
+
+  <section id="s7" data-src="Slide P4 - lab1.pdf">
+    <h2>7. Exercise 3: ECN marking</h2>
+    <p>This exercise is where the pipeline ordering of chapter 6 pays off. The theory came from chapter 5; here it becomes code. <strong>Explicit Congestion Notification</strong> uses two bits (in the old Type of Service field), and the slides give the four codepoints:</p>
+    <table>
+      <tr><th>ECN bits</th><th>Meaning</th></tr>
+      <tr><td><code>00</code></td><td>Non ECN-Capable Transport (Non-ECT)</td></tr>
+      <tr><td><code>10</code></td><td>ECN Capable Transport — ECT(0)</td></tr>
+      <tr><td><code>01</code></td><td>ECN Capable Transport — ECT(1)</td></tr>
+      <tr><td><code>11</code></td><td>Congestion Encountered (CE)</td></tr>
+    </table>
+
+    <p>For packets originating from an ECT source, ECN-capable switches set the CE bits upon congestion — for example when the observed queue depth exceeds a threshold (RFC 3168). And here is the crucial fact: the V1Model standard metadata exposes the queue depth as <code>standard_metadata.enq_qdepth</code>, a <code>bit&lt;19&gt;</code> — but it is <strong>measured at the traffic manager and only available in egress</strong>. That is why the whole exercise happens in the egress control.</p>
+
+    <div id="step-ecn"></div>
+
+    <p>The desired behaviour and the P4 recipe:</p>
+    <ul>
+      <li>If an end host supports ECN, it puts 1 or 2 in <code>ipv4.ecn</code>. For such packets, each switch may change the value to 3 if the queue is larger than a threshold. The receiver copies the value back to the sender, and the sender lowers its rate.</li>
+      <li>In P4: split the old TOS into DiffServ and ECN, update the checksum accordingly, and in <strong>egress</strong> compare the queue length with an <code>ECN_THRESHOLD</code>; if larger, set the ECN bits to <code>3</code> (binary <code>11</code>, congestion encountered) — but only if the original ECN was 1 or 2.</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>The ECN exercise is a clean test of two chapter-6 facts at once: (1) <code>enq_qdepth</code> is only meaningful in <strong>egress</strong>, because the traffic manager sits between ingress and egress; (2) the switch must not mark a Non-ECT packet, so the guard is "original ECN is 1 or 2". Setting CE on a non-ECN flow would be a protocol violation, not just a bug.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="Slide P4 - lab1.pdf">
+    <h2>8. Debugging BMv2</h2>
+    <p>BMv2 maintains logs that track in detail how packets are processed, one per switch: <code>/tmp/p4s.s1.log</code>, <code>/tmp/p4s.s2.log</code>, <code>/tmp/p4s.s3.log</code>. You can add information to the logs manually with a <strong>dummy debug table</strong> that reads the headers and metadata of interest:</p>
+
+    <pre><code class="language-cpp">control MyIngress(...) {
+  table debug {
+    key = { std_meta.egress_spec : exact; }
+    actions = { }
+  }
+  apply {
+    // ...
+    debug.apply();
+  }
+}</code></pre>
+
+    <p>A table with no actions never changes the packet, but the act of building its lookup key is logged, so a line like <code>Looking up key: * std_meta.egress_spec : 2</code> appears in the switch log. It is the P4 equivalent of a print statement, and it is the pragmatic answer to the FAQ facts from chapter 6 (architecture-dependent parser rejection, architecture-dependent parse depth): when in doubt, read what the switch actually did.</p>
+  </section>
+
+  <section id="s9" data-src="Slide P4 - lab1.pdf">
+    <h2>9. Stateful constructs: registers, counters, meters</h2>
+    <p>Chapter 6 said pure P4 cannot keep state across packets and that the answer is <em>external objects</em>. Here are the three, and the distinction between them is the most exam-relevant material in the whole P4 lab.</p>
+
+    <p>The framing: <strong>stateless objects</strong> — variables (metadata) and headers — do not maintain state across packets; <strong>stateful objects</strong> — tables, and the externs registers/counters/meters — keep state across different packets.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Registers</button>
+        <button class="lk-tab">Counters</button>
+        <button class="lk-tab">Meters</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Registers</strong> store arbitrary data — single values or arrays of N entries — and, unlike counters and meters, are <strong>readable and writable from within the data plane</strong>. This makes them the general-purpose per-flow memory.</p>
+        <pre><code class="language-cpp">register&lt;bit&lt;48&gt;&gt;(5) hello;   // array of 5 entries
+hello.write(1, 0xff);          // reg.write(index, value)
+hello.read(res, 1);            // reg.read(result, index)</code></pre>
+        <p>The example use is inter-packet gap detection: store the timestamp of the last packet seen for each flow, then on the next packet compute <code>delta = ingress_global_timestamp - last_seen</code> and rewrite the register. The slides add a caveat: <strong>concurrent read and write must be synchronized if required</strong> — the one place per-packet parallelism can bite.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Counters</strong> count packets, bytes, or both, formed in arrays, with an <code>enum CounterType { packets, bytes, packets_and_bytes }</code>.</p>
+        <pre><code class="language-cpp">counter(64, CounterType.packets_and_bytes) c;
+apply { c.count((bit&lt;32&gt;)standard_metadata.ingress_port); }
+// from the control plane:
+//   counter_read MyIngress.c 1
+//   -> MyIngress.c[1] = BmCounterValue(packets=1, bytes=658)</code></pre>
+        <p>Crucially, you <strong>cannot access counter information from within the data plane</strong> — the control plane reads it. <strong>Direct counters</strong> are attached to a table (<code>counters = c;</code>) so that each table entry has its own counter incremented on match — precisely the per-function-code counting the project challenges of chapter 11 require.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Meters</strong> measure packet <em>rates</em>, formed in arrays, with <code>enum MeterType { packets, bytes }</code> and three colours <code>{ RED, GREEN, YELLOW }</code>. A meter returns a colour: GREEN if under the Committed Information Rate, YELLOW if above CIR but below the Peak Information Rate, RED if above PIR (RFC 2698). Rates are set by the control plane per instance.</p>
+        <pre><code class="language-cpp">meter(16384, MeterType.packets) acl_meter;
+action color_my_packets(bit&lt;32&gt; index) {
+  acl_meter.execute_meter((bit&lt;32&gt;)index, meta.meta_tag); // meta_tag = colour
+}
+// then a second table drops or accepts depending on the colour
+table m_filter {
+  key = { meta.meta_tag: exact; }
+  actions = { drop; NoAction; }
+}</code></pre>
+        <p>The pattern is: one table colours the packet with a meter, a second table treats the packet differently depending on the colour — rate limiting expressed as two match-action stages.</p>
+      </div>
+    </div>
+
+    <p>Choose the right stateful construct for a task with the widget below.</p>
+
+    <div id="stateful-choose"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>The summary slide names the payoff: several stateful constructs to record and update per-flow or per-packet state, useful for congestion tracking, stateful forwarding and congestion-aware load balancing. Registers are the only one you both read and write in the data plane; counters and meters have their configuration and readout on the control-plane side. That read/write asymmetry is the single most tested distinction here.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What are the six steps of the basic router, and which parser homework does the lab set?</summary>
+        <p>Parse Ethernet and IPv4; find the destination in the IPv4 table; update source/destination MAC; decrement TTL; set the egress port; deparse. The homework is to fill the empty parser: start &rarr; parse_ethernet (extract Ethernet, select on etherType), parse_ipv4 if etherType is the IPv4 type (extract IPv4), otherwise accept.</p>
+      </details>
+
+      <details>
+        <summary>What are the two outputs of p4c, and who consumes each?</summary>
+        <p><code>test.json</code>, a JSON description of the forwarding pipeline, consumed by BMv2 <code>simple_switch</code> (the data plane); and optionally the <strong>P4Info</strong> protobuf, which describes the program's tables, actions and parameters to the control plane so it can format P4Runtime requests. One compiler run, two audiences.</p>
+      </details>
+
+      <details>
+        <summary>Who installs table rules at runtime, and where do the exercises define them?</summary>
+        <p>The <strong>control plane</strong> installs rules at runtime (via P4Runtime); when a rule matches, its action runs with control-plane-supplied parameters. In the exercises, <code>make run</code> installs rules from <code>sX-commands.txt</code> per switch, while <code>sX-runtime.json</code> drives P4Runtime and references names from the P4Info file.</p>
+      </details>
+
+      <details>
+        <summary>Decode the CLI command table_add m_table m_action 01:...&amp;&amp;&amp;01:... =&gt; 1 0.</summary>
+        <p>It adds an entry to the ternary table <code>m_table</code>: the key is a value and mask separated by <code>&amp;&amp;&amp;</code> (no spaces); <code>=&gt;</code> separates the key from the action data; the action is <code>m_action</code> with data <code>1 0</code>. The command returns an entry handle used by later operations such as <code>table_delete m_table 1</code>.</p>
+      </details>
+
+      <details>
+        <summary>What two fields does the myTunnel header carry, and what is the point of routing on it?</summary>
+        <p><code>proto_id</code> (the type of packet being encapsulated) and <code>dst_id</code> (the ID of the destination host). Routing on the tunnel header means <strong>changing the inner IP address will not change the path</strong> — the path follows the tunnel, not the inner destination.</p>
+      </details>
+
+      <details>
+        <summary>How is encapsulation and decapsulation actually implemented in P4?</summary>
+        <p>By toggling header validity. Encapsulation makes the tunnel header valid so the deparser emits it; decapsulation makes it invalid so the deparser skips it. No special construct is needed — it is the same validity mechanism the deparser uses for every header.</p>
+      </details>
+
+      <details>
+        <summary>What does clone3(CloneType.I2E, ...) do?</summary>
+        <p>It clones a packet ingress-to-egress: the copy is made in ingress and delivered in egress. The clone/mirroring session (configured with <code>mirroring_add</code>) chooses the output port for the copy. This is the mechanism for mirroring traffic to an observer, as in the project challenges.</p>
+      </details>
+
+      <details>
+        <summary>Give the four ECN codepoints and the switch's marking rule.</summary>
+        <p><code>00</code> Non-ECT, <code>10</code> ECT(0), <code>01</code> ECT(1), <code>11</code> CE (congestion encountered). An ECN-capable switch sets the bits to <code>11</code> when the queue exceeds a threshold, <strong>but only if the packet's original ECN was 1 or 2</strong> — it must never mark a Non-ECT packet.</p>
+      </details>
+
+      <details>
+        <summary>Why must ECN marking happen in egress?</summary>
+        <p>Because the queue depth, <code>standard_metadata.enq_qdepth</code>, is measured at the traffic manager, which sits between ingress and egress, and is only available in the egress pipeline. Ingress has decided forwarding but the packet has not yet been queued, so ingress cannot know the queue depth.</p>
+      </details>
+
+      <details>
+        <summary>How do you add print-style debugging to a BMv2 program?</summary>
+        <p>Add a dummy <strong>debug table</strong> with a key over the headers/metadata of interest and no actions, then <code>apply</code> it. It changes nothing but logs the lookup key into the per-switch log (<code>/tmp/p4s.sN.log</code>), e.g. <code>Looking up key: * std_meta.egress_spec : 2</code>.</p>
+      </details>
+
+      <details>
+        <summary>Contrast registers, counters and meters.</summary>
+        <p><strong>Registers</strong> store arbitrary data (single values or arrays) and are read/write <em>from the data plane</em> — general per-flow memory (e.g. inter-packet gap detection). <strong>Counters</strong> count packets/bytes/both in arrays; the data plane counts but <em>cannot read</em> them, the control plane reads; direct counters attach to a table so each entry counts on match. <strong>Meters</strong> measure rates and return a colour (GREEN under CIR, YELLOW between CIR and PIR, RED above PIR), with rates set by the control plane; a second table then treats packets by colour.</p>
+      </details>
+
+      <details>
+        <summary>What is the single most important distinction among the stateful externs?</summary>
+        <p>The read/write asymmetry: <strong>registers</strong> can be both read and written in the data plane; <strong>counters and meters</strong> have their configuration and readout on the control-plane side. If you need per-packet state that the pipeline itself must consult, only a register will do.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-06-p4-language.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-08-onos-p4runtime.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>Slide P4 - lab1</em> (Andrea Melis) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Annotated code: the p4c toolchain ---- */
+LessonKit.annotatedCode('#ac-toolchain', {
+  lang: 'bash',
+  lines: [
+    ['p4c-bm2-ss --p4v 16 -o test.json test.p4', 'Compile the P4-16 program for the BMv2 simple_switch target. The main compiler step of the whole toolchain.'],
+    ['# produces test.json', 'A JSON description of the forwarding pipeline. This is what BMv2 loads to know how to parse and process packets — it configures the DATA plane.'],
+    ['# --p4runtime-file test.p4info also produces test.p4info', 'Optionally, the P4Info protobuf: a description of the program (tables, actions, parameters) for the CONTROL plane, so a controller can format P4Runtime requests.'],
+    ['sudo simple_switch --log-console -i 0@veth0 -i 1@veth2 test.json', 'Start the software switch, loading test.json and binding logical ports 0 and 1 to veth interfaces. Interfaces must be created and brought up first.'],
+    ['simple_switch_CLI', 'Start the runtime CLI. It connects to a program-independent control server over a Thrift TCP socket, and lets you add, dump and delete table entries by hand.'],
+    ['make run', 'The default target: build, launch Mininet with the topology, and install each switch’s rules from its sX-commands.txt file.']
+  ]
+});
+
+/* ---- Bespoke widget: parse a table_add command ---- */
+(function () {
+  var host = document.getElementById('table-add-parse');
+  if (!host) return;
+  var examples = [
+    { cmd: 'table_add ipv4_lpm ipv4_forward 10.0.1.1/32 => 00:00:00:00:01:01 1',
+      table: 'ipv4_lpm', action: 'ipv4_forward', key: '10.0.1.1/32 (lpm)', data: '00:00:00:00:01:01, port 1',
+      note: 'A longest-prefix-match entry: destination 10.0.1.1/32 is forwarded to MAC 00:00:00:00:01:01 out of port 1. The => separates key from action data.' },
+    { cmd: 'table_add modbus_sec cipher 2 =>',
+      table: 'modbus_sec', action: 'cipher', key: 'egress_spec = 2 (exact)', data: '(none)',
+      note: 'The industrial-lab rule from chapter 11: packets whose egress_spec is 2 get the cipher action. No action data follows the =>.' },
+    { cmd: 'table_add m_table m_action 01:00:00:00:00:00&&&01:00:00:00:00:00 => 1 0',
+      table: 'm_table', action: 'm_action', key: 'value &&& mask (ternary)', data: '1 0',
+      note: 'A ternary entry: only the bits set in the mask must match the value. No spaces around &&&. The returned entry handle is used for later table_delete.' }
+  ];
+  var i = 0;
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'Reading a table_add command';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'The same four parts every time: which table, which action, the match key, the action data after the arrow.';
+  host.appendChild(sub);
+  var sel = document.createElement('div');
+  sel.className = 'lk-step-btns';
+  examples.forEach(function (e, k) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Example ' + (k + 1);
+    b.addEventListener('click', function () { i = k; render(); });
+    sel.appendChild(b);
+  });
+  host.appendChild(sel);
+  var pre = document.createElement('pre');
+  var code = document.createElement('code');
+  pre.appendChild(code);
+  host.appendChild(pre);
+  var bar = document.createElement('div');
+  bar.className = 'lk-step-state';
+  host.appendChild(bar);
+  var verdict = document.createElement('div');
+  verdict.className = 'lk-step-verdict';
+  host.appendChild(verdict);
+  function render() {
+    var e = examples[i];
+    code.textContent = e.cmd;
+    bar.innerHTML = '';
+    [['table', e.table], ['action', e.action], ['match key', e.key], ['action data', e.data]].forEach(function (p) {
+      var d = document.createElement('div');
+      d.className = 'lk-step-box';
+      d.innerHTML = p[0] + ' = <b></b>';
+      d.querySelector('b').textContent = p[1];
+      bar.appendChild(d);
+    });
+    verdict.className = 'lk-step-verdict';
+    verdict.textContent = e.note;
+  }
+  render();
+})();
+
+/* ---- State explorer: a packet through the tunnel exercise ---- */
+LessonKit.stateExplorer('#se-tunnel', {
+  title: 'A packet through the myTunnel exercise',
+  start: 'Ingress switch: no tunnel header yet',
+  states: {
+    'Ingress switch: no tunnel header yet': {
+      desc: 'A plain IP packet arrives at the ingress switch. The myTunnel_ingress rule matches and the switch will encapsulate it: prepend a myTunnel header carrying proto_id and dst_id.',
+      to: [['myTunnel_ingress rule: encapsulate', 'Encapsulated: routing on the tunnel header']]
+    },
+    'Encapsulated: routing on the tunnel header': {
+      desc: 'The myTunnel header is now valid, so the deparser will emit it. From here the switches run myTunnel_exact and route on dst_id, not on the inner IP address. Changing the inner IP would not change the path.',
+      to: [['myTunnel_forward rule: forward', 'Transit switch: forward by dst_id']]
+    },
+    'Transit switch: forward by dst_id': {
+      desc: 'A transit switch matches the tunnel header and forwards by dst_id. It never looks at the inner IP packet. This is why tunnels give overlay routing that is independent of the underlay addresses.',
+      to: [['reaches the egress switch', 'Egress switch: decapsulate']]
+    },
+    'Egress switch: decapsulate': {
+      desc: 'The myTunnel_egress rule matches, sets the tunnel header invalid, and forwards. Because the header is now invalid the deparser skips it, so the original IP packet emerges unchanged.',
+      to: [['tunnel header set invalid', 'Delivered: original IP packet']]
+    },
+    'Delivered: original IP packet': {
+      desc: 'The destination host receives exactly the IP packet the source sent; the tunnel existed only between the ingress and egress switches. Meanwhile the ingress and egress counters, read every 2 seconds, recorded the traffic.',
+      to: []
+    }
+  }
+});
+
+/* ---- Stepper: ECN marking in the egress pipeline ---- */
+LessonKit.stepper('#step-ecn', {
+  title: 'ECN marking (egress control)',
+  sub: 'Advance the egress logic. It marks congestion only for ECN-capable packets, and only when the queue is deep. Threshold = 10.',
+  shared: { ecn: 2, qdepth: 0, marked: 0 },
+  watch: ['ecn', 'qdepth', 'marked'],
+  threads: {
+    E: { name: 'Egress', steps: [
+      { label: 'read enq_qdepth from the traffic manager', run: function (s, l) { s.qdepth = 14; } },
+      { label: 'is the packet ECN-capable? (ecn == 1 or 2)', run: function (s, l) { l.capable = (s.ecn === 1 || s.ecn === 2); } },
+      { label: 'is qdepth > ECN_THRESHOLD (10)?', run: function (s, l) { l.congested = (s.qdepth > 10); } },
+      { label: 'if capable and congested: set ecn = 3 (CE)', run: function (s, l) { if (l.capable && l.congested) { s.ecn = 3; s.marked = 1; } } }
+    ] }
+  },
+  verdict: function (s, done) {
+    if (!done) return { status: '', text: 'Step through the egress control. Note that step 1 only works because enq_qdepth exists in egress, not ingress.' };
+    if (s.marked === 1 && s.ecn === 3) return { status: 'ok', text: 'Marked: an ECT packet met a deep queue, so ECN was set to 3 (CE). The receiver will echo this back and the sender will slow down — congestion signalled without dropping the packet.' };
+    return { status: '', text: 'Not marked: the guard protected either a Non-ECT packet or an uncongested queue.' };
+  }
+});
+
+/* ---- Bespoke widget: choose the right stateful construct ---- */
+(function () {
+  var host = document.getElementById('stateful-choose');
+  if (!host) return;
+  var tasks = [
+    { q: 'Remember the timestamp of the last packet of each flow, and read it back in the data plane on the next packet.',
+      answer: 'register', why: 'Only a register can be both written and read inside the data plane. Counters and meters cannot be read from the pipeline.' },
+    { q: 'Count how many Modbus packets of each function code have passed, for the control plane to display.',
+      answer: 'counter', why: 'A counter (ideally a direct counter, one per table entry) counts packets or bytes; the control plane reads it out. The data plane cannot read the count.' },
+    { q: 'Limit a flow to a committed rate and drop the excess.',
+      answer: 'meter', why: 'A meter colours each packet GREEN/YELLOW/RED by comparing its rate to CIR and PIR; a second table then drops the RED packets.' },
+    { q: 'Keep an in-network count of bytes seen per source address so the pipeline itself can react when a threshold is crossed.',
+      answer: 'register', why: 'The pipeline must READ the running total to react, so it must be a register — a counter is control-plane-read-only.' },
+    { q: 'Produce per-table-entry hit counts with no extra logic.',
+      answer: 'counter', why: 'A direct counter attaches to a table (counters = c;) and increments automatically on each entry match.' }
+  ];
+  var i = 0, answered = false;
+  host.className = 'lk-step';
+  var h = document.createElement('h4');
+  h.textContent = 'Which stateful construct?';
+  host.appendChild(h);
+  var sub = document.createElement('p');
+  sub.className = 'lk-step-sub';
+  sub.textContent = 'Read the task, choose register / counter / meter, then reveal the reasoning.';
+  host.appendChild(sub);
+  var qp = document.createElement('p');
+  qp.style.fontWeight = '600';
+  host.appendChild(qp);
+  var btns = document.createElement('div');
+  btns.className = 'lk-step-btns';
+  ['register', 'counter', 'meter'].forEach(function (opt) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = opt;
+    b.addEventListener('click', function () { choose(opt); });
+    btns.appendChild(b);
+  });
+  host.appendChild(btns);
+  var verdict = document.createElement('div');
+  verdict.className = 'lk-step-verdict';
+  host.appendChild(verdict);
+  var nav = document.createElement('div');
+  nav.className = 'lk-step-btns';
+  var nb = document.createElement('button');
+  nb.type = 'button';
+  nb.textContent = 'Next task';
+  nb.addEventListener('click', function () { i = (i + 1) % tasks.length; answered = false; render(); });
+  nav.appendChild(nb);
+  host.appendChild(nav);
+  function choose(opt) {
+    answered = true;
+    var t = tasks[i];
+    if (opt === t.answer) {
+      verdict.className = 'lk-step-verdict ok';
+      verdict.textContent = 'Correct — ' + t.answer + '. ' + t.why;
+    } else {
+      verdict.className = 'lk-step-verdict bad';
+      verdict.textContent = 'Not quite. The answer is ' + t.answer + '. ' + t.why;
+    }
+  }
+  function render() {
+    qp.textContent = tasks[i].q;
+    verdict.className = 'lk-step-verdict';
+    verdict.textContent = answered ? '' : 'Choose register, counter or meter.';
+  }
+  render();
+})();
+</script>
+</body>
+</html>

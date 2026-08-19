@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 6 — The P4 language · NetProg</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-05-programmable-data-plane.html">&larr; Ch. 5 — The programmable data plane</a>
+    <a href="index.html">Index</a>
+    <a href="cap-07-p4-in-practice.html">Ch. 7 — P4 in practice &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Hands-on networking · Chapter 6</div>
+    <h1>The P4 language</h1>
+    <div class="lk-meta"><span>~50 min read</span><span>5 interactive widgets</span><span>4 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What P4 is, and P4<sub>14</sub> versus P4<sub>16</sub></a></li>
+      <li><a href="#s2">Architectures and targets</a></li>
+      <li><a href="#s3">The V1Model and standard metadata</a></li>
+      <li><a href="#s4">The program template</a></li>
+      <li><a href="#s5">Types, headers and the parser</a></li>
+      <li><a href="#s6">The select statement</a></li>
+      <li><a href="#s7">Controls, actions and tables</a></li>
+      <li><a href="#s8">Match kinds</a></li>
+      <li><a href="#s9">Deparsing</a></li>
+      <li><a href="#s10">What P4 cannot do — and why</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Slide P4 - p4.pdf">
+    <h2>1. What P4 is, and P4<sub>14</sub> versus P4<sub>16</sub></h2>
+    <p><strong>P4</strong> is a high-level programming language for network data planes. Four properties define it: it allows <strong>protocol flexibility</strong>, it specifies a <strong>packet processing pipeline</strong>, it is <strong>compiled and loaded into a target platform</strong>, and it is <strong>open and standardized</strong>. The name comes from the founding paper, <em>P4: Programming Protocol-Independent Packet Processors</em> (Bosshart, Daly, Gibb, Izzard, McKeown, Rexford, Schlesinger, Talayco, Vahdat, Varghese, Walker), ACM SIGCOMM CCR, July 2014.</p>
+
+    <p>There are two versions of the language, and the distinction matters:</p>
+    <table>
+      <tr><th>P4<sub>14</sub></th><th>P4<sub>16</sub> (the one studied here)</th></tr>
+      <tr>
+        <td>The original version. <strong>Assumed specific device capabilities</strong>. Good only for a subset of programmable switches/targets.</td>
+        <td>A more mature and stable language definition. <strong>Does not assume device capabilities</strong> — they are defined via external libraries and an architecture definition. Good for many targets: switches or NICs, programmable or fixed-function.</td>
+      </tr>
+    </table>
+
+    <p>The evolution from P4<sub>14</sub> to P4<sub>16</sub> is itself an instance of the top-down principle from chapter 5: P4<sub>14</sub> still baked in assumptions about the hardware; P4<sub>16</sub> pushes every hardware-specific fact out of the core language and into an <em>architecture description</em>, leaving the language itself protocol- and target-agnostic.</p>
+
+    <p>The P4<sub>16</sub> language elements are a small, deliberate set:</p>
+    <table>
+      <tr><th>Element</th><th>What it provides</th></tr>
+      <tr><td>Parsers</td><td>State machine, bitfield extraction</td></tr>
+      <tr><td>Controls</td><td>Tables, actions, control-flow statements</td></tr>
+      <tr><td>Expressions</td><td>Basic operations and operators</td></tr>
+      <tr><td>Data types</td><td>Bitstrings, headers, structures, arrays</td></tr>
+      <tr><td>Architecture description</td><td>Programmable blocks and their interfaces</td></tr>
+      <tr><td>Extern libraries</td><td>Support for specialized components</td></tr>
+    </table>
+  </section>
+
+  <section id="s2" data-src="Slide P4 - p4.pdf,Slide P4 - ONOS_P4.pdf">
+    <h2>2. Architectures and targets</h2>
+    <p>Two P4<sub>16</sub> terms carry the whole portability story, and confusing them is the single most common mistake:</p>
+    <table>
+      <tr><th>Term</th><th>Definition</th></tr>
+      <tr><td><strong>P4 Target</strong></td><td>An embodiment of a specific hardware implementation.</td></tr>
+      <tr><td><strong>P4 Architecture</strong></td><td>Provides an interface to program a target via a set of P4-programmable components, externs and fixed components.</td></tr>
+    </table>
+
+    <p>The division of labour is explicit: the <strong>P4<sub>16</sub> language and the P4<sub>16</sub> core library are community-developed</strong>; the <strong>extern libraries and the architecture definition are vendor-supplied</strong>. A P4 program is written <em>against a specific architecture</em>, which defines which blocks are available, the interfaces of each block, and their capabilities. Example architectures named in the slides are the <strong>V1Model</strong>, the <strong>SimpleSumeSwitch</strong> and the <strong>Portable Switch Architecture (PSA)</strong>.</p>
+
+    <p>The consequence is the sentence to remember: <strong>architectures enable portability of P4 programs across different hardware and software targets</strong>. Ask "can I implement this feature with P4?" and the honest answer is <em>it depends on the architecture</em> — the language is flexible enough to express almost any match-action behaviour, but the specific capabilities (ternary vs. LPM vs. exact match, counters, registers) depend on the architecture. Ask "can I run my program on switch X from vendor Y?" and the answer is <em>probably yes, if vendor Y provides a P4 compiler for the architecture you used</em>.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>The architecture is the contract. It is the thing that lets the community own the language while vendors own the silicon: you write against the architecture, the vendor's compiler maps the architecture to the target. The PSA is the community-developed architecture that describes the common capabilities of a switch — 6 programmable blocks plus 2 fixed-function blocks — including counters, meters, stateful registers and hash functions beyond plain match+action.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="Slide P4 - p4.pdf,Slide P4 - ONOS_P4.pdf">
+    <h2>3. The V1Model and standard metadata</h2>
+    <p>The course teaches against the <strong>V1Model</strong>, implemented on top of BMv2's <code>simple_switch</code> target (the software switch used in the labs). Its pipeline has six blocks, and knowing their order is knowing where your code runs:</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 220" width="100%" role="img" aria-labelledby="p6-1-title">
+        <title id="p6-1-title">The V1Model pipeline: parser, checksum verification and ingress match-action, traffic manager, egress match-action and checksum update, deparser</title>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="var(--lk-paper-light)">
+          <rect x="20" y="70" width="86" height="70"/>
+          <rect x="116" y="70" width="120" height="70"/>
+          <rect x="246" y="70" width="120" height="70"/>
+          <rect x="376" y="70" width="120" height="70"/>
+          <rect x="506" y="70" width="86" height="70"/>
+        </g>
+        <rect x="246" y="70" width="120" height="70" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">
+          <text x="34" y="100">Parser</text>
+          <text x="126" y="96">Checksum verify</text><text x="126" y="112">+ Ingress</text><text x="126" y="128">match-action</text>
+          <text x="272" y="100" fill="var(--lk-vermilion)">Traffic</text><text x="272" y="116" fill="var(--lk-vermilion)">Manager</text><text x="264" y="132" fill="var(--lk-vermilion)">(fixed function)</text>
+          <text x="388" y="96">Egress</text><text x="388" y="112">match-action</text><text x="388" y="128">+ Checksum upd.</text>
+          <text x="520" y="100">Deparser</text>
+        </g>
+        <g stroke="var(--lk-ink)" stroke-width="1.2" fill="none">
+          <path d="M106 105 L116 105"/><path d="M236 105 L246 105"/><path d="M366 105 L376 105"/><path d="M496 105 L506 105"/>
+        </g>
+        <text x="20" y="180" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Everything blue is P4-programmable. The Traffic Manager (queueing, replication/multicast, scheduling) is fixed function.</text>
+        <text x="20" y="200" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Ingress runs before the buffer; egress runs after it — which is why queue depth is only visible in egress.</text>
+      </svg>
+      <figcaption><b>Plate 6.1</b> — The V1Model pipeline. Ingress decides forwarding before the traffic manager; egress can react to queueing state after it. This ordering is exactly what the ECN exercise in chapter 7 exploits.</figcaption>
+    </figure>
+
+    <p>Between the programmable blocks flows a struct the architecture provides: <code>standard_metadata_t</code>. Three of its fields are the ones you will touch constantly, and their distinction is a favourite exam point:</p>
+
+    <table>
+      <tr><th>Field</th><th>Meaning</th></tr>
+      <tr><td><code>ingress_port</code></td><td>The port on which the packet arrived.</td></tr>
+      <tr><td><code>egress_spec</code></td><td>The port to which the packet <em>should</em> be sent — you set this in ingress to forward.</td></tr>
+      <tr><td><code>egress_port</code></td><td>The port the packet <em>will</em> be sent out of — read-only, and only in the egress pipeline.</td></tr>
+    </table>
+
+    <pre><code class="language-cpp">struct standard_metadata_t {
+    bit&lt;9&gt;  ingress_port;
+    bit&lt;9&gt;  egress_spec;
+    bit&lt;9&gt;  egress_port;
+    bit&lt;32&gt; packet_length;
+    bit&lt;32&gt; enq_timestamp;
+    bit&lt;19&gt; enq_qdepth;        // enqueue queue depth — used by ECN in ch. 7
+    bit&lt;48&gt; ingress_global_timestamp;
+    bit&lt;16&gt; mcast_grp;
+    bit&lt;1&gt;  checksum_error;
+    // ... and more
+}</code></pre>
+  </section>
+
+  <section id="s4" data-src="Slide P4 - p4.pdf">
+    <h2>4. The program template</h2>
+    <p>A V1Model program always has the same skeleton. The <code>V1Switch(...)</code> instantiation at the bottom wires the six blocks together in order — this is the program declaring which piece of code plays which role in the pipeline of the previous section.</p>
+
+    <pre><code class="language-cpp">#include &lt;core.p4&gt;
+#include &lt;v1model.p4&gt;
+
+/* HEADERS */
+struct metadata { ... }
+struct headers {
+  ethernet_t ethernet;
+  ipv4_t     ipv4;
+}
+
+/* PARSER */
+parser MyParser(packet_in packet, out headers hdr,
+                inout metadata meta, inout standard_metadata_t smeta) { ... }
+
+control MyVerifyChecksum(inout headers hdr, inout metadata meta) { ... }
+control MyIngress(inout headers hdr, inout metadata meta,
+                  inout standard_metadata_t std_meta) { ... }
+control MyEgress(inout headers hdr, inout metadata meta,
+                 inout standard_metadata_t std_meta) { ... }
+control MyComputeChecksum(inout headers hdr, inout metadata meta) { ... }
+control MyDeparser(packet_out packet, in headers hdr) { ... }
+
+/* SWITCH — bind the blocks into the V1Model pipeline, in order */
+V1Switch(
+  MyParser(),
+  MyVerifyChecksum(),
+  MyIngress(),
+  MyEgress(),
+  MyComputeChecksum(),
+  MyDeparser()
+) main;</code></pre>
+
+    <p>The simplest complete program, the "hello world" of P4, forwards by swapping ports 1 and 2 directly in the ingress control:</p>
+
+    <div id="ac-hello"></div>
+  </section>
+
+  <section id="s5" data-src="Slide P4 - p4.pdf">
+    <h2>5. Types, headers and the parser</h2>
+    <p>P4's types are deliberately spartan, because everything about a packet is bits at fixed offsets:</p>
+    <table>
+      <tr><th>Type</th><th>Meaning</th></tr>
+      <tr><td><code>bit&lt;n&gt;</code></td><td>Unsigned integer (bitstring) of size n; <code>bit</code> is the same as <code>bit&lt;1&gt;</code>.</td></tr>
+      <tr><td><code>int&lt;n&gt;</code></td><td>Signed integer of size n (n &ge; 2).</td></tr>
+      <tr><td><code>varbit&lt;n&gt;</code></td><td>Variable-length bitstring (maximum n) — used for the Modbus payload in chapters 10–11.</td></tr>
+      <tr><td><code>header</code></td><td>An ordered, byte-aligned collection of members; can be <strong>valid</strong> or <strong>invalid</strong>, with <code>isValid()</code>, <code>setValid()</code>, <code>setInvalid()</code>.</td></tr>
+      <tr><td><code>struct</code></td><td>Unordered collection of members (no alignment restriction).</td></tr>
+      <tr><td><code>typedef</code></td><td>An alternative name for a type.</td></tr>
+    </table>
+
+    <pre><code class="language-cpp">typedef bit&lt;48&gt; macAddr_t;
+typedef bit&lt;32&gt; ip4Addr_t;
+
+header ethernet_t {
+  macAddr_t dstAddr;
+  macAddr_t srcAddr;
+  bit&lt;16&gt;   etherType;
+}
+header ipv4_t {
+  bit&lt;4&gt;    version;   bit&lt;4&gt;    ihl;
+  bit&lt;8&gt;    diffserv;  bit&lt;16&gt;   totalLen;
+  bit&lt;16&gt;   identification; bit&lt;3&gt; flags; bit&lt;13&gt; fragOffset;
+  bit&lt;8&gt;    ttl;       bit&lt;8&gt;    protocol; bit&lt;16&gt; hdrChecksum;
+  ip4Addr_t srcAddr;   ip4Addr_t dstAddr;
+}</code></pre>
+
+    <h3>The parser as a state machine</h3>
+    <p>Parsers are <strong>functions that map packets into headers and metadata, written in a state machine style</strong>. Every parser has three predefined states — <code>start</code>, <code>accept</code>, <code>reject</code> — and the programmer may define others. In each state you execute zero or more statements and then transition to another state; loops are permitted. The platform initialises user metadata to 0.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="100%" role="img" aria-labelledby="p6-2-title">
+        <title id="p6-2-title">A parser state machine: start extracts ethernet, branches on etherType to parse_ipv4 or accept, and parse_ipv4 extracts ipv4 then accepts; a reject state is also shown</title>
+        <ellipse cx="90" cy="60" rx="52" ry="26" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="66" y="65" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">start</text>
+        <rect x="230" y="34" width="150" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="244" y="58" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">parse_ethernet</text>
+        <text x="244" y="76" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">extract(ethernet)</text>
+        <rect x="470" y="120" width="150" height="52" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="484" y="144" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">parse_ipv4</text>
+        <text x="484" y="162" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">extract(ipv4)</text>
+        <ellipse cx="560" cy="60" rx="52" ry="26" fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="1.5"/>
+        <text x="536" y="65" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-forest)">accept</text>
+        <ellipse cx="90" cy="180" rx="52" ry="26" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="66" y="185" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">reject</text>
+        <g stroke="var(--lk-ink)" stroke-width="1.2" fill="none" marker-end="url(#arr6)">
+          <path d="M142 60 L230 60"/>
+          <path d="M380 66 L470 132"/>
+          <path d="M380 50 L508 60"/>
+          <path d="M560 120 L560 86"/>
+        </g>
+        <defs><marker id="arr6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink)"/></marker></defs>
+        <text x="386" y="104" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">etherType = 0x800</text>
+        <text x="392" y="44" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">default</text>
+        <text x="20" y="222" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">The select statement branches on bits just parsed — here, etherType decides whether an IPv4 header follows.</text>
+      </svg>
+      <figcaption><b>Plate 6.2</b> — A parser state machine for the basic router. The <code>select</code> on <code>etherType</code> is the branch; every real protocol stack is a tree of such branches.</figcaption>
+    </figure>
+
+    <div id="ac-parser"></div>
+  </section>
+
+  <section id="s6" data-src="Slide P4 - p4.pdf">
+    <h2>6. The select statement</h2>
+    <p>P4<sub>16</sub> has a <strong>select statement</strong> to branch inside a parser. The slides describe it precisely: it is similar to case statements in C or Java, <strong>but without fall-through behaviour</strong> — no <code>break</code> is needed. In parsers it is often necessary to branch based on some of the bits just parsed; for example, <code>etherType</code> determines the format of the rest of the packet. Match patterns can be literals or simple computations such as masks.</p>
+
+    <pre><code class="language-cpp">state start {
+  transition parse_ethernet;
+}
+state parse_ethernet {
+  packet.extract(hdr.ethernet);
+  transition select(hdr.ethernet.etherType) {
+    0x800:   parse_ipv4;   // it is IPv4, keep parsing
+    default: accept;       // not IPv4, we are done
+  }
+}</code></pre>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>The absence of fall-through is not a stylistic detail. A parser must terminate in bounded time on every packet (the line-rate budget of chapter 5), and C-style fall-through invites the kind of accidental control flow that a fixed per-packet cost cannot afford. The parser reads like a case statement but behaves like a decision tree: exactly one branch is taken.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="Slide P4 - p4.pdf,Slide P4 - lab1.pdf">
+    <h2>7. Controls, actions and tables</h2>
+    <p><strong>Controls</strong> are similar to C functions without loops. They can declare variables, create tables, instantiate externs, and their functionality is specified by the code in the <code>apply</code> statement. They represent everything expressible as a directed acyclic graph: match-action pipelines, deparsers, checksum updates.</p>
+
+    <h3>Actions</h3>
+    <p>Actions are also very similar to C functions, and their parameters have a <strong>direction</strong>. This is the concept that unifies the data plane and the control plane, so it is worth stating carefully:</p>
+    <ul>
+      <li><strong>Directional</strong> parameters come from the <em>data plane</em>. Actions called directly use only directional parameters.</li>
+      <li><strong>Directionless</strong> parameters come from the <em>control plane</em>. Actions used in tables typically use directionless parameters (and may sometimes use directional ones too).</li>
+    </ul>
+
+    <pre><code class="language-cpp">// directionless dstAddr and port are filled in by the control plane
+// when it installs a table entry
+action ipv4_forward(macAddr_t dstAddr, bit&lt;9&gt; port) {
+  standard_metadata.egress_spec = port;
+  hdr.ethernet.dstAddr = dstAddr;
+  hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
+}
+action drop() { mark_to_drop(); }</code></pre>
+
+    <h3>Tables</h3>
+    <p>The table is <strong>the fundamental unit of a match-action pipeline</strong>. A table specifies what data to match on and the match kind, a list of possible actions, and optional properties (size, default action, static entries). Each table contains one or more <strong>entries (rules)</strong>, and each entry has a specific key to match on, a single action executed on a match, and action data (possibly empty).</p>
+
+    <pre><code class="language-cpp">table ipv4_lpm {
+  key = {
+    hdr.ipv4.dstAddr: lpm;      // longest-prefix match
+  }
+  actions = {
+    ipv4_forward;
+    drop;
+    NoAction;
+  }
+  size = 1024;
+  default_action = NoAction();
+}</code></pre>
+
+    <p>The division of labour is the crucial part, and it is the same control/data split from chapter 3, now made concrete: the <strong>data-plane P4 program defines the format of the table</strong> (key fields, actions, action data) and <strong>performs the lookup and executes the chosen action</strong>; the <strong>control plane populates the entries</strong> with specific information, based on configuration, automatic discovery, or protocol calculations.</p>
+
+    <div id="se-matchaction"></div>
+
+    <p>A control applies its tables in its <code>apply</code> block:</p>
+    <pre><code class="language-cpp">control MyIngress(inout headers hdr, inout metadata meta,
+                  inout standard_metadata_t std_meta) {
+  table ipv4_lpm { /* ... as above ... */ }
+  apply {
+    if (hdr.ipv4.isValid()) {
+      ipv4_lpm.apply();
+    }
+  }
+}</code></pre>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful — two FAQ facts worth memorising</span>
+      <p>From the lab FAQ: you <strong>cannot apply a table multiple times</strong> in a P4 program (except via resubmit/recirculate), and you <strong>cannot modify table entries from your P4 program</strong> (except for direct counters) — entries are the control plane's job, or you use registers. These are not arbitrary restrictions; they are what keeps the per-packet cost constant.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="Slide P4 - p4.pdf">
+    <h2>8. Match kinds</h2>
+    <p>The type <code>match_kind</code> is special in P4. The standard library <code>core.p4</code> defines three, the V1Model architecture adds two more, and other architectures may define their own — a perfect small illustration of the "architecture defines capabilities" principle from section 2.</p>
+
+    <table>
+      <tr><th>Defined in</th><th>Match kinds</th></tr>
+      <tr><td><code>core.p4</code> (standard)</td><td><code>exact</code>, <code>ternary</code>, <code>lpm</code> (longest-prefix match)</td></tr>
+      <tr><td><code>v1model.p4</code> (architecture)</td><td><code>range</code>, <code>selector</code></td></tr>
+      <tr><td>some other architecture</td><td>e.g. <code>regexp</code>, <code>fuzzy</code></td></tr>
+    </table>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">exact</button>
+        <button class="lk-tab">ternary</button>
+        <button class="lk-tab">lpm</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>The key must equal the value exactly. Used for things like "packets arriving on ingress port 1", where there is nothing to generalise. The Modbus security table in chapter 11 matches <code>egress_spec</code> exactly.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>The key is matched against a value <em>and a mask</em> — only the masked bits must agree. This is the TCAM-backed matching of chapter 5's ACLs, used when rules overlap and priority decides. The <code>simple_switch_CLI</code> syntax uses <code>value&amp;&amp;&amp;mask</code>.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Longest-prefix match: the entry with the longest matching address prefix wins. This is exactly how a router chooses a route (chapter 4's "longest IP prefix"), which is why the routing table <code>ipv4_lpm</code> uses it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s9" data-src="Slide P4 - p4.pdf">
+    <h2>9. Deparsing</h2>
+    <p>The <strong>deparser assembles the headers back into a well-formed packet</strong>. It is expressed as a control function — no new construct is needed — and it uses the <code>packet_out</code> extern from <code>core.p4</code>, whose <code>emit(hdr)</code> serialises a header <em>only if it is valid</em>.</p>
+
+    <pre><code class="language-cpp">control MyDeparser(packet_out packet, in headers hdr) {
+  apply {
+    packet.emit(hdr.ethernet);
+    packet.emit(hdr.ipv4);   // emitted only if still valid
+  }
+}</code></pre>
+
+    <p>The design advantage stated in the slides is subtle but important: making deparsing explicit <strong>decouples it from parsing</strong>. You are not obliged to emit headers in the order you parsed them, or to emit everything you parsed; a header you <code>setInvalid()</code> during processing simply vanishes from the output. This is precisely the mechanism the tunnelling exercise in chapter 7 uses to push and pop a tunnel header — validity in, validity out.</p>
+
+    <p>Walk one packet through the full V1Model pipeline below, from parse to deparse.</p>
+
+    <div id="se-pipeline"></div>
+  </section>
+
+  <section id="s10" data-src="Slide P4 - p4.pdf">
+    <h2>10. What P4 cannot do — and why</h2>
+    <p>The most instructive slides in the P4 deck are the ones about limitations, because the limits are not incidental — they are the price of running at line rate. The core P4 language is <strong>very small</strong>: highly portable, but very limited in expressivity.</p>
+
+    <h3>What is missing from the language</h3>
+    <p>Floating point; pointers and references; data structures and recursive data types; dynamic memory management; loops and iterators (except the parser state machine); recursion; threads. The slides give the reason in one arrow: <strong>&rArr; constant work per byte of header</strong>. Everything absent is something whose cost cannot be bounded per packet.</p>
+
+    <h3>What cannot be done in pure P4</h3>
+    <table>
+      <tr><th>Cannot be done in pure P4</th><th>How it is done instead</th></tr>
+      <tr><td>Multicast, broadcast, queueing, scheduling, multiplexing</td><td>By the target device, controlled by P4 metadata.</td></tr>
+      <tr><td>Persistent state across packets (per-flow state)</td><td>External objects: <strong>registers, counters, meters</strong> (chapter 7).</td></tr>
+      <tr><td>Communication to the control plane</td><td>External objects: learning providers, digests (chapter 8).</td></tr>
+      <tr><td>Payload processing, e.g. encryption</td><td>Externs — this is exactly the AES/HMAC extern of the industrial lab (chapter 11).</td></tr>
+      <tr><td>Packet generation</td><td>The control plane, or external objects.</td></tr>
+      <tr><td>Timers</td><td>Not in P4 itself.</td></tr>
+      <tr><td>TCP-style reassembly, trailers, inter-packet operations (fragmentation/reassembly)</td><td>Not currently done.</td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Two questions to expect. <em>Why can't P4 do X?</em> — because X's cost is not bounded per byte of header, and the data plane's whole promise is constant per-packet work. <em>If P4 can't do X, how is X done?</em> — through the target (multicast, queueing), through externs (persistent state via registers/counters/meters, payload crypto), or through the control plane (packet generation, table population). Section 6.2's answer — the architecture defines capabilities — is the same answer wearing a different hat.</p>
+    </div>
+
+    <p>The closing argument of the deck answers "why P4<sub>16</sub>?" and it reads as a list of software-engineering virtues rather than networking ones: <strong>clearly defined semantics</strong> (you can describe what your data plane does), <strong>expressive</strong> (a wide range of architectures through a standard methodology), <strong>high-level and target-independent</strong> (the compiler manages resources and the hardware), <strong>type-safe</strong> (enforces good design and eliminates "stupid" bugs), <strong>agile</strong> (high-speed devices become as flexible as any software), and <strong>insight</strong> (freely mixing packet headers and intermediate results).</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What is P4, and what distinguishes P4<sub>16</sub> from P4<sub>14</sub>?</summary>
+        <p>P4 is a high-level language for network data planes: protocol-flexible, specifying a packet-processing pipeline, compiled and loaded into a target, open and standardized. <strong>P4<sub>14</sub></strong> assumed specific device capabilities and suited only a subset of targets. <strong>P4<sub>16</sub></strong> does not assume device capabilities — they are defined via external libraries and an architecture definition — so it is good for many targets, programmable or fixed-function.</p>
+      </details>
+
+      <details>
+        <summary>Distinguish a P4 target from a P4 architecture.</summary>
+        <p>A <strong>target</strong> is an embodiment of a specific hardware implementation. An <strong>architecture</strong> provides an interface to program a target via P4-programmable components, externs and fixed components, and defines which blocks are available, their interfaces and their capabilities. The language and core library are community-developed; extern libraries and the architecture definition are vendor-supplied. Architectures enable portability across targets.</p>
+      </details>
+
+      <details>
+        <summary>"Can I implement feature X in P4?" What is the correct answer?</summary>
+        <p><em>It depends on the architecture.</em> The language is flexible enough to express almost any match-action behaviour, but specific capabilities — ternary vs. LPM vs. exact match, counters, registers — depend on the architecture. And "can I run my program on switch X from vendor Y?" is <em>probably yes, if vendor Y provides a P4 compiler for the architecture you used</em>.</p>
+      </details>
+
+      <details>
+        <summary>Distinguish ingress_port, egress_spec and egress_port.</summary>
+        <p><code>ingress_port</code> is the port the packet arrived on; <code>egress_spec</code> is the port it <em>should</em> be sent to, which you set in ingress to forward; <code>egress_port</code> is the port it <em>will</em> leave from, read-only and only in the egress pipeline. Forwarding is "set egress_spec"; the traffic manager turns egress_spec into egress_port.</p>
+      </details>
+
+      <details>
+        <summary>List the V1Model blocks in order and name the fixed-function one.</summary>
+        <p>Parser, checksum verification + ingress match-action, <strong>Traffic Manager</strong>, egress match-action + checksum update, deparser. The Traffic Manager (queueing, replication/multicast, scheduling) is the fixed-function block; everything else is P4-programmable. Ingress runs before the buffer, egress after it.</p>
+      </details>
+
+      <details>
+        <summary>What is the select statement, and what makes it unlike a C switch?</summary>
+        <p>It branches inside a parser based on bits just parsed (for example <code>etherType</code> deciding whether IPv4 follows). Unlike a C switch it has <strong>no fall-through</strong> — no <code>break</code> is needed. Patterns can be literals or simple computations such as masks. Exactly one branch is taken.</p>
+      </details>
+
+      <details>
+        <summary>Explain directional versus directionless action parameters.</summary>
+        <p><strong>Directional</strong> parameters come from the data plane; actions called directly use only these. <strong>Directionless</strong> parameters come from the control plane; actions used in tables typically use these (and may also use directional ones). This is how a single action body serves both planes: <code>ipv4_forward(dstAddr, port)</code> gets its <code>port</code> filled in by the control plane when it installs a table entry.</p>
+      </details>
+
+      <details>
+        <summary>What does a table specify, and who fills its entries?</summary>
+        <p>A table specifies the match key and match kind, the list of possible actions, and optional properties (size, default action, static entries). Each entry has a key, a single action, and action data. The <strong>P4 program defines the table format and performs the lookup and action</strong>; the <strong>control plane populates the entries</strong>, based on configuration, discovery or protocol calculations.</p>
+      </details>
+
+      <details>
+        <summary>Two things you cannot do with a table in your P4 program?</summary>
+        <p>You cannot apply a table multiple times (except via resubmit/recirculate), and you cannot modify table entries from the P4 program (except for direct counters) — entry population is the control plane's job, or you use registers. Both restrictions preserve constant per-packet cost.</p>
+      </details>
+
+      <details>
+        <summary>Name the match kinds and where each is defined.</summary>
+        <p><code>core.p4</code> defines <code>exact</code>, <code>ternary</code> and <code>lpm</code>; <code>v1model.p4</code> adds <code>range</code> and <code>selector</code>; other architectures may add their own (e.g. <code>regexp</code>, <code>fuzzy</code>). <code>lpm</code> is how a router chooses a route; <code>ternary</code> is value+mask, TCAM-backed, for overlapping ACL rules; <code>exact</code> is equality.</p>
+      </details>
+
+      <details>
+        <summary>What does the deparser do, and why is decoupling it from parsing useful?</summary>
+        <p>The deparser reassembles headers into a well-formed packet, as a control using <code>packet.emit(hdr)</code>, which serialises a header only if it is valid. Decoupling deparsing from parsing means you can emit headers in a different order, omit some, or add new ones by managing their validity bits — exactly the mechanism used to push and pop a tunnel header.</p>
+      </details>
+
+      <details>
+        <summary>Why can't pure P4 do encryption, persistent state or multicast — and how are they done?</summary>
+        <p>Because their cost is not bounded per byte of header, which would break line-rate processing (the language also lacks loops, recursion, floating point and dynamic memory for the same reason). Instead: payload processing like encryption is done via <strong>externs</strong>; persistent per-flow state via <strong>registers, counters and meters</strong>; multicast, queueing and scheduling by the <strong>target device</strong> controlled through P4 metadata; packet generation and table population by the <strong>control plane</strong>.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-05-programmable-data-plane.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-07-p4-in-practice.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Sources: <em>Slide P4 - p4</em>, <em>Slide P4 - lab1</em>, <em>Slide P4 - ONOS_P4</em> (Andrea Melis) · Laboratory of Network Programmability and Automation — Programmable Networking, UniBo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Annotated code: the P4 hello world ---- */
+LessonKit.annotatedCode('#ac-hello', {
+  lang: 'cpp',
+  lines: [
+    ['control MyIngress(inout headers hdr, inout metadata meta,', 'The ingress control: this is where forwarding decisions are made, before the traffic manager buffers the packet.'],
+    ['                  inout standard_metadata_t standard_metadata) {', 'standard_metadata carries the ports. inout means the block may both read and write it.'],
+    ['  apply {', 'The apply block holds the actual per-packet logic. A control does nothing until apply runs.'],
+    ['    if (standard_metadata.ingress_port == 1)', 'Read the arrival port. This is the whole "algorithm" of hello world: look at where the packet came in.'],
+    ['      standard_metadata.egress_spec = 2;', 'Send it out of port 2. Setting egress_spec is how you forward in P4 — you name the destination port.'],
+    ['    else if (standard_metadata.ingress_port == 2)', 'The symmetric case for traffic arriving on port 2.'],
+    ['      standard_metadata.egress_spec = 1;', 'Send it out of port 1. The switch now bridges ports 1 and 2 — a two-port cable, expressed as a program.'],
+    ['  }', 'No parser work, no tables: the simplest complete P4 program, forwarding hard-coded in the control.']
+  ]
+});
+
+/* ---- Annotated code: the basic-router parser ---- */
+LessonKit.annotatedCode('#ac-parser', {
+  lang: 'cpp',
+  lines: [
+    ['parser MyParser(packet_in packet, out headers hdr,', 'A parser consumes a packet_in and produces the headers struct. It is written as a state machine.'],
+    ['                inout metadata meta, inout standard_metadata_t smeta) {', 'It also receives metadata; the platform initialises user metadata to 0 before the parser runs.'],
+    ['  state start {', 'Every parser has the predefined states start, accept and reject. Execution begins in start.'],
+    ['    transition parse_ethernet;', 'No packet begins without an Ethernet header, so jump straight to a state that extracts it.'],
+    ['  }', ''],
+    ['  state parse_ethernet {', 'A programmer-defined state.'],
+    ['    packet.extract(hdr.ethernet);', 'extract reads the next bytes off the wire into hdr.ethernet and advances the cursor. The header becomes valid.'],
+    ['    transition select(hdr.ethernet.etherType) {', 'Branch on bits just parsed. etherType tells us what protocol follows.'],
+    ['      0x800: parse_ipv4;', 'EtherType 0x800 means IPv4 — go extract the IPv4 header.'],
+    ['      default: accept;', 'Anything else: we do not understand the rest, so stop parsing and accept what we have.'],
+    ['    }', ''],
+    ['  }', ''],
+    ['  state parse_ipv4 {', ''],
+    ['    packet.extract(hdr.ipv4);', 'Extract the IPv4 header, making hdr.ipv4 valid so the ingress control can match on hdr.ipv4.dstAddr.'],
+    ['    transition accept;', 'Done: hand the parsed headers to the ingress pipeline.'],
+    ['  }', '']
+  ]
+});
+
+/* ---- State explorer: match-action processing of one table lookup ---- */
+LessonKit.stateExplorer('#se-matchaction', {
+  title: 'One table lookup, step by step',
+  start: 'Build the lookup key',
+  states: {
+    'Build the lookup key': {
+      desc: 'The P4 program says which headers and metadata form the key. For ipv4_lpm the key is hdr.ipv4.dstAddr, matched with kind lpm. The data plane assembles the key from the parsed packet.',
+      to: [['search the table', 'Selector: hit or miss?']]
+    },
+    'Selector: hit or miss?': {
+      desc: 'The table entries were installed by the control plane. The selector searches them for the key. For lpm, the entry with the longest matching prefix wins.',
+      to: [['a matching entry exists', 'Hit: run the action'], ['no entry matches', 'Miss: default action']]
+    },
+    'Hit: run the action': {
+      desc: 'The matched entry names one action and supplies its directionless action data (from the control plane). For example ipv4_forward with dstAddr and port. The action code executes on the packet.',
+      to: [['action modifies headers/metadata', 'Output headers and metadata']]
+    },
+    'Miss: default action': {
+      desc: 'No entry matched, so the table default action runs — often NoAction, sometimes drop. This is why a routing table needs a sensible default, and why the debug table in chapter 7 uses this path deliberately.',
+      to: [['default action executes', 'Output headers and metadata']]
+    },
+    'Output headers and metadata': {
+      desc: 'The action has set egress_spec, rewritten fields, decremented the TTL, or counted the packet. The modified headers and metadata flow to the next stage of the pipeline. Exactly one action ran — P4 tables allow only one action per entry.',
+      to: []
+    }
+  }
+});
+
+/* ---- State explorer: a packet through the whole V1Model pipeline ---- */
+LessonKit.stateExplorer('#se-pipeline', {
+  title: 'A packet through the V1Model pipeline',
+  start: 'Parser',
+  states: {
+    'Parser': {
+      desc: 'The parser state machine extracts Ethernet and, if etherType says so, IPv4. Headers become valid; user metadata was initialised to 0. Loops are allowed here but nowhere else.',
+      to: [['headers extracted', 'Checksum verify + Ingress']]
+    },
+    'Checksum verify + Ingress': {
+      desc: 'The IPv4 checksum is verified, then the ingress control runs its match-action tables: ipv4_lpm sets egress_spec, decrements TTL, rewrites MAC addresses. Forwarding is decided here, BEFORE the packet is buffered.',
+      to: [['forwarding decided', 'Traffic Manager']]
+    },
+    'Traffic Manager': {
+      desc: 'The fixed-function block: queueing, replication (multicast) and scheduling. It turns egress_spec into egress_port and records queue state such as enq_qdepth — which only becomes available to the program afterwards, in egress.',
+      to: [['dequeued to an output port', 'Egress + Checksum update']]
+    },
+    'Egress + Checksum update': {
+      desc: 'The egress control runs, now able to read queueing metadata (this is where ECN marking compares enq_qdepth to a threshold, chapter 7). Then the checksum is recomputed to match any header changes.',
+      to: [['headers finalised', 'Deparser']]
+    },
+    'Deparser': {
+      desc: 'The deparser emits each valid header back onto the wire with packet.emit. Headers set invalid during processing vanish; headers added become part of the packet. The serialised packet leaves the switch.',
+      to: []
+    }
+  }
+});
+</script>
+</body>
+</html>
