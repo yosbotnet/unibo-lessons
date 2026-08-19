@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 7 — Attention and transformers for forecasting · OA</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .oa-w{margin:1.4rem 0;border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;background:var(--lk-paper-light)}
+  .oa-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .oa-w .oa-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .oa-w .oa-row{display:flex;align-items:center;gap:.8rem;margin:.5rem 0;flex-wrap:wrap}
+  .oa-w label{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;min-width:9.5rem}
+  .oa-w input[type=range]{flex:1;min-width:130px;cursor:pointer}
+  .oa-w .oa-val{font-family:var(--lk-mono);font-size:.9rem;color:var(--lk-cobalt);font-weight:600;min-width:4.5rem;text-align:right}
+  .oa-w .oa-out{border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper);padding:.55rem .8rem;margin-top:.7rem;font-family:var(--lk-mono);font-size:.88rem;line-height:1.6}
+  .oa-w .oa-out b{color:var(--lk-vermilion)}
+  .oa-w canvas{width:100%;height:230px;display:block;margin:.7rem 0 0;border:1px solid var(--lk-rule-soft);background:var(--lk-paper)}
+  .oa-w table{margin:.6rem 0 0;font-size:.86rem}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-06-machine-learning-models.html">&larr; Ch. 6 — Machine learning models</a>
+    <a href="index.html">Index</a>
+    <a href="cap-08-statistics.html">Ch. 8 — Statistics &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Predictive analytics · Chapter 7</div>
+    <h1>Attention and transformers for forecasting</h1>
+    <div class="lk-meta"><span>~34 min read</span><span>6 interactive widgets</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Sequence to sequence, and the distance problem</a></li>
+      <li><a href="#s2">The attention operator: queries, keys, values</a></li>
+      <li><a href="#s3">Scaling, softmax and extracting the values</a></li>
+      <li><a href="#s4">Self-attention, cross-attention, multihead</a></li>
+      <li><a href="#s5">Positional encoding</a></li>
+      <li><a href="#s6">The transformer architecture</a></li>
+      <li><a href="#s7">From NLP to univariate time series</a></li>
+      <li><a href="#s8">Normalization and the data pollution trap</a></li>
+      <li><a href="#s9">Training, and what the loss curves confess</a></li>
+      <li><a href="#s10">Chronos, out of the box</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="lesson.pdf">
+    <h2>1. Sequence to sequence, and the distance problem</h2>
+    <p>This lecture arrives at forecasting through a detour, and the detour is the point. <strong>Sequence-to-Sequence manipulation is a key problem in NLP (Natural Language Processing)</strong>, with examples the deck lists as <strong>translation</strong> (X original text, Y translated text), <strong>question answering</strong> (X question, Y answer) and <strong>text completion</strong>.</p>
+
+    <p><strong>Recurrent Neural Networks model sequences</strong> — chapter 5 built them. But there is a structural cost: <strong>to compare two samples x<sub>i</sub> and x<sub>j</sub> we need |i - j| steps</strong>, and therefore it is <strong>very easy to lose information in the process</strong>. In language, <strong>the distance between elements is crucial</strong>, and related concepts can be <strong>very far away</strong> from each other in the sentence.</p>
+
+    <p><strong>The Attention Operator solves this issue.</strong> The mechanism, in the deck's words: <strong>during a single operation, each proposed output element looks at all elements of the input sequence in parallel.</strong> And the consequence stated as a complexity:</p>
+
+    <table>
+      <tr><th>Model</th><th>Path Length Complexity</th></tr>
+      <tr><td>RNNs</td><td><strong>O(n)</strong></td></tr>
+      <tr><td>Attention</td><td><strong>O(1)</strong></td></tr>
+    </table>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-labelledby="p71t">
+        <title id="p71t">Top: a recurrent chain where information from the first element must traverse every intermediate state to reach the last, a path of length n. Bottom: attention, where every element connects directly to every other in a single operation.</title>
+        <text x="14" y="20" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">RNN &#183; path length O(n)</text>
+        <g>
+          <circle cx="90" cy="72" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/><text x="90" y="77" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">x1</text>
+          <circle cx="200" cy="72" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/><text x="200" y="77" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">x2</text>
+          <circle cx="310" cy="72" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/><text x="310" y="77" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">x3</text>
+          <circle cx="420" cy="72" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/><text x="420" y="77" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">x4</text>
+          <circle cx="530" cy="72" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/><text x="530" y="77" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">x5</text>
+          <circle cx="640" cy="72" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/><text x="640" y="77" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">x6</text>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="2">
+          <line x1="110" y1="72" x2="180" y2="72"/><line x1="220" y1="72" x2="290" y2="72"/><line x1="330" y1="72" x2="400" y2="72"/>
+          <line x1="440" y1="72" x2="510" y2="72"/><line x1="550" y1="72" x2="620" y2="72"/>
+        </g>
+        <text x="360" y="112" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">x1 reaches x6 only after 5 hops &#8212; information degrades at every one</text>
+
+        <line x1="14" y1="132" x2="686" y2="132" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+
+        <text x="14" y="158" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">ATTENTION &#183; path length O(1)</text>
+        <g>
+          <circle cx="90" cy="216" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="90" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">x1</text>
+          <circle cx="200" cy="216" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="200" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">x2</text>
+          <circle cx="310" cy="216" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="310" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">x3</text>
+          <circle cx="420" cy="216" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="420" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">x4</text>
+          <circle cx="530" cy="216" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="530" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">x5</text>
+          <circle cx="640" cy="216" r="20" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="640" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">x6</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="0.8" opacity="0.55" fill="none">
+          <path d="M90,196 Q365,144 640,196"/><path d="M90,196 Q310,158 530,196"/><path d="M90,196 Q255,168 420,196"/>
+          <path d="M200,196 Q420,156 640,196"/><path d="M200,196 Q365,166 530,196"/><path d="M310,196 Q475,166 640,196"/>
+          <path d="M90,236 Q145,262 200,236"/><path d="M200,236 Q255,262 310,236"/><path d="M310,236 Q365,262 420,236"/>
+          <path d="M420,236 Q475,262 530,236"/><path d="M530,236 Q585,262 640,236"/>
+        </g>
+        <text x="360" y="288" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">every element looks at every other IN PARALLEL, in one operation</text>
+      </svg>
+      <figcaption><b>Plate 7.1</b> — Why attention replaced recurrence. The chain is not merely slower, it is <em>lossy</em>: each hop is another chance for the signal to be squeezed out by the vanishing gradient of chapter 5.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s2" data-src="lesson.pdf">
+    <h2>2. The attention operator: queries, keys, values</h2>
+    <p><strong>Each element in the sequence is projected into three different sets</strong>, and the deck gives each one a question to answer:</p>
+
+    <table>
+      <tr><th>Projection</th><th>The question it answers</th></tr>
+      <tr><td><strong>Queries</strong></td><td>What is each element <em>looking for</em>?</td></tr>
+      <tr><td><strong>Keys</strong></td><td>What does each element <em>have to offer</em>?</td></tr>
+      <tr><td><strong>Values</strong></td><td>What is the actual <em>content</em> of the element?</td></tr>
+    </table>
+
+    <p><strong>"Projected" means matrix multiplication</strong>: <var>Q = XW<sub>q</sub></var>, <var>K = XW<sub>k</sub></var>, <var>V = XW<sub>v</sub></var>, <strong>where the weight matrices are learnable parameters</strong>, with <var>W &#8712; &#8477;<sup>d&#215;k</sup></var>.</p>
+
+    <pre><code class="language-python">import torch, torch.nn as nn, math
+
+class Attention(nn.Module):
+    def __init__(self, d, k):
+        super(Attention, self).__init__()
+        self.Wq, self.Wk, self.Wv = self.init_qkv(d, k)
+        self.Wo = nn.Parameter(torch.randn(k, d))
+
+    # d = input dim, k = projection dim
+    def init_qkv(self, d, k):
+        Wq, Wk, Wv = [nn.Parameter(torch.randn(d, k)) for _ in range(3)]
+        return Wq, Wk, Wv
+
+    # converts a torch array X into queries, keys, values
+    def get_qkv(self, X):
+        return X @ self.Wq, X @ self.Wk, X @ self.Wv</code></pre>
+
+    <p>The deck notes the convention that makes this efficient: <strong>here we stack all the elements of the sequence in a single matrix X, and each output Q, K, V will have in row i the projection of x<sub>i</sub></strong>. One matrix multiplication does the whole sequence at once — which is precisely what the recurrent formulation could not do.</p>
+
+    <h3>The web search analogy</h3>
+    <p>The deck offers an analogy that is worth keeping, because it makes the three roles concrete. <strong>Single query: "Best pizza in Cesena". Google extracts the keys from each possibly relevant page (e.g. metadata). If there is a good match, it only shows us the page content.</strong> Query, key, value — asked, advertised, delivered.</p>
+  </section>
+
+  <section id="s3" data-src="lesson.pdf">
+    <h2>3. Scaling, softmax and extracting the values</h2>
+    <p>Having queries and keys, we can <strong>compare how much a query of an element and a key of another element match</strong>. The similarity function is the <strong>dot product</strong>, <var>q<sub>i</sub> &#183; k<sub>j</sub></var>, or in matrix form <var>Q &#183; K<sup>T</sup></var>, so that <strong>in each cell (i, j) sits the similarity between q<sub>i</sub> and k<sub>j</sub></strong>.</p>
+
+    <p>Two corrections follow, each with a stated reason.</p>
+    <ul>
+      <li><strong>For stability purposes, it is better to scale the dot product by &#8730;d<sub>k</sub></strong>. Without it, large projection dimensions produce large dot products, softmax saturates, and gradients vanish — the same saturation argument as chapter 5.</li>
+      <li><strong>To understand these values better, normalize for rows</strong> with a softmax: <var>softmax(Q&#183;K<sup>T</sup> / &#8730;d<sub>k</sub>)</var>. Each row then sums to one, and can be read as how the corresponding query distributes its attention.</li>
+    </ul>
+
+    <p>Finally, <strong>values: what does each element contain? Let us extract only the content of similar elements</strong>:</p>
+
+    <pre><code>Attention(Q, K, V) = softmax( Q &#183; K&#7488; / &#8730;d&#8342; ) &#183; V
+                     &#8970;___ attention weights ___&#8971;</code></pre>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-labelledby="p72t">
+        <title id="p72t">The attention computation as matrix operations: Q times K transposed gives a similarity matrix, scaled by the square root of d_k and row-normalised by softmax to give attention weights, which multiply V to produce the output.</title>
+        <defs>
+          <marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/>
+          </marker>
+        </defs>
+        <rect x="24" y="42" width="56" height="76" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="52" y="86" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">Q</text>
+        <text x="52" y="134" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">n &#215; d&#8342;</text>
+
+        <text x="94" y="86" text-anchor="middle" font-family="var(--lk-mono)" font-size="14" fill="var(--lk-ink)">&#215;</text>
+
+        <rect x="110" y="52" width="76" height="56" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="148" y="86" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">K&#7488;</text>
+        <text x="148" y="124" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">d&#8342; &#215; n</text>
+
+        <line x1="196" y1="80" x2="228" y2="80" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#a7)"/>
+
+        <g>
+          <rect x="238" y="42" width="76" height="76" fill="none" stroke="var(--lk-ink)" stroke-width="1.4"/>
+          <line x1="238" y1="61" x2="314" y2="61" stroke="var(--lk-rule-soft)"/><line x1="238" y1="80" x2="314" y2="80" stroke="var(--lk-rule-soft)"/><line x1="238" y1="99" x2="314" y2="99" stroke="var(--lk-rule-soft)"/>
+          <line x1="257" y1="42" x2="257" y2="118" stroke="var(--lk-rule-soft)"/><line x1="276" y1="42" x2="276" y2="118" stroke="var(--lk-rule-soft)"/><line x1="295" y1="42" x2="295" y2="118" stroke="var(--lk-rule-soft)"/>
+          <rect x="257" y="61" width="19" height="19" fill="var(--lk-vermilion)" opacity="0.6"/>
+        </g>
+        <text x="276" y="134" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">cell (i,j) = q&#7522; &#183; k&#11388;</text>
+
+        <line x1="322" y1="80" x2="354" y2="80" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#a7)"/>
+        <text x="338" y="70" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">&#247;&#8730;d&#8342;</text>
+
+        <g>
+          <rect x="364" y="42" width="76" height="76" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+          <rect x="364" y="42" width="46" height="19" fill="var(--lk-vermilion)" opacity="0.55"/>
+          <rect x="410" y="42" width="30" height="19" fill="var(--lk-vermilion)" opacity="0.18"/>
+          <rect x="364" y="61" width="19" height="19" fill="var(--lk-vermilion)" opacity="0.2"/>
+          <rect x="383" y="61" width="57" height="19" fill="var(--lk-vermilion)" opacity="0.45"/>
+          <rect x="364" y="80" width="38" height="19" fill="var(--lk-vermilion)" opacity="0.3"/>
+          <rect x="402" y="80" width="38" height="19" fill="var(--lk-vermilion)" opacity="0.6"/>
+          <rect x="364" y="99" width="76" height="19" fill="var(--lk-vermilion)" opacity="0.4"/>
+        </g>
+        <text x="402" y="134" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">softmax per ROW &#8594; sums to 1</text>
+
+        <text x="452" y="86" text-anchor="middle" font-family="var(--lk-mono)" font-size="14" fill="var(--lk-ink)">&#215;</text>
+
+        <rect x="470" y="42" width="56" height="76" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="498" y="86" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt)">V</text>
+
+        <line x1="534" y1="80" x2="566" y2="80" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#a7)"/>
+
+        <rect x="576" y="42" width="56" height="76" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.6"/>
+        <text x="604" y="86" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">out</text>
+        <text x="604" y="134" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">&#215; W&#8338; &#8594; back to d</text>
+
+        <line x1="24" y1="168" x2="676" y2="168" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+
+        <text x="24" y="196" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">WHAT EACH PROJECTION ASKS</text>
+        <text x="24" y="222" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">Q &#8212; what is each element LOOKING FOR ?</text>
+        <text x="24" y="244" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">K &#8212; what does each element HAVE TO OFFER ?</text>
+        <text x="24" y="266" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">V &#8212; what is the actual CONTENT of the element ?</text>
+        <text x="24" y="296" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">web search: query &#8220;best pizza in Cesena&#8221;, keys = page metadata, value = the page shown</text>
+        <text x="24" y="320" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">all three are LEARNED projections of the same input X &#8212; W&#8340;, W&#8342;, W&#7515; are parameters</text>
+      </svg>
+      <figcaption><b>Plate 7.2</b> — Attention as three matrix products. The scaling by &#8730;d<sub>k</sub> and the per-row softmax are the two lines of the implementation that most often get written wrong.</figcaption>
+    </figure>
+
+    <div id="ac-attn"></div>
+
+    <div class="oa-w" id="att-widget">
+      <h4>Attention weights, computed live</h4>
+      <p class="oa-sub">Six one-dimensional query and key values, the full <code>softmax(QK&#7488;/&#8730;d<sub>k</sub>)</code> matrix drawn as a heat map. Change the scaling and watch the distribution sharpen or flatten.</p>
+      <div class="oa-row"><label for="att-dk">d&#8342; (scaling divisor)</label><input type="range" id="att-dk" min="1" max="64" step="1" value="4"><span class="oa-val" id="att-dk-v">4</span></div>
+      <div class="oa-row"><label for="att-sp">Key spread</label><input type="range" id="att-sp" min="2" max="40" step="1" value="14"><span class="oa-val" id="att-sp-v">1.4</span></div>
+      <canvas id="att-canvas" height="230"></canvas>
+      <div class="oa-out" id="att-out"></div>
+    </div>
+  </section>
+
+  <section id="s4" data-src="lesson.pdf">
+    <h2>4. Self-attention, cross-attention, multihead</h2>
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Self-attention</button>
+        <button class="lk-tab">Cross-attention</button>
+        <button class="lk-tab">Multihead</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Q, K and V all come from the <strong>same</strong> sequence. The sequence looks at itself: each element asks what the rest of its own context has to offer.</p>
+        <pre><code class="language-python">def self_attention(self, X):
+    Q, K, V = self.get_qkv(X)
+    return self.forward(Q, K, V)
+
+def forward(self, Q, K, V):
+    d_k = K.shape[1]
+    sim = Q @ K.T
+    att_weights = torch.softmax(sim / math.sqrt(d_k), dim=-1)
+    out = att_weights @ V
+    out = out @ self.Wo      # project back into d dimensions
+    return out</code></pre>
+        <p><strong>We must normalize the attention given by queries, hence for rows</strong> — which is what <code>dim=-1</code> does. Getting that axis wrong produces a model that trains without error and learns nothing useful.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>In cross-attention, queries come from one series, while keys and values come from another series.</strong> This is the operation that lets a decoder consult an encoder: the output being generated asks questions, the encoded input answers them.</p>
+        <pre><code class="language-python">def cross_attention(self, X, Y):
+    Q, _, _ = self.get_qkv(X)
+    _, K, V = self.get_qkv(Y)
+    return self.forward(Q, K, V)</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p>The deck poses the question directly: <strong>why should we use a single set of projections onto queries, keys and values?</strong> The answer is <strong>multihead</strong> — <strong>each head performs its own attention and the result is concatenated</strong>. Different heads can specialise: one on the immediately preceding step, another on the same month a year ago.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s5" data-src="lesson.pdf">
+    <h2>5. Positional encoding</h2>
+    <p>Attention buys parallelism at a price, and the deck states the price plainly: <strong>attention evaluates each query with each key &#8594; no knowledge on position in the sequence!</strong> The operation is symmetric under permutation of the input. For a bag of words that might be tolerable; for a <em>time</em> series it is fatal.</p>
+
+    <p>The fix: <strong>we add "positional knowledge" to the inputs.</strong></p>
+
+    <pre><code class="language-python">class PositionalEncoding(nn.Module):
+    def __init__(self, d, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.pe = nn.Parameter(torch.randn(max_len, d))
+
+    def forward(self, x):
+        seq_len = x.size(1)
+        pe = self.pe[:seq_len, :].unsqueeze(0)
+        return x + pe</code></pre>
+
+    <p>Note that this implementation makes the positional encoding a <strong>learned parameter</strong> (<code>nn.Parameter(torch.randn(...))</code>) rather than a fixed sinusoidal table: the network discovers for itself what "position 3" should mean. It is added to the embedded input, not concatenated — the position becomes part of the same vector the attention operates on.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Every model in this course encodes position somehow. AR does it by <em>which coefficient</em> multiplies which lag. The MLP does it by <em>which input node</em> a value lands on. The transformer has neither, because it processes the sequence as a set — so position must be injected explicitly as data.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="lesson.pdf">
+    <h2>6. The transformer architecture</h2>
+    <p>The transformer is introduced with three bullets: <strong>the first Attention-only model</strong>; an <strong>Encoder-Decoder architecture</strong>; where the <strong>Encoder manipulates the inputs</strong> and the <strong>Decoder generates the output</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 400" width="100%" role="img" aria-labelledby="p73t">
+        <title id="p73t">Encoder-decoder transformer: an encoder block with self-attention, add-and-norm and a feedforward network, feeding a decoder block that adds cross-attention onto the encoder output before its own feedforward network.</title>
+        <defs>
+          <marker id="a73" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/>
+          </marker>
+        </defs>
+        <rect x="30" y="40" width="252" height="316" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5" stroke-dasharray="6 4"/>
+        <text x="42" y="60" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">ENCODER &#215; N</text>
+
+        <rect x="58" y="300" width="196" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="156" y="322" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">+ positional encoding</text>
+        <rect x="58" y="240" width="196" height="42" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="156" y="266" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">SELF-attention</text>
+        <rect x="58" y="192" width="196" height="30" fill="none" stroke="var(--lk-rule)" stroke-width="1.1"/>
+        <text x="156" y="212" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">norm1( x + att_out )</text>
+        <rect x="58" y="134" width="196" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="156" y="152" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">feed-forward d &#8594; 4d &#8594; d</text>
+        <text x="156" y="167" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">Linear, ReLU, Linear</text>
+        <rect x="58" y="86" width="196" height="30" fill="none" stroke="var(--lk-rule)" stroke-width="1.1"/>
+        <text x="156" y="106" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">norm2( x + ffn_out )</text>
+
+        <g stroke="var(--lk-ink)" stroke-width="1.1">
+          <line x1="156" y1="300" x2="156" y2="288" marker-end="url(#a73)"/>
+          <line x1="156" y1="240" x2="156" y2="228" marker-end="url(#a73)"/>
+          <line x1="156" y1="192" x2="156" y2="180" marker-end="url(#a73)"/>
+          <line x1="156" y1="134" x2="156" y2="122" marker-end="url(#a73)"/>
+        </g>
+        <line x1="156" y1="380" x2="156" y2="340" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#a73)"/>
+        <text x="156" y="396" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">src (the context window)</text>
+
+        <rect x="404" y="40" width="266" height="316" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5" stroke-dasharray="6 4"/>
+        <text x="416" y="60" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">DECODER &#215; N</text>
+
+        <rect x="430" y="300" width="212" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="536" y="322" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">+ positional encoding</text>
+        <rect x="430" y="248" width="212" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <text x="536" y="271" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">SELF-attention &#8594; norm1</text>
+        <rect x="430" y="192" width="212" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+        <text x="536" y="210" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">CROSS-attention &#8594; norm2</text>
+        <text x="536" y="225" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">Q from decoder, K and V from encoder</text>
+        <rect x="430" y="134" width="212" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="536" y="159" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">feed-forward &#8594; norm3</text>
+
+        <g stroke="var(--lk-ink)" stroke-width="1.1">
+          <line x1="536" y1="300" x2="536" y2="290" marker-end="url(#a73)"/>
+          <line x1="536" y1="248" x2="536" y2="238" marker-end="url(#a73)"/>
+          <line x1="536" y1="192" x2="536" y2="180" marker-end="url(#a73)"/>
+        </g>
+        <line x1="536" y1="380" x2="536" y2="340" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#a73)"/>
+        <text x="536" y="396" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">tgt (what has been generated so far)</text>
+        <line x1="536" y1="134" x2="536" y2="106" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#a73)"/>
+        <text x="536" y="96" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">next point</text>
+
+        <path d="M282,212 C340,212 350,212 424,212" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.8" marker-end="url(#a73)"/>
+        <text x="352" y="204" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">enc_out</text>
+      </svg>
+      <figcaption><b>Plate 7.3</b> — The encoder-decoder transformer. Each block is <em>attention, add-and-normalise, feedforward, add-and-normalise</em>; the decoder simply inserts a cross-attention stage that consults the encoder output.</figcaption>
+    </figure>
+
+    <pre><code class="language-python">class EncoderBlock(nn.Module):
+    def __init__(self, d, k):
+        super(EncoderBlock, self).__init__()
+        self.attn  = Attention(d, k)
+        self.norm1 = nn.LayerNorm(d)
+        self.norm2 = nn.LayerNorm(d)
+        self.ffn   = nn.Sequential(nn.Linear(d, d * 4), nn.ReLU(),
+                                   nn.Linear(d * 4, d))
+
+    def forward(self, x):
+        att_out = self.attn.self_attention(x)
+        x = self.norm1(x + att_out)        # residual connection + layer norm
+        ffn_out = self.ffn(x)
+        x = self.norm2(x + ffn_out)
+        return x</code></pre>
+
+    <p>The two <code>x + ...</code> are <strong>residual connections</strong>: the block learns a <em>correction</em> to its input rather than a replacement. Together with <code>LayerNorm</code>, they are what allows N blocks to be stacked without the signal degrading — the structural answer to the vanishing gradient that limited the RNNs of chapter 5.</p>
+
+    <pre><code class="language-python">class DecoderBlock(nn.Module):
+    def __init__(self, d, k):
+        super(DecoderBlock, self).__init__()
+        self.self_attn  = Attention(d, k)
+        self.cross_attn = Attention(d, k)
+        self.norm1, self.norm2, self.norm3 = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
+        self.ffn = nn.Sequential(nn.Linear(d, d * 4), nn.ReLU(), nn.Linear(d * 4, d))
+
+    def forward(self, x, enc_out):
+        x = self.norm1(x + self.self_attn.self_attention(x))
+        x = self.norm2(x + self.cross_attn.cross_attention(x, enc_out))
+        x = self.norm3(x + self.ffn(x))
+        return x</code></pre>
+
+    <pre><code class="language-python">class Transformer(nn.Module):
+    def __init__(self, d, k, N):
+        super(Transformer, self).__init__()
+        self.encoder = Encoder(d, k, N)
+        self.decoder = Decoder(d, k, N)
+
+    def forward(self, src, tgt):
+        enc_out = self.encoder(src)
+        return self.decoder(tgt, enc_out)
+
+    def generate(self, src, max_len=20):
+        enc_out = self.encoder(src)
+        dec_input = torch.zeros(src.size(0), 1, enc_out.size(-1)).to(src.device)
+        generated = []
+        for _ in range(max_len):
+            dec_out = self.decoder(dec_input, enc_out)
+            output  = dec_out[:, -1, :].unsqueeze(1)
+            generated.append(output)
+            dec_input = torch.cat([dec_input, output], dim=1)
+        return torch.stack(generated, dim=1)</code></pre>
+
+    <p><code>generate</code> is the recursive forecasting of chapters 5 and 6 in a new costume: the encoder runs once, and then each generated point is appended to <code>dec_input</code> and fed back. <strong>Outputs are m scalar points, generated one at a time.</strong></p>
+  </section>
+
+  <section id="s7" data-src="lesson.pdf">
+    <h2>7. From NLP to univariate time series</h2>
+    <p>Now the translation. <strong>Inputs: n scalar points. Outputs: m scalar points, generated one at a time.</strong> But a transformer operates on vectors of dimension <var>d</var>, not on scalars, so two conversions are needed:</p>
+
+    <pre><code>into the model:   z  &#8592; x &#183; w&#7522;&#8345; + b&#7522;&#8345;
+out of the model:  x&#770; &#8592; z &#183; w&#8338;&#7524;&#8348; + b&#8338;&#7524;&#8348;</code></pre>
+
+    <pre><code class="language-python">class Embedder(nn.Module):
+    def __init__(self, d):
+        super(Embedder, self).__init__()
+        self.w_in  = nn.Parameter(torch.randn(1, d))
+        self.b_in  = nn.Parameter(torch.zeros(d))
+        # initialize so that (x * w_in) @ w_out = x
+        self.w_out = nn.Parameter(self.w_in / (self.w_in.norm() + 1e-8))
+        self.b_out = nn.Parameter(torch.zeros(1))
+
+    def embed(self, x):
+        return x * self.w_in + self.b_in
+
+    def unembed(self, x):
+        return x @ self.w_out.T + self.b_out</code></pre>
+
+    <p>The comment on <code>w_out</code> is the elegant part: the un-embedding is initialised as the normalised embedding, so that at step zero the round trip <em>scalar &#8594; vector &#8594; scalar</em> is the identity. The network starts from "do nothing" and learns a departure from it, rather than starting from noise.</p>
+
+    <h3>The output scaler</h3>
+    <p>A second module conditions the output on the context, producing a scale and a bias:</p>
+
+    <pre><code class="language-python">class OutputScaler(nn.Module):
+  def __init__(self, embed_dim):
+    super().__init__()
+    self.head  = nn.Sequential(nn.Linear(embed_dim, embed_dim * 4), nn.ReLU(),
+                               nn.Linear(embed_dim * 4, embed_dim))
+    self.scale = nn.Linear(embed_dim, embed_dim)
+    self.bias  = nn.Linear(embed_dim, embed_dim)
+
+  def forward(self, X, context):
+    head_in = X[:, -1, :]
+    out = self.head(head_in)
+    s = torch.sigmoid(self.scale(context))     # sigmoid keeps the scale in (0,1)
+    b = self.bias(context)
+    return out * s + b                          # x &#8592; out &#183; s + b</code></pre>
+
+    <pre><code class="language-python">class TimeSeriesTransformer(nn.Module):
+    def __init__(self, d, k, N):
+        super(TimeSeriesTransformer, self).__init__()
+        self.transformer = Transformer(d, k, N)
+        self.embedder, self.scaler = Embedder(d), OutputScaler(d)
+
+    def forward(self, src, tgt):
+        src_emb, tgt_emb = self.embedder.embed(src), self.embedder.embed(tgt)
+        transformer_out = self.transformer(src_emb, tgt_emb)
+        scaled_out = self.scaler(transformer_out, src_emb.mean(dim=1))
+        return self.embedder.unembed(scaled_out)</code></pre>
+
+    <p>Note what plays the role of <em>context</em>: <code>src_emb.mean(dim=1)</code>, the average embedding of the input window. The scaler therefore adapts the output level to the level of the window it just saw — a learned defence against the normalization problem of the next section.</p>
+
+    <div id="se-tst"></div>
+  </section>
+
+  <section id="s8" data-src="lesson.pdf">
+    <h2>8. Normalization and the data pollution trap</h2>
+    <p>The points are normalised to <var>[0,1]</var> with the min-max feature scaling of chapter 3:</p>
+
+    <pre><code>x&#8345; &#8592; (x&#7522; - x&#7504;&#7522;&#8345;) / (x&#7504;&#8336;&#8339; - x&#7504;&#7522;&#8345;)</code></pre>
+
+    <p>And then the deck states the rule and immediately flags the difficulty, in a slide that ends with a deliberate ellipsis: <strong>to avoid data pollution, normalization should only employ points from the train series. However&#8230;</strong> The next slide answers it with three words on a chart: <strong>values unseen during training!</strong></p>
+
+    <pre><code class="language-python">def normalize_series(train_series, test_series=None):
+    s_max = np.max(train_series)
+    s_min = np.min(train_series)
+    train_series = (train_series - s_min) / (s_max - s_min)
+    if test_series is not None:
+        test_series = (test_series - s_min) / (s_max - s_min)   # TRAIN stats
+        return train_series, test_series
+    return train_series</code></pre>
+
+    <p>The code is correct — it applies the training min and max to the test series — and that correctness is exactly what creates the problem. The airline series rises throughout its history, so every test point lies <em>above</em> the training maximum. Normalised with training statistics, the test values exceed 1. The model has never seen an input greater than 1 in its life, and is now asked to forecast in that region.</p>
+
+    <div class="oa-w" id="norm-widget">
+      <h4>Where the test data lands</h4>
+      <p class="oa-sub">Min-max normalization fitted on the training split only, applied to a rising series. Move the split and watch how far outside <code>[0,1]</code> the held-out points fall.</p>
+      <div class="oa-row"><label for="nm-sp">Train share</label><input type="range" id="nm-sp" min="40" max="95" step="5" value="80"><span class="oa-val" id="nm-sp-v">80%</span></div>
+      <div class="oa-row"><label for="nm-tr">Trend strength</label><input type="range" id="nm-tr" min="0" max="100" step="5" value="60"><span class="oa-val" id="nm-tr-v">0.60</span></div>
+      <canvas id="nm-canvas" height="220"></canvas>
+      <div class="oa-out" id="nm-out"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>This is the cleanest illustration in the whole course of a general fact: <strong>a trended series cannot be handled by scaling alone</strong>. Whatever range you fit on the training data, the future leaves it. The structural fixes are the ones from chapter 3 — <strong>difference the series</strong> so that the modelled quantity is a change rather than a level, or model on a <strong>log</strong> scale — and the architectural fix used here is the <code>OutputScaler</code>, which conditions the output on the level of the current window.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="lesson.pdf">
+    <h2>9. Training, and what the loss curves confess</h2>
+    <p>The dataset is the airline series once more, this time loaded through seaborn:</p>
+
+    <pre><code class="language-python">def get_airline_passenger_data() -&gt; np.ndarray:
+    flights = sns.load_dataset('flights')
+    series = flights.pivot(index='year', columns='month', values='passengers')
+    return series.values.flatten()
+
+def create_dataset(series, input_len, output_len):
+    X, Y = [], []
+    for i in range(len(series) - input_len - output_len + 1):
+        X.append(series[i:i+input_len])
+        Y.append(series[i+input_len:i+input_len+output_len])
+    return torch.utils.data.TensorDataset(
+        torch.tensor(X, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32))
+
+def get_datasets(in_len=12, out_len=6):
+    series = get_airline_passenger_data()
+    train_series, test_series = train_test_split(series)          # 0.8
+    train_series, test_series = normalize_series(train_series, test_series)
+    return create_dataset(train_series, in_len, out_len), \
+           create_dataset(test_series,  in_len, out_len)</code></pre>
+
+    <p>This is the sliding window of chapter 5 with one change: <strong>the target is a block of <code>output_len</code> points, not a single one</strong>. Input 12, output 6 — the model is trained to produce half a year at a time.</p>
+
+    <pre><code class="language-python">def train_model(model, train_ds, test_ds, epochs=400, lr=5e-4, batch_size=8):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = torch.nn.MSELoss()
+    ...
+    for epoch in range(epochs):
+        avg_loss = train_loop(model, train_ds, optimizer, criterion)
+        train_loss.append(avg_loss)
+        avg_loss = test_loop(model, test_ds, criterion)
+        test_loss.append(avg_loss)
+        if (epoch + 1) % 100 == 0:
+            ...
+            lr /= 2                      # learning rate halved every 100 epochs
+
+if __name__ == "__main__":
+    train_ds, test_ds = get_datasets()
+    model = TimeSeriesTransformer(d=6, k=12, N=1)
+    train_model(model, train_ds, test_ds)</code></pre>
+
+    <p>The model is deliberately tiny: <strong>d = 6, k = 12, N = 1</strong> — a six-dimensional embedding, a twelve-dimensional projection, one encoder and one decoder block. And the printed log is the most instructive output of the entire lecture:</p>
+
+    <table>
+      <tr><th>Epoch</th><th>Train Loss</th><th>Test Loss</th></tr>
+      <tr><td>1</td><td>0.3875</td><td>0.0534</td></tr>
+      <tr><td>2</td><td>0.1027</td><td>0.1807</td></tr>
+      <tr><td>3</td><td>0.0468</td><td>0.2791</td></tr>
+      <tr><td>4</td><td>0.0363</td><td>0.2810</td></tr>
+      <tr><td>5</td><td>0.0322</td><td>0.2572</td></tr>
+      <tr><td>6</td><td>0.0312</td><td>&#8230;</td></tr>
+    </table>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful &#8212; read the two columns together</span>
+      <p>The train loss falls from 0.3875 to 0.0312, a twelvefold improvement. The test loss goes from 0.0534 to 0.2810, <strong>five times worse</strong>. This is textbook <strong>overfitting</strong>, visible from epoch two, and it is exactly the condition chapter 2 named: a model with a large number of parameters fitted to too small a sample. It is also why the deck heads the results slide <em>Testing the model &#8211; Spoiler&#8230;</em> The honest lesson of this chapter is not that transformers forecast well on 144 monthly observations. It is that they do not.</p>
+    </div>
+
+    <div class="oa-w" id="loss-widget">
+      <h4>The two loss curves</h4>
+      <p class="oa-sub">The numbers reported by the deck, plotted. The point where the curves separate is where training should have stopped.</p>
+      <canvas id="loss-canvas" height="220"></canvas>
+      <div class="oa-out" id="loss-out"></div>
+    </div>
+
+    <h3>Forecasting the whole test span</h3>
+    <p>Because the model emits <code>out_len</code> points at a time, a long forecast is assembled in chunks, with the context window rolled forward each time:</p>
+
+    <pre><code class="language-python">def forecast_sequence(model, x_seq, out_len=None) -&gt; np.ndarray:
+    model.eval()
+    context = x_seq.detach().clone()
+    preds, remaining = [], out_len
+    with torch.no_grad():
+        while remaining &gt; 0:
+            y_chunk = model.generate(context.unsqueeze(0).unsqueeze(-1),
+                                     max_len=remaining).squeeze(0)
+            preds.append(y_chunk)
+            context = torch.cat([context, y_chunk], dim=0)[-x_seq.size(0):]
+            remaining -= remaining
+    return torch.cat(preds, dim=0).detach().cpu().numpy()</code></pre>
+
+    <p>The line <code>context = torch.cat([context, y_chunk], dim=0)[-x_seq.size(0):]</code> is recursive forecasting once more: append the predictions, keep only the last <code>input_len</code> values. Same accumulation of error, same widening uncertainty, in a fourth architecture.</p>
+  </section>
+
+  <section id="s10" data-src="lesson.pdf">
+    <h2>10. Chronos, out of the box</h2>
+    <p>The lecture closes with an <em>Extra</em>: <strong>Chronos by Amazon</strong> (arXiv 2403.07815), a pretrained forecasting model usable without training anything yourself.</p>
+
+    <pre><code class="language-python">&gt; pip install chronos-forecasting
+
+from chronos import ChronosPipeline
+
+def get_model(device_map=None):
+    if device_map is None:
+        device_map = "cuda" if torch.cuda.is_available() else "cpu"
+    return ChronosPipeline.from_pretrained("amazon/chronos-t5-tiny",
+                                           device_map=device_map)
+
+def predict(pipeline, input_series, max_len=6, num_samples=20):
+    context = torch.tensor(input_series, dtype=torch.float32).unsqueeze(0)
+    forecast = pipeline.predict(context, prediction_length=max_len,
+                                num_samples=num_samples)
+    if forecast.ndim == 3:
+        forecast = np.median(forecast, axis=1)      # median over samples
+    return forecast[0]</code></pre>
+
+    <p>Two design choices are worth reading off that snippet. Chronos is <strong>probabilistic</strong>: it draws <code>num_samples</code> trajectories rather than one, and the point forecast is their <strong>median</strong>. That is the chapter 2 attribute — forecasts are not just numbers, they carry a dispersion — realised directly in the API, and the sample cloud <em>is</em> the prediction interval of chapter 4. And it needs no fitting at all: the pipeline is loaded pretrained and handed a context window.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Editor's note</span>
+      <p>For the exam project, note the constraint from chapter 1: <strong>only the libraries used during the course may be employed</strong>, and anything else must be approved by the instructor beforehand. <code>chronos-forecasting</code> appears in the lecture material, but a project depending on downloading pretrained weights must still run on the laboratory machines and on the instructor's server. Check before you build on it.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="lesson.pdf">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What problem with RNNs does attention solve, and what are the two path-length complexities?</summary>
+        <p>In an RNN, <strong>to compare two samples x<sub>i</sub> and x<sub>j</sub> we need |i - j| steps</strong>, so it is <strong>very easy to lose information in the process</strong> — a serious defect since the distance between elements is crucial and related concepts can be very far apart. Attention fixes it because <strong>during a single operation, each proposed output element looks at all elements of the input sequence in parallel</strong>. Path length complexity: <strong>O(n) for RNNs, O(1) for attention</strong>.</p>
+      </details>
+
+      <details>
+        <summary>What do queries, keys and values represent, and how are they obtained?</summary>
+        <p><strong>Queries</strong>: what is each element looking for? <strong>Keys</strong>: what does each element have to offer? <strong>Values</strong>: what is the actual content of the element? Each is obtained by projection — matrix multiplication — of the input: <var>Q = XW<sub>q</sub></var>, <var>K = XW<sub>k</sub></var>, <var>V = XW<sub>v</sub></var>, with the weight matrices being <strong>learnable parameters</strong> in &#8477;<sup>d&#215;k</sup>. The web-search analogy: the query is what you type, the keys are page metadata, the value is the page content you are shown.</p>
+      </details>
+
+      <details>
+        <summary>Write the attention formula and justify each of its two normalisations.</summary>
+        <p><var>softmax(Q &#183; K<sup>T</sup> / &#8730;d<sub>k</sub>) &#183; V</var>. The <strong>dot product</strong> Q&#183;K<sup>T</sup> puts in cell (i,j) the similarity between query i and key j. Dividing by <strong>&#8730;d<sub>k</sub></strong> is done <em>for stability purposes</em>: large projection dimensions otherwise produce large scores that saturate the softmax. The <strong>softmax normalises for rows</strong> — <code>dim=-1</code> — because the attention given by each query must sum to one. The result is called the attention weights, and multiplying by V <em>extracts only the content of similar elements</em>.</p>
+      </details>
+
+      <details>
+        <summary>Distinguish self-attention from cross-attention.</summary>
+        <p>In <strong>self-attention</strong>, Q, K and V all come from the same sequence, so the sequence attends to itself. In <strong>cross-attention</strong>, <strong>queries come from one series while keys and values come from another</strong> — in the transformer, the decoder supplies the queries and the encoder output supplies keys and values, which is how the generated output consults the encoded input.</p>
+      </details>
+
+      <details>
+        <summary>What is multihead attention, and why bother?</summary>
+        <p>The motivating question is: why should we use a single set of projections onto queries, keys and values? In multihead attention <strong>each head performs its own attention and the result is concatenated</strong>, allowing different heads to attend to different kinds of relationship — one to the immediately preceding step, another to the same period a year earlier.</p>
+      </details>
+
+      <details>
+        <summary>Why does a transformer need positional encoding, and how is it added here?</summary>
+        <p>Because <strong>attention evaluates each query with each key, so there is no knowledge of position in the sequence</strong> — the operation is invariant to permutation of the inputs, which is fatal for a time series. <strong>Positional knowledge is added to the inputs</strong>: in this implementation a learned parameter matrix of shape (max_len, d) whose first <code>seq_len</code> rows are <strong>added</strong> to the embedded input.</p>
+      </details>
+
+      <details>
+        <summary>Describe the structure of an encoder block.</summary>
+        <p>Self-attention, then <code>norm1(x + att_out)</code>; then a feedforward network <strong>Linear(d, 4d) &#8594; ReLU &#8594; Linear(4d, d)</strong>, then <code>norm2(x + ffn_out)</code>. The <code>x +</code> terms are residual connections and the norms are layer normalisations; together they let N blocks stack without the signal degrading. A decoder block adds a <strong>cross-attention</strong> stage with its own norm between the self-attention and the feedforward network, so it has three norms instead of two.</p>
+      </details>
+
+      <details>
+        <summary>How is a scalar time series fed into a model that expects vectors?</summary>
+        <p>Through an <strong>Embedder</strong>: <var>z = x &#183; w<sub>in</sub> + b<sub>in</sub></var> on the way in, and <var>x&#770; = z &#183; w<sub>out</sub> + b<sub>out</sub></var> on the way out. Both are learnable, and <code>w_out</code> is <strong>initialised as w_in divided by its norm, so that the round trip is initially the identity</strong> — the model starts from "do nothing" rather than from noise. Inputs are n scalar points; outputs are m scalar points, generated one at a time.</p>
+      </details>
+
+      <details>
+        <summary>What does the OutputScaler do, and what is its "context"?</summary>
+        <p>It passes the last position of the transformer output through a small head (Linear &#8594; ReLU &#8594; Linear), then computes a <strong>scale s = sigmoid(scale(context))</strong> and a <strong>bias b = bias(context)</strong>, returning <var>out &#183; s + b</var>. The context passed to it is <code>src_emb.mean(dim=1)</code>, the <strong>average embedding of the input window</strong> — so the output level is conditioned on the level of the window just seen, which is a defence against the normalization problem below.</p>
+      </details>
+
+      <details>
+        <summary>Explain the data pollution problem with min-max normalization on this series.</summary>
+        <p>To avoid data pollution, <strong>normalization should only employ points from the train series</strong>, so <code>s_min</code> and <code>s_max</code> come from the training split and are then applied to the test split. But the airline series rises throughout, so every test point lies above the training maximum and normalises to a value <strong>greater than 1</strong> — the slide caption reads <em>values unseen during training!</em> The model is asked to work in a region it has never seen. The structural remedy is chapter 3: difference or log-transform the series so that the modelled quantity is a change, not a level.</p>
+      </details>
+
+      <details>
+        <summary>The reported training log shows train loss 0.3875 &#8594; 0.0312 while test loss goes 0.0534 &#8594; 0.2810. Diagnose it.</summary>
+        <p><strong>Overfitting</strong>, visible from the second epoch onwards. The model is fitting the training windows better and better while generalising worse and worse; training should have been stopped where the curves diverge. It is exactly the first circumstance chapter 2 named — a model with a large number of parameters fitted to too small a sample — on 144 monthly observations. The deck itself titles the results slide <em>Spoiler&#8230;</em></p>
+      </details>
+
+      <details>
+        <summary>How does a transformer produce a multi-step forecast, and what does it share with the MLP and XGBoost?</summary>
+        <p>The encoder runs once on the context; the decoder then generates points one at a time, each appended to the decoder input for the next step (<code>dec_input = torch.cat([dec_input, output], dim=1)</code>). For a longer span, chunks are produced and the context window rolled forward: <code>context = torch.cat([context, y_chunk])[-input_len:]</code>. This is <strong>recursive forecasting</strong>, identical in principle to the MLP loop of chapter 5 and the <code>np.roll</code> loop of chapter 6, and it accumulates error the same way.</p>
+      </details>
+
+      <details>
+        <summary>What is Chronos and what does its API reveal about good forecasting practice?</summary>
+        <p>A <strong>pretrained forecasting model by Amazon</strong> (arXiv 2403.07815), usable out of the box via <code>ChronosPipeline.from_pretrained("amazon/chronos-t5-tiny")</code> with no training. Its <code>predict</code> takes a <code>num_samples</code> argument and draws that many trajectories, the point forecast being their <strong>median</strong> — so the model natively outputs a <em>distribution</em>, which is the chapter 2 requirement that a forecast include dispersion, and the sample spread is a ready-made prediction interval.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-06-machine-learning-models.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-08-statistics.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Source: deck <em>lesson &#8212; Transformers for Forecasting</em> &#183; Operational Analytics, University of Bologna, a.y. 2025/2026 &#183; Prof. V. Maniezzo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Annotated code: the attention forward pass ---- */
+LessonKit.annotatedCode('#ac-attn', {
+  lines: [
+    ['def forward(self, Q, K, V):', 'The whole attention operator in six lines. Q, K and V arrive already projected; this function only combines them.'],
+    ['    d_k = K.shape[1]', 'The projection dimension. It is read off the keys rather than stored, so the same module works whatever k it was built with.'],
+    ['    sim = Q @ K.T', 'The similarity matrix. Cell (i,j) holds the dot product of query i with key j: how well what element i is LOOKING FOR matches what element j HAS TO OFFER.'],
+    ['    att_weights = torch.softmax(sim / math.sqrt(d_k), dim=-1)', 'Two things at once. Dividing by the square root of d_k is done for STABILITY: without it, a large projection dimension produces large dot products, the softmax saturates and gradients die. dim=-1 normalises along the LAST axis, that is per row, because the attention given by each query must sum to one.'],
+    ['    out = att_weights @ V', 'Extract the content: each output row is a weighted average of all value vectors, weighted by how well that query matched each key. This single matrix product is what replaces the n sequential hops of an RNN.'],
+    ['    out = out @ self.Wo', 'Project back into d dimensions. The attention happened in the k-dimensional projection space; the block must hand back something the residual connection can add to its input.'],
+    ['    return out', 'One operation, no recurrence, every element compared with every other. Path length O(1).']
+  ]
+});
+
+/* ---- State explorer: data flow through the TimeSeriesTransformer ---- */
+LessonKit.stateExplorer('#se-tst', {
+  start: 'SCALAR SERIES',
+  states: {
+    'SCALAR SERIES': { desc: 'n scalar observations, min-max normalised to [0,1] using statistics computed on the TRAIN split only. This is where the data pollution question of section 8 is decided.', to: [['embed each scalar','EMBEDDING']] },
+    EMBEDDING: { desc: 'Embedder.embed: z = x * w_in + b_in turns each scalar into a d-dimensional vector. w_out is initialised as w_in normalised, so that the eventual round trip starts out as the identity function.', to: [['add position','POSITIONAL']] },
+    POSITIONAL: { desc: 'PositionalEncoding adds a learned vector per position. Necessary because attention compares every query with every key and therefore knows nothing about order: without this the model sees a set, not a sequence.', to: [['into the encoder','ENCODER']] },
+    ENCODER: { desc: 'N encoder blocks: self-attention, norm1(x + att_out), feedforward d to 4d to d, norm2(x + ffn_out). The residual connections and layer norms are what allow the blocks to stack.', to: [['enc_out to the decoder','DECODER']] },
+    DECODER: { desc: 'N decoder blocks: self-attention on what has been generated so far, then CROSS-attention with queries from the decoder and keys and values from enc_out, then a feedforward network - each followed by a layer norm.', to: [['rescale the output','OUTPUT SCALER'],['generate one more point','DECODER']] },
+    'OUTPUT SCALER': { desc: 'The last position goes through a small head, and is then multiplied by a sigmoid scale and shifted by a bias, both computed from the context - the mean embedding of the input window. This conditions the output on the level of the window just seen.', to: [['unembed','SCALAR FORECAST']] },
+    'SCALAR FORECAST': { desc: 'Embedder.unembed maps the vector back to a scalar. For a horizon longer than one step the value is appended to the context, the window is rolled forward and the loop reopens: recursive forecasting, with the usual error accumulation.', to: [['more points needed','DECODER']] }
+  }
+});
+
+/* ---- Bespoke widget: attention weights heat map ---- */
+(function () {
+  var DK = document.getElementById('att-dk');
+  if (!DK) return;
+  var SP = document.getElementById('att-sp'), cv = document.getElementById('att-canvas'), out = document.getElementById('att-out');
+  function draw() {
+    var dk = +DK.value, spread = +SP.value / 10;
+    document.getElementById('att-dk-v').textContent = dk;
+    document.getElementById('att-sp-v').textContent = spread.toFixed(1);
+    var n = 6, q = [], k = [], i, j;
+    for (i = 0; i < n; i++) { q.push((i - 2.5) * spread * 0.5); k.push((i - 2.5) * spread * 0.5); }
+    var W = [];
+    for (i = 0; i < n; i++) {
+      var row = [], mx = -Infinity;
+      for (j = 0; j < n; j++) { var s = q[i] * k[j] / Math.sqrt(dk); row.push(s); mx = Math.max(mx, s); }
+      var sum = 0;
+      for (j = 0; j < n; j++) { row[j] = Math.exp(row[j] - mx); sum += row[j]; }
+      for (j = 0; j < n; j++) { row[j] /= sum; }
+      W.push(row);
+    }
+    var w = cv.clientWidth || 600, hh = 230;
+    cv.width = w; cv.height = hh;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, w, hh);
+    var cell = Math.min(28, (hh - 60) / n);
+    var x0 = 92, y0 = 34;
+    g.font = '10px monospace';
+    g.fillStyle = '#45463F';
+    g.fillText('keys  k(j) &#8594;', x0, 20);
+    for (j = 0; j < n; j++) { g.fillText('k' + j, x0 + j * cell + cell / 3, 30); }
+    for (i = 0; i < n; i++) {
+      g.fillStyle = '#45463F';
+      g.fillText('q' + i, x0 - 22, y0 + i * cell + cell / 1.6);
+      for (j = 0; j < n; j++) {
+        var v = W[i][j];
+        g.fillStyle = 'rgba(184,61,45,' + (0.08 + v * 0.92) + ')';
+        g.fillRect(x0 + j * cell, y0 + i * cell, cell - 1, cell - 1);
+        if (cell > 22) {
+          g.fillStyle = v > 0.5 ? '#FAF7EF' : '#171813';
+          g.fillText(v.toFixed(2), x0 + j * cell + 2, y0 + i * cell + cell / 1.6);
+        }
+      }
+    }
+    g.fillStyle = '#45463F';
+    g.fillText('each ROW sums to 1 (softmax dim=-1)', x0, y0 + n * cell + 20);
+    /* entropy of the first row as a sharpness measure */
+    var H = 0;
+    for (j = 0; j < n; j++) { if (W[0][j] > 0) H -= W[0][j] * Math.log2(W[0][j]); }
+    var maxW = Math.max.apply(null, W[n - 1]);
+    out.innerHTML = 'scaling divisor &#8730;d&#8342; = <b>' + Math.sqrt(dk).toFixed(2) + '</b><br>'
+      + 'largest weight in the last row: <b>' + maxW.toFixed(3) + '</b> &#160;&#183;&#160; attention entropy of the first row: <b>' + H.toFixed(3) + '</b> bits (max ' + Math.log2(n).toFixed(2) + ')<br>'
+      + (maxW > 0.8 ? '<b>saturated</b>: one key takes almost all the weight, the softmax gradient nearly vanishes &#8212; exactly what dividing by &#8730;d&#8342; is meant to prevent.'
+        : (maxW < 0.25 ? 'nearly <b>uniform</b>: attention is spread evenly, so the operator is behaving like a plain average and discriminating between elements very little.'
+          : 'a healthy distribution: clearly peaked but not saturated.'));
+  }
+  [DK, SP].forEach(function (el) { el.addEventListener('input', draw); });
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ---- Bespoke widget: normalization leakage ---- */
+(function () {
+  var SPL = document.getElementById('nm-sp');
+  if (!SPL) return;
+  var TR = document.getElementById('nm-tr'), cv = document.getElementById('nm-canvas'), out = document.getElementById('nm-out');
+  function draw() {
+    var share = +SPL.value / 100, trend = +TR.value / 100;
+    document.getElementById('nm-sp-v').textContent = (share * 100).toFixed(0) + '%';
+    document.getElementById('nm-tr-v').textContent = trend.toFixed(2);
+    var n = 144, raw = [], i;
+    for (i = 0; i < n; i++) {
+      raw.push(100 + trend * 2.2 * i + 22 * Math.sin(2 * Math.PI * i / 12) * (1 + trend * i / 120));
+    }
+    var cut = Math.round(n * share);
+    var trainMin = Math.min.apply(null, raw.slice(0, cut));
+    var trainMax = Math.max.apply(null, raw.slice(0, cut));
+    var norm = raw.map(function (v) { return (v - trainMin) / (trainMax - trainMin); });
+    var above = 0, worst = 1;
+    for (i = cut; i < n; i++) { if (norm[i] > 1) above++; worst = Math.max(worst, norm[i]); }
+    var w = cv.clientWidth || 600, hh = 220;
+    cv.width = w; cv.height = hh;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, w, hh);
+    var lo = -0.15, hi = Math.max(1.35, worst + 0.12);
+    function X(i2) { return 44 + i2 / (n - 1) * (w - 60); }
+    function Yc(v) { return hh - 24 - (v - lo) / (hi - lo) * (hh - 40); }
+    g.fillStyle = 'rgba(31,90,73,0.08)';
+    g.fillRect(44, Yc(1), w - 56, Yc(0) - Yc(1));
+    g.strokeStyle = '#1F5A49'; g.lineWidth = 1; g.setLineDash([4, 3]);
+    g.beginPath(); g.moveTo(44, Yc(1)); g.lineTo(w - 12, Yc(1)); g.stroke();
+    g.beginPath(); g.moveTo(44, Yc(0)); g.lineTo(w - 12, Yc(0)); g.stroke();
+    g.setLineDash([]);
+    g.font = '10px monospace'; g.fillStyle = '#1F5A49';
+    g.fillText('1.0', 20, Yc(1) + 4); g.fillText('0.0', 20, Yc(0) + 4);
+    g.strokeStyle = '#1546B8'; g.lineWidth = 1.7; g.beginPath();
+    for (i = 0; i < cut; i++) { var x = X(i), y = Yc(norm[i]); if (i === 0) g.moveTo(x, y); else g.lineTo(x, y); }
+    g.stroke();
+    g.strokeStyle = '#B83D2D'; g.lineWidth = 1.9; g.beginPath();
+    for (i = cut - 1; i < n; i++) { var x2 = X(i), y2 = Yc(norm[i]); if (i === cut - 1) g.moveTo(x2, y2); else g.lineTo(x2, y2); }
+    g.stroke();
+    g.strokeStyle = '#171813'; g.setLineDash([4, 4]);
+    g.beginPath(); g.moveTo(X(cut), 6); g.lineTo(X(cut), hh - 24); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#1546B8'; g.fillText('train (fits s_min, s_max)', 50, 18);
+    g.fillStyle = '#B83D2D'; g.fillText('test', X(cut) + 6, 18);
+    out.innerHTML = 'train min = <b>' + trainMin.toFixed(1) + '</b>, train max = <b>' + trainMax.toFixed(1) + '</b><br>'
+      + 'test points normalising ABOVE 1.0: <b>' + above + '</b> of ' + (n - cut) + ' &#160;&#183;&#160; largest normalised value: <b>' + worst.toFixed(3) + '</b><br>'
+      + (above > 0
+        ? '<b>values unseen during training</b> &#8212; the model has never had an input above 1 and is being asked to forecast there. Difference or log-transform the series (ch. 3) instead of relying on scaling.'
+        : 'no test point leaves [0,1] here &#8212; but that is only because the trend is flat. Raise the trend slider and the problem reappears at once.');
+  }
+  [SPL, TR].forEach(function (el) { el.addEventListener('input', draw); });
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ---- Bespoke widget: the reported loss curves ---- */
+(function () {
+  var cv = document.getElementById('loss-canvas');
+  if (!cv) return;
+  var out = document.getElementById('loss-out');
+  var tr = [0.3875, 0.1027, 0.0468, 0.0363, 0.0322, 0.0312];
+  var te = [0.0534, 0.1807, 0.2791, 0.2810, 0.2572];
+  function draw() {
+    var w = cv.clientWidth || 600, hh = 220;
+    cv.width = w; cv.height = hh;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, w, hh);
+    var hi = 0.42;
+    function X(i) { return 50 + i / 5 * (w - 66); }
+    function Yc(v) { return hh - 30 - v / hi * (hh - 46); }
+    g.strokeStyle = '#C9C3B6'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(50, 8); g.lineTo(50, hh - 30); g.lineTo(w - 12, hh - 30); g.stroke();
+    g.font = '10px monospace'; g.fillStyle = '#45463F';
+    g.fillText('0.40', 14, Yc(0.40) + 4); g.fillText('0.20', 14, Yc(0.20) + 4); g.fillText('0', 34, hh - 28);
+    for (var e = 0; e < 6; e++) { g.fillText(String(e + 1), X(e) - 3, hh - 14); }
+    g.fillText('epoch', w / 2 - 16, hh - 4);
+    function poly(arr, color) {
+      g.strokeStyle = color; g.lineWidth = 2.2; g.beginPath();
+      for (var i = 0; i < arr.length; i++) { var x = X(i), y = Yc(arr[i]); if (i === 0) g.moveTo(x, y); else g.lineTo(x, y); }
+      g.stroke();
+      g.fillStyle = color;
+      for (var j = 0; j < arr.length; j++) { g.beginPath(); g.arc(X(j), Yc(arr[j]), 3.4, 0, 6.3); g.fill(); }
+    }
+    poly(tr, '#1546B8');
+    poly(te, '#B83D2D');
+    g.fillStyle = '#1546B8'; g.fillText('train loss', 58, 20);
+    g.fillStyle = '#B83D2D'; g.fillText('test loss', 132, 20);
+    g.strokeStyle = '#171813'; g.setLineDash([4, 3]); g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(X(1), 8); g.lineTo(X(1), hh - 30); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#171813'; g.fillText('curves diverge here', X(1) + 6, 40);
+  }
+  out.innerHTML = 'train loss 0.3875 &#8594; 0.0312: <b>12&#215; better</b><br>'
+    + 'test loss 0.0534 &#8594; 0.2810: <b>5&#215; worse</b><br>'
+    + 'the two curves separate at epoch 2 and never meet again: textbook <b>overfitting</b>, on 144 monthly observations with an encoder-decoder transformer. Training should have stopped at the divergence point.';
+  window.addEventListener('resize', draw);
+  draw();
+})();
+</script>
+</body>
+</html>

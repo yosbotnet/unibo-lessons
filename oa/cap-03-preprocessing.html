@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 3 — Preprocessing: stationarity, transforms and denoising · OA</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .oa-w{margin:1.4rem 0;border:1px solid var(--lk-rule);border-radius:3px;padding:1.1rem;background:var(--lk-paper-light)}
+  .oa-w h4{margin:0 0 .25rem;color:var(--lk-cobalt-dark)}
+  .oa-w .oa-sub{margin:0 0 .7rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .oa-w .oa-row{display:flex;align-items:center;gap:.8rem;margin:.5rem 0;flex-wrap:wrap}
+  .oa-w label{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;min-width:9.5rem}
+  .oa-w input[type=range]{flex:1;min-width:130px;cursor:pointer}
+  .oa-w .oa-val{font-family:var(--lk-mono);font-size:.9rem;color:var(--lk-cobalt);font-weight:600;min-width:4.5rem;text-align:right}
+  .oa-w .oa-out{border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper);padding:.55rem .8rem;margin-top:.7rem;font-family:var(--lk-mono);font-size:.88rem;line-height:1.6}
+  .oa-w .oa-out b{color:var(--lk-vermilion)}
+  .oa-w canvas{width:100%;height:220px;display:block;margin:.7rem 0 0;border:1px solid var(--lk-rule-soft);background:var(--lk-paper)}
+  .oa-w .oa-btns{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.6rem}
+  .oa-w .oa-btns button{font-family:var(--lk-utility);font-size:.85rem;font-weight:600;cursor:pointer;padding:.4rem .85rem;border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-paper-light);color:var(--lk-cobalt)}
+  .oa-w .oa-btns button[aria-pressed="true"]{background:var(--lk-cobalt);color:var(--lk-paper-light)}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-02-time-series.html">&larr; Ch. 2 — Time series and decomposition</a>
+    <a href="index.html">Index</a>
+    <a href="cap-04-statistical-models.html">Ch. 4 — Statistical models &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Predictive analytics · Chapter 3</div>
+    <h1>Preprocessing: stationarity, transforms and denoising</h1>
+    <div class="lk-meta"><span>~40 min read</span><span>6 interactive widgets</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Why raw data is not enough</a></li>
+      <li><a href="#s2">The three fundamental moments</a></li>
+      <li><a href="#s3">Stationarity, in three conditions</a></li>
+      <li><a href="#s4">The difference transform</a></li>
+      <li><a href="#s5">The log transform</a></li>
+      <li><a href="#s6">Power transforms and Box-Cox</a></li>
+      <li><a href="#s7">Standardization and normalization</a></li>
+      <li><a href="#s8">Missing values</a></li>
+      <li><a href="#s9">Outliers, dimensionality reduction, augmentation</a></li>
+      <li><a href="#s10">Noise reduction and spectral analysis</a></li>
+      <li><a href="#s11">Autoencoders and Kalman filters</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>1. Why raw data is not enough</h2>
+    <p>The deck opens by stating the problem without softening it: <strong>raw data could be unsuitable for forecasting algorithms</strong>. Two reasons are given, and they are different in kind.</p>
+    <ul>
+      <li><strong>Some algorithms require data with specific characteristics.</strong> This is a hard constraint: an AR model is <em>only feasible for stationary processes</em>, full stop.</li>
+      <li><strong>Some algorithms perform better when data is presented in some specific format.</strong> This is a soft one: an MLP with sigmoid activations will train, but badly, on unscaled inputs.</li>
+    </ul>
+
+    <p>So <strong>data preprocessing has the objective of making raw data better compatible with the selected algorithm</strong>. Note the direction of the arrow: preprocessing is chosen <em>for</em> a model, not in the abstract. And then the warning that should be printed on the inside of every student's eyelids: there are <strong>many different preprocessing options</strong>, and <strong>no deterministic rule on what to do</strong>.</p>
+
+    <p>What preprocessing is aiming at is stated in one line under a picture of white noise: that is <strong>the easiest time series to forecast</strong>, and <strong>data preprocessing tries to revert to this case</strong>. It sounds paradoxical — flat noise is unforecastable — but it is exactly right. Every structure you can strip out and model explicitly (trend, seasonality, changing variance) is structure the fitting algorithm no longer has to discover for itself. What should be left over is the part nobody can predict.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>Preprocessing is not cleaning. It is <strong>moving structure out of the residual and into the model specification</strong>, where it can be inverted afterwards. Every transform in this chapter is paired with its inverse, because the forecast must eventually be returned to the original scale.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>2. The three fundamental moments</h2>
+    <p>A <strong>moment is a specific quantitative measure of the shape of a function</strong>. The statistical description of a time series rests on three of them.</p>
+
+    <table>
+      <tr><th>Moment</th><th>Definition</th><th>What it measures</th></tr>
+      <tr><td><strong>Mean</strong></td><td><var>&#956;<sub>t</sub> = E[y<sub>t</sub>]</var></td><td>The level of the series at time <var>t</var>.</td></tr>
+      <tr><td><strong>Variance</strong></td><td><var>&#963;&#178;<sub>t</sub> = E[(y<sub>t</sub> - &#956;<sub>t</sub>)&#178;]</var></td><td>The spread around that level.</td></tr>
+      <tr><td><strong>Autocovariance</strong></td><td><var>&#947;<sub>t,s</sub> = E[(y<sub>t</sub> - &#956;<sub>t</sub>)(y<sub>s</sub> - &#956;<sub>s</sub>)]</var></td><td>Relates the value at time <var>t</var> with the value at time <var>s</var>. It is what the autocorrelograms of chapter 2 represent.</td></tr>
+    </table>
+
+    <p>These three quantities are the vocabulary in which stationarity is about to be defined, and the reason the definition has exactly three clauses.</p>
+  </section>
+
+  <section id="s3" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>3. Stationarity, in three conditions</h2>
+    <p>A time series is <strong>stationary</strong> if:</p>
+    <ol>
+      <li>its <strong>mean is constant over time</strong> (stationarity in means);</li>
+      <li>its <strong>variance is constant over time</strong> (stationarity in variance);</li>
+      <li>the relation between values separated by <var>k</var> time periods <strong>depends only on <var>k</var>, not on time</strong> (stationarity in covariance).</li>
+    </ol>
+
+    <p>Or, compressed into the sentence worth memorising: <strong>a series is stationary if its distribution is invariant with respect to translations in time</strong>. Slide the window anywhere along the series and it looks statistically the same.</p>
+
+    <p>The slides give two contrasting examples. <em>Daily total female births in California, 1959</em> is a stationary process: no trends, stationary in mean and variance, no seasonality or cyclicity. <em>Accidental deaths in the U.S.A.</em> (1973-1978) is stationary in mean and variance <strong>but with seasonality</strong> — a reminder that the three conditions fail independently, and that a series can be well behaved in two of them and useless in the third.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 400" width="100%" role="img" aria-labelledby="p31t">
+        <title id="p31t">Three panels contrasting a series non-stationary in mean because of a trend, a series non-stationary in variance with widening oscillations, and a stationary series whose window statistics do not move.</title>
+        <text x="14" y="18" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">FAILS 1 &#183; mean drifts (trend)</text>
+        <line x1="56" y1="112" x2="672" y2="112" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <polyline points="62,100 92,86 122,96 152,74 182,64 212,76 242,60 272,48 302,58 332,42 362,34 392,46 422,30 452,40 482,24 512,34 542,18 572,30 602,22 632,28" fill="none" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <line x1="62" y1="98" x2="632" y2="30" stroke="var(--lk-vermilion)" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <rect x="70" y="60" width="86" height="52" fill="none" stroke="var(--lk-cobalt)" stroke-width="1"/>
+        <rect x="530" y="10" width="86" height="52" fill="none" stroke="var(--lk-cobalt)" stroke-width="1"/>
+        <text x="200" y="106" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">two windows, two different means &#8594; fix with diff</text>
+
+        <text x="14" y="152" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">FAILS 2 &#183; variance grows with level</text>
+        <line x1="56" y1="252" x2="672" y2="252" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <line x1="62" y1="205" x2="632" y2="205" stroke="var(--lk-rule-soft)" stroke-width="1" stroke-dasharray="3 4"/>
+        <polyline points="62,199 92,211 122,197 152,213 182,193 212,217 242,188 272,222 302,183 332,228 362,176 392,234 422,170 452,240 482,164 512,246 542,158 572,252 602,152 632,258" fill="none" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <path d="M62,199 L632,152" fill="none" stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="4 3"/>
+        <path d="M62,211 L632,258" fill="none" stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="4 3"/>
+        <text x="330" y="272" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">widening envelope &#8594; fix with log / Box-Cox</text>
+
+        <text x="14" y="300" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">STATIONARY &#183; invariant under translation in time</text>
+        <line x1="56" y1="390" x2="672" y2="390" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <line x1="62" y1="348" x2="632" y2="348" stroke="var(--lk-rule-soft)" stroke-width="1" stroke-dasharray="3 4"/>
+        <polyline points="62,340 92,358 122,336 152,356 182,342 212,360 242,334 272,354 302,344 332,358 362,336 392,352 422,342 452,360 482,338 512,354 542,344 572,356 602,336 632,350" fill="none" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <rect x="70" y="330" width="86" height="30" fill="none" stroke="var(--lk-forest)" stroke-width="1"/>
+        <rect x="530" y="330" width="86" height="30" fill="none" stroke="var(--lk-forest)" stroke-width="1"/>
+        <text x="200" y="380" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">same mean, same spread, same lag structure &#8594; ready to model</text>
+      </svg>
+      <figcaption><b>Plate 3.1</b> — The three stationarity conditions fail independently, and each failure has its own remedy. The transform ladder of sections 4 to 6 is organised by which condition it repairs.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s4" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>4. The difference transform</h2>
+    <p>We try to make a series <strong>stationary in mean</strong> by <strong>differencing</strong>: subtracting from the current value the value of the previous time moment.</p>
+
+    <pre><code>first order:     &#8711;y&#8348; = y&#8348; - y&#8348;&#8331;&#8321;
+second order:    &#8711;&#178;y&#8348; = &#8711;y&#8348; - &#8711;y&#8348;&#8331;&#8321; = y&#8348; - 2y&#8348;&#8331;&#8321; + y&#8348;&#8331;&#8322;
+seasonal (L):    &#8711;&#8348;y&#8348; = y&#8348; - y&#8348;&#8331;&#8324;</code></pre>
+
+    <p><strong>If the series has a linear trend, the resulting differenced series is stationary in means.</strong> More generally, the difference transform subtracts from each entry the entry back-shifted by a constant time lag: <em>a simple way for removing a systematic structure from the series</em>. The process can be repeated — difference the differenced series — to remove second-order trends. A <strong>seasonal structure</strong> is removed by subtracting the observation from the prior season: e.g. 12 time steps before, for monthly data with a yearly seasonal structure.</p>
+
+    <h3>On the fil rouge</h3>
+    <p>Applying a first difference to the TV sales series gives, for t = 2 &#8230; 20:</p>
+    <table>
+      <tr><th>t</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th></tr>
+      <tr><td><strong>diff</strong></td><td>53</td><td>-94</td><td>132</td><td>188</td><td>-181</td><td>-12</td><td>169</td><td>122</td><td>-118</td><td>-109</td></tr>
+      <tr><th>t</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th><th></th></tr>
+      <tr><td><strong>diff</strong></td><td>245</td><td>49</td><td>-218</td><td>50</td><td>269</td><td>79</td><td>-284</td><td>-49</td><td>306</td><td></td></tr>
+    </table>
+    <p>The slides annotate this table with two words: <em>removed the linear trend!</em> The differenced series oscillates around a roughly constant level instead of climbing. What it has <em>not</em> removed is the seasonal alternation, still visible as the regular sign pattern, nor the growth of the swing amplitude.</p>
+
+    <div id="ac-diff"></div>
+
+    <p>The invertibility is the point. <code>difference()</code> throws away the first <code>interval</code> observations and produces increments; <code>invert_difference()</code> replays them from the original head. Every forecast produced on differenced data must go back through this function before anyone sees it.</p>
+  </section>
+
+  <section id="s5" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>5. The log transform</h2>
+    <p>Where differencing fixes the mean, the <strong>log transform</strong> attacks the <strong>variance</strong> — and, combined with diff, both.</p>
+
+    <h3>Why the logarithm turns growth into addition</h3>
+    <p>The slides derive the key approximation carefully. The function <var>y = ln(x)</var> is tangent at <var>(1, 0)</var> to the line <var>y = x - 1</var>, so <var>ln(1+r) &#8776; r</var> when <var>r</var> is small with respect to 1 (say <var>r &#8804; 0.2</var>). Now suppose <var>x</var> has a small percent increase, for example 5%: it changes from <var>x</var> to <var>(1+r)x</var> with <var>r = 0.05</var>. Then</p>
+
+    <pre><code>ln((1+r)x) = ln(x) + ln(1+r) &#8776; ln(x) + r</code></pre>
+
+    <p>If <var>x</var> increases by 5%, the log of <var>x</var> increases from <var>ln(x)</var> to <var>ln(x) + 0.05</var>. Since a percent variation of a series is <var>(y<sub>t</sub> - y<sub>t-1</sub>) / y<sub>t-1</sub></var>, the conclusion is that <strong>a percent variation is almost equal to ln(y<sub>t</sub>) - ln(y<sub>t-1</sub>)</strong> — the log-difference <em>is</em> the growth rate.</p>
+
+    <p>The slides check it numerically on the first airline passenger records:</p>
+    <table>
+      <tr><th>Passengers</th><th>% var (r)</th><th>ln(x)</th><th>ln(x&#8331;&#8321;) + r</th></tr>
+      <tr><td>112</td><td></td><td>4.718499</td><td></td></tr>
+      <tr><td>118</td><td>0.053571</td><td>4.770685</td><td>4.772070</td></tr>
+      <tr><td>132</td><td>0.118644</td><td>4.882802</td><td>4.889329</td></tr>
+      <tr><td>129</td><td>-0.02273</td><td>4.859812</td><td>4.860075</td></tr>
+      <tr><td>121</td><td>-0.06202</td><td>4.795791</td><td>4.797797</td></tr>
+      <tr><td>135</td><td>0.115702</td><td>4.905275</td><td>4.911493</td></tr>
+    </table>
+    <p>The last two columns agree to three decimals, and disagree slightly more when <var>r</var> is largest — exactly as the approximation predicts.</p>
+
+    <h3>Three properties</h3>
+    <table>
+      <tr><th>Property</th><th>Consequence</th></tr>
+      <tr><td><strong>Linearization of exponential increases</strong>: <var>ln(xy) = ln(x) + ln(y)</var></td><td>The log transform turns multiplicative relations into additive ones and exponential trends into linear ones. <strong>It makes it possible to use linear models for exponential processes.</strong></td></tr>
+      <tr><td><strong>Trends in log units &#8776; percentage increases</strong></td><td>The slope of a trend on a log scale equals the percentage increase of the original series.</td></tr>
+      <tr><td><strong>Errors in log units &#8776; percentage errors</strong></td><td>Errors measured on log data can be read as percentage errors on the original data.</td></tr>
+    </table>
+
+    <h3>The two-step ladder on the fil rouge</h3>
+    <p>Taking logs first and then differencing gives the pair of columns the slides annotate as <em>removed the trend on variance!</em> and <em>removed the trend on means and variance!</em></p>
+
+    <table>
+      <tr><th>t</th><th>y<sub>t</sub></th><th>log</th><th>log-diff</th></tr>
+      <tr><td>1</td><td>128</td><td>4.85</td><td></td></tr>
+      <tr><td>2</td><td>181</td><td>5.20</td><td>0.35</td></tr>
+      <tr><td>3</td><td>87</td><td>4.47</td><td>-0.73</td></tr>
+      <tr><td>4</td><td>219</td><td>5.39</td><td>0.92</td></tr>
+      <tr><td>5</td><td>407</td><td>6.01</td><td>0.62</td></tr>
+      <tr><td>&#8230;</td><td>&#8230;</td><td>&#8230;</td><td>&#8230;</td></tr>
+      <tr><td>19</td><td>419</td><td>6.04</td><td>-0.11</td></tr>
+      <tr><td>20</td><td>725</td><td>6.59</td><td>0.55</td></tr>
+    </table>
+
+    <div class="oa-w" id="tf-widget">
+      <h4>The transform ladder, on the real fil rouge</h4>
+      <p class="oa-sub">Each button applies one rung of the ladder to the twenty TV-sales points. The verdict box compares the mean and the standard deviation of the first half against the second half: that comparison is the working definition of stationarity in mean and in variance.</p>
+      <div class="oa-btns" id="tf-btns"></div>
+      <canvas id="tf-canvas" height="220"></canvas>
+      <div class="oa-out" id="tf-out"></div>
+    </div>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Know which transform repairs which condition. <strong>Diff</strong> &#8594; stationarity <em>in mean</em>, by removing a linear trend (repeat for higher-order trends, use lag L for seasonality). <strong>Log</strong> &#8594; stationarity <em>in variance</em>, by turning proportional growth into constant growth. <strong>Log then diff</strong> &#8594; both, and it is the standard opening move on the Box-Jenkins airline series in chapter 4.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>6. Power transforms and Box-Cox</h2>
+    <p>The log is one member of a family. A <strong>power transform</strong> is a family of functions that create a <strong>monotonic transformation of data using power functions</strong>, used to stabilise variance and make the data more normal-distribution-like. On a time series, this can remove a change in variance over time. Popular examples: the log transform, the square root transform, and the generalised <strong>Box-Cox</strong> transform, which transforms positive data according to</p>
+
+    <pre><code>          &#8968; (x&#7525; - 1) / &#955;     if &#955; &#8800; 0
+BC(x) =   &#8970; ln(x)             if &#955; = 0</code></pre>
+
+    <p>and where <strong>the &#955; value is chosen to maximise the log-likelihood function, making the data as normally distributed as possible</strong>. So Box-Cox with &#955; = 0 <em>is</em> the log transform; &#955; = 0.5 is essentially a square root; &#955; = 1 leaves the shape alone. Choosing &#955; automatically is what makes it attractive: you do not have to guess how strong the variance stabilisation should be.</p>
+
+    <pre><code class="language-python">from math import log, exp
+from scipy.stats import boxcox
+import pandas as pd
+
+def invert_boxcox(value, lam):
+    if lam == 0:                       # log case
+        return exp(value)
+    return exp(log(lam * value + 1) / lam)   # general case
+
+data = pd.read_csv('FilRouge.csv', usecols=[1]).values.flatten()
+transformed, lmbda = boxcox(data)
+print(f"data={transformed}, lmbda={lmbda}")
+inverted = [invert_boxcox(x, lmbda) for x in transformed]</code></pre>
+
+    <p>Note the shape of that snippet: transform, use, <strong>invert</strong>. It is the same three-beat rhythm as the difference transform, and it is the rhythm the exam project has to implement for whatever preprocessing it chooses.</p>
+  </section>
+
+  <section id="s7" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>7. Standardization and normalization</h2>
+    <p>Two rescalings that are constantly confused, so the slides define them separately.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Standardization</button>
+        <button class="lk-tab">Normalization</button>
+        <button class="lk-tab">Which one, when</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>A transform for data with a Gaussian distribution, resulting in a standard normal.</strong> It rescales the distribution so that the mean of observed values is <strong>0</strong> and the standard deviation is <strong>1</strong>. It subtracts the series mean <var>x&#772;</var> and divides by the sample standard deviation <var>s</var>:</p>
+        <pre><code>x&#8347; = (x&#7522; - x&#772;) / s</code></pre>
+        <pre><code class="language-python">from sklearn.preprocessing import StandardScaler
+data = pd.read_csv('FilRouge.csv', usecols=[1]).values   # column vector!
+transformer = StandardScaler()
+transformer.fit(data)
+transformed = transformer.transform(data)     # mean 0, std 1
+inverted    = transformer.inverse_transform(transformed)</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p>In the simplest case, <strong>a rescaling of data from the original range to a new range</strong> (min-max feature scaling), usually between <strong>0 and 1</strong>:</p>
+        <pre><code>x&#8345; = (x&#7522; - x&#7504;&#7522;&#8345;) / (x&#7504;&#8336;&#8339; - x&#7504;&#7522;&#8345;)</code></pre>
+        <p>In more complicated cases, normalization may refer to adjustments where the intention is to bring the entire probability distribution of adjusted values into a given alignment.</p>
+        <pre><code class="language-python">from sklearn.preprocessing import MinMaxScaler
+data = pd.read_csv('FilRouge.csv', usecols=[1]).values
+transformer = MinMaxScaler()
+transformer.fit(data.T)
+transformed = transformer.transform(data)     # min 0, max 1
+inverted    = transformer.inverse_transform(transformed)</code></pre>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Standardization assumes a roughly Gaussian shape and is indifferent to outliers only in the sense that it does not clip them; normalization pins the range, which is what activation functions want. Chapter 5 makes the requirement explicit: because sigmoid activations are defined on <var>]-1, 1[</var> (hyperbolic tangent) or <var>]0, 1[</var> (logistic), input data <strong>must</strong> be scaled, and some authors recommend scaling into a narrower interval such as <var>[0.2, 0.8]</var> to avoid saturation at the asymptotes.</p>
+        <p><strong>Both are invertible, and both must be fitted on training data only.</strong> Chapter 7 shows what happens when a min-max scaler is fitted on data the model will later be tested against.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s8" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>8. Missing values</h2>
+    <p>The slides refuse to be encouraging here, and they are right to: <strong>there is NO good way to deal with missing data</strong>, and <strong>imputation does not necessarily give better results</strong>. Imputation algorithms divide into simple but fast approaches, like mean imputation, and more advanced algorithms that need more computation time, like Kalman smoothing.</p>
+
+    <table>
+      <tr><th>Family</th><th>Methods</th><th>When it is defensible</th></tr>
+      <tr><td><strong>Non-time-series specific</strong></td><td>mean imputation, median imputation, mode imputation &#8212; calculate the appropriate measure and replace NAs with it; <strong>random sample imputation</strong>, replacing missing values with observations randomly selected from the remaining data.</td><td>Replacing with a central measure is <strong>appropriate for stationary time series</strong>. Random sample imputation is <strong>not likely to work well unless the random selection is carefully chosen</strong>.</td></tr>
+      <tr><td><strong>Time-series specific</strong></td><td><strong>LOCF</strong> (last observation carried forward), <strong>NOCB</strong> (next observation carried backward), <strong>linear interpolation</strong>, <strong>spline interpolation</strong>.</td><td>These rely on the assumption that <strong>adjacent observations are similar to one another</strong>. They do not work well when that assumption fails &#8212; for instance in the presence of strong seasonality, where the nearest <em>useful</em> neighbour is one period away, not one step away.</td></tr>
+    </table>
+
+    <pre><code class="language-python">ds  = pd.Series(y)
+ds1 = ds.ffill()              # LOCF
+ds2 = ds.bfill()              # NOCB
+ds3 = ds.fillna(ds.mean())    # mean imputation
+ds4 = ds.interpolate()        # linear interpolation</code></pre>
+
+    <div id="se-missing"></div>
+  </section>
+
+  <section id="s9" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>9. Outliers, dimensionality reduction, augmentation</h2>
+    <p>From here the deck marks its own content as <em>advanced topics</em>: sketches of subjects that deserve much more grounding, offered as <strong>pointers to issues that could need to be addressed in order to enhance forecasting effectiveness</strong>. These are also the "advanced extensions" that lift an exam project into the top band.</p>
+
+    <h3>Outliers, or anomaly detection</h3>
+    <p>An <strong>outlier is an observation that significantly differs from other observations of the same feature</strong>. Time series with outliers have three characteristics: there is a <strong>systematic pattern</strong> (deterministic) and some <strong>variation</strong> (stochastic); <strong>only a few data points are outliers</strong>; and <strong>outliers are significantly different from the rest of the data</strong>.</p>
+
+    <p>An anomaly detection algorithm must either <strong>label each time point</strong> as anomaly / not anomaly, <strong>or forecast a signal</strong> for some point and test whether the actual value deviates from the forecast enough to be deemed an anomaly. Two decomposition-based approaches are given:</p>
+    <ul>
+      <li><strong>STL decomposition</strong>: split the signal into seasonal, trend and residue; analyse the deviation of the residue and introduce a threshold on it, and you have an anomaly detector. Similarly with ARIMA or exponential smoothing.</li>
+      <li><strong>Classification and regression trees</strong>: use supervised learning to teach trees to classify anomaly and non-anomaly points.</li>
+    </ul>
+
+    <pre><code class="language-python">from statsmodels.tsa.seasonal import seasonal_decompose
+
+df     = pd.read_csv("traffico16.csv")
+col    = "ago2"
+series = df[col].fillna(value=df[col].mean())
+result = seasonal_decompose(series, model='additive', period=7)
+Resid  = result.resid
+std    = Resid.std()
+
+plt.plot(Resid, "o", label="datapoints")
+plt.hlines(0, 0, len(Resid))
+plt.hlines( 1.5*std, 0, len(Resid), color="red", label="std limits")
+plt.hlines(-1.5*std, 0, len(Resid), color="red")
+plt.legend(); plt.show()</code></pre>
+
+    <div class="callout warn">
+      <span class="callout-label">Careful</span>
+      <p>The slides attach a caution that is easy to skip and expensive to ignore: <strong>in certain applications outliers are data of special interest, not data to be deleted</strong>. In predictive maintenance the anomaly <em>is</em> the signal. Deleting outliers is a modelling decision, never a cleaning step.</p>
+    </div>
+
+    <h3>Dimensionality reduction</h3>
+    <p>In multivariate analysis, datasets can be defined over too many dimensions — attributes can number in the hundreds or thousands. Five reasons are given for reducing them: less storage space; less computation and training time; some algorithms do not perform well in large dimensions; it takes care of <strong>multicollinearity</strong> by removing redundant features; and it helps in visualising data.</p>
+
+    <p>It can be done in two different ways: (1) <strong>keeping only the most relevant variables</strong> from the original dataset — properly called <em>feature selection</em>; (2) <strong>finding a smaller set of new variables</strong>, each a combination of the input variables, containing basically the same information — sometimes called dimensionality reduction proper.</p>
+
+    <table>
+      <tr><th>Technique</th><th>Rule</th></tr>
+      <tr><td>Missing Value Ratio</td><td>Attributes with too many missing values (50%?) can be discarded.</td></tr>
+      <tr><td>Low Variance Filter</td><td>Attributes often repeating one same value can be discarded.</td></tr>
+      <tr><td>High Correlation Filter</td><td>If two variables are highly correlated one can be dropped, keeping the one most correlated with the target.</td></tr>
+      <tr><td>Random Forest</td><td>Very popular; feature importance falls out of the ensemble (chapter 6).</td></tr>
+      <tr><td>Backward Feature Elimination</td><td>Re-train omitting one feature; if its removal has no big effect, remove it.</td></tr>
+      <tr><td>Forward Feature Selection</td><td>Start with few attributes, include the features contributing the greater improvement.</td></tr>
+      <tr><td><strong>PCA</strong></td><td>Extracts a new set of variables from a large existing set by <strong>linear combinations</strong>; the new variables are the <em>principal components</em>.</td></tr>
+      <tr><td><strong>SVD</strong></td><td>Singular value decomposition: another mathematical approach decomposing the original dataset into its constituents.</td></tr>
+    </table>
+
+    <h3>Data augmentation and bootstrapping</h3>
+    <p><strong>Data augmentation means generating artificial data in order to reduce the variance of the output</strong> (to reduce the number of errors). Widely used in image analysis, but useful also when dealing with too short time series — which, given the fil rouge has twenty points, is a live concern. Common techniques for time series classification: <strong>extrapolation</strong> (fill relevant fields with values based on heuristics — a trend-seasonality model can compute predicted values for instants not covered by the series); <strong>tagging</strong> (common records tagged to a group); <strong>aggregation</strong> (values estimated using averages and means); <strong>probability</strong> (values populated based on the probability of events).</p>
+
+    <p><strong>Bootstrapping</strong> is useful both for augmentation and for uncertainty estimation: it <strong>generates many pseudo-samples from your observed series to empirically estimate the distribution of a statistic without assuming a parametric model</strong>. In forecasting, this translates into confidence intervals derived from data alone.</p>
+
+    <table>
+      <tr><th>Method</th><th>Mechanism</th></tr>
+      <tr><td><strong>Block bootstrap</strong></td><td>Resamples <strong>contiguous blocks</strong> of observations, preserving local temporal dependency structure.</td></tr>
+      <tr><td><strong>Stationary bootstrap</strong></td><td>Uses <strong>random-length</strong> blocks for stationarity; block length drawn from a geometric distribution.</td></tr>
+      <tr><td><strong>Residual bootstrap</strong></td><td>Fit a model, resample the <strong>residuals</strong>, reconstruct the series — separating signal from noise.</td></tr>
+    </table>
+
+    <p>Why it matters, in the slides' own list: no distributional assumptions; works with non-linear models; forecast interval estimation; model selection validation; and it handles short series well.</p>
+  </section>
+
+  <section id="s10" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>10. Noise reduction and spectral analysis</h2>
+    <p><strong>Denoising can be heavily borrowed from signal processing techniques</strong> to improve the signal-to-noise ratio (SNR). The general recipe is analysis <strong>in the frequency domain</strong>: apply a Fourier transform (or a wavelet transform) to the series, and then an appropriate filter.</p>
+
+    <table>
+      <tr><th>Filter</th><th>Definition</th><th>Time-series instance</th></tr>
+      <tr><td><strong>Low pass</strong></td><td>Passes signals with a frequency <em>lower</em> than a cut-off and attenuates higher ones.</td><td>A simple moving average (SMA) is a low pass filter.</td></tr>
+      <tr><td><strong>High pass</strong></td><td>Passes signals with a frequency <em>higher</em> than a cut-off and attenuates lower ones.</td><td>Either linear filters such as SMA, or non-linear filters such as a median filter. Consider also the Kalman filter.</td></tr>
+    </table>
+
+    <h3>Fourier, DFT, FFT</h3>
+    <p>The premise is the classic one: <strong>any periodic function (or function defined on an interval) can be reconstructed by adding an appropriate, infinite number of sinusoids with appropriate amplitudes and frequencies</strong>. <strong>Spectral analysis is a technique to discover periodicities underlying time series</strong>, and to that end we first transform data from the time domain to the frequency domain.</p>
+
+    <p>The Fourier transform of a function of time is a <strong>complex-valued function of frequency, whose magnitude represents the amount of that frequency present in the original function</strong>, and the transformation is invertible. For data series, the <strong>Discrete Fourier Transform (DFT)</strong> converts a finite sequence of equally spaced samples into a same-length sequence of equally spaced samples of a complex-valued function of frequency. The <strong>Fast Fourier Transform (FFT)</strong> is an algorithm that computes the DFT efficiently, in <strong>O(n log n)</strong>.</p>
+
+    <p>Two facts about the output that you must not forget when coding it:</p>
+    <ul>
+      <li><strong>Symmetry.</strong> For a sequence of real values, the transform satisfies <var>FT(k) = FT(n-k)</var> — symmetry around <var>n/2</var> — so <strong>only half of the transform data is needed</strong>.</li>
+      <li><strong>Nyquist-Shannon.</strong> A signal containing frequency components up to frequency <var>F</var> must be sampled at a rate of <strong>at least 2F</strong> to be fully reconstructed. Conversely, sampling at frequency <var>F</var> can reconstruct the signal only up to the <var>F/2</var> component — its <strong>Nyquist frequency</strong>.</li>
+    </ul>
+
+    <p>And the sentence that explains why any of this is a <em>preprocessing</em> technique: <strong>noise has high frequency; cutting out high frequencies prevents from representing noise</strong>. A second, less obvious use is noted too: <strong>spectral decomposition can be used as externals</strong> — as exogenous variables for SARIMAX — because sinusoids extend into the future; usually a low number of frequencies is used.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-labelledby="p32t">
+        <title id="p32t">The low-pass denoising pipeline: detrend the series, take the FFT, keep only the one-sided spectrum below the cut-off frequency, invert the transform and add the trend back.</title>
+        <defs>
+          <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/>
+          </marker>
+        </defs>
+        <rect x="16" y="40" width="96" height="54" fill="var(--lk-paper-light)" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <text x="64" y="62" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">series y(t)</text>
+        <text x="64" y="79" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">non-stationary</text>
+
+        <rect x="146" y="40" width="104" height="54" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="198" y="62" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">detrend</text>
+        <text x="198" y="79" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">signal.detrend()</text>
+
+        <rect x="284" y="40" width="104" height="54" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="336" y="62" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">FFT</text>
+        <text x="336" y="79" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">O(n log n)</text>
+
+        <rect x="422" y="40" width="112" height="54" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.5"/>
+        <text x="478" y="62" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">low-pass mask</text>
+        <text x="478" y="79" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">f &#8804; f_cut</text>
+
+        <rect x="568" y="40" width="112" height="54" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="624" y="62" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">ifft + trend</text>
+        <text x="624" y="79" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">clean series</text>
+
+        <line x1="112" y1="67" x2="140" y2="67" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#ar3)"/>
+        <line x1="250" y1="67" x2="278" y2="67" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#ar3)"/>
+        <line x1="388" y1="67" x2="416" y2="67" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#ar3)"/>
+        <line x1="534" y1="67" x2="562" y2="67" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#ar3)"/>
+
+        <text x="16" y="140" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">POWER SPECTRUM  |FFT|&#178; / n</text>
+        <line x1="60" y1="270" x2="672" y2="270" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <line x1="60" y1="150" x2="60" y2="270" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <rect x="72" y="164" width="14" height="106" fill="var(--lk-cobalt)"/>
+        <rect x="118" y="180" width="14" height="90" fill="var(--lk-cobalt)"/>
+        <rect x="164" y="240" width="14" height="30" fill="var(--lk-cobalt)"/>
+        <rect x="210" y="252" width="14" height="18" fill="var(--lk-cobalt)"/>
+        <rect x="256" y="258" width="14" height="12" fill="var(--lk-rule-soft)"/>
+        <rect x="302" y="262" width="14" height="8" fill="var(--lk-rule-soft)"/>
+        <rect x="348" y="264" width="14" height="6" fill="var(--lk-rule-soft)"/>
+        <rect x="394" y="265" width="14" height="5" fill="var(--lk-rule-soft)"/>
+        <rect x="440" y="266" width="14" height="4" fill="var(--lk-rule-soft)"/>
+        <rect x="486" y="266" width="14" height="4" fill="var(--lk-rule-soft)"/>
+        <rect x="532" y="267" width="14" height="3" fill="var(--lk-rule-soft)"/>
+        <rect x="578" y="267" width="14" height="3" fill="var(--lk-rule-soft)"/>
+        <line x1="240" y1="150" x2="240" y2="284" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="5 4"/>
+        <text x="246" y="162" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">f_cut</text>
+        <text x="90" y="300" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt)">kept: low frequencies = structure</text>
+        <text x="380" y="300" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">discarded: high frequencies = noise</text>
+        <text x="620" y="288" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">&#8594; Nyquist at f = 0.5</text>
+        <text x="16" y="322" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">airline passengers: max power at f = 0.0833 &#8594; period 1/0.0833 = 12 months</text>
+      </svg>
+      <figcaption><b>Plate 3.2</b> — Low-pass denoising in the frequency domain. The periodogram doubles as a period detector: the dominant frequency of the airline series is 0.0833 cycles per month, whose reciprocal is the twelve-month season.</figcaption>
+    </figure>
+
+    <h3>Doing it, step by step</h3>
+    <p>The pipeline needs a <strong>stationary signal</strong> first: detrend the series and keep only the seasonal component, either via <code>seasonal_decompose(...).seasonal</code> or via <code>scipy.signal.detrend()</code>. Only half of the transformed values are used, because of FFT symmetry. And remember that <strong>periods (wavelengths) are the inverse of frequencies</strong>.</p>
+
+    <pre><code class="language-python">detrended_series = signal.detrend(orig_values, type="linear")
+fft = np.fft.fft(detrended_series)
+n   = len(fft)
+one_sided_fft = fft[:int(n/2)+1]        # conjugate symmetry: half is enough
+Fs      = 1                              # 1 observation per unit of time
+nyquist = Fs/2                           # only frequencies up to Fs/2 matter
+power   = np.abs(one_sided_fft)**2 / n   # magnitude squared over length
+
+freq_sample = np.array(range(n)) / n     # normalized frequency grid
+x_freq      = freq_sample[:int(n/2)+1]
+frequency_max = freq_sample[np.where(power == np.amax(power))]
+print("Max period {}".format(1/frequency_max))</code></pre>
+
+    <pre><code class="language-python"># ---------- low pass filter
+f_cut = 1/4      # keep only periods longer than the denominator
+mask  = np.logical_or(freq_sample &lt;= f_cut, freq_sample &gt;= 1 - f_cut)
+
+fft_lowpass = fft * mask                 # reconstruction needs the FULL fft array
+reconstructed_detrended = np.real(np.fft.ifft(fft_lowpass))
+
+t     = np.arange(len(orig_values))       # put the trend back
+coeff = np.polyfit(t, orig_values, 1)
+trend = coeff[0] * t + coeff[1]
+reconstructed_series = reconstructed_detrended + trend</code></pre>
+
+    <p>The <code>mask</code> line deserves a second look: it keeps frequencies below the cut-off <em>and</em> above <code>1 - f_cut</code>, because the second half of the FFT array is the mirror image of the first. Masking only the left half would destroy the symmetry and give a complex reconstruction. A convenience alternative is <code>np.fft.rfft</code> / <code>np.fft.irfft</code>, which keep only half the frequencies for you, or <code>scipy.signal.periodogram</code>, which returns the spectrum directly.</p>
+
+    <div class="oa-w" id="lp-widget">
+      <h4>Low-pass cut-off</h4>
+      <p class="oa-sub">A clean seasonal component plus high-frequency noise. Slide the cut-off down and watch the reconstruction shed the noise &#8212; and then, if you go too far, shed the signal as well.</p>
+      <div class="oa-row"><label for="lp-c">Cut-off f_cut</label><input type="range" id="lp-c" min="2" max="50" step="1" value="20"><span class="oa-val" id="lp-c-v">0.20</span></div>
+      <div class="oa-row"><label for="lp-n">Noise level</label><input type="range" id="lp-n" min="0" max="60" step="2" value="26"><span class="oa-val" id="lp-n-v">0.26</span></div>
+      <canvas id="lp-canvas" height="220"></canvas>
+      <div class="oa-out" id="lp-out"></div>
+    </div>
+  </section>
+
+  <section id="s11" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>11. Autoencoders and Kalman filters</h2>
+
+    <h3>Autoencoders: a neural approach to noise filtering</h3>
+    <p><strong>An autoencoder is a simple neural network trained with the same dataset both as input and as output of the network, where the network has fewer hidden neurons than the input/output ones.</strong> The bottleneck is the whole trick: the network cannot copy its input through, so it must learn a compressed description. <strong>Since noise has much higher dimensions than regular data, this process reduces the noise.</strong> The slides note that this is similar to PCA and is a general dimensionality reduction technique.</p>
+
+    <pre><code class="language-python">class Autoencoder(nn.Module):
+    def __init__(self, input_dim, latent_dim):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 64), nn.ReLU(),
+            nn.Linear(64, latent_dim), nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 64), nn.ReLU(),
+            nn.Linear(64, input_dim), nn.Sigmoid()   # output in [0, 1]
+        )
+    def forward(self, x):
+        latent = self.encoder(x)
+        return self.decoder(latent)</code></pre>
+
+    <p>Three further uses are listed beyond denoising. <strong>Anomaly detection</strong>: autoencoders reconstruct "normal" patterns well but struggle with anomalies, so the reconstruction errors correspond to outliers, which can be removed or flagged before the forecasting model. <strong>Handling missing data</strong>: they can be trained to impute gaps, giving a cleaner, complete dataset. <strong>Dimensionality reduction and feature extraction</strong>: rather than feeding raw, high-dimensional series into a forecasting model, use the encoder output as features — these learned features tend to capture temporal structure (trends, seasonality, correlations) more effectively than hand-crafted ones.</p>
+
+    <h3>Kalman filters</h3>
+    <p>The Kalman filter is <strong>an algorithm that provides estimates of some unknown variables given their measurements observed over time</strong>. It is called a <em>filter</em> because it filters out noise. The precise statement of its optimality is worth quoting: <strong>if all noise is Gaussian, the Kalman filter minimises the mean square error of the estimated parameters; if the noise is NOT Gaussian, the Kalman filter is the best <em>linear</em> estimator, but non-linear estimators may be better.</strong></p>
+
+    <p>Its practical appeal is architectural: Kalman filters have a relatively simple form and require small computational power — <strong>they do not need to keep any history other than the previous state</strong> — and they are very fast, which makes them well suited to real-time problems and embedded systems.</p>
+
+    <p>The model assumes the true state at time <var>t</var> evolves from the state at <var>t-1</var>:</p>
+    <pre><code>x&#8348; = F&#8348; x&#8348;&#8331;&#8321; + B&#8348; u&#8348; + w&#8348;        state transition
+z&#8348; = H&#8348; x&#8348; + v&#8348;                  observation</code></pre>
+    <table>
+      <tr><th>Symbol</th><th>Role</th></tr>
+      <tr><td><var>F<sub>t</sub></var></td><td>the <strong>state transition model</strong> applied to the state <var>x<sub>t-1</sub></var></td></tr>
+      <tr><td><var>B<sub>t</sub></var></td><td>the <strong>control-input model</strong> applied to the input vector <var>u<sub>t</sub></var></td></tr>
+      <tr><td><var>w<sub>t</sub></var></td><td>the <strong>process noise</strong>, assumed drawn from a zero-mean multivariate normal distribution</td></tr>
+      <tr><td><var>H<sub>t</sub></var></td><td>the <strong>observation model</strong>, mapping the true state space into the observed space</td></tr>
+      <tr><td><var>v<sub>t</sub></var></td><td>the <strong>observation noise</strong>, assumed zero-mean Gaussian white noise</td></tr>
+    </table>
+    <p>The slides add the practical footnote: <strong>matrices need to be identified for the specific application</strong>. That identification is the real work.</p>
+
+    <h3>Predict and update</h3>
+    <p>The algorithm consists of two stages, cycled for each new measurement — and the slides note that the terms <em>prediction</em> and <em>update</em> are often called <em>propagation</em> and <em>correction</em> in different literature.</p>
+    <ol>
+      <li><strong>Prediction phase.</strong> The filter predicts the next value in the series from the current value and its parameters, and predicts the uncertainty (error, variance) in that prediction according to the process noise present in the system.</li>
+      <li><strong>Update phase.</strong> The filter reads the actual measurement, computes the difference between predicted and measured value, and <strong>decides which value to keep — both being unreliable — by calculating the Kalman Gain</strong>. A new value and a new uncertainty follow, and are fed back into the prediction step.</li>
+    </ol>
+
+    <p>The gain itself has a memorable form:</p>
+    <pre><code>K = Error in Prediction / (Error in Prediction + Error in Measurement)</code></pre>
+    <p>Its value ranges from 0 to 1: <strong>near 0, the predicted value is close to the actual value; near 1, the measured value is close to the actual value</strong>. The cycle continues until the difference between predicted and measured value converges to zero.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-labelledby="p33t">
+        <title id="p33t">The Kalman filter cycle: an actual measurement enters the update step, which computes the Kalman gain, updates the estimate and error covariance, and feeds the predict step, which predicts the next state and error covariance and returns to update.</title>
+        <defs>
+          <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="ar4v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-vermilion)"/>
+          </marker>
+        </defs>
+        <rect x="20" y="24" width="180" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <text x="110" y="45" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">actual measure z(t)</text>
+        <text x="110" y="61" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">(can initialise the state)</text>
+        <line x1="110" y1="70" x2="110" y2="106" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#ar4v)"/>
+
+        <rect x="20" y="112" width="270" height="112" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="36" y="134" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">UPDATE (correction)</text>
+        <text x="36" y="156" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">1. compute Kalman gain K</text>
+        <text x="36" y="176" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">2. update estimate with measurement</text>
+        <text x="36" y="196" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">3. update the error covariance</text>
+        <text x="36" y="214" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">K = Ep / (Ep + Em)   &#8712; [0, 1]</text>
+
+        <rect x="400" y="112" width="270" height="112" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="416" y="134" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">PREDICT (propagation)</text>
+        <text x="416" y="156" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">1. predict next state</text>
+        <text x="416" y="176" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">2. predict next error covariance</text>
+        <text x="416" y="200" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">x(t) = F x(t-1) + B u(t) + w(t)</text>
+        <text x="416" y="216" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">no history kept beyond the previous state</text>
+
+        <path d="M290,150 L394,150" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="342" y="142" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">corrected estimate</text>
+        <path d="M400,196 L290,196" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="345" y="212" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">prior for the next step</text>
+
+        <text x="20" y="256" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">K &#8594; 0 : trust the PREDICTION &#160;&#160;&#160; K &#8594; 1 : trust the MEASUREMENT</text>
+        <text x="20" y="276" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">once the series is filtered, train your chosen model on the &#8220;clean&#8221; data for a more accurate forecast</text>
+      </svg>
+      <figcaption><b>Plate 3.3</b> — The two-stage Kalman cycle exactly as the slides draw it. Everything the filter knows is in the current state and its covariance, which is why it costs so little to run in real time.</figcaption>
+    </figure>
+
+    <div class="oa-w" id="kg-widget">
+      <h4>Kalman gain: whom do you believe?</h4>
+      <p class="oa-sub">Both the prediction and the measurement are unreliable. The gain decides how the two are blended, using nothing but their error magnitudes.</p>
+      <div class="oa-row"><label for="kg-ep">Error in prediction</label><input type="range" id="kg-ep" min="1" max="100" step="1" value="40"><span class="oa-val" id="kg-ep-v">40</span></div>
+      <div class="oa-row"><label for="kg-em">Error in measurement</label><input type="range" id="kg-em" min="1" max="100" step="1" value="40"><span class="oa-val" id="kg-em-v">40</span></div>
+      <div class="oa-row"><label for="kg-pr">Predicted value</label><input type="range" id="kg-pr" min="0" max="200" step="1" value="80"><span class="oa-val" id="kg-pr-v">80</span></div>
+      <div class="oa-row"><label for="kg-me">Measured value</label><input type="range" id="kg-me" min="0" max="200" step="1" value="120"><span class="oa-val" id="kg-me-v">120</span></div>
+      <div class="oa-out" id="kg-out"></div>
+    </div>
+
+    <pre><code class="language-python">from pykalman import KalmanFilter
+
+measurements = y.to_numpy()
+kf = KalmanFilter(transition_matrices=[1],
+                  observation_matrices=[1],
+                  initial_state_mean=measurements[0],
+                  initial_state_covariance=1,
+                  observation_covariance=10,
+                  transition_covariance=10)
+state_means, state_covariances = kf.filter(measurements)</code></pre>
+
+    <p>The slides report the outcome on their example series as <em>randomness reduced by 50%</em>, and add the sentence that ties this whole chapter back to the rest of the course: <strong>once you have the filtered series, you can make forecasts by training the model you have chosen using the "clean" data</strong>.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">For the exam</span>
+      <p>Three denoising routes, three different assumptions. <strong>Low-pass / FFT</strong> assumes noise lives at high frequency. <strong>Autoencoder</strong> assumes noise lives in high dimensions that a bottleneck cannot fit. <strong>Kalman</strong> assumes noise is Gaussian, and is provably MSE-optimal only in that case — otherwise it is merely the best <em>linear</em> estimator. Be able to state which assumption each one makes.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="2 - Predictive data preprocessing.pdf">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>What is the objective of data preprocessing, and what does the deck say about choosing among the options?</summary>
+        <p>The objective is <strong>making raw data better compatible with the selected algorithm</strong>, because raw data may be unsuitable — some algorithms require data with specific characteristics, others simply perform better in a given format. There are <strong>many different preprocessing options and no deterministic rule on what to do</strong>. The target is the easiest series to forecast, white noise: preprocessing tries to revert to that case, so that everything predictable has already been moved into the model.</p>
+      </details>
+
+      <details>
+        <summary>State the three conditions for stationarity, and the one-line version.</summary>
+        <p>(1) The <strong>mean is constant over time</strong> (stationarity in means). (2) The <strong>variance is constant over time</strong> (stationarity in variance). (3) The relation between values separated by k periods <strong>depends only on k, not on time</strong> (stationarity in covariance). In one line: a series is stationary if its <strong>distribution is invariant with respect to translations in time</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Which three moments describe a time series statistically?</summary>
+        <p><strong>Mean</strong> &#956;<sub>t</sub> = E[y<sub>t</sub>]; <strong>variance</strong> &#963;&#178; = E[(y<sub>t</sub> - &#956;)&#178;]; and <strong>autocovariance</strong> &#947;<sub>t,s</sub> = E[(y<sub>t</sub> - &#956;)(y<sub>s</sub> - &#956;)], which relates the value at time t with the value at time s and is what autocorrelograms represent.</p>
+      </details>
+
+      <details>
+        <summary>Write the first, second and seasonal difference, and say what each removes.</summary>
+        <p>First: <var>&#8711;y<sub>t</sub> = y<sub>t</sub> - y<sub>t-1</sub></var>, which makes a series with a <strong>linear trend</strong> stationary in means. Second: <var>&#8711;&#178;y<sub>t</sub> = y<sub>t</sub> - 2y<sub>t-1</sub> + y<sub>t-2</sub></var>, for second-order trends. Seasonal: <var>y<sub>t</sub> - y<sub>t-L</sub></var>, subtracting the corresponding value of the previous season — e.g. 12 steps back for monthly data with a yearly structure.</p>
+      </details>
+
+      <details>
+        <summary>Explain why a log-difference is approximately a growth rate.</summary>
+        <p>Because <var>ln(x)</var> is tangent at (1,0) to <var>y = x - 1</var>, so <var>ln(1+r) &#8776; r</var> for small r. If x grows by a fraction r, then <var>ln((1+r)x) = ln(x) + ln(1+r) &#8776; ln(x) + r</var>. Since the percent variation of a series is <var>(y<sub>t</sub> - y<sub>t-1</sub>)/y<sub>t-1</sub></var>, that variation is almost exactly <var>ln(y<sub>t</sub>) - ln(y<sub>t-1</sub>)</var>.</p>
+      </details>
+
+      <details>
+        <summary>Give the three properties of the log transform.</summary>
+        <p><strong>Linearization of exponential increases</strong> — ln(xy) = ln(x) + ln(y), so multiplicative relations become additive and exponential trends become linear, making linear models usable on exponential processes. <strong>Trends measured in log units are approximately percentage increases</strong>. <strong>Errors measured in log units are approximately percentage errors</strong> on the original data.</p>
+      </details>
+
+      <details>
+        <summary>What is the Box-Cox transform and how is its parameter chosen?</summary>
+        <p>A power transform on positive data: <var>(x&#7525; - 1)/&#955;</var> for <var>&#955; &#8800; 0</var> and <var>ln(x)</var> for <var>&#955; = 0</var>. Power transforms are monotonic transformations used to stabilise variance and make data more normal-like, removing a change in variance over time. The <strong>&#955; value is chosen to maximise the log-likelihood function</strong>, making the data as normally distributed as possible.</p>
+      </details>
+
+      <details>
+        <summary>Distinguish standardization from normalization.</summary>
+        <p><strong>Standardization</strong> targets Gaussian data and produces a standard normal: subtract the mean and divide by the standard deviation, giving <strong>mean 0 and standard deviation 1</strong> (<code>StandardScaler</code>). <strong>Normalization</strong> in the simplest case is min-max feature scaling: <var>(x - x<sub>min</sub>)/(x<sub>max</sub> - x<sub>min</sub>)</var>, rescaling to a new range, usually <strong>0 to 1</strong> (<code>MinMaxScaler</code>). More generally normalization can mean bringing an entire probability distribution into a given alignment.</p>
+      </details>
+
+      <details>
+        <summary>Name the time-series-specific imputation methods and the assumption they share.</summary>
+        <p><strong>LOCF</strong> (last observation carried forward), <strong>NOCB</strong> (next observation carried backward), <strong>linear interpolation</strong> and <strong>spline interpolation</strong>. They all rely on the assumption that <strong>adjacent observations are similar to one another</strong>, and therefore fail when that is untrue — notably in the presence of strong seasonality. The general warning stands: there is no good way to deal with missing data, and imputation does not necessarily give better results.</p>
+      </details>
+
+      <details>
+        <summary>How can an STL decomposition be turned into an anomaly detector, and what caution accompanies it?</summary>
+        <p>Split the signal into seasonal, trend and residue; then <strong>analyse the deviation of the residue and introduce a threshold on it</strong> — points beyond, say, 1.5 standard deviations of the residual are flagged. The same can be done with ARIMA or exponential smoothing, or by training classification and regression trees to label points. The caution: <strong>in certain applications outliers are data of special interest, not data to be deleted</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Why does dimensionality reduction help, and what is the difference between its two forms?</summary>
+        <p>It reduces storage, reduces computation and training time, helps algorithms that perform poorly in high dimensions, takes care of <strong>multicollinearity</strong> by removing redundant features, and helps visualisation. The two forms: <strong>feature selection</strong>, keeping only the most relevant original variables (missing value ratio, low variance filter, high correlation filter, backward elimination, forward selection, random forest); and <strong>dimensionality reduction proper</strong>, finding a smaller set of new variables that are combinations of the inputs (PCA, SVD).</p>
+      </details>
+
+      <details>
+        <summary>What does the FFT symmetry property imply for code, and what does Nyquist add?</summary>
+        <p>For a real-valued series the transform satisfies <var>FT(k) = FT(n-k)</var>, symmetric around n/2, so <strong>only half the transform data is needed</strong> for analysis — but the <em>full</em> array is needed for reconstruction, which is why a low-pass mask must keep both <var>f &#8804; f_cut</var> and <var>f &#8805; 1 - f_cut</var>. Nyquist-Shannon says a signal with components up to F must be sampled at a rate of at least 2F to be reconstructed; sampling at F recovers only up to F/2. Since <strong>noise has high frequency</strong>, cutting high frequencies suppresses noise.</p>
+      </details>
+
+      <details>
+        <summary>Why does an autoencoder denoise, and what else can it do for a forecasting pipeline?</summary>
+        <p>It is trained with the same dataset as input and output, but has <strong>fewer hidden neurons than input/output ones</strong>. Since <strong>noise has much higher dimensions than regular data</strong>, the bottleneck cannot represent it and the reconstruction comes back cleaner — similar in spirit to PCA. Beyond denoising: <strong>anomaly detection</strong> (high reconstruction error flags outliers), <strong>missing data imputation</strong>, and <strong>feature extraction</strong>, using the encoder output as features that capture temporal structure better than hand-crafted ones.</p>
+      </details>
+
+      <details>
+        <summary>State the Kalman gain formula and interpret its extremes. When is the filter optimal?</summary>
+        <p><var>K = Error in Prediction / (Error in Prediction + Error in Measurement)</var>, with <var>K &#8712; [0,1]</var>. Near <strong>0</strong> the predicted value is close to the actual value, so the filter leans on its own prediction; near <strong>1</strong> the measured value is close to the actual value, so it leans on the sensor. The filter is a <strong>mean-square-error minimiser when all noise is Gaussian</strong>; if the noise is not Gaussian it is only the <strong>best linear estimator</strong>, and non-linear estimators may beat it.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-02-time-series.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-04-statistical-models.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Source: deck <em>2 - Predictive data preprocessing</em> &#183; Operational Analytics, University of Bologna, a.y. 2025/2026 &#183; Prof. V. Maniezzo</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Annotated code: difference transform and its inverse ---- */
+LessonKit.annotatedCode('#ac-diff', {
+  lines: [
+    ['def difference(data, interval):', 'The interval is the lag: 1 for a plain first difference, L for a seasonal difference. The same function does both.'],
+    ['    return [data[i] - data[i-interval] for i in range(interval, len(data))]', 'Start at index interval, not 0: the first "interval" observations have no predecessor to subtract, so the differenced series is shorter than the original. Forgetting this off-by-interval is the classic bug when re-aligning forecasts with dates.'],
+    ['', ''],
+    ['def invert_difference(orig_data, diff_data, interval):', 'The inverse needs the head of the ORIGINAL series as seed values, because differencing destroyed the level information and kept only the increments.'],
+    ['    inverted = [diff_data[i]+orig_data[i] for i in range(interval)]', 'Seed: the first interval reconstructed values come from the original head plus the corresponding increments.'],
+    ['    for i in range(interval, len(diff_data)):', 'Then a cumulative replay: each value is its own increment plus the value reconstructed one interval earlier.'],
+    ['        inverted = np.append(inverted, diff_data[i]+inverted[i-interval])', 'This is a cumulative sum with a lag. On a linear series like data = [5+2*x for x in range(0,10)] the differenced series is a constant 2 everywhere, and inverting it walks straight back to 5, 7, 9, 11, ...'],
+    ['    return inverted', 'Any forecast computed on the differenced scale must pass through here before it is reported. Chapter 4 chains two of these inversions, diff(12) then diff(1), then an exp() to undo the log.']
+  ]
+});
+
+/* ---- State explorer: choosing a missing-value strategy ---- */
+LessonKit.stateExplorer('#se-missing', {
+  start: 'GAP FOUND',
+  states: {
+    'GAP FOUND': { desc: 'A NaN appears in the series. Before anything else, recall the deck: there is NO good way to deal with missing data, and imputation does not necessarily give better results. Deleting the record is also an option when the series is long.', to: [['is the series stationary?','STATIONARY'],['is there strong seasonality?','SEASONAL'],['are neighbours informative?','LOCAL']] },
+    STATIONARY: { desc: 'For a stationary series, computing the appropriate central measure and replacing NAs with it is appropriate: mean, median or mode imputation. Cheap, fast, and defensible precisely because the level does not move.', to: [['apply mean/median/mode','IMPUTED']] },
+    SEASONAL: { desc: 'Strong seasonality breaks the adjacency assumption: the value one step back may be at the opposite phase of the cycle. LOCF, NOCB and interpolation do not work well here. Advanced options such as Kalman smoothing, or an autoencoder trained to impute gaps, cost more computation but respect the structure.', to: [['use Kalman smoothing / autoencoder','IMPUTED'],['reconsider a simpler option','GAP FOUND']] },
+    LOCAL: { desc: 'If adjacent observations really are similar to one another, the time-series-specific methods apply: LOCF (ffill), NOCB (bfill), linear interpolation or spline interpolation. In pandas these are one call each.', to: [['ffill / bfill / interpolate','IMPUTED']] },
+    IMPUTED: { desc: 'The gap is filled, but the imputation is now part of the model. Report it, and check that model diagnostics are not being flattered by artificially smooth stretches of invented data.', to: [['another gap','GAP FOUND']] }
+  }
+});
+
+/* ---- Bespoke widget: the transform ladder on the fil rouge ---- */
+(function () {
+  var RAW = [128,181,87,219,407,226,214,383,505,387,278,523,572,354,404,673,752,468,419,725];
+  var host = document.getElementById('tf-btns');
+  if (!host) return;
+  var cv = document.getElementById('tf-canvas'), out = document.getElementById('tf-out');
+  var current = 'raw';
+  var defs = {
+    raw:      { label: 'raw y', note: 'the original TV sales: trend up, seasonal swing widening.' },
+    log:      { label: 'log', note: 'log transform &#8212; attacks stationarity in VARIANCE by turning proportional growth into constant growth.' },
+    diff:     { label: 'diff', note: 'first difference &#8212; attacks stationarity in MEAN by removing the linear trend.' },
+    logdiff:  { label: 'log-diff', note: 'log then diff &#8212; the standard opening move: variance and mean together.' },
+    sdiff:    { label: 'seasonal diff (L=4)', note: 'seasonal difference y(t) - y(t-4) &#8212; removes the quarterly structure identified by the correlogram.' }
+  };
+  function series(kind) {
+    var i, o = [];
+    if (kind === 'raw') return RAW.slice();
+    if (kind === 'log') { for (i = 0; i < RAW.length; i++) o.push(Math.log(RAW[i])); return o; }
+    if (kind === 'diff') { for (i = 1; i < RAW.length; i++) o.push(RAW[i] - RAW[i - 1]); return o; }
+    if (kind === 'logdiff') { for (i = 1; i < RAW.length; i++) o.push(Math.log(RAW[i]) - Math.log(RAW[i - 1])); return o; }
+    for (i = 4; i < RAW.length; i++) o.push(RAW[i] - RAW[i - 4]);
+    return o;
+  }
+  function stats(a) {
+    var n = a.length, m = 0, i;
+    for (i = 0; i < n; i++) m += a[i];
+    m /= n;
+    var v = 0;
+    for (i = 0; i < n; i++) v += (a[i] - m) * (a[i] - m);
+    return { mean: m, sd: Math.sqrt(v / n) };
+  }
+  Object.keys(defs).forEach(function (k) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.innerHTML = defs[k].label;
+    b.setAttribute('aria-pressed', k === 'raw' ? 'true' : 'false');
+    b.addEventListener('click', function () {
+      current = k;
+      [].slice.call(host.children).forEach(function (o, i) {
+        o.setAttribute('aria-pressed', Object.keys(defs)[i] === k ? 'true' : 'false');
+      });
+      draw();
+    });
+    host.appendChild(b);
+  });
+  function draw() {
+    var a = series(current), n = a.length, i;
+    var w = cv.clientWidth || 600, hh = 220;
+    cv.width = w; cv.height = hh;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, w, hh);
+    var lo = Math.min.apply(null, a), hi = Math.max.apply(null, a);
+    if (hi === lo) { hi = lo + 1; }
+    var pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+    function X(i2) { return 52 + i2 / (n - 1) * (w - 68); }
+    function Yc(v) { return hh - 26 - (v - lo) / (hi - lo) * (hh - 44); }
+    g.strokeStyle = '#C9C3B6'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(52, 6); g.lineTo(52, hh - 26); g.lineTo(w - 12, hh - 26); g.stroke();
+    if (lo < 0 && hi > 0) {
+      g.strokeStyle = '#6E7068'; g.setLineDash([3, 3]);
+      g.beginPath(); g.moveTo(52, Yc(0)); g.lineTo(w - 12, Yc(0)); g.stroke(); g.setLineDash([]);
+    }
+    var half = Math.floor(n / 2);
+    var s1 = stats(a.slice(0, half)), s2 = stats(a.slice(half));
+    g.fillStyle = 'rgba(21,70,184,0.06)'; g.fillRect(52, 6, X(half - 1) - 52, hh - 32);
+    g.strokeStyle = '#1546B8'; g.lineWidth = 1.2; g.setLineDash([5, 3]);
+    g.beginPath(); g.moveTo(52, Yc(s1.mean)); g.lineTo(X(half - 1), Yc(s1.mean)); g.stroke();
+    g.strokeStyle = '#B83D2D';
+    g.beginPath(); g.moveTo(X(half), Yc(s2.mean)); g.lineTo(w - 12, Yc(s2.mean)); g.stroke();
+    g.setLineDash([]);
+    g.strokeStyle = '#171813'; g.lineWidth = 2; g.beginPath();
+    for (i = 0; i < n; i++) { var x = X(i), y = Yc(a[i]); if (i === 0) g.moveTo(x, y); else g.lineTo(x, y); }
+    g.stroke();
+    g.fillStyle = '#171813';
+    for (i = 0; i < n; i++) { g.beginPath(); g.arc(X(i), Yc(a[i]), 2.2, 0, 6.3); g.fill(); }
+    g.font = '10px monospace'; g.fillStyle = '#45463F';
+    g.fillText(hi.toFixed(2), 4, 14); g.fillText(lo.toFixed(2), 4, hh - 28);
+    var dm = Math.abs(s2.mean - s1.mean), dsd = s2.sd === 0 || s1.sd === 0 ? 0 : s2.sd / s1.sd;
+    var scale = Math.max(Math.abs(s1.mean), Math.abs(s2.mean), 1e-9);
+    var meanOK = dm / scale < 0.25;
+    var sdOK = dsd > 0.6 && dsd < 1.7;
+    out.innerHTML = defs[current].note + '<br>'
+      + 'first half:  mean ' + s1.mean.toFixed(3) + ' &#160; sd ' + s1.sd.toFixed(3) + '<br>'
+      + 'second half: mean ' + s2.mean.toFixed(3) + ' &#160; sd ' + s2.sd.toFixed(3) + '<br>'
+      + 'mean shift ' + (meanOK ? '<b>small</b> &#8594; plausibly stationary in mean' : '<b>large</b> &#8594; NOT stationary in mean')
+      + ' &#183; sd ratio ' + dsd.toFixed(2) + (sdOK ? ' <b>&#8776; 1</b> &#8594; plausibly stationary in variance' : ' <b>far from 1</b> &#8594; NOT stationary in variance');
+  }
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ---- Bespoke widget: low-pass cut-off ---- */
+(function () {
+  var C = document.getElementById('lp-c'), N = document.getElementById('lp-n');
+  if (!C) return;
+  var cv = document.getElementById('lp-canvas'), out = document.getElementById('lp-out');
+  var n = 96, noise = [];
+  var seed = 7;
+  function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 - 0.5; }
+  for (var i = 0; i < n; i++) { noise.push(rnd()); }
+  function draw() {
+    var fcut = +C.value / 100, amp = +N.value / 100;
+    document.getElementById('lp-c-v').textContent = fcut.toFixed(2);
+    document.getElementById('lp-n-v').textContent = amp.toFixed(2);
+    var clean = [], noisy = [], i;
+    for (i = 0; i < n; i++) {
+      var c = Math.sin(2 * Math.PI * i / 12) + 0.5 * Math.sin(2 * Math.PI * i / 24);
+      clean.push(c);
+      noisy.push(c + amp * 4 * noise[i]);
+    }
+    /* naive real-DFT low-pass: keep harmonics with normalized frequency <= fcut */
+    var rec = new Array(n).fill(0);
+    var kept = 0;
+    for (var k = 0; k <= n / 2; k++) {
+      var f = k / n;
+      if (f > fcut) continue;
+      var re = 0, im = 0;
+      for (i = 0; i < n; i++) {
+        var ang = 2 * Math.PI * k * i / n;
+        re += noisy[i] * Math.cos(ang);
+        im -= noisy[i] * Math.sin(ang);
+      }
+      re /= n; im /= n;
+      var mult = (k === 0 || k === n / 2) ? 1 : 2;
+      kept++;
+      for (i = 0; i < n; i++) {
+        var ang2 = 2 * Math.PI * k * i / n;
+        rec[i] += mult * (re * Math.cos(ang2) - im * Math.sin(ang2));
+      }
+    }
+    var w = cv.clientWidth || 600, hh = 220;
+    cv.width = w; cv.height = hh;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, w, hh);
+    var lo = -3.2, hi = 3.2;
+    function X(i2) { return 40 + i2 / (n - 1) * (w - 54); }
+    function Yc(v) { return hh - 22 - (v - lo) / (hi - lo) * (hh - 40); }
+    g.strokeStyle = '#C9C3B6'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(40, 6); g.lineTo(40, hh - 22); g.lineTo(w - 12, hh - 22); g.stroke();
+    function poly(arr, color, width) {
+      g.strokeStyle = color; g.lineWidth = width; g.beginPath();
+      for (var i3 = 0; i3 < n; i3++) { var x = X(i3), y = Yc(arr[i3]); if (i3 === 0) g.moveTo(x, y); else g.lineTo(x, y); }
+      g.stroke();
+    }
+    poly(noisy, '#C9C3B6', 1.1);
+    poly(clean, '#1546B8', 1.3);
+    poly(rec, '#B83D2D', 2.1);
+    g.font = '10px monospace';
+    g.fillStyle = '#C9C3B6'; g.fillText('noisy input', 46, 16);
+    g.fillStyle = '#1546B8'; g.fillText('true signal', 130, 16);
+    g.fillStyle = '#B83D2D'; g.fillText('low-pass reconstruction', 214, 16);
+    var err = 0;
+    for (i = 0; i < n; i++) { var e = rec[i] - clean[i]; err += e * e; }
+    err = Math.sqrt(err / n);
+    var verdict;
+    if (fcut < 0.05) verdict = 'cut-off below the 1/12 seasonal harmonic: the <b>signal itself</b> has been filtered away.';
+    else if (fcut > 0.3) verdict = 'cut-off too permissive: most of the <b>noise passes through</b> with the signal.';
+    else verdict = 'good band: the 1/24 and 1/12 harmonics survive, the high-frequency noise does not.';
+    out.innerHTML = 'harmonics kept: <b>' + kept + '</b> of ' + (n / 2 + 1) + ' &#160;&#183;&#160; longest period filtered out: 1/' + fcut.toFixed(2) + ' &#8776; <b>' + (1 / fcut).toFixed(1) + '</b> steps<br>'
+      + 'RMSE against the true signal: <b>' + err.toFixed(3) + '</b><br>' + verdict;
+  }
+  C.addEventListener('input', draw); N.addEventListener('input', draw);
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ---- Bespoke widget: Kalman gain ---- */
+(function () {
+  var EP = document.getElementById('kg-ep'), EM = document.getElementById('kg-em'),
+      PR = document.getElementById('kg-pr'), ME = document.getElementById('kg-me');
+  if (!EP) return;
+  var out = document.getElementById('kg-out');
+  function draw() {
+    var ep = +EP.value, em = +EM.value, pr = +PR.value, me = +ME.value;
+    document.getElementById('kg-ep-v').textContent = ep;
+    document.getElementById('kg-em-v').textContent = em;
+    document.getElementById('kg-pr-v').textContent = pr;
+    document.getElementById('kg-me-v').textContent = me;
+    var K = ep / (ep + em);
+    var est = pr + K * (me - pr);
+    var newErr = (1 - K) * ep;
+    var lean;
+    if (K < 0.35) lean = 'K is low: the filter <b>trusts its own prediction</b>, the estimate sits near the predicted value.';
+    else if (K > 0.65) lean = 'K is high: the filter <b>trusts the measurement</b>, the estimate is pulled towards the sensor.';
+    else lean = 'K near 0.5: prediction and measurement are <b>equally unreliable</b>, so the estimate lands between them.';
+    out.innerHTML = 'K = Ep / (Ep + Em) = ' + ep + ' / (' + ep + ' + ' + em + ') = <b>' + K.toFixed(3) + '</b><br>'
+      + 'new estimate = predicted + K &#183; (measured - predicted) = ' + pr + ' + ' + K.toFixed(3) + ' &#183; (' + (me - pr) + ') = <b>' + est.toFixed(2) + '</b><br>'
+      + 'updated error = (1 - K) &#183; Ep = <b>' + newErr.toFixed(2) + '</b> &#8212; always smaller than Ep: each cycle shrinks the uncertainty<br>' + lean;
+  }
+  [EP, EM, PR, ME].forEach(function (el) { el.addEventListener('input', draw); });
+  draw();
+})();
+</script>
+</body>
+</html>
