@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 13 — Progettazione fisica: ETL e indici · BI</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-12-viste-materializzate-scenari-temporali.html">&larr; Cap. 12 — Viste materializzate e scenari temporali</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-14-interrogazione-olap-power-bi.html">Cap. 14 — Interrogazione OLAP con Power BI &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte IV — Progettazione fisica · Capitolo 13</div>
+    <h1>Progettazione fisica: ETL e indici</h1>
+    <div class="lk-meta"><span>~50 min di lettura</span><span>6 widget interattivi</span><span>11 tavole</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">La progettazione dell'ETL</a></li>
+      <li><a href="#s2">L'estrazione dei dati: natura della sorgente e modalità</a></li>
+      <li><a href="#s3">L'estrazione incrementale: quattro tecniche</a></li>
+      <li><a href="#s4">Il risultato dell'estrazione</a></li>
+      <li><a href="#s5">Il caricamento: ODS, dimension table e fact table</a></li>
+      <li><a href="#s6">Trasformazione e pulizia</a></li>
+      <li><a href="#s7">Il refresh delle viste</a></li>
+      <li><a href="#s8">Indici per il data mart: i limiti dei B+-tree</a></li>
+      <li><a href="#s9">Gli indici bitmap</a></li>
+      <li><a href="#s10">Indici di join e indici star</a></li>
+      <li><a href="#s11">Su quali attributi creare indici</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p>I capitoli 10, 11 e 12 hanno coperto la progettazione concettuale e logica: schemi di fatto, schemi a stella, viste materializzate. Questo capitolo chiude la metodologia con la <strong>progettazione fisica</strong>, che nelle slide del corso ha due grandi blocchi. Il primo è la <strong>progettazione dell'ETL</strong>: le procedure che portano i dati dalle sorgenti operazionali al data mart, dal livello estensionale dell'integrazione (capitolo 6) fino al caricamento delle dimension table e delle fact table con le chiavi surrogate. Il secondo è la <strong>scelta degli indici</strong>: le caratteristiche dei data mart — accessi in sola lettura, aggiornamento periodico, accessi ad ampie porzioni di dati — rendono i B+-tree non più sufficienti e aprono la strada agli indici bitmap, di join e star. È la materia che i quesiti d'esame riassumono in poche domande secche: <em>quale tecnica di estrazione incrementale, quale indice per quale predicato</em>.</p>
+
+  <section id="s1" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>1. La progettazione dell'ETL</h2>
+
+    <div class="callout idea">
+      <span class="callout-label">Definizione — progettazione dell'ETL</span>
+      <p>Durante la fase di progettazione dell'ETL vengono <strong>definite le procedure necessarie a caricare all'interno del data mart i dati provenienti dalle sorgenti operazionali</strong>. Le procedure operano in <strong>due direzioni</strong>: dalle sorgenti operazionali all'ODS realizzano a livello <strong>estensionale</strong> le trasformazioni definite in fase di integrazione; dall'ODS al data mart conformano la struttura dei dati del livello riconciliato <strong>agli schemi a stella</strong> utilizzati in ambito multidimensionale.</p>
+    </div>
+
+    <p>La distinzione fra le due direzioni è importante perché corrisponde a due nature diverse dei dati. Fra le sorgenti e l'ODS i dati sono <strong>integrati e riconciliati</strong>: nascono dalle trasformazioni del capitolo 6, applicate però ai valori reali invece che agli schemi. Fra l'ODS e il data mart i dati vengono <strong>ridimensionati</strong>: gli schemi a stella richiedono chiavi surrogate, gerarchie denormalizzate e misure già pronte per l'aggregazione.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="700" height="260" role="img" aria-label="Le due direzioni della progettazione ETL: dalle sorgenti all'ODS con integrazione estensionale, dall'ODS al data mart con conformazione agli schemi a stella">
+        <defs>
+          <marker id="ar-13-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" style="fill:var(--lk-cobalt);stroke:none"/>
+          </marker>
+        </defs>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.4">
+          <rect x="30" y="90" width="140" height="50" rx="2"/>
+          <rect x="280" y="90" width="140" height="50" rx="2"/>
+          <rect x="530" y="90" width="140" height="50" rx="2"/>
+        </g>
+        <g style="fill:none;stroke:var(--lk-cobalt);stroke-width:1.4" marker-end="url(#ar-13-1)">
+          <path d="M170 115 L280 115"/>
+          <path d="M420 115 L530 115"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="100" y="110" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Sorgenti</text>
+          <text x="100" y="128" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">operazionali</text>
+          <text x="350" y="110" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">ODS</text>
+          <text x="350" y="128" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">livello riconciliato</text>
+          <text x="600" y="110" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Data mart</text>
+          <text x="600" y="128" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">schemi a stella</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-vermilion)">
+          <text x="225" y="80" text-anchor="middle">integrazione</text>
+          <text x="225" y="93" text-anchor="middle" style="fill:var(--lk-ink-soft)">livello estensionale</text>
+          <text x="475" y="80" text-anchor="middle">conformazione</text>
+          <text x="475" y="93" text-anchor="middle" style="fill:var(--lk-ink-soft)">agli schemi a stella</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 180 L670 180"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="210" text-anchor="middle">progettazione dell'ETL = definire le procedure di caricamento</text>
+          <text x="350" y="230" text-anchor="middle" style="fill:var(--lk-vermilion)">l'ODS realizza a livello estensionale ciò che l'integrazione ha definito a livello intensionale</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.1</b> — Le due direzioni della progettazione ETL. Dalle sorgenti all'ODS si realizzano le trasformazioni dell'integrazione sui dati; dall'ODS al data mart si conforma la struttura del livello riconciliato agli schemi a stella.</figcaption>
+    </figure>
+
+    <h3>L'alimentazione dello schema riconciliato</h3>
+    <p>Il percorso che alimenta l'ODS attraversa la <strong>staging area</strong>: uno spazio utilizzato per memorizzare <strong>in via transitoria</strong> le informazioni necessarie all'esecuzione delle procedure. La terminologia delle slide distingue quattro operazioni:</p>
+
+    <table>
+      <tr><th>Operazione</th><th>Ruolo</th></tr>
+      <tr><td><strong>Estrazione</strong></td><td>Operazioni che permettono di <strong>acquisire i dati</strong> dalle sorgenti</td></tr>
+      <tr><td><strong>Pulizia</strong></td><td>Operazioni che permettono di <strong>eliminare le incongruenze</strong> dovute a errori e omissioni</td></tr>
+      <tr><td><strong>Trasformazione</strong></td><td>Operazioni che <strong>conformano i dati</strong> delle sorgenti allo schema riconciliato</td></tr>
+      <tr><td><strong>Caricamento</strong></td><td>Operazioni necessarie a <strong>inserire i dati trasformati</strong> nell'ODS</td></tr>
+    </table>
+
+    <div id="st-etl" class="lk-step">
+      <h4>Simulazione: il flusso di alimentazione dell'ODS</h4>
+      <p class="lk-step-sub">Avanzate le quattro operazioni e osservate dove risiede ciascun dato durante il percorso.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>2. L'estrazione dei dati: natura della sorgente e modalità</h2>
+
+    <p>Le operazioni di estrazione dipendono dalla <strong>natura dei dati</strong> presenti nelle sorgenti operazionali. Le slide classificano tre livelli di storicizzazione:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Transitoria</button>
+        <button class="lk-tab">Semi-storicizzata</button>
+        <button class="lk-tab">Storicizzata</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Transitoria.</strong> Il sistema mantiene <em>solo l'immagine corrente</em> dei dati, sovrascrivendo quelli che non sono più validi. Esempi tipici: dati di inventario, scorte di magazzino. Per l'estrazione è un caso difficile: dello stato precedente non resta nulla da leggere.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Semi-storicizzata.</strong> Il sistema mantiene un <em>limitato numero di stati precedenti</em>, e non è possibile determinare per quanto tempo ciascun dato verrà conservato. L'estrazione può trovare qualche stato passato, ma senza garanzie sulla completezza della storia.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Storicizzata.</strong> Tutte le modifiche intervenute nei dati vengono mantenute <em>in un intervallo di tempo ben definito</em>. Esempi tipici: dati bancari e assicurativi. È il caso più favorevole per l'estrazione incrementale, perché ogni stato passato è ancora leggibile.</p>
+      </div>
+    </div>
+
+    <p>Indipendentemente dalla natura dei dati, l'estrazione può avvenire in due modalità. L'<strong>estrazione statica</strong> estrae <em>tutti</em> i dati dei database sorgenti. L'<strong>estrazione incrementale</strong> estrae <em>solo i dati modificati o inseriti</em> nell'intervallo di tempo intercorso dall'ultima estrazione, e può essere <strong>immediata</strong> (le modifiche vengono rilevate e catturate nel momento in cui si verificano) oppure <strong>ritardata</strong> (le modifiche vengono individuate a posteriori, analizzando tracce lasciate dal sistema).</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="700" height="240" role="img" aria-label="Classificazione dell'estrazione: statica o incrementale; l'incrementale si divide in immediata e ritardata, condizionata dalla natura dei dati">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="30" y="30">MODALITÀ DI ESTRAZIONE</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="60" y="60" width="180" height="44" rx="2"/>
+          <rect x="360" y="60" width="180" height="44" rx="2"/>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-cobalt);stroke-width:1.3">
+          <rect x="410" y="140" width="130" height="40" rx="2"/>
+          <rect x="560" y="140" width="110" height="40" rx="2"/>
+        </g>
+        <g style="fill:none;stroke:var(--lk-ink);stroke-width:1.2">
+          <path d="M150 104 L150 130 M450 104 L450 130 L475 130"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="150" y="86" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Statica</text>
+          <text x="450" y="86" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Incrementale</text>
+          <text x="475" y="145" text-anchor="middle" style="fill:var(--lk-cobalt)">immediata</text>
+          <text x="615" y="145" text-anchor="middle" style="fill:var(--lk-cobalt)">ritardata</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="220" text-anchor="middle">la natura dei dati (transitoria, semi-storicizzata, storicizzata) condiziona le tecniche incrementali</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.2</b> — Modalità di estrazione. La statica estrae tutti i dati; l'incrementale estrae solo le modifiche dall'ultima estrazione, con rilevamento immediato o ritardato.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>3. L'estrazione incrementale: quattro tecniche</h2>
+
+    <p>Le slide presentano <strong>quattro tecniche</strong> di estrazione incrementale, che si distinguono per il meccanismo con cui le modifiche vengono individuate e per il momento in cui vengono catturate.</p>
+
+    <h3>1. Estrazione assistita dall'applicazione</h3>
+    <p>Tecnica di estrazione <strong>immediata</strong>. Le modifiche vengono rilevate da <strong>specifiche funzioni implementate direttamente all'interno delle applicazioni</strong> OLTP, che le segnalano all'estrattore. Richiede quindi la <strong>modifica delle applicazioni</strong>; è utile con sistemi legacy che non forniscono sistemi di triggering o log, e trova applicazione anche nei sistemi moderni quando esiste un <strong>livello di API comune</strong> a tutte le applicazioni: una sola modifica serve per tutti gli accessi di uno stesso tipo.</p>
+
+    <h3>2. Estrazione basata su log</h3>
+    <p>Tecnica di estrazione <strong>ritardata</strong>. Le modifiche vengono memorizzate in <strong>appositi file prodotti dal DBMS</strong>. Il problema: interpretare il contenuto dei log può risultare molto complesso, perché il formato è <strong>normalmente proprietario</strong> dello specifico DBMS. È consigliabile solo quando il <strong>modulo di estrazione è fornito direttamente dal produttore</strong> del DBMS.</p>
+
+    <h3>3. Estrazione basata su trigger</h3>
+    <p>Tecnica di estrazione <strong>immediata</strong>. Le modifiche vengono individuate mediante <strong>funzioni basate su eventi implementate e controllate direttamente nel DBMS</strong> (i trigger). Per motivi prestazionali <strong>non è possibile adottarla in modo estensivo</strong>: richiederebbe al DBMS di monitorare continuamente tutte le transazioni potenzialmente in grado di innescare un trigger.</p>
+
+    <h3>4. Estrazione basata su marche temporali</h3>
+    <p>Tecnica di estrazione <strong>ritardata</strong>. Prevede la <strong>modifica dello schema del database</strong>, che dovrà contenere uno o più campi necessari a contrassegnare i record modificati. Il modulo di estrazione opera <strong>a posteriori</strong>, individuando il tipo di modifica subita dai dati grazie alle marche.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="700" height="250" role="img" aria-label="Le quattro tecniche di estrazione incrementale classificate per immediatezza e meccanismo di rilevamento">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="30" y="28">ESTRAZIONE INCREMENTALE — QUATTRO TECNICHE</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="40" y="50" width="150" height="40" rx="2"/>
+          <rect x="220" y="50" width="150" height="40" rx="2"/>
+          <rect x="400" y="50" width="150" height="40" rx="2"/>
+          <rect x="580" y="50" width="90" height="40" rx="2"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="115" y="67" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Assistita dall'applicazione</text>
+          <text x="115" y="82" text-anchor="middle" style="font-size:9px;fill:var(--lk-vermilion)">immediata</text>
+          <text x="295" y="67" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Basata su log</text>
+          <text x="295" y="82" text-anchor="middle" style="font-size:9px;fill:var(--lk-vermilion)">ritardata</text>
+          <text x="475" y="67" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Basata su trigger</text>
+          <text x="475" y="82" text-anchor="middle" style="font-size:9px;fill:var(--lk-vermilion)">immediata</text>
+          <text x="625" y="67" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Marche temporali</text>
+          <text x="625" y="82" text-anchor="middle" style="font-size:9px;fill:var(--lk-vermilion)">ritardata</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 120 L670 120"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="145" text-anchor="middle">funzioni nelle applicazioni · file di log del DBMS · trigger nel DBMS · campi di marcatura nello schema</text>
+          <text x="350" y="170" text-anchor="middle">immediate = catturano la modifica mentre avviene · ritardate = la individuano a posteriori</text>
+          <text x="350" y="200" text-anchor="middle" style="fill:var(--lk-vermilion)">log: formato proprietario, solo con modulo del produttore · trigger: limiti prestazionali</text>
+          <text x="350" y="220" text-anchor="middle">marche temporali: efficacia dipendente dalla struttura del sistema operazionale</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.3</b> — Le quattro tecniche di estrazione incrementale. L'asse immediata/ritardata divide il rilevamento «al momento» da quello «a posteriori»; log e trigger sono legati al DBMS, l'applicazione e le marche temporali richiedono modifiche al codice o allo schema.</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <span class="callout-label">Il limite delle marche temporali</span>
+      <p>L'efficacia della tecnica basata su marche temporali dipende dalla struttura stessa del sistema operazionale: se i dati sono <strong>transitori o semi-storicizzati</strong>, l'estrazione basata su marche temporali <strong>non può identificare gli stati intermedi</strong> di quei record modificati più volte durante l'intervallo di aggiornamento. L'esempio delle slide è il record del vino <em>Barolo</em>: estratto l'1/4/2002 con quantità 100, il 2/4/2002 la quantità diventa 200, il 3/4/2002 diventa 150. L'estrazione del 3/4/2002 legge lo stato corrente (150) e la marca temporale segnala la modifica — ma la modifica intermedia (200) è <strong>persa</strong>: non è mai stata estratta e dello stato intermedio non resta traccia.</p>
+    </div>
+
+    <div id="w-tecniche" class="lk-step">
+      <h4>Esercizio: quale tecnica di estrazione?</h4>
+      <p class="lk-step-sub">Data la situazione descritta, scegliete la tecnica di estrazione incrementale appropriata.</p>
+      <div id="w-tecniche-dom"></div>
+    </div>
+  </section>
+
+  <section id="s4" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>4. Il risultato dell'estrazione</h2>
+
+    <p>Qualunque tecnica incrementale si utilizzi, il risultato della fase di estrazione consiste nell'<strong>insieme di record della sorgente modificati, aggiunti o cancellati</strong> rispetto alla precedente esecuzione della procedura di estrazione. I dati risiedono nella <strong>staging area</strong>.</p>
+
+    <p>Per facilitare le fasi successive è opportuno <strong>associare a ogni record estratto il tipo di operazione</strong> (Inserimento, Modifica, Cancellazione) che ne ha generato la variazione. Nell'esempio delle slide, fra la situazione al 4/4/2002 e quella al 6/4/2002 la <strong>differenza incrementale</strong> contiene quattro record: il record 3 (Barbera) è stato <strong>cancellato</strong> (C), il record 4 (Sangiovese) è stato <strong>modificato</strong> (M, da 45 a 145), i record 5 e 6 (Vermentino, Trebbiano) sono stati <strong>inseriti</strong> (I).</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="700" height="260" role="img" aria-label="La differenza incrementale fra la situazione al 4/4/2002 e quella al 6/4/2002, con il tipo di operazione per ciascun record">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="40" y="28">SITUAZIONE AL 4/4/2002</text>
+          <text x="390" y="28">SITUAZIONE AL 6/4/2002</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="40" y="52">cod  prodotto     cliente   qtà</text>
+          <text x="40" y="72">1    Greco di tufo Malavasi  50</text>
+          <text x="40" y="90">2    Barolo        Maio     150</text>
+          <text x="40" y="108">3    Barbera       Lumini    75</text>
+          <text x="40" y="126">4    Sangiovese    Cappelli  45</text>
+          <text x="390" y="52">cod  prodotto     cliente    qtà</text>
+          <text x="390" y="72">1    Greco di tufo Malavasi   50</text>
+          <text x="390" y="90">2    Barolo        Maio      150</text>
+          <text x="390" y="108">4    Sangiovese    Cappelli  145</text>
+          <text x="390" y="126">5    Vermentino    Maltoni    25</text>
+          <text x="390" y="144">6    Trebbiano     Maltoni   150</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 180 L670 180"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="40" y="202" style="fill:var(--lk-cobalt-dark);font-weight:600">DIFFERENZA INCREMENTALE</text>
+          <text x="40" y="222">cod  prodotto     cliente    qtà   oper</text>
+          <text x="40" y="240">3    Barbera       Lumini     75    C</text>
+          <text x="40" y="256">4    Sangiovese    Cappelli  145    M</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="250" y="222">5    Vermentino    Maltoni    25    I</text>
+          <text x="250" y="240">6    Trebbiano     Maltoni   150    I</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="590" y="222">C = cancellazione</text>
+          <text x="590" y="240">M = modifica</text>
+          <text x="590" y="256">I = inserimento</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.4</b> — Il risultato dell'estrazione incrementale. La differenza fra due esecuzioni consecutive produce i record variati con il tipo di operazione (I, M, C), pronti per le fasi successive dalla staging area.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s5" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>5. Il caricamento: ODS, dimension table e fact table</h2>
+
+    <h3>Dalla staging area all'ODS</h3>
+    <p>La modalità di caricamento dei dati dalla staging area all'ODS dipende dalla <strong>tecnica utilizzata in fase di estrazione</strong> e dal <strong>livello di storicizzazione dell'ODS</strong>:</p>
+
+    <ul>
+      <li>estrazione <strong>statica</strong> &rarr; <strong>riscrittura completa</strong>;</li>
+      <li>estrazione <strong>incrementale</strong>:
+        <ul>
+          <li>ODS <strong>non storicizzato</strong>: si memorizza solo il <strong>tipo di operazione</strong> che ha determinato la variazione;</li>
+          <li>ODS <strong>storicizzato</strong>: si memorizza anche una <strong>coppia di marche temporali</strong> che indicano l'intervallo di validità della tupla.</li>
+        </ul>
+      </li>
+    </ul>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il livello di storicizzazione dell'ODS dipende da quello delle sorgenti operazionali <strong>e</strong> dai requisiti utente relativi alla reportistica operativa: un ODS storicizzato è il presupposto per le gerarchie dinamiche di tipo III del capitolo 12.</p>
+    </div>
+
+    <h3>Il caricamento delle dimension table</h3>
+    <p>Il caricamento di una dimension table richiede quattro passi: <strong>identificazione dei dati da caricare</strong>; <strong>sostituzione degli identificatori con chiavi surrogate</strong>; <strong>verifica delle corrispondenze</strong> identificatori-chiavi surrogata tramite le <strong>tabelle di look-up</strong>; caricamento delle tuple nella dimension table. La chiave surrogata di una tupla già presente viene riusata; per le tuple nuove viene generata una nuova chiave.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="700" height="260" role="img" aria-label="Caricamento della dimension table: dalle tuple aggiornate o inserite della staging area, attraverso la tabella di look-up, alle tuple da inserire nella dimension table con chiave surrogata">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="40" y="28">STAGING AREA</text>
+          <text x="280" y="28">LOOK-UP</text>
+          <text x="500" y="28">DIMENSION TABLE</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="40" y="50" width="170" height="120" rx="2"/>
+          <rect x="280" y="50" width="150" height="120" rx="2"/>
+          <rect x="500" y="50" width="170" height="120" rx="2"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink)">
+          <text x="52" y="74">Tuple della DT</text>
+          <text x="52" y="90">aggiornate/inserite</text>
+          <text x="52" y="112">ID1  attr1</text>
+          <text x="52" y="128">ID2  attr3</text>
+          <text x="52" y="144">ID3  attr5</text>
+          <text x="52" y="160">     attr6</text>
+          <text x="292" y="74">ID2   chiaveS</text>
+          <text x="292" y="92">ID3   chiaveS</text>
+          <text x="292" y="110">…</text>
+          <text x="512" y="74">chiaveS  attr1</text>
+          <text x="512" y="92">attr3  attr5</text>
+          <text x="512" y="110">attr6</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-cobalt);stroke-width:1.3" marker-end="url(#ar-13-1)">
+          <path d="M210 110 L280 110"/>
+          <path d="M430 110 L500 110"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9px;fill:var(--lk-vermilion)">
+          <text x="245" y="92" text-anchor="middle">verifica</text>
+          <text x="245" y="104" text-anchor="middle">corrispondenze</text>
+          <text x="465" y="92" text-anchor="middle">caricamento</text>
+          <text x="465" y="104" text-anchor="middle">nella DT</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="220" text-anchor="middle">gli identificatori operazionali (ID) vengono sostituiti con le chiavi surrogate (chiaveS)</text>
+          <text x="350" y="240" text-anchor="middle" style="fill:var(--lk-vermilion)">la tabella di look-up mantiene la corrispondenza fra identificatori e chiavi</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.5</b> — Caricamento di una dimension table. La staging area fornisce le tuple variate; la tabella di look-up mappa gli identificatori operazionali sulle chiavi surrogate già assegnate; la dimension table riceve le tuple da inserire o aggiornare.</figcaption>
+    </figure>
+
+    <h3>Il caricamento delle fact table</h3>
+    <p>Il caricamento delle fact table <strong>segue l'alimentazione delle dimension table</strong>, per poter rispettare i vincoli di integrità referenziale. Anche qui si identificano i dati da caricare e si sostituiscono gli identificatori con le chiavi surrogate, usando le tabelle di look-up; alle chiavi si aggiungono le <strong>misure</strong> (mis 1, mis 3, mis 5, mis 6 nell'esempio delle slide).</p>
+
+    <div id="w-caricamento" class="lk-step">
+      <h4>Esercizio: cosa succede a ogni passo?</h4>
+      <p class="lk-step-sub">Scegliete l'esito corretto per ciascuna situazione di caricamento.</p>
+      <div id="w-caricamento-dom"></div>
+    </div>
+  </section>
+
+  <section id="s6" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>6. Trasformazione e pulizia</h2>
+
+    <p>L'insieme delle operazioni atte a <strong>garantire la correttezza e la consistenza dei dati</strong> presenti nel livello riconciliato. Le slide classificano le sorgenti di errore in quattro famiglie:</p>
+
+    <table>
+      <tr><th>Famiglia</th><th>Esempio</th></tr>
+      <tr><td><strong>Errori di battitura</strong></td><td>valori digitati male nei sistemi operazionali</td></tr>
+      <tr><td><strong>Differenza di formato</strong> dei dati nello stesso campo</td><td>date in formati diversi, maiuscole/minuscole</td></tr>
+      <tr><td><strong>Inconsistenza tra valori e descrizione</strong> dei campi</td><td>evoluzione del modo di operare dell'azienda, evoluzioni della società, convenzioni interne ai reparti diverse da quelle generali del sistema informativo</td></tr>
+      <tr><td><strong>Inconsistenza tra valori di campi correlati</strong></td><td><code>Città='Bologna'</code> e <code>Regione='Lazio'</code> nella stessa tupla</td></tr>
+    </table>
+
+    <div class="callout note">
+      <span class="callout-label">Prevenzione</span>
+      <p>La maggior parte delle inconsistenze può essere <strong>prevenuta</strong> rendendo più rigorose le regole di inserimento dei dati nelle applicazioni del sistema operazionale.</p>
+    </div>
+
+    <h3>Le tecniche di pulizia</h3>
+    <ul>
+      <li><strong>Tecniche basate su dizionari</strong>: utilizzano <em>tabelle di look-up</em> per identificare ed eliminare sinonimi e abbreviazioni. Utilizzabili solo quando il <strong>dominio dell'attributo è conosciuto e limitato</strong>; utili per errori di battitura e discrepanze di formato.</li>
+      <li><strong>Tecniche ad hoc</strong>: ogni dominio applicativo ha regole proprie, troppo specifiche per essere verificate tramite strumenti standard. Esempi: <em>equazioni</em> (profitto = incasso − spese) e <em>outliers</em> (variazione di prezzo di oltre il 20%).</li>
+      <li><strong>Tecniche di fusione approssimata</strong>: permettono di identificare <em>record corrispondenti in assenza di identificatori comuni</em>. Esempi: <em>join approssimati</em> e il cosiddetto <em>purge/merge problem</em>.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 240" width="700" height="240" role="img" aria-label="Le tre famiglie di tecniche di pulizia: dizionari, ad hoc e fusione approssimata">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="30" y="28">TECNICHE DI PULIZIA</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="40" y="50" width="190" height="110" rx="2"/>
+          <rect x="255" y="50" width="190" height="110" rx="2"/>
+          <rect x="470" y="50" width="200" height="110" rx="2"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="135" y="74" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Dizionari</text>
+          <text x="135" y="96" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">look-up per sinonimi</text>
+          <text x="135" y="110" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">e abbreviazioni</text>
+          <text x="135" y="130" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">dominio noto e limitato</text>
+          <text x="135" y="148" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">battitura · formato</text>
+          <text x="350" y="74" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Ad hoc</text>
+          <text x="350" y="96" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">regole specifiche</text>
+          <text x="350" y="110" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">del dominio applicativo</text>
+          <text x="350" y="130" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">equazioni (profitto = …)</text>
+          <text x="350" y="148" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">outliers (&gt;20%)</text>
+          <text x="570" y="74" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Fusione approssimata</text>
+          <text x="570" y="96" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">record corrispondenti</text>
+          <text x="570" y="110" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">senza identificatori comuni</text>
+          <text x="570" y="130" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">join approssimati</text>
+          <text x="570" y="148" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">purge/merge problem</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="205" text-anchor="middle">la maggior parte delle inconsistenze può essere prevenuta con regole di inserimento più rigorose</text>
+          <text x="350" y="225" text-anchor="middle" style="fill:var(--lk-vermilion)">nei sistemi operazionali, non nel data mart</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.6</b> — Le tecniche di pulizia. I dizionari coprono domini noti e limitati; le tecniche ad hoc codificano regole di dominio; la fusione approssimata trova corrispondenze senza chiavi comuni.</figcaption>
+    </figure>
+
+    <div id="w-pulizia" class="lk-step">
+      <h4>Esercizio: quale tecnica di pulizia?</h4>
+      <p class="lk-step-sub">Data l'inconsistenza descritta, scegliete la famiglia di tecniche più adatta.</p>
+      <div id="w-pulizia-dom"></div>
+    </div>
+  </section>
+
+  <section id="s7" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>7. Il refresh delle viste</h2>
+
+    <p>Le viste materializzate del capitolo 12 vanno <strong>aggiornate</strong> quando arrivano nuovi dati. Il problema è la <strong>scelta della vista aggiornata che minimizza il costo di aggiornamento</strong>: la risposta delle slide è semplice e diretta — <strong>è la più piccola vista che permette di risolvere l'interrogazione</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 230" width="700" height="230" role="img" aria-label="Il reticolo multidimensionale con la vista da alimentare: la più piccola vista che risolve l'interrogazione">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="30" y="28">RETICOLO MULTIDIMENSIONALE</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="250" y="40" width="60" height="26" rx="2"/>
+          <rect x="120" y="90" width="60" height="26" rx="2"/>
+          <rect x="380" y="90" width="60" height="26" rx="2"/>
+          <rect x="60" y="140" width="60" height="26" rx="2"/>
+          <rect x="220" y="140" width="60" height="26" rx="2"/>
+          <rect x="380" y="140" width="60" height="26" rx="2"/>
+          <rect x="160" y="190" width="60" height="26" rx="2"/>
+          <rect x="310" y="190" width="60" height="26" rx="2"/>
+          <rect x="460" y="190" width="60" height="26" rx="2"/>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-vermilion);stroke-width:1.6">
+          <rect x="220" y="140" width="60" height="26" rx="2"/>
+        </g>
+        <g style="fill:none;stroke:var(--lk-ink);stroke-width:1">
+          <path d="M280 66 L150 90 M280 66 L410 90 M150 116 L90 140 M150 116 L250 140 M410 116 L250 140 M410 116 L410 140 M90 166 L190 190 M250 166 L190 190 M250 166 L340 190 M410 166 L340 190 M410 166 L490 190"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="280" y="56" text-anchor="middle">{a,b}</text>
+          <text x="150" y="106" text-anchor="middle">{a',b}</text>
+          <text x="410" y="106" text-anchor="middle">{a,b'}</text>
+          <text x="90" y="156" text-anchor="middle">{b}</text>
+          <text x="250" y="156" text-anchor="middle" style="fill:var(--lk-vermilion);font-weight:600">{a',b'}</text>
+          <text x="410" y="156" text-anchor="middle">{a}</text>
+          <text x="190" y="206" text-anchor="middle">{b'}</text>
+          <text x="340" y="206" text-anchor="middle">{a'}</text>
+          <text x="490" y="206" text-anchor="middle">{}</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-vermilion)">
+          <text x="500" y="150">vista da</text>
+          <text x="500" y="163">alimentare</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.7</b> — Il refresh delle viste. Fra le viste che risolvono l'interrogazione, si aggiorna la più piccola: nel reticolo, la vista {a', b'} è quella che minimizza il costo di aggiornamento.</figcaption>
+    </figure>
+
+    <p>Il collegamento con l'aggregate navigator del capitolo 12 è immediato: se il navigator sceglie la vista che minimizza il <em>costo di esecuzione</em> delle interrogazioni, il refresh sceglie quella che minimizza il <em>costo di aggiornamento</em> — e in entrambi i casi la logica è la stessa, scegliere la vista più piccola che «fa il lavoro».</p>
+  </section>
+
+  <section id="s8" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>8. Indici per il data mart: i limiti dei B+-tree</h2>
+
+    <p>Le specifiche caratteristiche dei data mart permettono di utilizzare <strong>classi di indici diverse dal ben noto B+-tree</strong> utilizzato nella maggior parte dei DBMS commerciali:</p>
+
+    <ul>
+      <li><strong>accessi in sola lettura</strong>;</li>
+      <li><strong>aggiornamento periodico</strong> dei dati, con possibilità di riorganizzazione degli indici;</li>
+      <li><strong>accessi ad ampie porzioni</strong> di dati.</li>
+    </ul>
+
+    <p>Alcuni indici sono <strong>nati in conseguenza delle esigenze di data warehousing</strong>; altri erano preesistenti ma non venivano utilizzati. Le tre classi citate dalle slide sono gli <strong>indici bitmap</strong>, gli <strong>indici di join</strong> e gli <strong>indici star</strong>.</p>
+
+    <h3>Come funziona un B+-tree</h3>
+    <p>Nei B+-tree le <strong>foglie contengono tutti i valori di chiave</strong>; i nodi interni, organizzati come un B-tree, costituiscono solo una <strong>mappa</strong> per consentire una rapida localizzazione delle chiavi e memorizzano dei <strong>separatori</strong>.</p>
+
+    <h3>Perché i B+-tree non sono più sufficienti</h3>
+    <ul>
+      <li>forniscono buone prestazioni quando la <strong>selettività dei predicati è molto elevata</strong> — ma le interrogazioni OLAP utilizzano spesso <strong>predicati a bassa selettività</strong> (es. <em>sesso</em>);</li>
+      <li>sono più adatti a <strong>interrogazioni semplici</strong>;</li>
+      <li>possono richiedere <strong>molto spazio</strong> per la loro memorizzazione.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Conclusione delle slide</span>
+      <p>I B+-tree <strong>non sono più sufficienti ma rimangono ancora molto utili</strong>: il punto non è abbandonarli, ma affiancarli con indici pensati per la bassa selettività e per i join a stella.</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>9. Gli indici bitmap</h2>
+
+    <div class="callout idea">
+      <span class="callout-label">Definizione — indice bitmap</span>
+      <p>Un indice bitmap su un attributo è composto da una <strong>matrice di bit</strong> contenente tante <strong>righe quante sono le tuple</strong> della relazione e tante <strong>colonne quanti sono i valori distinti</strong> (di chiave) dell'attributo. Il bit (i, j) è posto a TRUE se nella tupla i-esima è presente il valore j-esimo.</p>
+    </div>
+
+    <p>L'esempio delle slide costruisce un indice bitmap sulla <em>Posizione</em> della tabella impiegati, con sei valori distinti: Ingegnere, Consulente, Manager, Programmatore, Assistente, Ragioniere. La matrice ha una riga per impiegato (RID 1–5) e una colonna per posizione: l'impiegato con RID 1 è un Manager, quindi la sua riga ha un solo bit a 1, nella colonna Manager.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="700" height="250" role="img" aria-label="Matrice di bit dell'indice bitmap sulla posizione: righe per impiegato, colonne per valore distinto">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="30" y="28">INDICE BITMAP SU POSIZIONE</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="40" y="56">RID   Ing. Cons. Man. Prog. Assis. Rag.</text>
+          <text x="40" y="80">1     0    0     1    0     0     0</text>
+          <text x="40" y="104">2     0    0     0    1     0     0</text>
+          <text x="40" y="128">3     0    0     0    0     1     0</text>
+          <text x="40" y="152">4     0    0     0    1     0     0</text>
+          <text x="40" y="176">5     0    0     0    0     0     1</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-vermilion)">
+          <text x="330" y="80">l'impiegato con RID 1</text>
+          <text x="330" y="94">è un Manager</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 200 L670 200"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="222" text-anchor="middle">una colonna per valore distinto · un bit a TRUE per tupla</text>
+          <text x="350" y="240" text-anchor="middle" style="fill:var(--lk-vermilion)">la cardinalità dell'attributo determina il numero di colonne</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.8</b> — La matrice di bit dell'indice bitmap sulla Posizione. Ogni tupla ha esattamente un bit a 1 per la colonna del proprio valore.</figcaption>
+    </figure>
+
+    <h3>Implementazione e vantaggi</h3>
+    <p>Normalmente i bitmap sono associati a <strong>B+-tree le cui foglie contengono vettori di bit invece di RID</strong>. La valutazione di un predicato segue quattro passi: si <strong>naviga il B+-tree</strong>, si <strong>caricano i vettori di bit</strong> corrispondenti, si <strong>determina quali bit sono posti a TRUE</strong> e infine si <strong>recuperano le tuple</strong> corrispondenti ai RID.</p>
+
+    <ul>
+      <li>lo <strong>spazio richiesto su disco può essere molto ridotto</strong>;</li>
+      <li>l'<strong>I/O è molto basso</strong>, poiché vengono letti solo i vettori di bit necessari;</li>
+      <li>ottimi per <strong>interrogazioni che non richiedono l'accesso ai dati</strong>;</li>
+      <li>permettono l'utilizzo di <strong>operatori binari</strong> (AND, OR, NOT) per l'elaborazione dei predicati.</li>
+    </ul>
+
+    <p>L'esempio delle slide è la domanda «<em>Quanti maschi in Emilia-Romagna sono assicurati?</em>». Si prendono i vettori di bit delle tre condizioni (sesso = M, assicurato = Sì, regione = E/R) e se ne fa l'<strong>AND</strong> vettoriale: il numero di bit a 1 nel risultato è la risposta — senza mai leggere le tuple.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 230" width="700" height="230" role="img" aria-label="AND vettoriale per la query quanti maschi in Emilia-Romagna sono assicurati: il risultato è 2">
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="40" y="30">RID  Sesso  Assic.  Regione</text>
+          <text x="40" y="52">1    M      No      LO</text>
+          <text x="40" y="74">2    M      Sì      E/R</text>
+          <text x="40" y="96">3    F      No      LA</text>
+          <text x="40" y="118">4    M      Sì      E/R</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="230" y="30">Sesso=M  Assic.=Sì  Regione=E/R</text>
+          <text x="230" y="52">1        0          0</text>
+          <text x="230" y="74">1        1          1</text>
+          <text x="230" y="96">0        0          0</text>
+          <text x="230" y="118">1        1          1</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-ink)">
+          <text x="440" y="74" style="fill:var(--lk-cobalt-dark);font-weight:600">AND = 2</text>
+          <text x="440" y="96">0</text>
+          <text x="440" y="118" style="fill:var(--lk-cobalt-dark);font-weight:600">1</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 150 L670 150"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="178" text-anchor="middle">gli operatori binari elaborano i predicati senza accedere alle tuple</text>
+          <text x="350" y="198" text-anchor="middle" style="fill:var(--lk-vermilion)">I/O molto basso: si leggono solo i vettori di bit necessari</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.9</b> — AND vettoriale di tre bitmap. La risposta («quanti maschi in E/R assicurati?») è il conteggio dei bit a 1 del vettore risultante, senza accesso ai dati.</figcaption>
+    </figure>
+
+    <h3>Occupazione su disco</h3>
+    <p>Gli indici bitmap sono adatti ad attributi con <strong>ridotta cardinalità</strong>: ogni nuovo valore distinto richiede un ulteriore vettore di bit, e all'aumentare del numero di chiavi distinte aumenta la <strong>sparsità</strong> della matrice. Con NR = 10.000.000 e puntatori da 4 byte, il confronto fra B-tree e bitmap è:</p>
+
+    <table>
+      <tr><th>Indice</th><th>Spazio</th></tr>
+      <tr><td>B-tree</td><td>NR × Len(Pointer) = 10.000.000 × 32 bit</td></tr>
+      <tr><td>Bitmap</td><td>NR × NK × 1 bit</td></tr>
+    </table>
+
+    <p>Si ha un risparmio di spazio se <strong>densità media ≥ 1 / Len(RID)</strong>; la <strong>compressione delle matrici</strong> riduce il fattore di crescita della dimensione. Per valori piccoli di NK (attributi a bassa cardinalità) il bitmap occupa una frazione del B-tree; al crescere di NK la matrice si sparge e il vantaggio si riduce — il grafico delle slide mostra le due curve che si incrociano intorno a qualche decina di chiavi distinte.</p>
+
+    <div id="w-bitmap" class="lk-step">
+      <h4>Esercizio: bitmap o B+-tree?</h4>
+      <p class="lk-step-sub">Data la selettività del predicato, scegliete l'indice più adatto.</p>
+      <div id="w-bitmap-dom"></div>
+    </div>
+  </section>
+
+  <section id="s10" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>10. Indici di join e indici star</h2>
+
+    <h3>Gli indici di join</h3>
+    <p>Le interrogazioni su schemi a stella richiedono <strong>sempre uno o più join</strong>. Un <strong>indice di join calcola in anticipo le tuple che soddisfano un particolare predicato di join</strong>, memorizzando le <strong>coppie di RID</strong> corrispondenti. Nell'esempio delle slide, l'indice contiene le coppie che soddisfano <code>Vendite.IDNegozi = Negozi.IDNegozi</code>: la riga 1 di Vendite (IDNegozi 123) corrisponde alla riga 1 di Negozi, e così via.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="700" height="250" role="img" aria-label="Indice di join fra Vendite e Negozi sul predicato Vendite.IDNegozi = Negozi.IDNegozi, con le coppie di RID">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="40" y="28">VENDITE</text>
+          <text x="400" y="28">NEGOZI</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="40" y="52">RID  IDNegozi  IDSett.  IDProd.  Quantità  Guadagno</text>
+          <text x="40" y="74">1    123       13       41       100       10,00</text>
+          <text x="40" y="94">2    123       24       17       150       15,00</text>
+          <text x="40" y="114">3    367       36       94       350       35,00</text>
+          <text x="40" y="134">4    367       27       11       120       12,00</text>
+          <text x="400" y="52">IDNegozi  Negozio  Città  Stato  Agente</text>
+          <text x="400" y="74">123       N1       RM     I      R1</text>
+          <text x="400" y="94">367       N3       MI     I      R2</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 170 L670 170"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="40" y="194" style="fill:var(--lk-cobalt-dark);font-weight:600">INDICE DI JOIN (V-Rid, N-rid)</text>
+          <text x="40" y="216">1  1</text>
+          <text x="40" y="236">2  1</text>
+          <text x="110" y="216">3  2</text>
+          <text x="110" y="236">4  2</text>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:9.5px;fill:var(--lk-ink-soft)">
+          <text x="300" y="216">l'indice contiene le coppie di RID</text>
+          <text x="300" y="232">che soddisfano</text>
+          <text x="300" y="248" style="fill:var(--lk-vermilion)">Vendite.IDNegozi = Negozi.IDNegozi</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.10</b> — Un indice di join. Il join tra fact table e dimension table viene precalcolato: l'indice memorizza le coppie di RID che soddisfano il predicato di join.</figcaption>
+    </figure>
+
+    <h3>Gli indici star</h3>
+    <p>Gli indici star <strong>estendono il concetto di indice di join a più tabelle</strong>, concatenando i valori delle colonne della fact table e di più dimension table. L'esempio delle slide collega <em>Vendite</em> con <em>Settimana</em> e <em>Negozi</em>: ogni riga dell'indice contiene la quadrupla (VRID, NRID, SID, PID) che rappresenta una combinazione di tuple che soddisfa i join. Tre osservazioni dalle slide:</p>
+
+    <ul>
+      <li>rappresentano <strong>esplicitamente l'aspetto multidimensionale</strong> dei dati e dipendono fortemente dall'<strong>ordinamento delle colonne</strong>;</li>
+      <li>sono <strong>molto efficienti</strong> quando utilizzati in interrogazioni che coinvolgono tutte o le sole <strong>colonne iniziali</strong> dell'indice;</li>
+      <li>forniscono <strong>prestazioni sub-ottime</strong> in caso contrario.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>Il numero di indici star necessari a rispondere efficientemente a interrogazioni che coinvolgono un <strong>insieme arbitrario di dimensioni</strong> è funzione del numero di <strong>permutazioni</strong> dell'insieme di dimensioni: cresce rapidamente, ed è per questo che la scelta va guidata dal carico di lavoro.</p>
+    </div>
+
+    <div id="w-indici" class="lk-step">
+      <h4>Esercizio: quale indice per il data mart?</h4>
+      <p class="lk-step-sub">Data la caratteristica del data mart o del predicato, scegliete la classe di indici appropriata.</p>
+      <div id="w-indici-dom"></div>
+    </div>
+  </section>
+
+  <section id="s11" data-src="Il ciclo di vita dei data warehouse (seconda parte).pdf">
+    <h2>11. Su quali attributi creare indici</h2>
+
+    <p>Le slide chiudono la parte sugli indici con i consigli operativi: creare indici su</p>
+
+    <ul>
+      <li><strong>chiavi importate sulla fact table</strong>, per aumentare la velocità di esecuzione dei join — con <strong>B+-tree o indici di join</strong>, indici star, bitmapped join index;</li>
+      <li><strong>attributi dimensionali</strong> che sono spesso coinvolti nei criteri di selezione — con <strong>B+-tree o bitmap</strong>;</li>
+      <li><strong>misure</strong> che sono spesso coinvolte in clausole di selezione — con <strong>bitmap evoluti</strong>.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">Il caveat delle statistiche</span>
+      <p>Se il DBMS <strong>non utilizza statistiche</strong> per definire il piano di accesso, la creazione degli indici deve essere <strong>valutata con molta attenzione</strong>: senza stime di selettività e cardinalità, un indice scelto a priori può peggiorare le prestazioni invece di migliorarle.</p>
+    </div>
+
+    <p>Le slide illustrano la logica di scelta con un esempio ispirato a <strong>Redbrick 6.0</strong>, un DBMS relazionale storico pensato per il data warehousing. L'algoritmo decide come rispondere a una query interrogandosi su: quante dimension table sono coinvolte da condizioni (0, 1, 2 o più); se esiste un indice sulla fact table che inizia con la chiave della prima dimension table condizionata (IXFT1 su k1); se la query richiede di accedere ai dati della fact table. A seconda delle risposte si accede alla dimension table e poi all'indice, si esegue un hash join, si fa una RID intersection fra le condizioni, o si scandisce la fact table facendo il join con tutte le dimension table richieste dal group-by set — terminando con il raggruppamento delle tuple. La morale è che la scelta dell'indice <strong>non è indipendente dal piano di accesso</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="700" height="260" role="img" aria-label="Le regole di scelta degli indici: chiavi importate della fact table, attributi dimensionali in selezione, misure in selezione">
+        <g style="font-family:var(--lk-mono);font-size:10.5px;fill:var(--lk-vermilion)">
+          <text x="30" y="28">SI CONSIGLIA DI CREARE INDICI SU…</text>
+        </g>
+        <g style="fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.3">
+          <rect x="40" y="50" width="200" height="100" rx="2"/>
+          <rect x="260" y="50" width="200" height="100" rx="2"/>
+          <rect x="480" y="50" width="190" height="100" rx="2"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink)">
+          <text x="140" y="74" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Chiavi importate FT</text>
+          <text x="140" y="94" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">velocità dei join</text>
+          <text x="140" y="114" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">B+-tree · join · star</text>
+          <text x="140" y="130" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">bitmapped join index</text>
+          <text x="360" y="74" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Attributi dimensionali</text>
+          <text x="360" y="94" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">spesso in selezione</text>
+          <text x="360" y="114" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">B+-tree o bitmap</text>
+          <text x="575" y="74" text-anchor="middle" style="fill:var(--lk-cobalt-dark);font-weight:600">Misure</text>
+          <text x="575" y="94" text-anchor="middle" style="font-size:9.5px;fill:var(--lk-ink-soft)">spesso in clausole</text>
+          <text x="575" y="114" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">di selezione</text>
+          <text x="575" y="130" text-anchor="middle" style="font-size:9px;fill:var(--lk-ink-soft)">bitmap evoluti</text>
+        </g>
+        <g style="fill:none;stroke:var(--lk-rule-soft);stroke-width:1">
+          <path d="M30 180 L670 180"/>
+        </g>
+        <g style="font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)">
+          <text x="350" y="205" text-anchor="middle">senza statistiche il piano di accesso non è definito:</text>
+          <text x="350" y="225" text-anchor="middle" style="fill:var(--lk-vermilion)">la creazione degli indici va valutata con molta attenzione</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 13.11</b> — Le regole per la creazione degli indici. Chiavi importate della fact table per i join; attributi dimensionali e misure in selezione per i predicati; l'avvertenza finale sulle statistiche del DBMS.</figcaption>
+    </figure>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Che cosa si definisce nella progettazione dell'ETL e in quali due direzioni operano le procedure?</summary>
+        <p>Si definiscono le <strong>procedure necessarie a caricare all'interno del data mart i dati provenienti dalle sorgenti operazionali</strong>. Due direzioni: (1) dalle sorgenti operazionali all'ODS, realizzando a livello estensionale le trasformazioni definite in fase di integrazione; (2) dall'ODS al data mart, conformando la struttura del livello riconciliato agli schemi a stella.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono le quattro operazioni che alimentano lo schema riconciliato?</summary>
+        <p><strong>Estrazione</strong> (acquisire i dati dalle sorgenti), <strong>pulizia</strong> (eliminare le incongruenze dovute a errori e omissioni), <strong>trasformazione</strong> (conformare i dati allo schema riconciliato), <strong>caricamento</strong> (inserire i dati trasformati nell'ODS). Tutte transitano dalla <strong>staging area</strong>, spazio di memorizzazione transitoria.</p>
+      </details>
+
+      <details>
+        <summary>Come si classificano i dati delle sorgenti e le modalità di estrazione?</summary>
+        <p>Per natura dei dati: <strong>transitoria</strong> (solo immagine corrente), <strong>semi-storicizzata</strong> (limitato numero di stati precedenti), <strong>storicizzata</strong> (tutte le modifiche mantenute). Per modalità: <strong>estrazione statica</strong> (tutti i dati) e <strong>incrementale</strong> (solo i dati modificati/inseriti dall'ultima estrazione), che può essere <strong>immediata</strong> o <strong>ritardata</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono le quattro tecniche di estrazione incrementale?</summary>
+        <p><strong>Assistita dall'applicazione</strong> (immediata: funzioni dentro le applicazioni OLTP); <strong>basata su log</strong> (ritardata: file di log del DBMS, formato proprietario, consigliata solo col modulo del produttore); <strong>basata su trigger</strong> (immediata: funzioni basate su eventi nel DBMS, non estensibile per motivi prestazionali); <strong>basata su marche temporali</strong> (ritardata: campi di marcatura nello schema, opera a posteriori).</p>
+      </details>
+
+      <details>
+        <summary>Qual è il limite della tecnica basata su marche temporali?</summary>
+        <p>Se i dati sono <strong>transitori o semi-storicizzati</strong>, non può identificare gli <strong>stati intermedi</strong> dei record modificati più volte durante l'intervallo di aggiornamento: resta solo l'ultimo stato, e le modifiche intermedie vanno perse (esempio Barolo: 100 → 200 → 150, l'estrazione legge 150 e perde il 200).</p>
+      </details>
+
+      <details>
+        <summary>In che cosa consiste il risultato dell'estrazione incrementale?</summary>
+        <p>Nell'insieme di <strong>record della sorgente modificati, aggiunti o cancellati</strong> rispetto alla precedente esecuzione, residenti nella staging area. A ogni record conviene associare il <strong>tipo di operazione</strong> (Inserimento, Modifica, Cancellazione) che ne ha generato la variazione.</p>
+      </details>
+
+      <details>
+        <summary>Come si caricano i dati dalla staging area all'ODS?</summary>
+        <p>Estrazione statica → <strong>riscrittura completa</strong>. Estrazione incrementale: ODS <strong>non storicizzato</strong> → si memorizza solo il tipo di operazione; ODS <strong>storicizzato</strong> → si memorizzano anche le marche temporali di validità. Il livello di storicizzazione dell'ODS dipende dalle sorgenti e dai requisiti di reportistica operativa.</p>
+      </details>
+
+      <details>
+        <summary>Come avviene il caricamento delle dimension table e delle fact table?</summary>
+        <p>Si <strong>identificano i dati da caricare</strong>, si <strong>sostituiscono gli identificatori con chiavi surrogate</strong> verificando le corrispondenze nelle <strong>tabelle di look-up</strong>, quindi si caricano le tuple. Le fact table si caricano <strong>dopo</strong> le dimension table per rispettare i vincoli di integrità referenziale.</p>
+      </details>
+
+      <details>
+        <summary>Quali famiglie di inconsistenze affronta la trasformazione e pulizia, e con quali tecniche?</summary>
+        <p>Errori di battitura, differenze di formato, inconsistenze tra valori e descrizione, inconsistenze tra campi correlati (Bologna/Lazio). Tecniche: <strong>basate su dizionari</strong> (look-up per sinonimi e abbreviazioni, dominio noto e limitato), <strong>ad hoc</strong> (equazioni, outliers), <strong>fusione approssimata</strong> (join approssimati, purge/merge). La prevenzione con regole di inserimento rigorose è la strada migliore.</p>
+      </details>
+
+      <details>
+        <summary>Quale vista si sceglie per il refresh e perché?</summary>
+        <p>La <strong>più piccola vista che permette di risolvere l'interrogazione</strong>: è quella che <strong>minimizza il costo di aggiornamento</strong>, esattamente come l'aggregate navigator sceglie la vista che minimizza il costo di esecuzione.</p>
+      </details>
+
+      <details>
+        <summary>Perché i B+-tree non sono più sufficienti nei data mart?</summary>
+        <p>Danno buone prestazioni con <strong>selettività molto elevata</strong>, ma le interrogazioni OLAP usano predicati a <strong>bassa selettività</strong> (es. sesso); sono più adatti a interrogazioni semplici e richiedono molto spazio. Non sono più sufficienti, ma rimangono molto utili.</p>
+      </details>
+
+      <details>
+        <summary>Come è fatto un indice bitmap e quali sono i suoi vantaggi?</summary>
+        <p>Una <strong>matrice di bit</strong>: una riga per tupla, una colonna per valore distinto; bit (i,j) = TRUE se la tupla i ha il valore j. Vantaggi: spazio ridotto, I/O basso (si leggono solo i vettori), ottimi per query senza accesso ai dati, operatori binari (AND/OR/NOT) per i predicati. Adatti a cardinalità ridotta: si risparmia spazio se densità media ≥ 1/Len(RID).</p>
+      </details>
+
+      <details>
+        <summary>Che cosa sono gli indici di join e gli indici star?</summary>
+        <p>L'<strong>indice di join</strong> calcola in anticipo le coppie di RID che soddisfano un predicato di join. L'<strong>indice star</strong> estende il concetto a più tabelle, concatenando le colonne della fact table e di più dimension table: efficiente sulle colonne iniziali, sub-ottimo altrimenti; il numero di indici necessari cresce con le permutazioni delle dimensioni.</p>
+      </details>
+
+      <details>
+        <summary>Su quali attributi si consiglia di creare indici?</summary>
+        <p>Chiavi importate della fact table (per i join: B+-tree, indici di join, star, bitmapped join index), attributi dimensionali spesso in selezione (B+-tree o bitmap), misure spesso in clausole di selezione (bitmap evoluti). Se il DBMS non usa statistiche, la creazione va valutata con molta attenzione.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-12-viste-materializzate-scenari-temporali.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-14-interrogazione-olap-power-bi.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: <code>Il ciclo di vita dei data warehouse (seconda parte).pdf</code> · Business Intelligence, UniBo · Prof. S. Rizzi</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Step simulator: il flusso di alimentazione dell'ODS ---- */
+LessonKit.stepper("#st-etl", {
+  title: "Il flusso di alimentazione dell'ODS",
+  sub: "Quattro operazioni trasformano i dati delle sorgenti: estrazione, pulizia, trasformazione, caricamento. Avanzatele nell'ordine giusto: solo così i dati arrivano nello schema riconciliato.",
+  shared: { dati: 0, inStaging: 0, puliti: 0, conformati: 0, inODS: 0 },
+  watch: ["dati", "inStaging", "puliti", "conformati", "inODS"],
+  threads: {
+    estr: {
+      name: "Estrazione",
+      steps: [
+        { label: "Acquisire i dati dalle sorgenti operazionali verso la staging area", run: function (S) { S.dati = 100; S.inStaging = 100; } }
+      ]
+    },
+    pul: {
+      name: "Pulizia",
+      steps: [
+        { label: "Eliminare le incongruenze dovute a errori e omissioni (es. Città=Bologna, Regione=Lazio)", run: function (S) { S.inStaging -= 12; S.puliti = 88; } }
+      ]
+    },
+    trasf: {
+      name: "Trasformazione",
+      steps: [
+        { label: "Conformare i dati delle sorgenti allo schema riconciliato", run: function (S) { S.conformati = S.puliti; } }
+      ]
+    },
+    car: {
+      name: "Caricamento",
+      steps: [
+        { label: "Inserire i dati trasformati nell'ODS", run: function (S) { S.inODS = S.conformati; } }
+      ]
+    }
+  },
+  verdict: function (S, allDone) {
+    if (!allDone) return { status: "", text: "L'ordine delle operazioni è parte del progetto: l'estrazione precede la pulizia, la trasformazione precede il caricamento." };
+    return { status: "ok", text: "Dati acquisiti: " + S.dati + ". Dopo pulizia (-12 incongruenze): " + S.puliti + ". Conformati allo schema riconciliato e caricati in ODS: " + S.inODS + ". Il percorso passa sempre dalla staging area." };
+  }
+});
+
+/* ---- Widget bespoke: quale tecnica di estrazione? ---- */
+(function () {
+  var host = document.getElementById("w-tecniche-dom");
+  if (!host) return;
+  var items = [
+    { q: "«Sistemi legacy che non forniscono sistemi di triggering o log; le modifiche vengono segnalate da funzioni implementate dentro le applicazioni OLTP.»",
+      a: "Assistita dall'applicazione",
+      why: "Tecnica immediata: specifiche funzioni dentro le applicazioni OLTP rilevano le modifiche e le segnalano all'estrattore. Utile con i legacy, e nei sistemi moderni quando esiste un livello di API comune." },
+    { q: "«Il modulo di estrazione è fornito direttamente dal produttore del DBMS.»",
+      a: "Basata su log",
+      why: "Il formato dei log è normalmente proprietario del DBMS: interpretarlo è complesso, quindi la tecnica è consigliabile solo quando il modulo di estrazione viene dal produttore stesso." },
+    { q: "«Le modifiche vengono individuate da funzioni basate su eventi implementate e controllate direttamente nel DBMS; non è estendibile a tutte le transazioni per motivi prestazionali.»",
+      a: "Basata su trigger",
+      why: "I trigger sono immediati ma monitorare continuamente tutte le transazioni potenzialmente in grado di innescarli ha un costo prestazionale proibitivo: non si adotta in modo estensivo." },
+    { q: "«Lo schema del database viene modificato aggiungendo campi che contrassegnano i record modificati; il modulo opera a posteriori.»",
+      a: "Basata su marche temporali",
+      why: "Tecnica ritardata: le marche segnalano il tipo di modifica e l'estrattore individua a posteriori i record variati. L'efficacia dipende dalla struttura del sistema operazionale." },
+    { q: "«Le modifiche vengono catturate nel momento stesso in cui si verificano, da funzioni basate su eventi controllate dal DBMS.»",
+      a: "Basata su trigger",
+      why: "Le funzioni basate su eventi implementate nel DBMS (i trigger) rilevano la modifica mentre avviene: estrazione immediata, con i limiti prestazionali citati dalle slide." }
+  ];
+  var levels = ["Assistita dall'applicazione", "Basata su log", "Basata su trigger", "Basata su marche temporali"];
+  var i = 0, ok = 0, answered = false;
+  var qEl = document.createElement("p");
+  qEl.style.margin = ".2rem 0 .8rem";
+  var btnWrap = document.createElement("div");
+  btnWrap.className = "lk-step-btns";
+  var msg = document.createElement("div");
+  msg.className = "lk-step-verdict";
+  var nav = document.createElement("div");
+  nav.className = "lk-step-btns";
+  host.appendChild(qEl); host.appendChild(btnWrap); host.appendChild(msg); host.appendChild(nav);
+  var btns = levels.map(function (lv) {
+    var b = document.createElement("button");
+    b.type = "button"; b.textContent = lv;
+    b.addEventListener("click", function () { choose(lv); });
+    btnWrap.appendChild(b);
+    return b;
+  });
+  var nextBtn = document.createElement("button");
+  nextBtn.type = "button"; nextBtn.className = "lk-step-reset";
+  nextBtn.textContent = "Prossima situazione";
+  nav.appendChild(nextBtn);
+  function render() {
+    answered = false;
+    qEl.innerHTML = "<strong>Situazione " + (i + 1) + " di " + items.length + ".</strong> " + items[i].q;
+    msg.className = "lk-step-verdict";
+    msg.textContent = "Corrette finora: " + ok + ".";
+    btns.forEach(function (b) { b.disabled = false; });
+  }
+  function choose(v) {
+    if (answered) return;
+    answered = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (v === items[i].a) {
+      ok++;
+      msg.className = "lk-step-verdict ok";
+      msg.textContent = "Corretto: " + items[i].a + ". " + items[i].why;
+    } else {
+      msg.className = "lk-step-verdict bad";
+      msg.textContent = "No, è: " + items[i].a + ". " + items[i].why;
+    }
+  }
+  nextBtn.addEventListener("click", function () {
+    i = (i + 1) % items.length;
+    if (i === 0) { ok = 0; }
+    render();
+  });
+  render();
+})();
+
+/* ---- Widget bespoke: cosa succede a ogni passo? ---- */
+(function () {
+  var host = document.getElementById("w-caricamento-dom");
+  if (!host) return;
+  var items = [
+    { q: "«L'estrazione è statica: come si carica l'ODS dalla staging area?»",
+      a: "Riscrittura completa",
+      why: "Con l'estrazione statica si estraggono tutti i dati dei database sorgenti: la modalità di caricamento è la riscrittura completa dell'ODS." },
+    { q: "«L'estrazione è incrementale e l'ODS non è storicizzato: cosa si memorizza per ogni variazione?»",
+      a: "Solo il tipo di operazione",
+      why: "In un ODS non storicizzato si memorizza solo il tipo di operazione (Inserimento, Modifica, Cancellazione) che ha determinato la variazione." },
+    { q: "«L'estrazione è incrementale e l'ODS è storicizzato: che cosa si aggiunge a ogni tupla?»",
+      a: "Una coppia di marche temporali",
+      why: "In un ODS storicizzato si memorizza anche una coppia di marche temporali che indica l'intervallo di validità della tupla." },
+    { q: "«Nel caricamento di una dimension table, una tupla già presente con lo stesso identificatore: quale chiave viene riusata?»",
+      a: "La chiave surrogata già assegnata",
+      why: "La chiave surrogata di una tupla già presente viene riusata; solo per le tuple nuove viene generata una nuova chiave, verificando la corrispondenza nelle tabelle di look-up." },
+    { q: "«Perché le fact table si caricano dopo le dimension table?»",
+      a: "Per rispettare l'integrità referenziale",
+      why: "Il caricamento delle fact table segue l'alimentazione delle dimension table per poter rispettare i vincoli di integrità referenziale: le chiavi surrogate devono già esistere nelle dimension table." }
+  ];
+  var levels = ["Riscrittura completa", "Solo il tipo di operazione", "Una coppia di marche temporali", "La chiave surrogata già assegnata", "Per rispettare l'integrità referenziale"];
+  var i = 0, ok = 0, answered = false;
+  var qEl = document.createElement("p");
+  qEl.style.margin = ".2rem 0 .8rem";
+  var btnWrap = document.createElement("div");
+  btnWrap.className = "lk-step-btns";
+  var msg = document.createElement("div");
+  msg.className = "lk-step-verdict";
+  var nav = document.createElement("div");
+  nav.className = "lk-step-btns";
+  host.appendChild(qEl); host.appendChild(btnWrap); host.appendChild(msg); host.appendChild(nav);
+  var btns = levels.map(function (lv) {
+    var b = document.createElement("button");
+    b.type = "button"; b.textContent = lv;
+    b.addEventListener("click", function () { choose(lv); });
+    btnWrap.appendChild(b);
+    return b;
+  });
+  var nextBtn = document.createElement("button");
+  nextBtn.type = "button"; nextBtn.className = "lk-step-reset";
+  nextBtn.textContent = "Prossimo passo";
+  nav.appendChild(nextBtn);
+  function render() {
+    answered = false;
+    qEl.innerHTML = "<strong>Passo " + (i + 1) + " di " + items.length + ".</strong> " + items[i].q;
+    msg.className = "lk-step-verdict";
+    msg.textContent = "Corrette finora: " + ok + ".";
+    btns.forEach(function (b) { b.disabled = false; });
+  }
+  function choose(v) {
+    if (answered) return;
+    answered = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (v === items[i].a) {
+      ok++;
+      msg.className = "lk-step-verdict ok";
+      msg.textContent = "Corretto: " + items[i].a + ". " + items[i].why;
+    } else {
+      msg.className = "lk-step-verdict bad";
+      msg.textContent = "No, è: " + items[i].a + ". " + items[i].why;
+    }
+  }
+  nextBtn.addEventListener("click", function () {
+    i = (i + 1) % items.length;
+    if (i === 0) { ok = 0; }
+    render();
+  });
+  render();
+})();
+
+/* ---- Widget bespoke: quale tecnica di pulizia? ---- */
+(function () {
+  var host = document.getElementById("w-pulizia-dom");
+  if (!host) return;
+  var items = [
+    { q: "«Valori digitati male nei sistemi operazionali, con un dominio conosciuto e limitato.»",
+      a: "Dizionari",
+      why: "Le tecniche basate su dizionari usano tabelle di look-up per sinonimi e abbreviazioni e sono utili per errori di battitura e discrepanze di formato, quando il dominio è noto e limitato." },
+    { q: "«Il profitto deve essere uguale all'incasso meno le spese: una regola specifica del dominio applicativo.»",
+      a: "Ad hoc",
+      why: "Le tecniche ad hoc codificano regole proprie del dominio applicativo, come le equazioni (profitto = incasso − spese) e gli outliers (variazione di prezzo oltre il 20%)." },
+    { q: "«Due record si riferiscono alla stessa entità ma non esiste un identificatore comune per accorgersene.»",
+      a: "Fusione approssimata",
+      why: "La fusione approssimata identifica record corrispondenti in assenza di identificatori comuni, con join approssimati e il purge/merge problem." },
+    { q: "«Città='Bologna' e Regione='Lazio' nella stessa tupla.»",
+      a: "Ad hoc",
+      why: "È l'inconsistenza tra valori di campi correlati: una regola di dominio (la coerenza città/regione) che gli strumenti standard non possono verificare — va trattata con tecniche ad hoc o prevenuta alla sorgente." },
+    { q: "«Date scritte in formati diversi e maiuscole/minuscole nello stesso campo.»",
+      a: "Dizionari",
+      why: "La differenza di formato nello stesso campo è una discrepanza di formato: le tecniche basate su dizionari (con dominio noto) sono indicate per normalizzarla." }
+  ];
+  var levels = ["Dizionari", "Ad hoc", "Fusione approssimata"];
+  var i = 0, ok = 0, answered = false;
+  var qEl = document.createElement("p");
+  qEl.style.margin = ".2rem 0 .8rem";
+  var btnWrap = document.createElement("div");
+  btnWrap.className = "lk-step-btns";
+  var msg = document.createElement("div");
+  msg.className = "lk-step-verdict";
+  var nav = document.createElement("div");
+  nav.className = "lk-step-btns";
+  host.appendChild(qEl); host.appendChild(btnWrap); host.appendChild(msg); host.appendChild(nav);
+  var btns = levels.map(function (lv) {
+    var b = document.createElement("button");
+    b.type = "button"; b.textContent = lv;
+    b.addEventListener("click", function () { choose(lv); });
+    btnWrap.appendChild(b);
+    return b;
+  });
+  var nextBtn = document.createElement("button");
+  nextBtn.type = "button"; nextBtn.className = "lk-step-reset";
+  nextBtn.textContent = "Prossima inconsistenza";
+  nav.appendChild(nextBtn);
+  function render() {
+    answered = false;
+    qEl.innerHTML = "<strong>Inconsistenza " + (i + 1) + " di " + items.length + ".</strong> " + items[i].q;
+    msg.className = "lk-step-verdict";
+    msg.textContent = "Corrette finora: " + ok + ".";
+    btns.forEach(function (b) { b.disabled = false; });
+  }
+  function choose(v) {
+    if (answered) return;
+    answered = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (v === items[i].a) {
+      ok++;
+      msg.className = "lk-step-verdict ok";
+      msg.textContent = "Corretto: " + items[i].a + ". " + items[i].why;
+    } else {
+      msg.className = "lk-step-verdict bad";
+      msg.textContent = "No, è: " + items[i].a + ". " + items[i].why;
+    }
+  }
+  nextBtn.addEventListener("click", function () {
+    i = (i + 1) % items.length;
+    if (i === 0) { ok = 0; }
+    render();
+  });
+  render();
+})();
+
+/* ---- Widget bespoke: bitmap o B+-tree? ---- */
+(function () {
+  var host = document.getElementById("w-bitmap-dom");
+  if (!host) return;
+  var items = [
+    { q: "«Il predicato seleziona il sesso dei clienti: bassa selettività, poche chiavi distinte.»",
+      a: "Bitmap",
+      why: "Attributi a ridotta cardinalità e predicati a bassa selettività (es. sesso): il bitmap occupa poco spazio, ha I/O basso e risponde con operatori binari senza accedere ai dati." },
+    { q: "«Il predicato seleziona una chiave primaria con selettività molto elevata.»",
+      a: "B+-tree",
+      why: "I B+-tree danno buone prestazioni quando la selettività dei predicati è molto elevata: il punto di forza classico, per cui restano ancora molto utili." },
+    { q: "«La matrice dell'indice avrebbe una densità media inferiore a 1/Len(RID): tante chiavi distinte e poche tuple per valore.»",
+      a: "B+-tree",
+      why: "Si ha risparmio di spazio col bitmap solo se la densità media è ≥ 1/Len(RID); sotto quella soglia (matrice sparsa, NK alto) il bitmap perde il vantaggio sul B-tree." },
+    { q: "«La query chiede «quanti maschi in Emilia-Romagna sono assicurati?»: conta i bit a 1 dell'AND di tre vettori.»",
+      a: "Bitmap",
+      why: "È l'esempio delle slide: gli operatori binari (AND/OR/NOT) elaborano i predicati e il conteggio dei bit a 1 risponde senza mai leggere le tuple: I/O molto basso." },
+    { q: "«L'attributo ha molti valori distinti e l'interrogazione è semplice, su dati puntuali.»",
+      a: "B+-tree",
+      why: "Con NK elevato la matrice del bitmap si sparge e cresce; per interrogazioni semplici e puntuali i B+-tree restano la scelta adeguata." }
+  ];
+  var levels = ["Bitmap", "B+-tree"];
+  var i = 0, ok = 0, answered = false;
+  var qEl = document.createElement("p");
+  qEl.style.margin = ".2rem 0 .8rem";
+  var btnWrap = document.createElement("div");
+  btnWrap.className = "lk-step-btns";
+  var msg = document.createElement("div");
+  msg.className = "lk-step-verdict";
+  var nav = document.createElement("div");
+  nav.className = "lk-step-btns";
+  host.appendChild(qEl); host.appendChild(btnWrap); host.appendChild(msg); host.appendChild(nav);
+  var btns = levels.map(function (lv) {
+    var b = document.createElement("button");
+    b.type = "button"; b.textContent = lv;
+    b.addEventListener("click", function () { choose(lv); });
+    btnWrap.appendChild(b);
+    return b;
+  });
+  var nextBtn = document.createElement("button");
+  nextBtn.type = "button"; nextBtn.className = "lk-step-reset";
+  nextBtn.textContent = "Prossimo predicato";
+  nav.appendChild(nextBtn);
+  function render() {
+    answered = false;
+    qEl.innerHTML = "<strong>Predicato " + (i + 1) + " di " + items.length + ".</strong> " + items[i].q;
+    msg.className = "lk-step-verdict";
+    msg.textContent = "Corrette finora: " + ok + ".";
+    btns.forEach(function (b) { b.disabled = false; });
+  }
+  function choose(v) {
+    if (answered) return;
+    answered = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (v === items[i].a) {
+      ok++;
+      msg.className = "lk-step-verdict ok";
+      msg.textContent = "Corretto: " + items[i].a + ". " + items[i].why;
+    } else {
+      msg.className = "lk-step-verdict bad";
+      msg.textContent = "No, è: " + items[i].a + ". " + items[i].why;
+    }
+  }
+  nextBtn.addEventListener("click", function () {
+    i = (i + 1) % items.length;
+    if (i === 0) { ok = 0; }
+    render();
+  });
+  render();
+})();
+
+/* ---- Widget bespoke: quale indice per il data mart? ---- */
+(function () {
+  var host = document.getElementById("w-indici-dom");
+  if (!host) return;
+  var items = [
+    { q: "«La fact table deve essere unita alle dimension table sul predicato Vendite.IDNegozi = Negozi.IDNegozi, con le coppie di RID precalcolate.»",
+      a: "Indice di join",
+      why: "L'indice di join calcola in anticipo le tuple che soddisfano un particolare predicato di join, memorizzando le coppie di RID corrispondenti." },
+    { q: "«Un'indagine multidimensionale coinvolge insieme fact table, Settimana e Negozi, sempre nelle colonne iniziali dell'indice.»",
+      a: "Indice star",
+      why: "L'indice star estende l'indice di join a più tabelle concatenando le colonne della fact table e di più dimension table; è molto efficiente sulle colonne iniziali." },
+    { q: "«La query deve contare i maschi in Emilia-Romagna assicurati, senza accedere alle tuple.»",
+      a: "Bitmap",
+      why: "Il conteggio dei bit a 1 nell'AND di tre bitmap risponde senza accesso ai dati: I/O molto basso e operatori binari, l'esempio tipico del bitmap." },
+    { q: "«L'attributo dimensionale è spesso coinvolto nei criteri di selezione e ha cardinalità ridotta.»",
+      a: "Bitmap",
+      why: "Le slide consigliano B+-tree o bitmap per gli attributi dimensionali spesso in selezione: con cardinalità ridotta il bitmap è la scelta naturale." },
+    { q: "«Una misura è spesso coinvolta in clausole di selezione.»",
+      a: "Bitmap evoluti",
+      why: "Per le misure spesso coinvolte in clausole di selezione le slide indicano i bitmap evoluti." },
+    { q: "«Le chiavi importate della fact table devono accelerare l'esecuzione dei join.»",
+      a: "Indice di join (o B+-tree, star, bitmapped join index)",
+      why: "Per le chiavi importate sulla fact table le slide consigliano B+-tree o indici di join, indici star, bitmapped join index: la priorità è la velocità dei join." }
+  ];
+  var levels = ["Bitmap", "Bitmap evoluti", "Indice di join", "Indice di join (o B+-tree, star, bitmapped join index)", "Indice star"];
+  var i = 0, ok = 0, answered = false;
+  var qEl = document.createElement("p");
+  qEl.style.margin = ".2rem 0 .8rem";
+  var btnWrap = document.createElement("div");
+  btnWrap.className = "lk-step-btns";
+  var msg = document.createElement("div");
+  msg.className = "lk-step-verdict";
+  var nav = document.createElement("div");
+  nav.className = "lk-step-btns";
+  host.appendChild(qEl); host.appendChild(btnWrap); host.appendChild(msg); host.appendChild(nav);
+  var btns = levels.map(function (lv) {
+    var b = document.createElement("button");
+    b.type = "button"; b.textContent = lv;
+    b.addEventListener("click", function () { choose(lv); });
+    btnWrap.appendChild(b);
+    return b;
+  });
+  var nextBtn = document.createElement("button");
+  nextBtn.type = "button"; nextBtn.className = "lk-step-reset";
+  nextBtn.textContent = "Prossima caratteristica";
+  nav.appendChild(nextBtn);
+  function render() {
+    answered = false;
+    qEl.innerHTML = "<strong>Caratteristica " + (i + 1) + " di " + items.length + ".</strong> " + items[i].q;
+    msg.className = "lk-step-verdict";
+    msg.textContent = "Corrette finora: " + ok + ".";
+    btns.forEach(function (b) { b.disabled = false; });
+  }
+  function choose(v) {
+    if (answered) return;
+    answered = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (v === items[i].a) {
+      ok++;
+      msg.className = "lk-step-verdict ok";
+      msg.textContent = "Corretto: " + items[i].a + ". " + items[i].why;
+    } else {
+      msg.className = "lk-step-verdict bad";
+      msg.textContent = "No, è: " + items[i].a + ". " + items[i].why;
+    }
+  }
+  nextBtn.addEventListener("click", function () {
+    i = (i + 1) % items.length;
+    if (i === 0) { ok = 0; }
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>
