@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 10 — Hyperparameter Optimization · MLDM</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-09-decision-trees.html">&larr; Ch. 9 — Decision Trees</a>
+    <a href="index.html">Index</a>
+    <a href="cap-11-knn-perceptron-mlp.html">Ch. 11 — kNN, Perceptron &amp; MLP &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part IV — Modeling · Chapter 10</div>
+    <h1>Hyperparameter Optimization</h1>
+    <div class="lk-meta"><span>~35 min read</span><span>5 interactive widgets</span><span>3 plates</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What is a hyperparameter?</a></li>
+      <li><a href="#s2">The anatomy of a search</a></li>
+      <li><a href="#s3">The parameter (search) space</a></li>
+      <li><a href="#s4">Grid search vs random search</a></li>
+      <li><a href="#s5">Cross-validation: testing configurations</a></li>
+      <li><a href="#s6">k-fold cross-validation in action</a></li>
+      <li><a href="#s7">Random forest: the search in practice</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="6 - Modeling.pdf#s37">
+    <h2>1. What is a hyperparameter?</h2>
+
+    <p>Chapter 9 tuned the decision tree by hand — a single slider called <code>max_depth</code>. The deck now asks the question behind that manual work: <em>how do we tune hyperparameters?</em></p>
+
+    <blockquote>
+      <p><strong>Hyper-parameters are parameters that are not directly learnt within estimators.</strong></p>
+    </blockquote>
+
+    <p>The distinction is the key of the chapter:</p>
+    <ul>
+      <li><strong>Parameters</strong> are learnt from the data by <code>.fit()</code> — the tree's thresholds, the forest's votes, the perceptron's weights (they end with an underscore, as Chapter 8 showed);</li>
+      <li><strong>Hyperparameters</strong> are set <em>before</em> training — in scikit-learn <strong>they are passed as arguments to the constructor of the estimator classes</strong>, and <code>.fit()</code> never touches them.</li>
+    </ul>
+
+    <div class="callout idea">
+      <span class="callout-label">Key idea</span>
+      <p>The same estimator class can produce very different models just by changing constructor arguments. <code>DecisionTreeClassifier(max_depth=1)</code> and <code>DecisionTreeClassifier(max_depth=9)</code> are the <em>same algorithm</em> with different hyperparameters — and, as Chapter 9 showed, one underfits while the other risks overfitting. Choosing the values is a second optimization problem on top of training, and this chapter gives it a name: <strong>hyperparameter optimization</strong>.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="6 - Modeling.pdf#s38">
+    <h2>2. The anatomy of a search</h2>
+
+    <p>The deck first makes the scope precise: <strong>any parameter provided when constructing an estimator may be optimized</strong>. You can see the full list for any fitted estimator with:</p>
+
+    <pre><code>estimator.get_params()</code></pre>
+
+    <p>Then it defines what a <strong>search</strong> is made of — five ingredients, two of which the course already has (marked with the deck's checkmarks):</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" role="img" aria-label="The five ingredients of a hyperparameter search: estimator, score function, parameter space, search method, cross-validation scheme">
+        <text x="12" y="20" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">THE FIVE INGREDIENTS OF A SEARCH</text>
+
+        <rect x="20" y="70" width="190" height="64" rx="3" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+        <text x="115" y="96" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-forest)">1. an estimator &#10003;</text>
+        <text x="115" y="114" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">the model family + its constructor args</text>
+
+        <rect x="255" y="70" width="190" height="64" rx="3" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+        <text x="350" y="96" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-forest)">2. a score function &#10003;</text>
+        <text x="350" y="114" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">how to measure a configuration</text>
+
+        <rect x="490" y="70" width="190" height="64" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="585" y="96" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">3. a parameter space</text>
+        <text x="585" y="114" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">the candidate values to try</text>
+
+        <rect x="20" y="176" width="300" height="64" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="170" y="202" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">4. a search / sampling method</text>
+        <text x="170" y="220" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">grid (exhaustive) or random (sampling)</text>
+
+        <rect x="380" y="176" width="300" height="64" rx="3" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="530" y="202" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt)">5. a cross-validation scheme</text>
+        <text x="530" y="220" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">how each candidate is evaluated</text>
+
+        <text x="12" y="252" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">the first two are ready from Chapter 8; the next three are what this chapter builds.</text>
+      </svg>
+      <figcaption><b>Plate 10.1</b> — The anatomy of a search as the deck lists it. The estimator and the score function exist already (the checkmarks); the parameter space, the sampling method and the cross-validation scheme are the machinery this chapter adds.</figcaption>
+    </figure>
+
+    <p>The remaining sections take the three missing ingredients in order: the <strong>space</strong> (&sect;3), the <strong>method</strong> (&sect;4), and the <strong>validation scheme</strong> (&sect;5&ndash;6) — then the deck runs the whole pipeline on a random forest (&sect;7).</p>
+  </section>
+
+  <section id="s3" data-src="6 - Modeling.pdf#s39">
+    <h2>3. The parameter (search) space</h2>
+
+    <p>The deck defines the search space geometrically:</p>
+
+    <blockquote>
+      <p><strong>Search Space</strong>: space where each dimension represents a hyperparameter and each point represents one model configuration.</p>
+    </blockquote>
+
+    <p>Its example uses the random forest — the model that will close the chapter. Two hyperparameters, two dimensions:</p>
+
+    <ul>
+      <li><code>max_depth</code>: maximum depth of a single tree, domain <strong>[1, 10]</strong>;</li>
+      <li><code>n_estimators</code> (the deck writes <em>#estimators</em>): number of trees in the forest, domain <strong>[2, 20]</strong>.</li>
+    </ul>
+
+    <p>Every pair <code>(max_depth, n_estimators)</code> is one forest configuration — one point in the 2D search space. With these domains there are <strong>10 &#215; 19 = 190 distinct configurations</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 280" role="img" aria-label="The two-dimensional search space of a random forest: max_depth from 1 to 10 on the x axis, n_estimators from 2 to 20 on the y axis, with a small shaded good region">
+        <text x="12" y="20" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">THE 2D SEARCH SPACE OF A RANDOM FOREST</text>
+
+        <line x1="70" y1="230" x2="640" y2="230" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <line x1="70" y1="230" x2="70" y2="50" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <text x="355" y="256" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">max_depth &#8712; [1, 10]</text>
+        <text x="46" y="145" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)" transform="rotate(-90 46 145)">n_estimators &#8712; [2, 20]</text>
+
+        <g font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">
+          <text x="92" y="244">1</text><text x="182" y="244">3</text><text x="272" y="244">5</text>
+          <text x="362" y="244">7</text><text x="452" y="244">9</text>
+          <text x="58" y="74">20</text><text x="58" y="128">12</text><text x="58" y="182">6</text>
+        </g>
+
+        <rect x="425" y="105" width="95" height="70" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.4"/>
+        <text x="472" y="118" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-forest)">good region &#8776; 5%</text>
+
+        <g>
+          <circle cx="72" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="72" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="72" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="72" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="72" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="72" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="72" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="72" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="72" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="72" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="111" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="111" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="111" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="111" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="111" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="111" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="111" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="111" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="111" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="111" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="150" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="150" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="150" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="150" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="150" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="150" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="150" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="150" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="150" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="150" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="189" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="189" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="189" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="189" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="189" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="189" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="189" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="189" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="189" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="189" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="228" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="228" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="228" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="228" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="228" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="228" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="228" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="228" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="228" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="228" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="267" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="267" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="267" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="267" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="267" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="267" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="267" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="267" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="267" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="267" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="306" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="306" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="306" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="306" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="306" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="306" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="306" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="306" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="306" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="306" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="345" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="345" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="345" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="345" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="345" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="345" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="345" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="345" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="345" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="345" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="384" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="384" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="384" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="384" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="384" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="384" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="384" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="384" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="384" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="384" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="423" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="423" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="423" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="423" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="423" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="423" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="423" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="423" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="423" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="423" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="462" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="462" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="462" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="462" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="462" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="462" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="462" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="462" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="462" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="462" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="501" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="501" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="501" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="501" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="501" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="501" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="501" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="501" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="501" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="501" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="540" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="540" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="540" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="540" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="540" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="540" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="540" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="540" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="540" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="540" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="579" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="579" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="579" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="579" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="579" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="579" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="579" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="579" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="579" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="579" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+        <g>
+          <circle cx="618" cy="228" r="2.6" fill="var(--lk-cobalt)"/><circle cx="618" cy="206" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="618" cy="184" r="2.6" fill="var(--lk-cobalt)"/><circle cx="618" cy="162" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="618" cy="140" r="2.6" fill="var(--lk-cobalt)"/><circle cx="618" cy="118" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="618" cy="96" r="2.6" fill="var(--lk-cobalt)"/><circle cx="618" cy="74" r="2.6" fill="var(--lk-cobalt)"/>
+          <circle cx="618" cy="52" r="2.6" fill="var(--lk-cobalt)"/><circle cx="618" cy="30" r="2.6" fill="var(--lk-cobalt)"/>
+        </g>
+
+        <text x="12" y="276" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">10 &#215; 19 = 190 points: one per forest configuration. The green patch marks the &#8776;5% of the volume where the good configurations live.</text>
+      </svg>
+      <figcaption><b>Plate 10.2</b> — The deck's 2D search space. Grid search walks every point; random search samples points blind, so the probability of hitting the good region is roughly its share of the volume.</figcaption>
+    </figure>
+
+    <h3>Widget — explore the search space</h3>
+    <p>Click cells of the space to read the configuration they represent, then flip the switch to see what a 5% good region looks like inside it.</p>
+    <div id="w-space"></div>
+  </section>
+
+  <section id="s4" data-src="6 - Modeling.pdf#s40">
+    <h2>4. Grid search vs random search</h2>
+
+    <p>Once the space exists, something must walk it. The deck presents the two classical strategies:</p>
+
+    <ul>
+      <li><strong>Grid search</strong> exhaustively tries <em>every combination</em> of the provided hyper-parameter values, in order to find the best model. Complete and deterministic — but the cost grows multiplicatively: 10 &#215; 19 &#215; (any further dimension) evaluations, each of which is a full training run.</li>
+      <li><strong>(Pure) random search</strong> samples from the <em>entirety</em> of the search space. It does not require optimizing a gradient, so it works on functions that are not continuous or differentiable — such methods are also known as <strong>direct-search, derivative-free, or black-box</strong> methods.</li>
+    </ul>
+
+    <p>The deck then quantifies random search with a striking back-of-the-envelope calculation. <strong>If good parts of the search space occupy 5% of the volume, the chances of hitting a good configuration with one draw is 5%.</strong> With repeated independent draws the probability of finding at least one good configuration grows:</p>
+
+    <pre><code>1 - 0.95^60 = 0.953 &gt; 0.95</code></pre>
+
+    <p><strong>After 60 configurations, the probability of having seen at least one good one is above 95%</strong> — a guarantee grid search cannot make any cheaper, and one that stays valid even when the space is too large to enumerate (e.g. when a hyperparameter is continuous).</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Why this matters</span>
+      <p>Grid search is exhaustive but fragile: it commits to a fixed list of values per dimension. Random search spends the same budget on 60 <em>different</em> configurations spread across the whole volume — and for high-dimensional spaces that spread is usually worth more than completeness. This is why the deck's practical recipe (&sect;7) uses <code>RandomizedSearchCV</code>, not <code>GridSearchCV</code>.</p>
+    </div>
+
+    <h3>Widget — how many draws does random search need?</h3>
+    <p>Move the good-region share and the sampling budget, and watch the probability of at least one hit respond.</p>
+    <div id="w-random"></div>
+  </section>
+
+  <section id="s5" data-src="6 - Modeling.pdf#s41">
+    <h2>5. Cross-validation: testing configurations</h2>
+
+    <p>The search produces candidate configurations, and each one needs a score. The deck's question is blunt: <strong>how do we test the hyperparameter configurations?</strong></p>
+
+    <p>The answer cannot be the test set — that would leak it into the choice of hyperparameters. And the training set alone is misleading: a deeper tree scores perfectly on training while overfitting, as Chapter 9 showed. The standard solution is <strong>cross-validation</strong>:</p>
+
+    <ul>
+      <li>split the <em>training</em> data into <strong>k folds</strong>;</li>
+      <li>for each fold, <strong>train on the other k&minus;1 folds</strong> and validate on the held-out fold;</li>
+      <li>the configuration's score is the <strong>average accuracy over the k folds</strong>;</li>
+      <li>the configuration with the best average wins the search;</li>
+      <li>only then is the winning model evaluated once on the untouched test set.</li>
+    </ul>
+
+    <div class="callout warning">
+      <span class="callout-label">Exam rule</span>
+      <p>Three sets, three roles: the <strong>training</strong> set fits the model, the <strong>validation</strong> folds (inside cross-validation) choose the hyperparameters, and the <strong>test</strong> set is used exactly once, at the end, to report the honest performance. If a pipeline tunes on the test set, its accuracy is optimistic — this is the leak the exam asks about.</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="6 - Modeling.pdf#s42">
+    <h2>6. k-fold cross-validation in action</h2>
+
+    <p>The deck illustrates the mechanism with a k-fold diagram. The essential property to see in it: <strong>every training sample is used for validation exactly once</strong>, and every model is trained on k&minus;1 folds. With the deck's later choice of <code>cv=5</code> on 120 training samples, each fold holds 24 samples and each configuration costs 5 fits.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" role="img" aria-label="Five-fold cross-validation: five rows of folds, each row holding out one fold for validation in turn">
+        <text x="12" y="20" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">5-FOLD CROSS-VALIDATION — EACH FOLD TAKES ITS TURN</text>
+
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">
+          <text x="30" y="66" text-anchor="end">fold 1</text>
+          <text x="30" y="106" text-anchor="end">fold 2</text>
+          <text x="30" y="146" text-anchor="end">fold 3</text>
+          <text x="30" y="186" text-anchor="end">fold 4</text>
+          <text x="30" y="226" text-anchor="end">fold 5</text>
+        </g>
+
+        <g>
+          <rect x="44" y="52" width="520" height="20" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <rect x="148" y="52" width="416" height="20" fill="var(--lk-hl)"/>
+          <text x="304" y="66" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">VALIDATE</text>
+
+          <rect x="44" y="92" width="104" height="20" fill="var(--lk-hl)"/>
+          <rect x="148" y="92" width="104" height="20" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <rect x="252" y="92" width="312" height="20" fill="var(--lk-hl)"/>
+          <text x="200" y="106" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">VALIDATE</text>
+
+          <rect x="44" y="132" width="208" height="20" fill="var(--lk-hl)"/>
+          <rect x="252" y="132" width="104" height="20" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <rect x="356" y="132" width="208" height="20" fill="var(--lk-hl)"/>
+          <text x="304" y="146" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">VALIDATE</text>
+
+          <rect x="44" y="172" width="312" height="20" fill="var(--lk-hl)"/>
+          <rect x="356" y="172" width="104" height="20" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <rect x="460" y="172" width="104" height="20" fill="var(--lk-hl)"/>
+          <text x="408" y="186" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">VALIDATE</text>
+
+          <rect x="44" y="212" width="416" height="20" fill="var(--lk-hl)"/>
+          <rect x="460" y="212" width="104" height="20" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+          <text x="512" y="226" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">VALIDATE</text>
+        </g>
+
+        <text x="580" y="70" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">model 1: trained on folds 2-5</text>
+        <text x="580" y="86" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">score on fold 1</text>
+        <text x="580" y="126" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">&#8942;</text>
+        <text x="580" y="142" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">each sample is validation once</text>
+
+        <text x="44" y="40" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">120 training samples, split into 5 folds of 24 &#8212; the shaded band is the fold currently held out.</text>
+      </svg>
+      <figcaption><b>Plate 10.3</b> — The deck's cross-validation picture, made concrete for <code>cv=5</code>. Five fits per configuration; the reported score is the mean of the five validation accuracies — which is exactly what <code>best_score_</code> will contain in the next section.</figcaption>
+    </figure>
+
+    <h3>Widget — run the folds</h3>
+    <p>Choose k and step through the rounds: watch one fold turn vermilion while the model trains on the rest.</p>
+    <div id="w-cv"></div>
+  </section>
+
+  <section id="s7" data-src="6 - Modeling.pdf#s43">
+    <h2>7. Random forest: the search in practice</h2>
+
+    <p>The deck now closes the loop on the model promised in Chapter 9 — the <strong>random forest</strong> — and runs a real random search over its hyperparameters:</p>
+
+    <pre><code>from sklearn.model_selection import RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from scipy.stats import randint
+
+rf = RandomForestClassifier(random_state=seed)   # the estimator
+
+param_dist = {                                    # the parameter space
+    'n_estimators': randint(2, 200),        # Number of trees in the forest
+    'max_depth': randint(2, 20),            # Maximum depth of the tree
+    'min_samples_split': randint(2, 20),    # Minimum number of samples to split a node
+    'min_samples_leaf': randint(1, 20),     # Minimum number of samples in a leaf node
+}
+
+random_search = RandomizedSearchCV(rf, param_distributions=param_dist,
+                                   n_iter=50, scoring='accuracy',
+                                   cv=5, random_state=seed, n_jobs=-1)
+random_search.fit(X_train, y_train)               # the search
+
+print("Best Parameters from Random Search:", random_search.best_params_)
+best_rf = random_search.best_estimator_
+test_accuracy = best_rf.score(X_test, y_test)
+print("Best Cross-validation Accuracy:", random_search.best_score_,
+      "Test Set Accuracy with Best Parameters:", test_accuracy)
+forest = plot_boundary(best_rf, "rf_cplot")</code></pre>
+
+    <p>The deck's printed output:</p>
+
+    <pre><code>Best Parameters from Random Search: {'max_depth': 4, 'min_samples_leaf': 3, 'min_samples_split': 2, 'n_estimators': 124}
+Best Cross-validation Accuracy: 0.9583333333333334 Test Set Accuracy with Best Parameters: 1.0</code></pre>
+
+    <p>Every ingredient of Plate 10.1 is in those lines: the estimator (<code>rf</code>), the score function (<code>scoring='accuracy'</code>), the space (<code>param_dist</code>, four dimensions this time — the deck's 2D drawing was just the example), the sampling method (<code>RandomizedSearchCV</code>, <code>n_iter=50</code>), and the validation scheme (<code>cv=5</code>).</p>
+
+    <div class="callout note">
+      <span class="callout-label">Verified against a real run</span>
+      <p>Reproducing this exact search on the deck's setup (seed 42, 50 iterations, 5-fold CV) returns <strong>precisely the printed values</strong>: best parameters <code>{'max_depth': 4, 'min_samples_leaf': 3, 'min_samples_split': 2, 'n_estimators': 124}</code>, cross-validation accuracy 0.9583, test accuracy 1.0. The replay widget below walks the 50 actual sampled configurations of that run. One observation worth keeping: <strong>18 of the 50 sampled configurations already reached &#8805; 0.95 CV accuracy</strong> — on this dataset the good region is much larger than the 5% worst case of the deck's example, which is why random search finds it so reliably.</p>
+    </div>
+
+    <h3>Widget — replay the deck's 50-iteration search</h3>
+    <p>The real sampled configurations of the run above, in order. Step through them and watch the best candidate so far evolve.</p>
+    <div id="w-replay"></div>
+
+    <h3>Widget — the forest behind the search</h3>
+    <p>Why does the winning forest (depth 4, 124 trees) draw a cleaner boundary than any single tree? This widget trains a real bagged forest on the petal plane and lets you grow it tree by tree.</p>
+    <div id="w-rf"></div>
+  </section>
+
+  <section id="quiz" data-src="6 - Modeling.pdf#s37-43">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Define hyperparameter in your own words, and say how scikit-learn exposes them.</summary>
+        <p>Hyperparameters are <strong>parameters not directly learnt within estimators</strong> — they are set before training. In scikit-learn they are <strong>passed as arguments to the constructor</strong> of the estimator class (e.g. <code>max_depth=2</code>), and <code>.fit()</code> never changes them. The learnt parameters are instead exposed as attributes ending with an underscore after fitting.</p>
+      </details>
+
+      <details>
+        <summary>List the five ingredients of a hyperparameter search, marking which the course already had.</summary>
+        <p>An <strong>estimator</strong> (&#10003; already available), a <strong>score function</strong> (&#10003;), a <strong>parameter space</strong>, a <strong>method for searching or sampling candidates</strong>, and a <strong>cross-validation scheme</strong>. Any parameter passed to the constructor may be optimized; <code>get_params()</code> lists them.</p>
+      </details>
+
+      <details>
+        <summary>Describe the deck's 2D search-space example and count its configurations.</summary>
+        <p>One dimension per hyperparameter, one point per configuration: <code>max_depth &#8712; [1, 10]</code> and <code>n_estimators &#8712; [2, 20]</code> for a random forest. The space holds <strong>10 &#215; 19 = 190</strong> distinct forest configurations.</p>
+      </details>
+
+      <details>
+        <summary>Compare grid search and random search, and reproduce the 60-draw calculation.</summary>
+        <p><strong>Grid search</strong> exhaustively tries every combination of the provided values; <strong>random search</strong> samples from the entirety of the space and needs no gradient (direct-search / derivative-free / black-box). If the good region is 5% of the volume, one draw hits it with probability 5%, and 60 draws find at least one good configuration with probability <strong>1 &#8722; 0.95^60 = 0.953 &gt; 0.95</strong>.</p>
+      </details>
+
+      <details>
+        <summary>Explain why hyperparameters are chosen by cross-validation and not by the test set.</summary>
+        <p>Using the test set for tuning would <strong>leak</strong> information into the choice of hyperparameters, making the final accuracy optimistic. Cross-validation splits only the training data into k folds, trains on k&minus;1 of them, validates on the held-out fold, and repeats so each sample is validated exactly once; the mean over folds scores the configuration. The test set is used exactly once, at the very end.</p>
+      </details>
+
+      <details>
+        <summary>Walk through the deck's RandomizedSearchCV run and its results.</summary>
+        <p>On the random forest with <code>n_iter=50</code>, <code>scoring='accuracy'</code>, <code>cv=5</code> and <code>random_state=42</code>, the search sampled 50 configurations over 4 dimensions (n_estimators, max_depth, min_samples_split, min_samples_leaf). Best: <strong>{'max_depth': 4, 'min_samples_leaf': 3, 'min_samples_split': 2, 'n_estimators': 124}</strong>, cross-validation accuracy <strong>0.9583</strong>, test accuracy <strong>1.0</strong>. A real reproduction returns exactly these values; 18 of the 50 samples already scored &#8805; 0.95 in CV.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-09-decision-trees.html">&larr; Previous chapter</a>
+      <a href="index.html">Index</a>
+      <a href="cap-11-knn-perceptron-mlp.html">Next chapter &rarr;</a>
+    </nav>
+    <p>Source: deck <em>6 - Modeling</em>, slides 37-43 · Machine Learning and Data Mining (Module 2), University of Bologna, A.Y. 2025/26 · Matteo Francia</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Widget: explore the search space ---- */
+(function(){
+  var host = document.getElementById('w-space');
+  if (!host) return;
+  var D = 10, E = 19;                 // max_depth 1..10, n_estimators 2..20
+  var wrap = document.createElement('div'); wrap.className = 'lk-step';
+  var h = document.createElement('h4'); h.textContent = 'The random-forest search space';
+  var sub = document.createElement('p'); sub.className = 'lk-step-sub';
+  sub.textContent = 'Each cell is one forest configuration. Click a cell to read it. Toggle the good region to see its share of the volume.';
+  var grid = document.createElement('div');
+  grid.style.display = 'grid'; grid.style.gridTemplateColumns = 'repeat(10, 1fr)'; grid.style.gap = '.15rem';
+  var toggleRow = document.createElement('div'); toggleRow.style.margin = '.5rem 0';
+  var chk = document.createElement('input'); chk.type = 'checkbox'; chk.id = 'w-space-region';
+  chk.setAttribute('aria-label', 'Show good region');
+  var lbl = document.createElement('label'); lbl.htmlFor = 'w-space-region';
+  lbl.textContent = ' show the good region (5% of the volume)';
+  lbl.style.fontFamily = 'var(--lk-mono)'; lbl.style.fontSize = '.8rem';
+  toggleRow.appendChild(chk); toggleRow.appendChild(lbl);
+  var verdict = document.createElement('div'); verdict.className = 'lk-step-verdict';
+  var selected = { d: 4, e: 12 };
+  // good region: max_depth 7..8, n_estimators 13..19 (~14 cells of 190 = 7.4%) -> use 7..9 x 15..19 = 15 (7.9%);
+  // keep ~5%: max_depth 8, n_estimators 11..20 is 10 cells = 5.3%
+  function inGood(d, e){ return (d === 7 && e >= 13 && e <= 20) || (d === 8 && e >= 9 && e <= 13); }
+  function render(){
+    grid.innerHTML = '';
+    var goodCount = 0;
+    for (var d = 1; d <= D; d++) {
+      for (var e = 2; e <= E + 1; e++) {
+        var g = inGood(d, e); if (g) goodCount++;
+        var cell = document.createElement('div');
+        cell.title = 'max_depth=' + d + ', n_estimators=' + e;
+        cell.style.padding = '.45rem 0'; cell.style.textAlign = 'center';
+        cell.style.fontFamily = 'var(--lk-mono)'; cell.style.fontSize = '.68rem';
+        cell.style.border = '1px solid var(--lk-rule-soft)'; cell.style.cursor = 'pointer';
+        cell.style.background = (d === selected.d && e === selected.e) ? 'var(--lk-cobalt)' :
+          (chk.checked && g) ? 'var(--lk-okbg)' : 'var(--lk-paper-light)';
+        cell.style.color = (d === selected.d && e === selected.e) ? 'var(--lk-paper)' : 'var(--lk-ink-soft)';
+        cell.textContent = (d === selected.d && e === selected.e) ? '&#9679;' : '&middot;';
+        (function(dd, ee){ cell.addEventListener('click', function(){ selected = { d: dd, e: ee }; render(); }); })(d, e);
+        grid.appendChild(cell);
+      }
+    }
+    verdict.className = 'lk-step-verdict';
+    var sel = 'max_depth=' + selected.d + ' (depth of each tree), n_estimators=' + selected.e + ' (trees in the forest) - one point, one forest. ';
+    if (chk.checked) {
+      verdict.textContent = sel + 'The green cells are a good region of ' + goodCount + ' cells (' + (100 * goodCount / (D * E)).toFixed(1) + '% of the volume): a random draw lands in it with that probability.';
+    } else {
+      verdict.textContent = sel + 'The whole space holds ' + (D * E) + ' configurations. Toggle the good region to see the 5% patch from the deck\'s example.';
+    }
+  }
+  chk.addEventListener('change', render);
+  wrap.appendChild(h); wrap.appendChild(sub); wrap.appendChild(grid); wrap.appendChild(toggleRow); wrap.appendChild(verdict);
+  host.appendChild(wrap);
+  render();
+})();
+
+/* ---- Widget: grid vs random search probabilities ---- */
+(function(){
+  var host = document.getElementById('w-random');
+  if (!host) return;
+  var wrap = document.createElement('div'); wrap.className = 'lk-step';
+  var h = document.createElement('h4'); h.textContent = 'Probability of at least one good configuration';
+  var sub = document.createElement('p'); sub.className = 'lk-step-sub';
+  sub.textContent = 'P(hit) = 1 - (1 - p)^N with p = good-region share and N = configurations tried. Drag the sliders - the deck\'s example is p = 5%, N = 60.';
+  var row1 = document.createElement('div'); row1.className = 'lk-step-state';
+  var lab1 = document.createElement('div'); lab1.className = 'lk-step-box'; lab1.style.minWidth = '130px'; lab1.textContent = 'good region p';
+  var s1 = document.createElement('input'); s1.type = 'range'; s1.min = '1'; s1.max = '25'; s1.step = '1'; s1.value = '5';
+  s1.setAttribute('aria-label', 'Good region share in percent'); s1.style.flex = '1';
+  var out1 = document.createElement('div'); out1.className = 'lk-step-box'; out1.style.minWidth = '70px';
+  row1.appendChild(lab1); row1.appendChild(s1); row1.appendChild(out1);
+  var row2 = document.createElement('div'); row2.className = 'lk-step-state';
+  var lab2 = document.createElement('div'); lab2.className = 'lk-step-box'; lab2.style.minWidth = '130px'; lab2.textContent = 'draws N';
+  var s2 = document.createElement('input'); s2.type = 'range'; s2.min = '5'; s2.max = '120'; s2.step = '5'; s2.value = '60';
+  s2.setAttribute('aria-label', 'Number of sampled configurations'); s2.style.flex = '1';
+  var out2 = document.createElement('div'); out2.className = 'lk-step-box'; out2.style.minWidth = '70px';
+  row2.appendChild(lab2); row2.appendChild(s2); row2.appendChild(out2);
+  var verdict = document.createElement('div'); verdict.className = 'lk-step-verdict';
+  function render(){
+    var p = parseInt(s1.value, 10) / 100, N = parseInt(s2.value, 10);
+    var prob = 1 - Math.pow(1 - p, N);
+    out1.innerHTML = ''; var b1 = document.createElement('b'); b1.textContent = p * 100 + '%'; out1.appendChild(b1);
+    out2.innerHTML = ''; var b2 = document.createElement('b'); b2.textContent = N; out2.appendChild(b2);
+    verdict.className = 'lk-step-verdict';
+    if (p === 0.05 && N === 60) {
+      verdict.textContent = 'The deck\'s example: 1 - 0.95^60 = 0.953 > 0.95. After 60 random configurations the chance of having seen at least one good one is above 95%.';
+    } else if (prob >= 0.95) {
+      verdict.textContent = 'P = ' + prob.toFixed(3) + ' (above 95%): with a ' + (p * 100) + '% good region, ' + N + ' draws almost certainly hit it at least once.';
+    } else {
+      verdict.textContent = 'P = ' + prob.toFixed(3) + ': ' + N + ' draws against a ' + (p * 100) + '% good region still leaves a ' + (100 * Math.pow(1 - p, N)).toFixed(1) + '% chance of missing it entirely.';
+    }
+  }
+  s1.addEventListener('input', render); s2.addEventListener('input', render);
+  wrap.appendChild(h); wrap.appendChild(sub); wrap.appendChild(row1); wrap.appendChild(row2); wrap.appendChild(verdict);
+  host.appendChild(wrap);
+  render();
+})();
+
+/* ---- Widget: k-fold cross-validation explorer ---- */
+(function(){
+  var host = document.getElementById('w-cv');
+  if (!host) return;
+  var wrap = document.createElement('div'); wrap.className = 'lk-step';
+  var h = document.createElement('h4'); h.textContent = 'k-fold cross-validation';
+  var sub = document.createElement('p'); sub.className = 'lk-step-sub';
+  sub.textContent = 'The 120 training samples, split into k folds. Step through the rounds: the vermilion block is the validation fold, the rest is training.';
+  var row = document.createElement('div'); row.className = 'lk-step-state';
+  var lab = document.createElement('div'); lab.className = 'lk-step-box'; lab.style.minWidth = '130px'; lab.textContent = 'k (folds)';
+  var s = document.createElement('input'); s.type = 'range'; s.min = '3'; s.max = '10'; s.step = '1'; s.value = '5';
+  s.setAttribute('aria-label', 'Number of folds'); s.style.flex = '1';
+  var out = document.createElement('div'); out.className = 'lk-step-box'; out.style.minWidth = '70px';
+  row.appendChild(lab); row.appendChild(s); row.appendChild(out);
+  var btns = document.createElement('div'); btns.className = 'lk-step-btns';
+  var prev = document.createElement('button'); prev.type = 'button'; prev.textContent = '\u2190 previous round';
+  var next = document.createElement('button'); next.type = 'button'; next.textContent = 'next round \u2192';
+  btns.appendChild(prev); btns.appendChild(next);
+  var svgHost = document.createElement('div');
+  var verdict = document.createElement('div'); verdict.className = 'lk-step-verdict';
+  var k = 5, round = 0;
+  function render(){
+    out.innerHTML = ''; var b = document.createElement('b'); b.textContent = k; out.appendChild(b);
+    var W = 560, H = 120, n = 120;
+    var bw = (W - 40) / n;
+    var svg = '';
+    for (var f = 0; f < k; f++) {
+      svg += '<text x="6" y="' + (22 + f * 20) + '" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">round ' + (f + 1) + '</text>';
+      for (var i = 0; i < n; i++) {
+        var foldOf = Math.floor(i * k / n);
+        var isVal = (foldOf === round);
+        svg += '<rect x="' + (28 + i * bw) + '" y="' + (12 + f * 20) + '" width="' + (bw + 0.4) + '" height="14"' +
+          ' fill="' + (isVal ? 'var(--lk-warnbg)' : 'var(--lk-hl)') + '"' +
+          (isVal ? ' stroke="var(--lk-vermilion)" stroke-width="1"' : '') + '/>';
+      }
+      var acc = (f === round) ? ' validate' : ' train';
+      svg += '<text x="' + (W - 12) + '" y="' + (22 + f * 20) + '" text-anchor="end" font-family="var(--lk-mono)" font-size="9" fill="' + (f === round ? 'var(--lk-vermilion)' : 'var(--lk-cobalt)') + '">' + acc + '</text>';
+    }
+    svg += '<text x="28" y="' + (H - 8) + '" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">120 training samples, k = ' + k + ' folds of ' + (120 / k) + ' samples each</text>';
+    svgHost.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="max-width:100%;height:auto;border:1px solid var(--lk-rule-soft);background:var(--lk-paper)">' + svg + '</svg>';
+    verdict.className = 'lk-step-verdict';
+    verdict.textContent = 'Round ' + (round + 1) + ' of ' + k + ': the model is fit on the ' + (k - 1) + ' training folds and scored on the held-out fold (' + (120 / k) + ' samples). The configuration\'s score is the mean of the ' + k + ' round scores.';
+  }
+  prev.addEventListener('click', function(){ round = (round - 1 + k) % k; render(); });
+  next.addEventListener('click', function(){ round = (round + 1) % k; render(); });
+  s.addEventListener('input', function(){ k = parseInt(s.value, 10); round = 0; render(); });
+  wrap.appendChild(h); wrap.appendChild(sub); wrap.appendChild(row); wrap.appendChild(btns); wrap.appendChild(svgHost); wrap.appendChild(verdict);
+  host.appendChild(wrap);
+  render();
+})();
+
+/* ---- Real 50-iteration random search on the random forest (deck slide 43, seed 42) ---- */
+var REAL_SEARCH = [[73,8,12,15,0.9333],[89,8,12,19,0.9417],[151,5,4,8,0.9417],[131,3,7,12,0.95],[90,2,13,12,0.95],[16,18,17,10,0.9333],[56,16,13,19,0.9167],[22,4,8,5,0.9333],[133,10,19,7,0.9417],[91,15,10,18,0.925],[173,3,8,15,0.95],[82,9,4,15,0.9417],[133,5,9,18,0.95],[5,3,11,6,0.95],[191,19,3,12,0.9417],[16,5,17,14,0.925],[83,9,9,14,0.95],[158,16,10,13,0.95],[90,16,2,13,0.95],[137,8,2,9,0.9417],[137,12,18,19,0.95],[124,4,2,3,0.9583],[42,6,8,10,0.925],[13,8,9,9,0.9333],[152,3,17,1,0.95],[105,6,13,3,0.9417],[102,4,4,1,0.95],[2,16,4,14,0.9083],[28,6,8,14,0.925],[91,10,16,15,0.9417],[53,11,8,13,0.9417],[144,5,8,5,0.9417],[161,12,14,4,0.9417],[171,8,3,19,0.95],[45,14,13,6,0.9333],[130,12,2,7,0.9417],[104,14,4,9,0.9417],[63,7,10,8,0.9417],[173,6,11,1,0.95],[63,16,18,9,0.9417],[131,18,8,12,0.95],[114,4,6,17,0.9417],[131,18,3,17,0.9417],[148,6,2,1,0.95],[161,3,7,12,0.95],[39,5,18,11,0.925],[140,6,7,2,0.95],[125,17,2,16,0.9417],[149,7,4,16,0.9417],[148,5,4,19,0.9417]];
+
+/* ---- Widget: replay the real search ---- */
+(function(){
+  var host = document.getElementById('w-replay');
+  if (!host) return;
+  var wrap = document.createElement('div'); wrap.className = 'lk-step';
+  var h = document.createElement('h4'); h.textContent = 'RandomizedSearchCV, iteration by iteration';
+  var sub = document.createElement('p'); sub.className = 'lk-step-sub';
+  sub.textContent = 'The 50 real sampled configurations of the deck\'s run (seed 42, cv=5, scoring=accuracy). Each row: n_estimators, max_depth, min_samples_split, min_samples_leaf, mean CV score. Step to replay the search.';
+  var btns = document.createElement('div'); btns.className = 'lk-step-btns';
+  var bPrev = document.createElement('button'); bPrev.type = 'button'; bPrev.textContent = '\u2190 previous';
+  var bNext = document.createElement('button'); bNext.type = 'button'; bNext.textContent = 'next sample \u2192';
+  var bAll = document.createElement('button'); bAll.type = 'button'; bAll.textContent = 'run all 50';
+  btns.appendChild(bPrev); btns.appendChild(bNext); btns.appendChild(bAll);
+  var state = document.createElement('div'); state.className = 'lk-step-state';
+  var verdict = document.createElement('div'); verdict.className = 'lk-step-verdict';
+  var idx = -1;
+  function render(){
+    state.innerHTML = '';
+    var bestIdx = -1, bestScore = -1;
+    for (var i = 0; i <= idx; i++) { if (REAL_SEARCH[i][4] > bestScore) { bestScore = REAL_SEARCH[i][4]; bestIdx = i; } }
+    function box(label, val){ var d = document.createElement('div'); d.className = 'lk-step-box'; d.appendChild(document.createTextNode(label + ' = ')); var b = document.createElement('b'); b.textContent = val; d.appendChild(b); state.appendChild(d); }
+    box('samples tried', idx < 0 ? 0 : idx + 1);
+    box('best CV so far', idx < 0 ? '-' : bestScore.toFixed(4));
+    box('best at iteration', bestIdx < 0 ? '-' : bestIdx + 1);
+    var good = 0;
+    for (var j = 0; j <= idx; j++) { if (REAL_SEARCH[j][4] >= 0.95) good++; }
+    box('good so far (\u2265 0.95)', idx < 0 ? 0 : good);
+    verdict.className = 'lk-step-verdict';
+    if (idx < 0) {
+      verdict.textContent = 'Press "next sample" to start replaying the search. The deck\'s printed best appears at iteration 22 (index 21).';
+    } else if (idx === 21) {
+      verdict.textContent = 'Iteration 22 (index 21): {' + REAL_SEARCH[idx].slice(0, 4).join(', ') + '} scores ' + REAL_SEARCH[idx][4] + ' - the best of the run, and exactly the deck\'s printed Best Parameters: {\'max_depth\': 4, \'min_samples_leaf\': 3, \'min_samples_split\': 2, \'n_estimators\': 124}.';
+    } else if (idx === 49) {
+      verdict.textContent = 'Search complete: 50 configurations sampled, best CV ' + bestScore.toFixed(4) + ' at iteration ' + (bestIdx + 1) + '. Fitted on all 5 folds, the best estimator scores 1.0 on the untouched test set.';
+    } else {
+      verdict.textContent = 'Sampled {' + REAL_SEARCH[idx].slice(0, 4).join(', ') + '} \u2192 CV score ' + REAL_SEARCH[idx][4] + '. Best so far: ' + bestScore.toFixed(4) + '.';
+    }
+  }
+  bPrev.addEventListener('click', function(){ if (idx > -1) { idx--; render(); } });
+  bNext.addEventListener('click', function(){ if (idx < 49) { idx++; render(); } });
+  bAll.addEventListener('click', function(){ idx = 49; render(); });
+  wrap.appendChild(h); wrap.appendChild(sub); wrap.appendChild(btns); wrap.appendChild(state); wrap.appendChild(verdict);
+  host.appendChild(wrap);
+  render();
+})();
+
+/* ---- Real iris data (petal plane), shared by the forest widget ---- */
+var IRIS2D = [[1.4,0.2,0],[1.4,0.2,0],[1.3,0.2,0],[1.5,0.2,0],[1.4,0.2,0],[1.7,0.4,0],[1.4,0.3,0],[1.5,0.2,0],[1.4,0.2,0],[1.5,0.1,0],[1.5,0.2,0],[1.6,0.2,0],[1.4,0.1,0],[1.1,0.1,0],[1.2,0.2,0],[1.5,0.4,0],[1.3,0.4,0],[1.4,0.3,0],[1.7,0.3,0],[1.5,0.3,0],[1.7,0.2,0],[1.5,0.4,0],[1.0,0.2,0],[1.7,0.5,0],[1.9,0.2,0],[1.6,0.2,0],[1.6,0.4,0],[1.5,0.2,0],[1.4,0.2,0],[1.6,0.2,0],[1.6,0.2,0],[1.5,0.4,0],[1.5,0.1,0],[1.4,0.2,0],[1.5,0.2,0],[1.2,0.2,0],[1.3,0.2,0],[1.4,0.1,0],[1.3,0.2,0],[1.5,0.2,0],[1.3,0.3,0],[1.3,0.3,0],[1.3,0.2,0],[1.6,0.6,0],[1.9,0.4,0],[1.4,0.3,0],[1.6,0.2,0],[1.4,0.2,0],[1.5,0.2,0],[1.4,0.2,0],[4.7,1.4,1],[4.5,1.5,1],[4.9,1.5,1],[4.0,1.3,1],[4.6,1.5,1],[4.5,1.3,1],[4.7,1.6,1],[3.3,1.0,1],[4.6,1.3,1],[3.9,1.4,1],[3.5,1.0,1],[4.2,1.5,1],[4.0,1.0,1],[4.7,1.4,1],[3.6,1.3,1],[4.4,1.4,1],[4.5,1.5,1],[4.1,1.0,1],[4.5,1.5,1],[3.9,1.1,1],[4.8,1.8,1],[4.0,1.3,1],[4.9,1.5,1],[4.7,1.2,1],[4.3,1.3,1],[4.4,1.4,1],[4.8,1.4,1],[5.0,1.7,1],[4.5,1.5,1],[3.5,1.0,1],[3.8,1.1,1],[3.7,1.0,1],[3.9,1.2,1],[5.1,1.6,1],[4.5,1.5,1],[4.5,1.6,1],[4.7,1.5,1],[4.4,1.3,1],[4.1,1.3,1],[4.0,1.3,1],[4.4,1.2,1],[4.6,1.4,1],[4.0,1.2,1],[3.3,1.0,1],[4.2,1.3,1],[4.2,1.2,1],[4.2,1.3,1],[4.3,1.3,1],[3.0,1.1,1],[4.1,1.3,1],[6.0,2.5,2],[5.1,1.9,2],[5.9,2.1,2],[5.6,1.8,2],[5.8,2.2,2],[6.6,2.1,2],[4.5,1.7,2],[6.3,1.8,2],[5.8,1.8,2],[6.1,2.5,2],[5.1,2.0,2],[5.3,1.9,2],[5.5,2.1,2],[5.0,2.0,2],[5.1,2.4,2],[5.3,2.3,2],[5.5,1.8,2],[6.7,2.2,2],[6.9,2.3,2],[5.0,1.5,2],[5.7,2.3,2],[4.9,2.0,2],[6.7,2.0,2],[4.9,1.8,2],[5.7,2.1,2],[6.0,1.8,2],[4.8,1.8,2],[4.9,1.8,2],[5.6,2.1,2],[5.8,1.6,2],[6.1,1.9,2],[6.4,2.0,2],[5.6,2.2,2],[5.1,1.5,2],[5.6,1.4,2],[6.1,2.3,2],[5.6,2.4,2],[5.5,1.8,2],[4.8,1.8,2],[5.4,2.1,2],[5.6,2.4,2],[5.1,2.3,2],[5.1,1.9,2],[5.9,2.3,2],[5.7,2.5,2],[5.2,2.3,2],[5.0,1.9,2],[5.2,2.0,2],[5.4,2.3,2],[5.1,1.8,2]];
+var CLS_COLOR = ['var(--lk-forest)', 'var(--lk-cobalt)', 'var(--lk-vermilion)'];
+
+/* ---- Bagged CART forest (the logic behind RandomForestClassifier, 2 features) ---- */
+function gini(rows){
+  var n = rows.length; if (!n) return 0;
+  var c = [0, 0, 0];
+  rows.forEach(function(r){ c[r[2]]++; });
+  var g = 1;
+  c.forEach(function(x){ g -= (x / n) * (x / n); });
+  return g;
+}
+function majority(rows){
+  var c = [0, 0, 0];
+  rows.forEach(function(r){ c[r[2]]++; });
+  var best = 0; c.forEach(function(x, i){ if (x > c[best]) best = i; });
+  return best;
+}
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function buildRFtree(rows, depth, maxDepth, rng){
+  if (depth >= maxDepth || rows.length < 2 || gini(rows) === 0) {
+    return { leaf: true, cls: majority(rows), n: rows.length };
+  }
+  var best = null;
+  var feats = rng() < 0.5 ? [0, 1] : [1, 0];   // random feature order; keep the best of both
+  feats.forEach(function(f){
+    var vals = rows.map(function(r){ return r[f]; }).sort(function(a, b){ return a - b; });
+    var seen = [];
+    vals.forEach(function(v){ if (!seen.length || seen[seen.length - 1] !== v) seen.push(v); });
+    for (var kk = 0; kk < seen.length - 1; kk++) {
+      var t = (seen[kk] + seen[kk + 1]) / 2;
+      var L = [], R = [];
+      rows.forEach(function(r){ (r[f] <= t ? L : R).push(r); });
+      if (!L.length || !R.length) continue;
+      var gain = gini(rows) - (L.length / rows.length) * gini(L) - (R.length / rows.length) * gini(R);
+      if (!best || gain > best.gain) best = { f: f, t: t, gain: gain, L: L, R: R };
+    }
+  });
+  if (!best || best.gain <= 0) return { leaf: true, cls: majority(rows), n: rows.length };
+  return { leaf: false, f: best.f, t: best.t, left: buildRFtree(best.L, depth + 1, maxDepth, rng), right: buildRFtree(best.R, depth + 1, maxDepth, rng), n: rows.length };
+}
+function classify(tree, x, y){
+  var node = tree;
+  while (!node.leaf) node = (node.f === 0 ? x : y) <= node.t ? node.left : node.right;
+  return node.cls;
+}
+function trainForest(nTrees, maxDepth, seedVal){
+  var rng = mulberry32(seedVal);
+  var trees = [];
+  for (var t = 0; t < nTrees; t++) {
+    var boot = [];
+    for (var i = 0; i < IRIS2D.length; i++) boot.push(IRIS2D[Math.floor(rng() * IRIS2D.length)]);
+    trees.push(buildRFtree(boot, 0, maxDepth, rng));
+  }
+  return trees;
+}
+function forestPredict(trees, x, y){
+  var votes = [0, 0, 0];
+  trees.forEach(function(t){ votes[classify(t, x, y)]++; });
+  var best = 0; votes.forEach(function(v, i){ if (v > votes[best]) best = i; });
+  return best;
+}
+
+/* ---- Widget: grow the forest ---- */
+(function(){
+  var host = document.getElementById('w-rf');
+  if (!host) return;
+  var nTrees = 20;
+  var wrap = document.createElement('div'); wrap.className = 'lk-step';
+  var h = document.createElement('h4'); h.textContent = 'Random forest on the petal plane';
+  var sub = document.createElement('p'); sub.className = 'lk-step-sub';
+  sub.textContent = 'Bagged CART trees (bootstrap samples, random splits) with max_depth=4 - the winning depth of the deck\'s search. Add trees and watch the boundary stabilize and the wiggles disappear.';
+  var row = document.createElement('div'); row.className = 'lk-step-state';
+  var lab = document.createElement('div'); lab.className = 'lk-step-box'; lab.style.minWidth = '130px'; lab.textContent = 'trees in the forest';
+  var input = document.createElement('input');
+  input.type = 'range'; input.min = '1'; input.max = '100'; input.step = '1'; input.value = '20';
+  input.style.flex = '1'; input.style.minWidth = '140px'; input.setAttribute('aria-label', 'Number of trees');
+  var out = document.createElement('div'); out.className = 'lk-step-box'; out.style.minWidth = '70px';
+  input.addEventListener('input', function(){ nTrees = parseInt(input.value, 10); render(); });
+  row.appendChild(lab); row.appendChild(input); row.appendChild(out);
+  var svgHost = document.createElement('div');
+  var state = document.createElement('div'); state.className = 'lk-step-state';
+  var verdict = document.createElement('div'); verdict.className = 'lk-step-verdict';
+  var cache = {};
+  function render(){
+    out.innerHTML = ''; var b = document.createElement('b'); b.textContent = nTrees; out.appendChild(b);
+    var trees = cache[nTrees] || trainForest(nTrees, 4, 42);
+    cache[nTrees] = trees;
+    var W = 560, H = 340, pad = 34;
+    var x0 = 0.8, x1 = 7.2, y0 = 0.0, y1 = 2.7;
+    function sx(v){ return pad + (v - x0) / (x1 - x0) * (W - 2 * pad); }
+    function sy(v){ return H - pad - (v - y0) / (y1 - y0) * (H - 2 * pad); }
+    var N = 40;
+    var cells = '';
+    for (var gx = 0; gx < N; gx++) {
+      for (var gy = 0; gy < N; gy++) {
+        var px = x0 + (gx + 0.5) / N * (x1 - x0);
+        var py = y0 + (gy + 0.5) / N * (y1 - y0);
+        var cls = forestPredict(trees, px, py);
+        var cw = (W - 2 * pad) / N + 0.6, ch = (H - 2 * pad) / N + 0.6;
+        cells += '<rect x="' + sx(px).toFixed(1) + '" y="' + sy(py).toFixed(1) + '" width="' + cw + '" height="' + ch + '" fill="' + CLS_COLOR[cls] + '" opacity="0.15" stroke="none"/>';
+      }
+    }
+    var pts = '';
+    IRIS2D.forEach(function(r){
+      pts += '<circle cx="' + sx(r[0]).toFixed(1) + '" cy="' + sy(r[1]).toFixed(1) + '" r="4" fill="' + CLS_COLOR[r[2]] + '" stroke="var(--lk-paper)" stroke-width="1"/>';
+    });
+    svgHost.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="max-width:100%;height:auto;border:1px solid var(--lk-rule-soft);background:var(--lk-paper)">' + cells + pts +
+      '<line x1="' + pad + '" y1="' + (H - pad) + '" x2="' + (W - pad) + '" y2="' + (H - pad) + '" stroke="var(--lk-ink)" stroke-width="1.2"/>' +
+      '<line x1="' + pad + '" y1="' + pad + '" x2="' + pad + '" y2="' + (H - pad) + '" stroke="var(--lk-ink)" stroke-width="1.2"/>' +
+      '<text x="' + (W / 2) + '" y="' + (H - 10) + '" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">petal length (cm)</text>' +
+      '<text x="12" y="' + (H / 2) + '" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)" transform="rotate(-90 12 ' + (H / 2) + ')">petal width (cm)</text>' +
+      '</svg>';
+    var trainOk = 0;
+    IRIS2D.forEach(function(r){ if (forestPredict(trees, r[0], r[1]) === r[2]) trainOk++; });
+    state.innerHTML = '';
+    [['trees', String(nTrees)], ['training accuracy', (trainOk / IRIS2D.length).toFixed(4)]].forEach(function(p){
+      var box = document.createElement('div'); box.className = 'lk-step-box';
+      box.appendChild(document.createTextNode(p[0] + ' = '));
+      var v = document.createElement('b'); v.textContent = p[1]; box.appendChild(v);
+      state.appendChild(box);
+    });
+    verdict.className = 'lk-step-verdict';
+    if (nTrees === 1) {
+      verdict.textContent = 'A single depth-4 tree: the boundary is jagged, with rectangular regions hugging individual flowers - the same fragmentation seen in Chapter 9.';
+    } else if (nTrees < 20) {
+      verdict.textContent = 'With ' + nTrees + ' trees the vote smooths the jagged edges, but a few stray regions remain: each bootstrap can still amplify one unlucky tree.';
+    } else {
+      verdict.textContent = 'The ensemble stabilizes: many trees agree on smooth regions, and the isolated fragments disappear. This is the boundary behavior behind the deck\'s best forest (124 trees, depth 4) - and why its test accuracy reaches 1.0.';
+    }
+  }
+  wrap.appendChild(h); wrap.appendChild(sub); wrap.appendChild(row); wrap.appendChild(svgHost); wrap.appendChild(state); wrap.appendChild(verdict);
+  host.appendChild(wrap);
+  render();
+})();
+</script>
+</body>
+</html>
