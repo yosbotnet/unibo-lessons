@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 12 — Deep learning: object detection · V&amp;R</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .vr-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1rem 1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .vr-w h4{margin:0 0 .3rem;color:var(--lk-cobalt-dark)}
+  .vr-w .vr-sub{margin:0 0 .8rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .vr-ctl{display:flex;flex-wrap:wrap;gap:.7rem 1.1rem;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.8rem}
+  .vr-ctl label{display:flex;gap:.4rem;align-items:center}
+  .vr-ctl input[type=range]{width:130px;accent-color:var(--lk-cobalt)}
+  .vr-ctl select{font-family:var(--lk-mono);font-size:.8rem;padding:.2rem .35rem;border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper)}
+  .vr-btn{font-family:var(--lk-utility);font-size:.82rem;font-weight:600;cursor:pointer;padding:.4rem .85rem;border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .vr-btn:hover{background:var(--lk-cobalt-dark)}
+  .vr-btn.sec{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .vr-out{font-family:var(--lk-mono);font-size:.85rem;background:var(--lk-paper);border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .75rem;margin-top:.7rem;overflow-x:auto}
+  .vr-out b{color:var(--lk-cobalt-dark)}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-11-deep-learning-classificazione.html">&larr; Cap. 11 — Deep learning: classificazione</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-13-deep-learning-semantic-segmentation.html">Cap. 13 — Deep learning: semantic segmentation &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte IV — Localizzazione e deep learning · Capitolo 12</div>
+    <h1>Deep learning per l'object detection</h1>
+    <div class="lk-meta"><span>~50 min di lettura</span><span>3 widget interattivi</span><span>5 tavole</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Dal classificare al localizzare: il problema della detection</a></li>
+      <li><a href="#s2">Valutare le prestazioni: IoU, AP e mAP</a></li>
+      <li><a href="#s3">Il framework generale e le sliding window</a></li>
+      <li><a href="#s4">R-CNN: region proposal e classificazione per regione</a></li>
+      <li><a href="#s5">Selective search: la gerarchia di regioni</a></li>
+      <li><a href="#s6">Fast R-CNN: RoI pooling e multi-task loss</a></li>
+      <li><a href="#s7">Il layer RoI pooling</a></li>
+      <li><a href="#s8">La multi-task loss</a></li>
+      <li><a href="#s9">Faster R-CNN e la Region Proposal Network</a></li>
+      <li><a href="#s10">Le ancore nella RPN</a></li>
+      <li><a href="#s11">Single-stage: YOLO</a></li>
+      <li><a href="#s12">SSD: default box e predittori convoluzionali</a></li>
+      <li><a href="#s13">RetinaNet: Feature Pyramid Network e focal loss</a></li>
+      <li><a href="#s14">Dataset e modelli a confronto</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>1. Dal classificare al localizzare: il problema della detection</h2>
+    <p>Il processo di <strong>object detection</strong> restituisce, per ogni oggetto di interesse presente nell'immagine di input: una <strong>bounding box</strong>, l'<strong>etichetta di una classe</strong> (scelta tra un insieme predefinito) e spesso una <strong>probabilità (o score)</strong>. Dall'avvento di AlexNet diversi gruppi di ricerca hanno iniziato a studiare modelli di object detection basati su CNN. Le applicazioni sono molteplici: <strong>pedestrian detection</strong>, <strong>face detection</strong>, rilevamento di <strong>targhe</strong>, conteggio di oggetti (object counting), football detection e i sistemi per le <strong>auto a guida autonoma</strong> (self-driving).</p>
+    <div class="callout note">
+      <span class="callout-label">Collegamento</span>
+      <p>Nel <a href="cap-11-deep-learning-classificazione.html">capitolo 11</a> le CNN restituiscono un'etichetta per l'intera immagine; qui il problema diventa: <strong>dove</strong> sono gli oggetti e <strong>quali</strong> sono. Tutte le architetture di questo capitolo usano le CNN del capitolo precedente come <strong>backbone</strong> (estrattore di feature).</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>2. Valutare le prestazioni: IoU, AP e mAP</h2>
+    <p>I possibili errori di un sistema di detection sono di diverso tipo: <strong>oggetto non trovato</strong>, <strong>classe errata</strong>, <strong>bounding box sbagliata o imprecisa</strong>. Per quantificare il tutto con uno scalare si usano due misure. La <strong>Average Precision (AP)</strong> è calcolata come l'<strong>area sotto la curva precision-recall</strong> per gli oggetti di una singola classe su tutto il database; solitamente la curva viene prima <strong>corretta</strong> rimpiazzando la precision al livello di recall r con la <strong>massima precision misurata con recall ≥ r</strong>. La <strong>mean Average Precision (mAP)</strong> è la media dell'AP su tutte le classi. Ricordando le definizioni del capitolo 9: <code>P = TP/(TP+FP)</code>, <code>R = TP/(TP+FN)</code>. Si considera una prediction <strong>corretta</strong> quando la classe è giusta e la <strong>Intersection over Union (IoU)</strong> delle due bounding box (rilevata e vera) è maggiore di un valore dato (solitamente <strong>0.5</strong>, per ovviare a inesattezze del ground truth):</p>
+    <pre><code>IoU = area(A_t ∩ R_e) / area(A_t ∪ R_e)</code></pre>
+    <p>L'esempio delle slide per la classe «cane»: 5 detection ordinate per score (0.99, 0.95, 0.9, 0.5, 0.1), di cui 3 con IoU &gt; 0.5 (TP) e 2 no (FP). Con 3 oggetti nel ground truth: Recall = 3/3 = 1.0 e Precision = 3/5 = 0.6; la curva precision-recall corretta dà AP(cane) = 0.86. La mAP è la media sulle classi: <code>mAP = (AP(cane) + AP(gatto) + AP(cavallo)) / 3</code>.</p>
+
+    <div class="vr-w" id="w-iou">
+      <h4>Intersection over Union</h4>
+      <p class="vr-sub">La bounding box rilevata (cobalto) si sovrappone a quella vera (verde). Sposta la rilevata per vedere come cambia IoU e quindi la soglia TP/FP (solitamente 0.5).</p>
+      <div class="vr-ctl">
+        <label>offset x <input type="range" id="i-x" min="-60" max="160" value="10"><span id="i-xv">10</span></label>
+        <label>offset y <input type="range" id="i-y" min="-50" max="130" value="8"><span id="i-yv">8</span></label>
+        <label>scala <input type="range" id="i-s" min="40" max="140" value="90"><span id="i-sv">90</span></label>
+      </div>
+      <svg id="i-svg" viewBox="0 0 700 300" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="i-out"></div>
+    </div>
+  </section>
+
+  <section id="s3" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>3. Il framework generale e le sliding window</h2>
+    <p>Tipicamente un sistema di object detection presenta tre componenti:</p>
+    <ol>
+      <li><strong>Region proposal</strong> — identifica le regioni di interesse (RoI) che potrebbero contenere un oggetto;</li>
+      <li><strong>Object prediction</strong> — per ogni RoI determina se e quali oggetti sono presenti, restituendo per ognuno bounding box e classe;</li>
+      <li><strong>Soppressione dei non-massimi</strong> — per ogni oggetto individuato analizza le bounding box associate, mantenendo quella con la <strong>confidenza più alta</strong> ed eliminando le altre.</li>
+    </ol>
+    <p>Il primo tentativo «naïve»: prendere una rete addestrata per la classificazione e usarla per la detection con <strong>sliding windows + image pyramids</strong>. Dato un livello della piramide e una sliding window, la sotto-immagine corrispondente viene estratta e data in input alla rete, che restituisce una classe L e una probabilità; se la probabilità supera una soglia T la sotto-immagine è marcata come appartenente alla classe L. Ripetendo per ogni livello e ogni finestra si ottengono le sotto-immagini candidate; la soppressione dei non-massimi elimina le sotto-finestre con overlapping o bassa confidenza. Contributi: intuitivo, semplice, possibilità di usare diverse CNN pre-addestrate come backbone (AlexNet, VGGNet). Svantaggi: <strong>troppe finestre valutate</strong> (sistema estremamente lento) e <strong>ricalcolo dell'intera CNN per ogni finestra</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-label="Framework generale dell'object detection e sliding window con piramide">
+        <g transform="translate(15,20)">
+          <text x="130" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">1 · region proposal</text>
+          <rect x="40" y="35" width="180" height="130" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <rect x="70" y="60" width="52" height="40" fill="var(--lk-hl)" stroke="var(--lk-vermilion)" stroke-width="1.4" stroke-dasharray="4 3"/>
+          <rect x="150" y="110" width="52" height="40" fill="var(--lk-hl)" stroke="var(--lk-vermilion)" stroke-width="1.4" stroke-dasharray="4 3"/>
+          <text x="130" y="185" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">finestre su più livelli</text>
+          <text x="130" y="197" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">(piramide)</text>
+          <path d="M225 100 L260 100" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12a)"/>
+        </g>
+        <g transform="translate(265,20)">
+          <text x="130" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">2 · object prediction</text>
+          <rect x="40" y="50" width="180" height="100" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <text x="130" y="90" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">CNN pre-addestrata</text>
+          <text x="130" y="110" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">(classificazione)</text>
+          <text x="130" y="128" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">classe L + probabilità</text>
+          <path d="M225 100 L260 100" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12a)"/>
+        </g>
+        <g transform="translate(530,20)">
+          <text x="120" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">3 · non-max suppression</text>
+          <rect x="30" y="50" width="180" height="100" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.3"/>
+          <rect x="45" y="60" width="70" height="45" fill="none" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <rect x="95" y="80" width="70" height="45" fill="none" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <rect x="65" y="65" width="70" height="45" fill="none" stroke="var(--lk-forest)" stroke-width="2"/>
+          <text x="120" y="170" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-forest)">mantiene la confidenza più alta</text>
+        </g>
+        <text x="350" y="240" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">sliding window + piramide: intuitivo ma lento (ricalcolo dell'intera CNN per ogni finestra)</text>
+        <defs><marker id="h12a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 12.1</b> — Il framework generale dell'object detection: region proposal (sliding window su piramide), object prediction (CNN di classificazione) e soppressione dei non-massimi. L'approccio a finestra scorrevole è il punto di partenza, ma è troppo lento.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s4" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>4. R-CNN: region proposal e classificazione per regione</h2>
+    <p>Nel 2013 Girshick, Donahue, Darrell e Malik proposero <strong>R-CNN</strong>, un modello in due fasi composto da quattro moduli: <strong>region proposal</strong> (individua un insieme di regioni di interesse), <strong>estrattore di feature</strong> (estrae le feature da ogni regione con una CNN — il backbone), <strong>classificatore</strong> (per ogni regione restituisce l'etichetta della classe più probabile) e <strong>regressore</strong> (ottimizza la bounding box restituita).</p>
+    <ul>
+      <li>Per individuare le regioni di interesse viene usato il metodo <strong>selective search</strong>, che restituisce circa <strong>2000 regioni</strong>;</li>
+      <li>ogni regione viene ridimensionata a una dimensione fissa di <strong>227 × 227</strong> pixel (eventualmente modificandone l'aspect ratio);</li>
+      <li>la regione ridimensionata è data in input alla rete <strong>AlexNet</strong> (pre-addestrata) ottenendo un vettore di <strong>4096 feature</strong> (livello fc6 o fc7);</li>
+      <li>per ogni classe è addestrato un <strong>SVM lineare</strong> che valuta le feature di ogni regione;</li>
+      <li>per ogni classe è addestrato un <strong>regressore</strong> che raffina la posizione della bounding box;</li>
+      <li>la <strong>soppressione dei non-massimi</strong> (separatamente per classe) rimuove le regioni con elevato overlapping rispetto a regioni con score più alto.</li>
+    </ul>
+    <p>Contributo: un algoritmo per la selezione preventiva delle regioni invece della ricerca esaustiva. Svantaggi: la modifica dell'aspect ratio può causare un calo di accuratezza; <strong>ricalcolo dell'intera CNN per ogni regione</strong>; addestramento lento (fine-tuning della CNN + SVM + regressori); selective search richiede ~2 secondi per immagine e restituisce regioni ridondanti; <strong>troppo lenta per il real-time</strong>.</p>
+  </section>
+
+  <section id="s5" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>5. Selective search: la gerarchia di regioni</h2>
+    <p>L'algoritmo <strong>selective search</strong>, presa un'immagine in input, produce una gerarchia di regioni:</p>
+    <ol type="A">
+      <li><strong>generazione di una segmentazione iniziale</strong> sulla base di colore e tessitura;</li>
+      <li><strong>fusione di regioni simili</strong>: si selezionano le due regioni più simili (in termini di <strong>colore, tessitura, dimensione e posizione reciproca</strong>), le si fonde, e si ripete finché non rimane un'unica regione.</li>
+    </ol>
+    <p>Il risultato è un insieme di regioni candidate (circa 2000) che verranno processate dalla CNN di R-CNN.</p>
+  </section>
+
+  <section id="s6" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>6. Fast R-CNN: RoI pooling e multi-task loss</h2>
+    <p>Nel 2015 Girshick (Microsoft Research) propose <strong>Fast R-CNN</strong> per risolvere i problemi di R-CNN: i tre componenti fondamentali (CNN, classificatore, regressore) vengono <strong>inglobati nella stessa architettura</strong>. Fast R-CNN è composta da:</p>
+    <ul>
+      <li>una <strong>CNN pre-addestrata</strong> (es. VGG-16);</li>
+      <li>l'ultimo livello di max pooling della CNN sostituito con un <strong>Region of Interest (RoI) pooling layer</strong>;</li>
+      <li>l'ultimo livello fully-connected sostituito da <strong>due sibling layer di output</strong>;</li>
+      <li>la CNN modificata per prendere in input <strong>un'immagine e un insieme di regioni di interesse</strong>.</li>
+    </ul>
+    <p>Le regioni di interesse sono selezionate con selective search; l'immagine è ridimensionata (lato corto 600 px, lato lungo ≤ 1000 px) e attraversa tutta la CNN fino alle feature map dell'ultimo convolutional layer. Il <strong>RoI pooling layer</strong> riceve le feature map e le regioni di interesse e restituisce, per ogni regione, feature map di dimensione prefissata passate ai livelli fully-connected; le feature risultanti alimentano i due sibling layer: il primo è il livello di <strong>classificazione</strong> (classe di ogni RoI), il secondo è il <strong>regressore</strong> (coordinate delle bounding box). Una <strong>multi-task loss</strong> addestra contemporaneamente la rete a predire classe e bounding box. Contributi: addestramento <strong>end-to-end</strong>, introduzione del RoI pooling, migliori prestazioni di R-CNN, multi-task loss. Svantaggi: metodo esterno per le regioni (~2s per immagine), <strong>ancora troppo lenta per il real-time</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-label="Architettura di Fast R-CNN: CNN condivisa, RoI pooling e due sibling layer">
+        <g transform="translate(15,25)">
+          <rect x="20" y="40" width="120" height="90" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <text x="80" y="78" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">immagine</text>
+          <text x="80" y="95" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">+ regioni (RoI)</text>
+          <path d="M140 85 L175 85" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12b)"/>
+          <rect x="180" y="40" width="130" height="90" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <text x="245" y="78" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">CNN</text>
+          <text x="245" y="95" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">(VGG-16)</text>
+          <text x="245" y="110" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">una sola passata</text>
+          <path d="M310 85 L345 85" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12b)"/>
+          <rect x="350" y="40" width="130" height="90" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <text x="415" y="78" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">RoI pooling</text>
+          <text x="415" y="95" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">dimensione fissa</text>
+          <path d="M480 85 L515 85" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12b)"/>
+          <rect x="520" y="40" width="150" height="90" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <text x="595" y="78" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">FC layers</text>
+          <path d="M530 130 L530 165" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#h12b)"/>
+          <path d="M660 130 L660 165" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#h12b)"/>
+          <rect x="480" y="170" width="110" height="55" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.3"/>
+          <text x="535" y="195" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-forest)">classificazione</text>
+          <text x="535" y="210" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">softmax (K+1)</text>
+          <rect x="610" y="170" width="110" height="55" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.3"/>
+          <text x="665" y="195" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-forest)">regressione</text>
+          <text x="665" y="210" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">bounding box</text>
+          <text x="535" y="245" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">multi-task loss: L = L_cls + λ·[u≥1]·L_loc</text>
+        </g>
+        <defs><marker id="h12b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 12.2</b> — Fast R-CNN: l'immagine attraversa la CNN una sola volta; il RoI pooling estrae per ogni regione una feature map di dimensione fissa; due sibling layer prevedono classe e bounding box, addestrati insieme con la multi-task loss.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s7" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>7. Il layer RoI pooling</h2>
+    <p>Uno dei principali ostacoli nell'uso di CNN progettate per la classificazione nei problemi di detection è la necessità di <strong>input a dimensioni prefissate</strong> (a causa dei livelli fully-connected), mentre il numero di oggetti e le loro dimensioni sono variabili e non noti a priori. Il <strong>RoI pooling layer</strong> restituisce più volumi di output di <strong>dimensione prefissata</strong> partendo da: una serie di feature map (volume di input) e <strong>N regioni di interesse</strong>. Per ogni regione, la porzione corrispondente delle feature map viene convertita in un insieme di feature map a dimensione prefissata tramite <strong>max pooling</strong>. Il numero di canali di output corrisponde a quello di input; le dimensioni spaziali dipendono solo dagli iperparametri del layer: le dimensioni del volume di output (W<sub>P</sub>, H<sub>P</sub>) e il <strong>fattore di scala P<sub>S</sub></strong>.</p>
+    <p>Le regioni di interesse sono individuate sull'immagine di input e devono essere riscalate sulle dimensioni del volume di input del RoI pooling: <code>P<sub>S</sub> = W<sub>M</sub>/W<sub>I</sub> = H<sub>M</sub>/H<sub>I</sub></code>. Ogni regione viene riscalata e la corrispondente porzione di feature map <strong>suddivisa in W<sub>P</sub> × H<sub>P</sub> blocchi</strong>; in ogni blocco viene selezionato il <strong>massimo di ogni canale</strong> e copiato nel volume di output. Per tutte le N regioni l'output ha sempre dimensione W<sub>P</sub> × H<sub>P</sub> × C<sub>M</sub>. Esempio delle slide: input 224 × 224, feature map 8 × 8 (C<sub>M</sub> = 3), W<sub>P</sub> = H<sub>P</sub> = 2 → P<sub>S</sub> = 8/224 = 1/28; ogni RoI è divisa in 2 × 2 blocchi e in ciascuno si prende il massimo per canale.</p>
+  </section>
+
+  <section id="s8" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>8. La multi-task loss</h2>
+    <p>Fast R-CNN è un'architettura end-to-end che apprende simultaneamente classe e bounding box tramite una <strong>multi-task loss</strong>. Il layer di classificazione restituisce una probabilità p = (p<sub>0</sub>, …, p<sub>K</sub>) per ogni classe (p<sub>0</sub> = probabilità della classe background). Dato il vettore p e la classe vera u, la loss di classificazione è:</p>
+    <pre><code>L_cls(p, u) = −log(p_u)</code></pre>
+    <p>Data una classe u (con u ≥ 1: il background non ha bounding box), il livello di regressione produce una tupla t<sup>u</sup> = (t<sub>x</sub>, t<sub>y</sub>, t<sub>w</sub>, t<sub>h</sub>) con le coordinate del corner superiore sinistro, la larghezza e l'altezza della bounding box. Indicando con v = (v<sub>x</sub>, v<sub>y</sub>, v<sub>w</sub>, v<sub>h</sub>) la bounding box vera della classe u, la loss di regressione è una <strong>L1 loss smoothed</strong>:</p>
+    <pre><code>L_loc(t^u, v) = Σ_{i∈{x,y,w,h}} smoothL1(t^u_i − v_i)
+smoothL1(x) = 0.5·x²  se |x| &lt; 1
+smoothL1(x) = |x| − 0.5  altrimenti</code></pre>
+    <p>La multi-task loss combina le due:</p>
+    <pre><code>L(p, u, t^u, v) = L_cls(p, u) + λ·[u ≥ 1]·L_loc(t^u, v)</code></pre>
+    <p>La funzione <code>[u ≥ 1]</code> (1 se u ≥ 1, 0 altrimenti) annulla il contributo della regressione se la classe vera è il background; l'iperparametro <strong>λ</strong> controlla il bilanciamento tra le due loss.</p>
+  </section>
+
+  <section id="s9" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>9. Faster R-CNN e la Region Proposal Network</h2>
+    <p>Sempre nel 2015, Ren, He, Girshick e Sun proposero <strong>Faster R-CNN</strong> che, a differenza di R-CNN e Fast R-CNN, <strong>non usa nessun metodo esterno</strong> per individuare le regioni di interesse: è composta da una <strong>Fast R-CNN</strong> e da una <strong>Region Proposal Network (RPN)</strong>. L'immagine (lato corto 600, lato lungo ≤ 1000) attraversa la CNN fino alle feature map dell'ultimo convolutional layer; la <strong>RPN</strong> riceve le feature map e restituisce un insieme di regioni di interesse; l'esecuzione prosegue come una normale Fast R-CNN che usa le regioni della RPN invece di selective search.</p>
+    <p>La RPN, dato il volume W<sub>F</sub> × H<sub>F</sub> × C<sub>F</sub>, è composta da: un <strong>convolutional layer con d kernel 3 × 3</strong> (che simula una sliding window 3 × 3 da cui vengono estratte d feature per ogni posizione) e <strong>due sibling convolutional layer</strong> con 4k e 2k kernel 1 × 1:</p>
+    <ul>
+      <li>il layer <strong>reg</strong> restituisce un volume W<sub>F</sub> × H<sub>F</sub> × 4k: per ogni posizione, i 4 coefficienti di regressione (centro, larghezza, altezza) per ognuna delle <strong>k regioni (ancore)</strong>;</li>
+      <li>il layer <strong>cls</strong> restituisce un volume W<sub>F</sub> × H<sub>F</sub> × 2k: la probabilità che vi sia o meno un oggetto di interesse in ognuna delle k regioni.</li>
+    </ul>
+    <p>Ad ogni posizione della sliding window la RPN valuta <strong>k possibili proposte di regione (ancore)</strong>. La trasformazione dalle ancore alle proposte: <code>p<sub>x</sub> = a<sub>x</sub> + a<sub>w</sub>·t<sub>x</sub></code>, <code>p<sub>y</sub> = a<sub>y</sub> + a<sub>h</sub>·t<sub>y</sub></code>, <code>p<sub>w</sub> = a<sub>w</sub>·exp(t<sub>w</sub>)</code>, <code>p<sub>h</sub> = a<sub>h</sub>·exp(t<sub>h</sub>)</code>, dove (a<sub>x</sub>, a<sub>y</sub>) è il centro dell'ancora (dipendente dalla box 3 × 3) e (a<sub>w</sub>, a<sub>h</sub>) le dimensioni prefissate.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-label="Region Proposal Network: sliding window 3x3, ancore e layer reg/cls">
+        <g transform="translate(20,25)">
+          <rect x="20" y="40" width="140" height="110" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <text x="90" y="78" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">feature map</text>
+          <text x="90" y="95" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">W_F × H_F × C_F</text>
+          <rect x="55" y="62" width="52" height="42" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="4 3"/>
+          <text x="81" y="54" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-vermilion)">3×3</text>
+          <path d="M160 95 L195 95" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12c)"/>
+          <rect x="200" y="40" width="130" height="110" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <text x="265" y="78" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">conv 3×3</text>
+          <text x="265" y="95" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">d kernel (256/512)</text>
+          <text x="265" y="112" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">1×512 per posizione</text>
+          <path d="M330 60 L365 60" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12c)"/>
+          <path d="M330 130 L365 130" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12c)"/>
+          <rect x="370" y="30" width="140" height="60" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.3"/>
+          <text x="440" y="55" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">cls 1×1</text>
+          <text x="440" y="72" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">2k · oggetto/sfondo</text>
+          <rect x="370" y="110" width="140" height="60" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="1.3"/>
+          <text x="440" y="135" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">reg 1×1</text>
+          <text x="440" y="152" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">4k · coordinate</text>
+          <path d="M515 60 L550 60" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12c)"/>
+          <path d="M515 140 L550 140" stroke="var(--lk-ink)" stroke-width="1.3" marker-end="url(#h12c)"/>
+          <rect x="555" y="30" width="120" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <text x="615" y="55" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)">proposte</text>
+          <text x="615" y="72" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">k regioni</text>
+          <rect x="555" y="110" width="120" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <text x="615" y="135" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink)">ancore</text>
+          <text x="615" y="152" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">p_i + t_i</text>
+        </g>
+        <text x="350" y="235" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">RPN = conv 3×3 + due sibling 1×1: niente metodo esterno di region proposal</text>
+        <defs><marker id="h12c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-ink)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 12.3</b> — La Region Proposal Network: una convoluzione 3×3 estrae d feature per ogni posizione; due sibling layer 1×1 producono le probabilità oggetto/sfondo (cls) e i coefficienti di regressione (reg) per le k ancore.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s10" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>10. Le ancore nella RPN</h2>
+    <p>Il parametro d è 256 con AlexNet come backbone o 512 con VGG-16. Sono usate <strong>9 ancore per ogni posizione</strong>, corrispondenti a <strong>3 diverse scale</strong> (128 × 128, 256 × 256, 512 × 512) e <strong>3 diversi aspect ratio</strong> (1:1, 2:1, 1:2). Con immagini di input 1000 × 600, le feature map di input della RPN hanno dimensione 60 × 40: <strong>60 × 40 × 9 = 21.600 ancore</strong>.</p>
+    <p>Durante il training: tutte le ancore che <strong>si intersecano con il bordo</strong> dell'immagine sono scartate (il numero scende a circa 6000 per immagine); un'ancora è etichettata come <strong>contenente un oggetto</strong> se i) presenta il più alto valore di IoU con una regione del ground truth, oppure ii) presenta IoU ≥ 0.7 con qualsiasi regione del ground truth; un'ancora è etichettata come <strong>background</strong> se presenta IoU &lt; 0.3 con tutte le regioni del ground truth; tutte le altre ancore <strong>non contribuiscono all'addestramento</strong>.</p>
+    <p>La multi-task loss della RPN è:</p>
+    <pre><code>L({p_i},{t_i}) = (1/N_cls)·Σ_i L_cls(p_i, p*_i) + (λ/N_reg)·Σ_i p*_i·L_reg(t_i, t*_i)</code></pre>
+    <p>dove p*<sub>i</sub> e t*<sub>i</sub> sono il ground truth dell'ancora i (p* = 1 se contiene un oggetto); L_cls e L_reg sono le stesse di Fast R-CNN; i due termini sono normalizzati con N<sub>cls</sub> (dimensione dei mini-batch = 256) e N<sub>reg</sub> (numero di ancore ~ 2400), pesati con λ = 10. In fase di detection, le regioni della RPN possono avere elevata sovrapposizione: si applica una <strong>soppressione dei non-massimi basata sullo score di classificazione</strong>.</p>
+
+    <div class="vr-w" id="w-anchor">
+      <h4>Le 9 ancore della RPN</h4>
+      <p class="vr-sub">Ad ogni posizione della sliding window la RPN valuta 9 ancore: 3 scale × 3 aspect ratio. Il widget mostra le ancore (cobalto) attorno al centro di una cella e una regione del ground truth (verde); ogni ancora etichettata con IoU ≥ 0.7 è un candidato positivo.</p>
+      <div class="vr-ctl">
+        <label>scala ancora <input type="range" id="a-scale" min="0" max="2" value="1"><span id="a-scalev">256</span></label>
+        <label>aspect ratio
+          <select id="a-ar">
+            <option value="1">1:1</option>
+            <option value="2">2:1</option>
+            <option value="0.5">1:2</option>
+          </select>
+        </label>
+        <label>IoU del ground truth <input type="range" id="a-gt" min="30" max="100" value="72"><span id="a-gtv">0.72</span></label>
+      </div>
+      <svg id="a-svg" viewBox="0 0 700 300" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="a-out"></div>
+    </div>
+  </section>
+
+  <section id="s11" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>11. Single-stage: YOLO</h2>
+    <p>Tutti i modelli visti finora sono <strong>multi-stage</strong>: prima si identificano le regioni di interesse, poi solo le regioni candidate vengono processate. I modelli <strong>single-stage</strong> effettuano la detection su una serie di posizioni predefinite evitando di individuare preventivamente le regioni: <strong>YOLO, SSD, RetinaNet</strong>. Generalmente i single-stage sono <strong>meno accurati ma più veloci</strong> dei multi-stage.</p>
+    <p><strong>YOLO</strong> (You Only Look Once, 2015 — Redmon, Divvala, Girshick e Farhadi) è una rete single-stage per scenari real-time, composta da 24 convolutional layer, quattro max pooling e due fully-connected. L'immagine di input viene riscalata a <strong>448 × 448</strong> e suddivisa con una <strong>griglia di S × S celle</strong> (S = 7). La cella <strong>responsabile</strong> dell'individuazione di un oggetto è quella in cui ricade il <strong>centro</strong> di tale oggetto. Ogni cella restituisce, per <strong>B bounding box</strong> (B = 2), una tupla <code>(c, x, y, w, h)</code>: un valore di <strong>confidenza c</strong> (quanto il modello è certo che la box contenga un oggetto), le coordinate del centro (x, y) e le dimensioni (w, h). Inoltre ogni cella restituisce un vettore <code>p<sub>j</sub></code> (1 ≤ j ≤ C) con la probabilità che un oggetto di classe j sia presente nella cella. La probabilità che la bounding box i contenga un oggetto di classe j è <code>c<sub>i</sub>·p<sub>j</sub></code>; le predizioni sono restituite come un volume di output <strong>S × S × (5·B + C)</strong>. Infine una soppressione dei non-massimi riduce le regioni usando una soglia sulla confidenza.</p>
+    <p>Contributi: real-time. Svantaggi: meno accurata di Faster R-CNN; <strong>non individua oggetti multipli nella stessa cella</strong>; lo stesso oggetto può essere individuato più volte in celle adiacenti.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 260" width="100%" role="img" aria-label="YOLO: griglia SxS, cella responsabile, bounding box e confidenza">
+        <g transform="translate(30,20)">
+          <text x="180" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">input 448×448 → griglia S×S (S=7)</text>
+          <rect x="30" y="35" width="300" height="200" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <g stroke="var(--lk-rule-soft)" stroke-width="1">
+            <line x1="72" y1="35" x2="72" y2="235"/><line x1="115" y1="35" x2="115" y2="235"/><line x1="158" y1="35" x2="158" y2="235"/><line x1="201" y1="35" x2="201" y2="235"/><line x1="244" y1="35" x2="244" y2="235"/><line x1="287" y1="35" x2="287" y2="235"/>
+            <line x1="30" y1="64" x2="330" y2="64"/><line x1="30" y1="93" x2="330" y2="93"/><line x1="30" y1="122" x2="330" y2="122"/><line x1="30" y1="151" x2="330" y2="151"/><line x1="30" y1="180" x2="330" y2="180"/><line x1="30" y1="209" x2="330" y2="209"/>
+          </g>
+          <rect x="160" y="100" width="70" height="62" fill="var(--lk-hl)" stroke="var(--lk-vermilion)" stroke-width="2"/>
+          <circle cx="195" cy="131" r="3.5" fill="var(--lk-vermilion)"/>
+          <text x="195" y="158" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">centro oggetto</text>
+          <text x="60" y="55" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">cella responsabile</text>
+        </g>
+        <g transform="translate(390,20)">
+          <text x="140" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">per ogni cella: B box + classi</text>
+          <rect x="30" y="40" width="260" height="180" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+          <rect x="60" y="70" width="80" height="55" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+          <text x="100" y="94" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt-dark)">box 1</text>
+          <text x="100" y="108" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">c, x, y, w, h</text>
+          <rect x="170" y="90" width="80" height="55" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+          <text x="210" y="114" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt-dark)">box 2</text>
+          <text x="210" y="128" text-anchor="middle" font-family="var(--lk-mono)" font-size="8" fill="var(--lk-ink-soft)">c, x, y, w, h</text>
+          <text x="160" y="170" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">vettore classi p_j (1≤j≤C)</text>
+          <text x="160" y="190" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">output: S×S×(5·B+C)</text>
+          <text x="160" y="210" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">score = c_i · p_j</text>
+        </g>
+        <text x="350" y="252" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">single-stage: niente region proposal · più veloce, meno accurato · non-max suppression finale</text>
+      </svg>
+      <figcaption><b>Tavola 12.4</b> — YOLO: l'immagine è divisa in una griglia S×S; la cella che contiene il centro dell'oggetto è responsabile della sua individuazione e predice B bounding box con confidenza e il vettore delle classi.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s12" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>12. SSD: default box e predittori convoluzionali</h2>
+    <p>Nel 2015 fu proposto il modello single-stage <strong>SSD</strong> (Single-Shot multibox Detector), composto da tre componenti: <strong>VGG-16 come backbone</strong>, <strong>quattro extra feature layer</strong> (ognuno con due convolutional layer) e <strong>6 convolutional predictor layer</strong>. L'immagine è riscalata a 300 × 300. SSD usa i <strong>livelli superficiali</strong> (receptive field piccolo) per rilevare <strong>piccoli oggetti</strong> e i <strong>livelli profondi</strong> (receptive field maggiore) per gli <strong>oggetti grandi</strong>. Una serie di <strong>8732 default box</strong> con dimensioni, aspect ratio e posizioni differenti viene valutata dalla rete, restituendo per ognuna <strong>quattro offset</strong> e un <strong>valore di confidenza per ogni classe</strong>, calcolati tramite convolutional predictor applicati a diverse feature map. Infine la soppressione dei non-massimi restituisce al massimo 200 regioni, eliminando quelle con IoU &gt; 0.45 con altre regioni della stessa classe.</p>
+    <h3>Default box</h3>
+    <p>Le <strong>default box</strong> sono bounding box predefinite sulla base di dimensioni, aspect ratio e posizione; l'obiettivo del modello è decidere <strong>quali usare</strong> per una data immagine e predire gli <strong>offset</strong> da applicare per ottenere la regione finale. Le feature map di livelli diversi hanno dimensioni e receptive field diversi: le default box sono ridimensionate opportunamente. Usando feature map da m livelli, il fattore di scala per ogni livello è:</p>
+    <pre><code>s_k = s_min + (s_max − s_min)/(m−1) · (k−1)</code></pre>
+    <p>Con s<sub>min</sub> = 0.2, s<sub>max</sub> = 0.9 e aspect ratio a<sub>r</sub> ∈ {1, 2, 3, 1/2, 1/3}: <code>w<sub>k</sub><sup>r</sup> = s<sub>k</sub>·√a<sub>r</sub></code> e <code>h<sub>k</sub><sup>r</sup> = s<sub>k</sub>/√a<sub>r</sub></code>. Le <strong>positive box</strong> sono default box con IoU &gt; 0.5 con almeno una regione del ground truth.</p>
+    <h3>Convolutional predictor</h3>
+    <p>Dato un volume W<sub>F</sub> × H<sub>F</sub> × C<sub>F</sub>, k default box e c classi, applicando <code>k·4 + c</code> kernel 3 × 3 × C<sub>F</sub> si ottiene un volume W<sub>F</sub> × H<sub>F</sub> × (k·4 + c): in ogni posizione spaziale, per ognuna delle k default box vi sono <strong>4 offset</strong> e <strong>c confidenze</strong> (una per classe).</p>
+    <p>Contributi: accuratezza confrontabile con Faster R-CNN, real-time, più veloce e più accurata di YOLO, introduzione di default box e localizzazione multi-scala. Svantaggi: funziona male su <strong>oggetti piccoli</strong> (i livelli superficiali non generano feature di alto livello); richiede una <strong>grande quantità di dati</strong>.</p>
+  </section>
+
+  <section id="s13" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>13. RetinaNet: Feature Pyramid Network e focal loss</h2>
+    <p>Nel 2017 fu proposto il modello single-stage <strong>RetinaNet</strong>, composto da: una <strong>ResNet come backbone</strong>, una <strong>Feature Pyramid Network (FPN)</strong> e una <strong>Detection head</strong> con due sottoreti (Classification subnet e Regression subnet). Usa <strong>anchor box</strong> di varie dimensioni e aspect ratio su ogni cella delle feature map (niente region proposal) e la <strong>Focal loss</strong> per bilanciare il peso di pochi oggetti (esempi difficili) rispetto allo sfondo (esempi facili). Contributi: accuratezza confrontabile con Faster R-CNN, FPN, focal loss. Svantaggio: più pesante di YOLO per il real-time.</p>
+    <h3>Feature Pyramid Network</h3>
+    <p>La FPN genera feature map a diverse risoluzioni (P2–P5) <strong>combinando informazioni provenienti da più livelli</strong> della rete, migliorando la localizzazione grazie a <strong>connessioni laterali</strong> tra i livelli ricostruiti e le corrispondenti feature map della ResNet. Nel percorso <strong>top-down</strong> esegue un <strong>upsampling di fattore 2</strong> del livello precedente (nearest neighbor) e riduce l'effetto di aliasing della fusione con una <strong>convoluzione 3 × 3</strong>.</p>
+  </section>
+
+  <section id="s14" data-src="12 - Deep Learning for Object Detection.pdf">
+    <h2>14. Dataset e modelli a confronto</h2>
+    <p>I dataset di riferimento per la detection:</p>
+    <ul>
+      <li><strong>COCO</strong> (Common Objects in Context): ~330K immagini, 80 categorie; oggetti in contesti realistici; benchmark principale per lo stato dell'arte;</li>
+      <li><strong>PASCAL VOC</strong>: ~20K immagini, 20 categorie; dataset storico e semplice, ideale per introdurre i concetti base e per training rapidi;</li>
+      <li><strong>Open Images</strong>: &gt;9M immagini, 600+ categorie; scene complesse con molti oggetti per immagine; applicazioni su larga scala.</li>
+    </ul>
+    <p>La tabella confronta i modelli sulla PASCAL Visual Object Classes Challenge 2012 (20 classi, 11530 immagini di training+validation con 27450 oggetti, 10991 di test):</p>
+    <table>
+      <thead><tr><th>Modello</th><th>mAP</th><th>Speed (ms/img)</th><th>Speed (FPS)</th></tr></thead>
+      <tbody>
+        <tr><td>R-CNN</td><td>53.3</td><td>47000</td><td>0.02</td></tr>
+        <tr><td>Fast R-CNN</td><td>65.7</td><td>303</td><td>3.3</td></tr>
+        <tr><td>Faster R-CNN</td><td>73.2</td><td>200</td><td>5</td></tr>
+        <tr><td>YOLO</td><td>63.4</td><td>22</td><td>45</td></tr>
+        <tr><td>SSD</td><td>74.3</td><td>17</td><td>59</td></tr>
+        <tr><td>RetinaNet</td><td>77.1</td><td>198</td><td>5.1</td></tr>
+      </tbody>
+    </table>
+    <p>Oggi sono disponibili online numerosi modelli all'avanguardia già addestrati: <strong>YOLO</strong> (Ultralytics), <strong>Faster R-CNN e Mask R-CNN</strong> (Detectron2), <strong>DETR, RetinaNet, SSD</strong> (MMDetection), <strong>Vision Transformer</strong> (Hugging Face).</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Che cosa restituisce un sistema di object detection?</summary>
+        <p>Per ogni oggetto di interesse presente nell'immagine: una <strong>bounding box</strong>, l'<strong>etichetta di una classe</strong> (da un insieme predefinito) e spesso una <strong>probabilità (o score)</strong>.</p>
+      </details>
+      <details>
+        <summary>Come si calcolano AP e mAP?</summary>
+        <p>L'<strong>AP</strong> è l'area sotto la <strong>curva precision-recall</strong> per una singola classe su tutto il database, con la curva corretta (la precision al recall r è sostituita dalla massima precision con recall ≥ r). La <strong>mAP</strong> è la media dell'AP su tutte le classi.</p>
+      </details>
+      <details>
+        <summary>Quando una prediction è considerata corretta?</summary>
+        <p>Quando la <strong>classe è giusta</strong> e la <strong>IoU</strong> tra la bounding box rilevata e quella vera è <strong>maggiore di una soglia</strong> (solitamente 0.5, per ovviare a inesattezze del ground truth). IoU = area(A_t ∩ R_e) / area(A_t ∪ R_e).</p>
+      </details>
+      <details>
+        <summary>Quali sono i tre componenti del framework generale di detection?</summary>
+        <p>1) <strong>Region proposal</strong>: identifica le regioni di interesse (RoI); 2) <strong>Object prediction</strong>: per ogni RoI determina se e quali oggetti sono presenti (bounding box e classe); 3) <strong>Soppressione dei non-massimi</strong>: mantiene la bounding box con confidenza più alta ed elimina le altre.</p>
+      </details>
+      <details>
+        <summary>Come funziona l'approccio sliding windows + image pyramids e perché è lento?</summary>
+        <p>Si usa una CNN di classificazione su ogni sotto-immagine estratta da ogni finestra a ogni livello della piramide; se la probabilità supera una soglia, la finestra è marcata. È lento perché il <strong>numero di finestre è enorme</strong> e si <strong>ricalcola l'intera CNN per ogni finestra</strong>.</p>
+      </details>
+      <details>
+        <summary>Descrivete l'architettura di R-CNN e i suoi svantaggi.</summary>
+        <p>Quattro moduli: <strong>region proposal</strong> (selective search, ~2000 regioni), <strong>estrattore di feature</strong> (AlexNet pre-addestrata, regioni riscalate a 227×227, vettore 4096), <strong>classificatore</strong> (SVM lineare per classe), <strong>regressore</strong> (raffina la bounding box); poi non-max suppression. Svantaggi: aspect ratio modificato, <strong>CNN ricalcolata per ogni regione</strong>, addestramento lento, selective search ~2s/immagine, non real-time.</p>
+      </details>
+      <details>
+        <summary>Come funziona selective search?</summary>
+        <p>A) genera una <strong>segmentazione iniziale</strong> su colore e tessitura; B) <strong>fonde le regioni simili</strong>: seleziona le due più simili (colore, tessitura, dimensione, posizione reciproca), le fonde e ripete finché non rimane un'unica regione. Produce una gerarchia di regioni candidate.</p>
+      </details>
+      <details>
+        <summary>Quali sono le differenze chiave di Fast R-CNN rispetto a R-CNN?</summary>
+        <p>I tre componenti (CNN, classificatore, regressore) sono <strong>inglobati nella stessa architettura</strong>: l'immagine attraversa la CNN <strong>una sola volta</strong>; il <strong>RoI pooling layer</strong> estrae feature map a dimensione fissa per ogni regione; due <strong>sibling layer</strong> (classificazione softmax e regressione bounding box) sono addestrati insieme con una <strong>multi-task loss</strong> (addestramento end-to-end).</p>
+      </details>
+      <details>
+        <summary>Che cos'è il RoI pooling layer e come funziona?</summary>
+        <p>Restituisce volumi di output a <strong>dimensione prefissata</strong> partendo da feature map e N regioni di interesse. Ogni RoI è riscalata con il fattore P_S = W_M/W_I = H_M/H_I, la porzione di feature map è divisa in W_P × H_P blocchi e in ogni blocco si prende il <strong>massimo di ogni canale</strong>. L'output è sempre W_P × H_P × C_M.</p>
+      </details>
+      <details>
+        <summary>Scrivete la multi-task loss di Fast R-CNN.</summary>
+        <p><code>L(p, u, t^u, v) = L_cls(p, u) + λ·[u≥1]·L_loc(t^u, v)</code> con <code>L_cls = −log(p_u)</code> e <code>L_loc = Σ smoothL1(t^u_i − v_i)</code> su {x, y, w, h}. La funzione [u≥1] annulla la regressione per il background; λ bilancia le due loss.</p>
+      </details>
+      <details>
+        <summary>Che cos'è la Region Proposal Network di Faster R-CNN?</summary>
+        <p>Una rete che produce le regioni di interesse <strong>senza metodi esterni</strong>: un conv 3×3 (d kernel, sliding window) + due sibling conv 1×1 — <strong>reg</strong> (4k coefficienti di regressione) e <strong>cls</strong> (2k probabilità oggetto/sfondo) — per k ancore per posizione. Sostituisce selective search dentro la Fast R-CNN.</p>
+      </details>
+      <details>
+        <summary>Come sono definite e addestrate le ancore della RPN?</summary>
+        <p>9 ancore per posizione: 3 scale (128², 256², 512²) × 3 aspect ratio (1:1, 2:1, 1:2) → 21.600 ancore su 1000×600. In training: si scartano le ancore al bordo (~6000 restano); un'ancora è positiva se ha il massimo IoU con una regione del ground truth o IoU ≥ 0.7; è background se IoU &lt; 0.3 con tutte; le altre non contribuiscono.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra modelli multi-stage e single-stage?</summary>
+        <p>I <strong>multi-stage</strong> prima identificano le regioni di interesse e poi processano solo le candidate (R-CNN, Fast/Faster R-CNN). I <strong>single-stage</strong> fanno detection su posizioni predefinite senza region proposal (YOLO, SSD, RetinaNet): generalmente <strong>meno accurati ma più veloci</strong>.</p>
+      </details>
+      <details>
+        <summary>Come funziona YOLO?</summary>
+        <p>L'immagine è riscalata a 448×448 e divisa in una griglia <strong>S×S</strong> (S=7); la cella in cui cade il centro dell'oggetto è responsabile. Ogni cella restituisce per <strong>B box</strong> (B=2) una tupla (c, x, y, w, h) — confidenza e coordinate — e un vettore di probabilità per C classi; l'output è un volume S×S×(5·B+C); lo score è c_i·p_j; segue la non-max suppression.</p>
+      </details>
+      <details>
+        <summary>Descrivete le default box di SSD.</summary>
+        <p>Sono bounding box predefinite per dimensioni, aspect ratio e posizione; il modello decide <strong>quali usare</strong> e predice gli <strong>offset</strong> per la regione finale. Il fattore di scala per il livello k su m livelli: <code>s_k = s_min + (s_max−s_min)/(m−1)·(k−1)</code>; con s_min = 0.2, s_max = 0.9 e a_r ∈ {1,2,3,1/2,1/3}: w = s·√a_r, h = s/√a_r. Positive box: IoU &gt; 0.5 con una regione del ground truth.</p>
+      </details>
+      <details>
+        <summary>Che cos'è il convolutional predictor di SSD?</summary>
+        <p>Applicando <code>k·4 + c</code> kernel 3×3×C_F a un volume W_F×H_F×C_F si ottiene W_F×H_F×(k·4+c): in ogni posizione, per ognuna delle k default box, 4 offset e c confidenze (una per classe).</p>
+      </details>
+      <details>
+        <summary>Che cosa fanno la Feature Pyramid Network e la focal loss in RetinaNet?</summary>
+        <p>La <strong>FPN</strong> genera feature map a diverse risoluzioni (P2–P5) combinando livelli con connessioni laterali, upsampling ×2 (nearest neighbor) e convoluzione 3×3 anti-aliasing: migliora la localizzazione multi-scala. La <strong>focal loss</strong> bilancia il peso dei pochi oggetti (esempi difficili) rispetto allo sfondo (esempi facili).</p>
+      </details>
+      <details>
+        <summary>Confrontate i modelli di detection sulla PASCAL VOC 2012.</summary>
+        <p>R-CNN: mAP 53.3, 0.02 FPS · Fast R-CNN: 65.7, 3.3 FPS · Faster R-CNN: 73.2, 5 FPS · YOLO: 63.4, 45 FPS · SSD: 74.3, 59 FPS · RetinaNet: 77.1, 5.1 FPS. I single-stage (YOLO, SSD) sono i più veloci; RetinaNet ha la mAP più alta.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-11-deep-learning-classificazione.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-13-deep-learning-semantic-segmentation.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonte: dispensa "12 - Deep Learning for Object Detection" · Visione Artificiale e Riconoscimento, UniBo · Matteo Ferrara</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Widget: Intersection over Union ---- */
+(function(){
+  var svg = document.getElementById("i-svg");
+  if(!svg) return;
+  function upd(){
+    var ox = +document.getElementById("i-x").value;
+    var oy = +document.getElementById("i-y").value;
+    var sc = +document.getElementById("i-s").value/100;
+    document.getElementById("i-xv").textContent = ox;
+    document.getElementById("i-yv").textContent = oy;
+    document.getElementById("i-sv").textContent = sc*100;
+    // ground truth box
+    var gx=180, gy=80, gw=160, gh=110;
+    // detected box (scaled around its top-left)
+    var dw = gw*sc, dh = gh*sc;
+    var dx = gx+ox, dy = gy+oy;
+    var ix = Math.max(gx,dx), iy = Math.max(gy,dy);
+    var iw = Math.min(gx+gw, dx+dw)-ix, ih = Math.min(gy+gh, dy+dh)-iy;
+    var inter = (iw>0&&ih>0)? iw*ih : 0;
+    var union = gw*gh + dw*dh - inter;
+    var iou = inter/union;
+    var s = "";
+    // griglia
+    s += '<rect x="140" y="50" width="420" height="180" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>';
+    // unione (area chiara)
+    s += '<rect x="'+gx+'" y="'+gy+'" width="'+gw+'" height="'+gh+'" fill="var(--lk-paper-light)" stroke="none" opacity=".5"/>';
+    s += '<rect x="'+dx+'" y="'+dy+'" width="'+dw+'" height="'+dh+'" fill="var(--lk-paper-light)" stroke="none" opacity=".5"/>';
+    // intersezione
+    if(inter>0) s += '<rect x="'+ix+'" y="'+iy+'" width="'+iw+'" height="'+ih+'" fill="var(--lk-hl)" stroke="var(--lk-vermilion)" stroke-width="1.6"/>';
+    // ground truth
+    s += '<rect x="'+gx+'" y="'+gy+'" width="'+gw+'" height="'+gh+'" fill="none" stroke="var(--lk-forest)" stroke-width="2.2"/>';
+    s += '<text x="'+(gx+gw+8)+'" y="'+(gy+18)+'" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">ground truth</text>';
+    // detected
+    s += '<rect x="'+dx+'" y="'+dy+'" width="'+dw+'" height="'+dh+'" fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2"/>';
+    s += '<text x="'+(dx-6)+'" y="'+(dy+dh+20)+'" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt)">rilevata</text>';
+    s += '<text x="470" y="90" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt-dark)">intersezione = '+(inter>0?Math.round(inter):0)+'</text>';
+    s += '<text x="470" y="112" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt-dark)">unione = '+Math.round(union)+'</text>';
+    s += '<text x="470" y="142" font-family="var(--lk-mono)" font-size="15" fill="var(--lk-vermilion)">IoU = '+iou.toFixed(2)+'</text>';
+    s += '<text x="470" y="168" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">soglia tipica: 0.5</text>';
+    s += '<text x="470" y="188" font-family="var(--lk-mono)" font-size="11" fill="'+(iou>=0.5?"var(--lk-forest)":"var(--lk-vermilion)")+'">'+(iou>=0.5?"→ TP (detection corretta)":"→ FP (falsa localizzazione)")+'</text>';
+    svg.innerHTML = s;
+    document.getElementById("i-out").innerHTML =
+      "IoU = <b>"+iou.toFixed(3)+"</b> · "+(iou>=0.5?"supera la soglia 0.5 → <b>true positive</b>":"sotto la soglia 0.5 → <b>false positive</b>")+"<br>"+
+      "IoU = area(A_t ∩ R_e) / area(A_t ∪ R_e): punisce sia lo spostamento sia la differenza di scala";
+  }
+  ["i-x","i-y","i-s"].forEach(function(id){
+    document.getElementById(id).addEventListener("input", upd);
+  });
+  upd();
+})();
+
+/* ---- Widget: le 9 ancore della RPN ---- */
+(function(){
+  var svg = document.getElementById("a-svg");
+  if(!svg) return;
+  var SCALES = [128, 256, 512];
+  var RATIOS = {"1":1, "2":2, "0.5":0.5};
+  function iou(a,b){
+    var ix = Math.max(a.x,b.x), iy = Math.max(a.y,b.y);
+    var iw = Math.min(a.x+a.w,b.x+b.w)-ix, ih = Math.min(a.y+a.h,b.y+b.h)-iy;
+    var inter = (iw>0&&ih>0)? iw*ih : 0;
+    var union = a.w*a.h + b.w*b.h - inter;
+    return inter/union;
+  }
+  function upd(){
+    var si = +document.getElementById("a-scale").value;
+    var ar = RATIOS[document.getElementById("a-ar").value];
+    var gtIoU = +document.getElementById("a-gt").value/100;
+    document.getElementById("a-scalev").textContent = SCALES[si];
+    document.getElementById("a-gtv").textContent = gtIoU.toFixed(2);
+    var s = "";
+    var cx = 350, cy = 150;
+    var base = SCALES[si];
+    // ground truth: box centrata con dimensione base*0.72 (coincide con un'ancora 1:1)
+    var gts = base*0.72;
+    var gt = {x: cx-gts/2, y: cy-gts/2, w: gts, h: gts};
+    s += '<rect x="'+(gt.x).toFixed(1)+'" y="'+(gt.y).toFixed(1)+'" width="'+(gt.w).toFixed(1)+'" height="'+(gt.h).toFixed(1)+'" fill="var(--lk-okbg)" stroke="var(--lk-forest)" stroke-width="2"/>';
+    s += '<text x="'+(gt.x+gt.w/2)+'" y="'+(gt.y-8)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)">ground truth (IoU gt = '+gtIoU.toFixed(2)+')</text>';
+    // 9 ancore
+    var anchors = [];
+    [0.5,1,2].forEach(function(r,ri){
+      [0.5,1,2].forEach(function(scf,scfi){
+        var w = base*Math.sqrt(r)*scf, h = base/Math.sqrt(r)*scf;
+        anchors.push({x: cx-w/2, y: cy-h/2, w: w, h: h, r: r, scf: scf});
+      });
+    });
+    // evidenzia l'ancora selezionata (ratio selezionata, scala base)
+    var sel = anchors.filter(function(a){ return Math.abs(a.r-ar)<0.01 && Math.abs(a.scf-1)<0.01; })[0];
+    anchors.forEach(function(a){
+      var isSel = sel && Math.abs(a.x-sel.x)<1 && Math.abs(a.y-sel.y)<1 && Math.abs(a.w-sel.w)<1;
+      var v = iou(a, gt);
+      var col = v>=0.7 ? "var(--lk-forest)" : (v>=gtIoU ? "var(--lk-cobalt)" : "var(--lk-rule-soft)");
+      var sw = isSel?2.4:1.2;
+      s += '<rect x="'+a.x.toFixed(1)+'" y="'+a.y.toFixed(1)+'" width="'+a.w.toFixed(1)+'" height="'+a.h.toFixed(1)+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'"/>';
+      if(isSel){
+        s += '<text x="'+(a.x+a.w+6)+'" y="'+(a.y+a.h/2)+'" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt-dark)">ancora selezionata</text>';
+        s += '<text x="'+(a.x+a.w+6)+'" y="'+(a.y+a.h/2+14)+'" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">IoU = '+v.toFixed(2)+'</text>';
+      }
+    });
+    s += '<circle cx="'+cx+'" cy="'+cy+'" r="3" fill="var(--lk-vermilion)"/>';
+    s += '<text x="'+cx+'" y="'+(cy-10)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">centro cella (sliding window 3×3)</text>';
+    s += '<text x="60" y="40" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">verde: IoU ≥ 0.7 (positiva) · cobalto: IoU ≥ soglia gt · grigio: negativa</text>';
+    svg.innerHTML = s;
+    document.getElementById("a-out").innerHTML =
+      "ancora selezionata: <b>"+base+" × "+base+"</b>, ratio "+(ar===1?"1:1":(ar===2?"2:1":"1:2"))+" · 9 ancore totali per posizione (3 scale × 3 ratio)<br>"+
+      "regola di training: positiva se max IoU col ground truth o IoU ≥ 0.7; background se IoU &lt; 0.3; le altre non contribuiscono";
+  }
+  ["a-scale","a-ar","a-gt"].forEach(function(id){
+    var el = document.getElementById(id);
+    el.addEventListener("input", upd); el.addEventListener("change", upd);
+  });
+  upd();
+})();
+</script>
+</body>
+</html>
