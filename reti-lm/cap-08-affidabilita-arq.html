@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 8 — Comunicazione affidabile: ARQ, flusso e congestione · Reti LM</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-07-mg1-priorita.html">&larr; Cap. 7 — M/G/1 e priorità</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-09-tcp-segmento.html">Cap. 9 — TCP: funzioni e segmento &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Trasporto affidabile e TCP · Capitolo 8</div>
+    <h1>Comunicazione affidabile: ARQ, controllo di flusso e di congestione</h1>
+    <div class="lk-meta"><span>~30 min di lettura</span><span>6 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Dalla rete di code al problema del trasporto</a></li>
+      <li><a href="#s2">I quattro aspetti critici</a></li>
+      <li><a href="#s3">Controllo dell'errore</a></li>
+      <li><a href="#s4">Automatic Repeat reQuest</a></li>
+      <li><a href="#s5">Stop-and-Wait</a></li>
+      <li><a href="#s6">Sliding Window</a></li>
+      <li><a href="#s7">Go-Back-N e Selective Repeat</a></li>
+      <li><a href="#s8">Controllo di flusso</a></li>
+      <li><a href="#s9">Controllo di congestione</a></li>
+      <li><a href="#s10">Il caso del protocollo TCP</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>1. Dalla rete di code al problema del trasporto</h2>
+    <p>La Parte III comincia esattamente dove il capitolo 1 si era interrotto. I router di Internet formano una <strong>rete di code</strong>, la presenza di code nei nodi è la causa principale della variabilità del ritardo, e un accumulo di pacchetti in coda può influire sulle prestazioni: è la <strong>congestione</strong>.</p>
+
+    <p>I capitoli da 3 a 7 hanno quantificato quel fenomeno dall'interno del nodo. Adesso lo si guarda dal punto di vista opposto: quello della <strong>sorgente</strong>, che è l'unico soggetto in grado di fare qualcosa. Il capitolo 6 ci ha lasciato con una conclusione precisa e scomoda: in un M/M/1/L con <code>A<sub>0</sub> &gt; 1</code> non è possibile dimensionare <var>L</var> per ottenere una probabilità di blocco piccola a piacere. Aggiungere memoria non crea capacità.</p>
+
+    <p>Con buffer infiniti, il throughput satura e il ritardo cresce senza limite. Con buffer finiti, quando la congestione diventa significativa alcuni pacchetti vengono scartati per <strong>buffer overflow</strong>; questo ha spesso come effetto la <strong>ritrasmissione</strong> dei pacchetti persi, e quindi si rischia di causare un ulteriore aumento del carico <strong>se non si interviene in qualche modo</strong>. Quel modo è il <em>congestion control</em>, e la Parte III racconta come il TCP lo realizza.</p>
+  </section>
+
+  <section id="s2" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>2. I quattro aspetti critici</h2>
+    <p>La domanda generale è: come possiamo garantire un corretto scambio di dati tra sorgente e destinazione? Le slide la scompongono in quattro aspetti critici, ciascuno con la propria famiglia di soluzioni. Vale la pena impararli in quest'ordine, perché è l'ordine in cui verranno affrontati.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-label="I quattro aspetti critici della comunicazione affidabile con le rispettive famiglie di soluzioni e i capitoli in cui sono trattati">
+        <style>
+          .fbox{fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.2}
+          .facc{fill:var(--lk-paper-light);stroke:var(--lk-cobalt);stroke-width:1.8}
+          .fver{fill:var(--lk-warnbg);stroke:var(--lk-vermilion);stroke-width:1.8}
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-cobalt)}
+          .ftv{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-vermilion)}
+          .ftb{font-family:var(--lk-mono);font-size:14px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs><marker id="ar81" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker></defs>
+
+        <text class="ftb" x="20" y="22">Come garantire un corretto scambio di dati?</text>
+
+        <rect class="fbox" x="20" y="42" width="40" height="56"/><text class="ftb" x="32" y="78">1</text>
+        <text class="ftx" x="76" y="66">i dati ricevuti sono CORRETTI?</text>
+        <text class="fts" x="76" y="88">codici a rivelazione / correzione di errore &middot; sezione 3</text>
+
+        <rect class="fbox" x="20" y="110" width="40" height="56"/><text class="ftb" x="32" y="146">2</text>
+        <text class="ftx" x="76" y="134">i dati ricevuti sono COMPLETI e IN ORDINE?</text>
+        <text class="fts" x="76" y="156">protocolli ARQ &middot; sezioni 4&ndash;7 &middot; capitolo 11</text>
+
+        <rect class="facc" x="20" y="178" width="40" height="56"/><text class="ftb" x="32" y="214" fill="var(--lk-cobalt)">3</text>
+        <text class="ftc" x="76" y="202">la sorgente sta sovraccaricando la DESTINAZIONE?</text>
+        <text class="fts" x="76" y="224">controllo di flusso &middot; sezione 8 &middot; capitolo 11</text>
+
+        <rect class="fver" x="20" y="246" width="40" height="56"/><text class="ftb" x="32" y="282" fill="var(--lk-vermilion)">4</text>
+        <text class="ftv" x="76" y="270">la sorgente sta sovraccaricando la RETE?</text>
+        <text class="fts" x="76" y="292">controllo di congestione &middot; sezione 9 &middot; capitoli 12&ndash;13</text>
+
+        <path class="fhair" d="M20,314 L680,314"/>
+        <text class="fts" x="20" y="334">Le soluzioni si applicano fra nodi intermedi (layer 2/3) oppure end-to-end (layer 4). Il TCP le realizza tutte end-to-end.</text>
+      </svg>
+      <figcaption><b>Tavola 8.1</b> — I quattro problemi in ordine di crescente ambizione. I primi due riguardano ciò che è già stato inviato; gli ultimi due riguardano quanto inviare, ed è la differenza fra correggere e prevenire.</figcaption>
+    </figure>
+
+    <p>La distinzione fra il terzo e il quarto punto è quella su cui si gioca tutta la Parte III, e va fissata subito con le parole delle slide:</p>
+
+    <table>
+      <tr><th>Controllo</th><th>Regolare la velocità della sorgente per evitare di sovraccaricare&hellip;</th></tr>
+      <tr><td><strong>di flusso</strong></td><td>&hellip; la <strong>destinazione</strong></td></tr>
+      <tr><td><strong>di congestione</strong></td><td>&hellip; la <strong>rete</strong></td></tr>
+    </table>
+
+    <p>Due meccanismi diversi, due colli di bottiglia diversi, due finestre diverse. Il capitolo 12 li vedrà convivere nella singola relazione <code>W = min{AW, CW}</code>.</p>
+  </section>
+
+  <section id="s3" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>3. Controllo dell'errore</h2>
+    <p>Il controllo d'errore consiste nell'aggiunta di <strong>bit di ridondanza</strong> per rilevare o correggere eventuali bit ricevuti errati. Il caso più semplice è il bit di parità; nella pratica si usano codici a blocco, codici convoluzionali, CRC, l'Internet Checksum e altri.</p>
+
+    <p>Le due strategie possibili si distinguono per quanta ridondanza aggiungono e per che cosa ci si fa:</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Correzione (FEC)</button>
+        <button class="lk-tab">Rivelazione</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Forward Error Correction</strong>. Richiede <strong>maggiore ridondanza</strong>, perché i bit aggiuntivi devono bastare non solo ad accorgersi dell'errore ma a ricostruire il dato corretto. È utile nel caso di comunicazioni soggette a <strong>molti errori</strong>, e il suo utilizzo principale è nelle <strong>comunicazioni wireless</strong>. Il vantaggio è che non serve alcuna ritrasmissione, quindi nessun round-trip aggiuntivo.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Rivelazione di errore</strong>. Richiede <strong>minore ridondanza</strong> ed è utile nel caso di comunicazioni soggette a <strong>pochi errori</strong>. Ha però un costo: rende <strong>necessaria la ritrasmissione</strong> dei dati errati. È la strategia usata anche nei protocolli di livello superiore al 2, e in particolare dal TCP con il suo checksum a 16 bit.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>La scelta è un compromesso economico: la FEC paga <em>sempre</em> un sovrapprezzo in banda, anche quando non serve; la rivelazione paga <em>solo quando serve</em>, ma paga in latenza, che è la valuta più cara nelle reti geografiche. Per questo il wireless, dove gli errori sono frequenti, usa FEC, mentre le reti cablate, dove sono rari, si limitano a rivelare e ritrasmettere.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>4. Automatic Repeat reQuest</h2>
+    <p>Un protocollo <strong>ARQ</strong> gestisce la ritrasmissione dei dati ricevuti errati, <strong>ma anche di quelli mai ricevuti</strong> — ad esempio perché scartati da nodi intermedi — e la gestione dei dati ricevuti fuori sequenza. La precisazione non è pedante: in una rete a pacchetto la causa dominante di ritrasmissione non è l'errore sui bit, è la <strong>perdita per buffer overflow</strong> di cui parla il capitolo 1.</p>
+
+    <p>Ogni soluzione ARQ poggia su tre ingredienti:</p>
+    <ul>
+      <li><strong>rivelazione degli errori</strong>;</li>
+      <li><strong>numerazione</strong> dei dati trasmessi sequenzialmente, che può essere di trame o pacchetti oppure di singoli bit o byte;</li>
+      <li><strong>conferma</strong> della corretta ricezione, o <em>acknowledgement</em>.</li>
+    </ul>
+
+    <p>Gli acknowledgement possono essere di tre tipi, e li ritroveremo tutti nel TCP:</p>
+    <table>
+      <tr><th>Tipo di ACK</th><th>Significato</th></tr>
+      <tr><td><strong>esplicito</strong></td><td>una conferma per ciascun blocco di dati</td></tr>
+      <tr><td><strong>implicito o cumulativo</strong></td><td>una conferma per più blocchi di dati</td></tr>
+      <tr><td><strong>piggybacking</strong></td><td>conferma inviata assieme ai dati trasmessi in direzione opposta</td></tr>
+    </table>
+
+    <p>Le due famiglie di protocolli ARQ sono <strong>Stop-and-Wait</strong> e <strong>Sliding Window</strong>.</p>
+  </section>
+
+  <section id="s5" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>5. Stop-and-Wait</h2>
+    <p>Nel protocollo <strong>Stop-and-Wait</strong> il trasmettitore invia un blocco dati e <strong>aspetta l'ACK</strong> dal ricevitore prima di trasmettere il blocco successivo. Se non riceve l'ACK entro un certo time-out, ritrasmette l'ultimo blocco già inviato. È necessaria la gestione dei duplicati nel ricevitore, perché un ACK perso porta a una ritrasmissione di un blocco che era invece arrivato.</p>
+
+    <p>Il vantaggio è la semplicità estrema: consente una <strong>numerazione a singolo bit</strong>, perché in volo c'è al massimo un blocco e basta distinguerlo dal precedente. Lo svantaggio è dichiarato senza mezzi termini: <strong>scarsa efficienza quando il round-trip time è maggiore dei tempi di trasmissione</strong>.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Il problema dello Stop-and-Wait non è la banda del collegamento: è il <strong>prodotto banda &times; ritardo</strong>. Su un collegamento veloce e lungo il trasmettitore passa quasi tutto il tempo ad aspettare, e la capacità disponibile resta inutilizzata. È esattamente lo stesso ragionamento che nel capitolo 12 porterà alla nozione di «finestra ideale».</p>
+    </div>
+
+    <div id="w-efficienza"></div>
+  </section>
+
+  <section id="s6" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>6. Sliding Window</h2>
+    <p>Nel protocollo <strong>Sliding Window</strong> più blocchi di dati sono trasmessi prima di ricevere l'ACK. Trasmettitore e ricevitore concordano la dimensione della <strong>finestra di trasmissione <var>W</var></strong>, cioè il numero massimo di blocchi che è possibile inviare senza aver ricevuto conferma. Con una numerazione a <var>n</var> bit i numeri di sequenza si riusano modulo <code>M = 2<sup>n</sup></code>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-label="Evoluzione della finestra di trasmissione su una numerazione circolare modulo otto con finestra di dimensione quattro">
+        <style>
+          .fcirc{fill:none;stroke:var(--lk-rule-soft);stroke-width:1.2}
+          .fwin{fill:var(--lk-hl);stroke:var(--lk-cobalt);stroke-width:1.8}
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-cobalt)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <text class="ftb" x="20" y="20">W = 4,  n = 3  &rarr;  numerazione modulo M = 8</text>
+
+        <g>
+          <path class="fwin" d="M120,140 L120,60 A80,80 0 0 1 176.6,83.4 Z"/>
+          <circle class="fcirc" cx="120" cy="140" r="80"/>
+          <text class="ftx" x="115" y="52">0</text><text class="ftx" x="168" y="74">1</text><text class="ftx" x="206" y="145">2</text>
+          <text class="ftx" x="168" y="212">3</text><text class="ftx" x="115" y="234">4</text><text class="ftx" x="62" y="212">5</text>
+          <text class="ftx" x="24" y="145">6</text><text class="ftx" x="62" y="74">7</text>
+          <path class="fwin" d="M120,140 L120,60 A80,80 0 0 1 176.6,196.6 Z" fill="var(--lk-hl)" opacity=".55"/>
+          <text class="ftc" x="60" y="270">trasmetto 0, 1, 2, 3</text>
+        </g>
+
+        <g transform="translate(240,0)">
+          <circle class="fcirc" cx="120" cy="140" r="80"/>
+          <path class="fwin" d="M120,140 L176.6,83.4 A80,80 0 0 1 120,220 Z" opacity=".55"/>
+          <text class="ftx" x="115" y="52">0</text><text class="ftx" x="168" y="74">1</text><text class="ftx" x="206" y="145">2</text>
+          <text class="ftx" x="168" y="212">3</text><text class="ftx" x="115" y="234">4</text><text class="ftx" x="62" y="212">5</text>
+          <text class="ftx" x="24" y="145">6</text><text class="ftx" x="62" y="74">7</text>
+          <text class="ftc" x="46" y="270">ACK 1 ricevuto: trasmetto 4</text>
+        </g>
+
+        <g transform="translate(460,0)">
+          <circle class="fcirc" cx="120" cy="140" r="80"/>
+          <path class="fwin" d="M120,140 L200,140 A80,80 0 0 1 63.4,196.6 Z" opacity=".55"/>
+          <text class="ftx" x="115" y="52">0</text><text class="ftx" x="168" y="74">1</text><text class="ftx" x="206" y="145">2</text>
+          <text class="ftx" x="168" y="212">3</text><text class="ftx" x="115" y="234">4</text><text class="ftx" x="62" y="212">5</text>
+          <text class="ftx" x="24" y="145">6</text><text class="ftx" x="62" y="74">7</text>
+          <text class="ftc" x="46" y="270">ACK 2 ricevuto: trasmetto 5</text>
+        </g>
+
+        <path class="fhair" d="M20,284 L680,284"/>
+        <text class="fts" x="20" y="298">La finestra non si allarga: SCORRE. Ogni conferma libera esattamente un posto, e quel posto viene subito riempito.</text>
+      </svg>
+      <figcaption><b>Tavola 8.2</b> — Il meccanismo a finestra scorrevole su numerazione circolare. Il vincolo <code>W<sub>T</sub> + W<sub>R</sub> &le; M</code> serve proprio a garantire che due blocchi con lo stesso numero non possano mai coesistere in rete.</figcaption>
+    </figure>
+
+    <p>Il beneficio dichiarato è che il meccanismo <strong>migliora l'efficienza quando il RTT non è trascurabile</strong>. Con <code>W = 1</code> si ricade nello Stop-and-Wait; già con <code>W = 3</code> il trasmettitore riesce a tenere occupata la linea per una frazione di tempo molto maggiore.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-label="Diagramma temporale che confronta lo Stop-and-Wait con una finestra di dimensione tre">
+        <style>
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.6;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.4;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs><marker id="ar82" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/></marker>
+        <marker id="ar82g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/></marker></defs>
+
+        <text class="ftb" x="20" y="20">W = 1  (Stop-and-Wait)</text>
+        <path class="fln" d="M60,36 L60,320"/><path class="fln" d="M280,36 L280,320"/>
+        <path class="flna" d="M60,50 L280,86" marker-end="url(#ar82)"/><text class="ftc" x="66" y="46">N(S) = 5</text>
+        <path class="flng" d="M280,100 L60,136" marker-end="url(#ar82g)"/><text class="ftg" x="150" y="132">ACK, N(R) = 6</text>
+        <path class="flna" d="M60,150 L280,186" marker-end="url(#ar82)"/><text class="ftc" x="66" y="146">N(S) = 6</text>
+        <path class="flng" d="M280,200 L60,236" marker-end="url(#ar82g)"/><text class="ftg" x="150" y="232">ACK, N(R) = 7</text>
+        <path class="flna" d="M60,250 L280,286" marker-end="url(#ar82)"/><text class="ftc" x="66" y="246">N(S) = 7</text>
+        <text class="fts" x="66" y="316">3 blocchi in tutto il tempo mostrato</text>
+
+        <path class="fhair" d="M340,20 L340,330"/>
+
+        <text class="ftb" x="380" y="20">W = 3</text>
+        <path class="fln" d="M420,36 L420,320"/><path class="fln" d="M660,36 L660,320"/>
+        <path class="flna" d="M420,44 L660,80" marker-end="url(#ar82)"/><text class="ftc" x="424" y="42">5</text>
+        <path class="flna" d="M420,60 L660,96" marker-end="url(#ar82)"/><text class="ftc" x="424" y="58">6</text>
+        <path class="flna" d="M420,76 L660,112" marker-end="url(#ar82)"/><text class="ftc" x="424" y="74">7</text>
+        <path class="flng" d="M660,86 L420,122" marker-end="url(#ar82g)"/><text class="ftg" x="490" y="122">N(R)=6</text>
+        <path class="flng" d="M660,102 L420,138" marker-end="url(#ar82g)"/>
+        <path class="flng" d="M660,118 L420,154" marker-end="url(#ar82g)"/>
+        <path class="flna" d="M420,130 L660,166" marker-end="url(#ar82)"/><text class="ftc" x="424" y="128">8</text>
+        <path class="flna" d="M420,146 L660,182" marker-end="url(#ar82)"/><text class="ftc" x="424" y="144">9</text>
+        <path class="flna" d="M420,162 L660,198" marker-end="url(#ar82)"/><text class="ftc" x="424" y="160">10</text>
+        <path class="flng" d="M660,172 L420,208" marker-end="url(#ar82g)"/><text class="ftg" x="490" y="208">N(R)=9</text>
+        <path class="flng" d="M660,188 L420,224" marker-end="url(#ar82g)"/>
+        <path class="flna" d="M420,216 L660,252" marker-end="url(#ar82)"/><text class="ftc" x="424" y="214">11</text>
+        <path class="flna" d="M420,232 L660,268" marker-end="url(#ar82)"/><text class="ftc" x="424" y="230">12</text>
+        <text class="fts" x="424" y="316">8 blocchi nello stesso tempo</text>
+      </svg>
+      <figcaption><b>Tavola 8.3</b> — Lo stesso collegamento, due protocolli. Il tempo di propagazione non cambia: cambia quanti blocchi si riesce a mettere in volo prima che il primo ACK torni indietro.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s7" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>7. Go-Back-N e Selective Repeat</h2>
+    <p>La finestra scorrevole risolve l'efficienza, ma apre un problema nuovo: che cosa fare quando <em>uno</em> dei blocchi in volo si perde, mentre i successivi sono già in viaggio? Le due risposte classiche si distinguono per dove mettono la complessità.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Go-Back-N</button>
+        <button class="lk-tab">Selective Repeat</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Il <strong>ricevitore scarta i dati successivi</strong>, anche se ricevuti correttamente, per evitare che siano fuori sequenza. Scatta il time-out quando il trasmettitore non riceve un ACK, e il trasmettitore <strong>ritrasmette tutti i dati a partire dal blocco non confermato</strong>.</p>
+        <table>
+          <tr><th>Pro</th><th>Contro</th></tr>
+          <tr>
+            <td>operazioni semplici da implementare; buffer limitato al ricevitore</td>
+            <td>inefficienza a causa della ritrasmissione di dati già ricevuti correttamente</td>
+          </tr>
+        </table>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Il <strong>ricevitore scarta solo il blocco errato</strong> e notifica al trasmettitore il blocco mancante con un <strong>Negative ACK</strong>, dopo aver ricevuto il blocco successivo. Il trasmettitore <strong>ritrasmette solo il blocco mancante</strong>. Il ricevitore mantiene in un buffer i blocchi successivi corretti e, quando riceve il mancante, ricostruisce la sequenza giusta e invia un <strong>ACK cumulativo</strong>.</p>
+        <table>
+          <tr><th>Pro</th><th>Contro</th></tr>
+          <tr>
+            <td>migliore efficienza</td>
+            <td>ricevitore più complesso</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-label="Confronto fra Go-Back-N e Selective Repeat in presenza della perdita di un blocco">
+        <style>
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.6;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.4;fill:none}
+          .flnv{stroke:var(--lk-vermilion);stroke-width:1.8;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .ftv{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs><marker id="ar83" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/></marker>
+        <marker id="ar83g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/></marker></defs>
+
+        <text class="ftb" x="20" y="20">Go-Back-N,  W = 3</text>
+        <path class="fln" d="M60,36 L60,300"/><path class="fln" d="M280,36 L280,300"/>
+        <path class="flna" d="M60,50 L280,86" marker-end="url(#ar83)"/><text class="ftc" x="64" y="48">N(S)=5</text>
+        <path class="flna" d="M60,68 L200,90"/><text class="ftc" x="64" y="66">N(S)=6</text>
+        <path class="flnv" d="M194,84 L212,98 M212,84 L194,98"/>
+        <path class="flna" d="M60,86 L280,122" marker-end="url(#ar83)"/><text class="ftc" x="64" y="84">N(S)=7</text>
+        <text class="ftv" x="290" y="126">scartato: fuori sequenza</text>
+        <path class="fhair" d="M60,150 L280,150" stroke-dasharray="4 3"/>
+        <text class="ftv" x="64" y="146">time out</text>
+        <path class="flna" d="M60,168 L280,204" marker-end="url(#ar83)"/><text class="ftc" x="64" y="166">N(S)=5</text>
+        <path class="flna" d="M60,186 L280,222" marker-end="url(#ar83)"/><text class="ftc" x="64" y="184">N(S)=6</text>
+        <path class="flna" d="M60,204 L280,240" marker-end="url(#ar83)"/><text class="ftc" x="64" y="202">N(S)=7</text>
+        <path class="flng" d="M280,230 L60,266" marker-end="url(#ar83g)"/><text class="ftg" x="130" y="266">N(R)=6</text>
+        <text class="fts" x="64" y="292">ritrasmessi 3 blocchi, 2 erano gia arrivati</text>
+
+        <path class="fhair" d="M340,20 L340,320"/>
+
+        <text class="ftb" x="380" y="20">Selective Repeat,  W = 3</text>
+        <path class="fln" d="M420,36 L420,300"/><path class="fln" d="M660,36 L660,300"/>
+        <path class="flna" d="M420,50 L660,86" marker-end="url(#ar83)"/><text class="ftc" x="424" y="48">N(S)=5</text>
+        <path class="flna" d="M420,68 L570,92"/><text class="ftc" x="424" y="66">N(S)=6</text>
+        <path class="flnv" d="M564,86 L582,100 M582,86 L564,100"/>
+        <path class="flna" d="M420,86 L660,122" marker-end="url(#ar83)"/><text class="ftc" x="424" y="84">N(S)=7</text>
+        <text class="ftg" x="668" y="126">bufferizzato</text>
+        <path class="flng" d="M660,132 L420,168" marker-end="url(#ar83g)"/><text class="ftv" x="490" y="168">NACK, N(R)=6</text>
+        <path class="flna" d="M420,186 L660,222" marker-end="url(#ar83)"/><text class="ftc" x="424" y="184">N(S)=6</text>
+        <path class="flng" d="M660,232 L420,268" marker-end="url(#ar83g)"/><text class="ftg" x="490" y="268">ACK cumulativo N(R)=8</text>
+        <text class="fts" x="424" y="292">ritrasmesso 1 solo blocco</text>
+      </svg>
+      <figcaption><b>Tavola 8.4</b> — Le due strategie di recupero. Go-Back-N butta via lavoro già fatto per tenere semplice il ricevitore; Selective Repeat lo conserva al prezzo di un buffer e di una logica di riordino.</figcaption>
+    </figure>
+
+    <div id="step-arq"></div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Il TCP sta in mezzo. Gli ACK sono <strong>cumulativi</strong> e la procedura di default è <strong>Go-Back-N</strong>, «anche se molte implementazioni mantengono in memoria i segmenti ricevuti correttamente ma fuori sequenza» &mdash; e in più si può <strong>negoziare</strong> una modalità di tipo Selective Repeat, il <strong>SACK</strong>. È un punto ricorrente: alla domanda «TCP è Go-Back-N o Selective Repeat?» la risposta corretta non è nessuna delle due da sola.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>8. Controllo di flusso</h2>
+    <p>Il <strong>controllo di flusso</strong> risponde al terzo aspetto critico: la sorgente deve adattare la velocità con cui trasmette i dati alla <strong>capacità di elaborazione della destinazione</strong>. Le due famiglie di soluzioni sono:</p>
+
+    <table>
+      <tr><th>Meccanismo</th><th>Come funziona</th><th>Quando si usa</th></tr>
+      <tr>
+        <td><strong>Rate based</strong></td>
+        <td>alla sorgente viene specificata una frequenza di trasmissione <var>R</var> adatta alla capacità della destinazione; la sorgente invia un blocco dati ogni <code>1/R</code> secondi</td>
+        <td>adatto alle modalità di trasmissione <strong>multicast/broadcast</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Window (o credit) based</strong></td>
+        <td>la destinazione comunica esplicitamente la dimensione massima della finestra di trasmissione in base alla propria capacità (<strong>advertised window</strong>, AW); la sorgente imposta di conseguenza il valore di <var>W</var>, che può variare nel tempo</td>
+        <td>adatto alle comunicazioni verso una <strong>singola destinazione</strong></td>
+      </tr>
+    </table>
+
+    <p>La differenza sostanziale è chi tiene il volante. Nel rate based la destinazione dice «non più di tanto al secondo» e poi tace; nel window based la destinazione emette <strong>crediti</strong> a ogni ACK, e la sorgente non può spendere più di quanto ha ricevuto. Il secondo è auto-regolante: se la destinazione smette di consumare, smette anche di emettere crediti, e la sorgente si ferma da sola.</p>
+
+    <p>Il meccanismo si integra naturalmente con lo sliding window ARQ: la destinazione modifica il valore di AW dentro gli ACK che già stava inviando, e il trasmettitore riduce o allarga <var>W</var> di conseguenza. È esattamente ciò che fa il TCP con il campo <code>Window</code> dell'intestazione, come vedremo nel capitolo 9.</p>
+  </section>
+
+  <section id="s9" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>9. Controllo di congestione</h2>
+    <p>Il <strong>controllo di congestione</strong> risponde al quarto aspetto critico: la sorgente deve adattare la velocità con cui trasmette i dati alla <strong>capacità di smaltimento della rete</strong>, che <em>può variare nel tempo</em> a causa di eventi aleatori di congestione. È la differenza cruciale rispetto al controllo di flusso: la capacità della destinazione è una proprietà nota e stabile, quella della rete no.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Closed-loop (reattivo)</button>
+        <button class="lk-tab">Open-loop (proattivo)</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>La sorgente <strong>adatta dinamicamente</strong> la velocità con cui trasmette i dati in base allo <strong>stato corrente della rete</strong>. È un metodo <strong>reattivo</strong>: prima si osserva un sintomo, poi si corregge. È la scelta di Internet e del TCP.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p>La sorgente fornisce una <strong>descrizione del suo profilo di traffico</strong> all'atto della creazione della connessione; la rete <strong>riserva le risorse</strong> necessarie a soddisfare quel profilo, se disponibili; la sorgente trasmette in base al profilo indicato. È un metodo <strong>proattivo</strong>, tipico delle reti a commutazione di circuito e delle architetture con garanzie di qualità del servizio.</p>
+      </div>
+    </div>
+
+    <h3>Le due dimensioni del controllo reattivo</h3>
+    <p>Scelto l'approccio closed-loop, restano due scelte progettuali indipendenti, e ciascuna è un compromesso dichiarato.</p>
+
+    <table>
+      <tr><th>Dimensione</th><th>Alternative</th><th>Compromesso</th></tr>
+      <tr>
+        <td><strong>Modalità di retroazione</strong></td>
+        <td><strong>esplicita</strong>: informazioni sull'eventuale congestione inviate tramite messaggi di controllo dalla rete o dalla destinazione<br><strong>implicita</strong>: la sorgente si accorge della congestione osservando le tempistiche e il comportamento dei dati scambiati e degli ACK ricevuti</td>
+        <td>esplicita = controllo più accurato, ma maggiore overhead<br>implicita = controllo meno accurato, ma minore overhead</td>
+      </tr>
+      <tr>
+        <td><strong>Livello di controllo</strong></td>
+        <td><strong>end-to-end</strong>: solo fra sorgente e destinazione<br><strong>hop-by-hop</strong>: fra coppie di nodi intermedi</td>
+        <td>end-to-end = dipendenza forte dal RTT<br>hop-by-hop = reazione più rapida perché non dipende dal RTT, ma operazioni più complesse nei router</td>
+      </tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Il TCP sceglie <strong>implicito</strong> ed <strong>end-to-end</strong>, cioè la combinazione con il minor costo per la rete e il maggior costo in termini di prontezza. Non è un caso: è la stessa scelta architetturale della pila di Internet, che tiene i router semplici e mette l'intelligenza ai bordi. Il prezzo, come vedremo nel capitolo 12, è che due connessioni con RTT diverso reagiscono con velocità diverse, e la rete finisce per <strong>favorire le connessioni con RTT breve</strong>.</p>
+    </div>
+
+    <p>Il controllo si realizza in pratica con l'<strong>adattamento dinamico della finestra di trasmissione</strong> dell'ARQ sliding window, che serve così a entrambi gli scopi. Le slide riassumono l'effetto della dimensione della finestra in due righe che è utile tenere insieme:</p>
+
+    <ul>
+      <li><var>W</var> <strong>piccolo</strong> riduce il carico nella rete e quindi la possibilità di generare congestione;</li>
+      <li><var>W</var> <strong>grande</strong> migliora l'efficienza e il tempo di completamento di una connessione.</li>
+    </ul>
+
+    <p>Tutto il capitolo 12 è la storia di come il TCP cerca, senza mai trovarlo del tutto, il punto di equilibrio fra queste due frasi.</p>
+
+    <div id="w-congestione"></div>
+  </section>
+
+  <section id="s10" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>10. Il caso del protocollo TCP</h2>
+    <p>Il capitolo si chiude collocando il TCP nella tassonomia appena costruita. Il protocollo di trasporto affidabile di Internet, che vive solo nei due host terminali, è caratterizzato da tre scelte:</p>
+
+    <pre><code>ARQ sliding window          con numerazione dei BYTE trasmessi
+controllo di flusso         window based
+controllo di congestione    implicito ed end-to-end</code></pre>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Queste tre righe sono la carta d'identità del TCP e vanno sapute a memoria, perché ciascuna apre un capitolo. La numerazione a <strong>byte</strong> invece che a pacchetti è la particolarità del TCP rispetto ai protocolli ARQ classici visti qui, e la sua ragione è che il TCP tratta i dati applicativi come un <strong>flusso continuo</strong>, non come una sequenza di messaggi.</p>
+    </div>
+
+    <p>Da qui in poi si scende nel dettaglio: il capitolo 9 apre il segmento e ne guarda i campi, il 10 studia l'apertura e la chiusura della connessione, l'11 il time-out di ritrasmissione e il controllo di flusso, il 12 il controllo di congestione e il 13 i modelli per stimarne le prestazioni.</p>
+  </section>
+
+  <section id="quiz" data-src="Richiami sui concetti di controllo di flusso e di congestione.pdf">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Quali sono i quattro aspetti critici della comunicazione affidabile?</summary>
+        <p>1) Verifica della <strong>correttezza</strong> dei dati ricevuti, con codici a rivelazione o correzione di errore. 2) Verifica della <strong>completezza e della corretta sequenza</strong>, con protocolli ARQ. 3) Regolazione della velocità della sorgente per non sovraccaricare la <strong>destinazione</strong>: controllo di flusso. 4) Regolazione della velocità della sorgente per non sovraccaricare la <strong>rete</strong>: controllo di congestione. Le soluzioni si applicano fra nodi intermedi (layer 2/3) oppure end-to-end (layer 4).</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'è fra FEC e rivelazione di errore, e dove si usano?</summary>
+        <p>La <strong>Forward Error Correction</strong> richiede maggiore ridondanza ma corregge senza ritrasmettere: è utile dove gli errori sono molti, e il suo utilizzo principale è nelle <strong>comunicazioni wireless</strong>. La <strong>rivelazione</strong> richiede minore ridondanza ma rende necessaria la ritrasmissione: è utile dove gli errori sono pochi, ed è usata anche nei protocolli di livello superiore al 2, come il checksum del TCP.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono i tre tipi di acknowledgement?</summary>
+        <p><strong>Esplicito</strong>: una conferma per ciascun blocco di dati. <strong>Implicito o cumulativo</strong>: una conferma per più blocchi. <strong>Piggybacking</strong>: conferma inviata assieme ai dati trasmessi in direzione opposta. Il TCP li usa tutti e tre: gli ACK sono cumulativi e viaggiano in piggybacking quando c'è traffico nella direzione opposta.</p>
+      </details>
+
+      <details>
+        <summary>Perché lo Stop-and-Wait è inefficiente e quando lo è di più?</summary>
+        <p>Perché il trasmettitore invia un blocco e poi <strong>si ferma ad aspettare l'ACK</strong>. È tanto più inefficiente quanto più il <strong>round-trip time è maggiore del tempo di trasmissione</strong> di un blocco: su un collegamento veloce e lungo la linea resta inattiva per quasi tutto il tempo. Il vantaggio è che consente una numerazione a singolo bit.</p>
+      </details>
+
+      <details>
+        <summary>Che cos'è la finestra di trasmissione <var>W</var> in un protocollo sliding window?</summary>
+        <p>Il <strong>numero massimo di blocchi che è possibile inviare senza aver ricevuto l'ACK</strong>. Trasmettitore e ricevitore la concordano. Con numerazione a <var>n</var> bit i numeri di sequenza si riusano modulo <code>M = 2<sup>n</sup></code>, e le dimensioni delle finestre di trasmissione e ricezione devono rispettare <code>W<sub>T</sub> + W<sub>R</sub> &le; M</code> per evitare conflitti fra numeri di sequenza.</p>
+      </details>
+
+      <details>
+        <summary>Confronta Go-Back-N e Selective Repeat.</summary>
+        <p><strong>Go-Back-N</strong>: il ricevitore scarta tutti i dati successivi al blocco perso, anche se corretti; allo scadere del time-out il trasmettitore ritrasmette tutto a partire dal blocco non confermato. Pro: semplice, buffer limitato al ricevitore. Contro: inefficiente, ritrasmette dati già arrivati bene. <strong>Selective Repeat</strong>: il ricevitore scarta solo il blocco errato, lo segnala con un NACK, bufferizza i successivi e invia un ACK cumulativo quando la sequenza si ricompone; il trasmettitore ritrasmette solo il mancante. Pro: più efficiente. Contro: ricevitore più complesso.</p>
+      </details>
+
+      <details>
+        <summary>TCP usa Go-Back-N o Selective Repeat?</summary>
+        <p>Entrambi, in un certo senso. Gli ACK sono <strong>cumulativi</strong> e la procedura di default è di tipo <strong>Go-Back-N</strong>, anche se molte implementazioni mantengono comunque in memoria i segmenti ricevuti correttamente ma fuori sequenza. Si può inoltre <strong>negoziare</strong> all'apertura della connessione una modalità di tipo selective repeat, il <strong>SACK</strong>, che permette di ritrasmettere solo i segmenti effettivamente perduti.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'è fra controllo di flusso rate based e window based?</summary>
+        <p><strong>Rate based</strong>: alla sorgente viene specificata una frequenza <var>R</var> e la sorgente invia un blocco ogni <code>1/R</code> secondi; è adatto a multicast e broadcast. <strong>Window based (o credit based)</strong>: la destinazione comunica esplicitamente la <strong>advertised window</strong> in base alla propria capacità, e la sorgente imposta <var>W</var> di conseguenza; è adatto alle comunicazioni verso una singola destinazione ed è auto-regolante, perché i crediti si esauriscono se la destinazione smette di consumare.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'è fra controllo di flusso e controllo di congestione?</summary>
+        <p>Il <strong>controllo di flusso</strong> adatta la velocità della sorgente alla capacità di elaborazione della <strong>destinazione</strong>, che è una proprietà nota e sostanzialmente stabile. Il <strong>controllo di congestione</strong> la adatta alla capacità di smaltimento della <strong>rete</strong>, che <em>varia nel tempo</em> a causa di eventi aleatori. Sono due meccanismi distinti, con due colli di bottiglia diversi, e nel TCP convivono nella relazione <code>W = min{AW, CW}</code>.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'è fra controllo di congestione closed-loop e open-loop?</summary>
+        <p><strong>Closed-loop</strong> (reattivo): la sorgente adatta dinamicamente la velocità in base allo stato corrente della rete; è la scelta di Internet. <strong>Open-loop</strong> (proattivo): la sorgente descrive il proprio profilo di traffico alla creazione della connessione, la rete riserva le risorse necessarie se disponibili, e la sorgente trasmette secondo quel profilo.</p>
+      </details>
+
+      <details>
+        <summary>Retroazione esplicita o implicita, end-to-end o hop-by-hop: quali sono i compromessi?</summary>
+        <p><strong>Esplicita</strong>: messaggi di controllo dalla rete o dalla destinazione, controllo più accurato ma maggiore overhead. <strong>Implicita</strong>: la sorgente deduce la congestione osservando tempistiche e ACK, controllo meno accurato ma minore overhead. <strong>End-to-end</strong>: solo fra sorgente e destinazione, con forte dipendenza dal RTT. <strong>Hop-by-hop</strong>: fra coppie di nodi intermedi, reazione più rapida perché non dipende dal RTT, ma operazioni più complesse nei router. Il TCP sceglie implicito ed end-to-end.</p>
+      </details>
+
+      <details>
+        <summary>Che effetto ha la dimensione della finestra sulla rete e sulla connessione?</summary>
+        <p><var>W</var> <strong>piccolo</strong> riduce il carico nella rete e quindi la possibilità di generare congestione. <var>W</var> <strong>grande</strong> migliora l'efficienza e il tempo di completamento della connessione. Il controllo di congestione consiste appunto nell'adattare dinamicamente <var>W</var> per stare il più vicino possibile al punto in cui le due esigenze si bilanciano.</p>
+      </details>
+
+      <details>
+        <summary>Riassumi in tre righe la carta d'identità del TCP.</summary>
+        <p><strong>ARQ sliding window</strong> con numerazione dei <strong>byte</strong> trasmessi; controllo di flusso <strong>window based</strong>; controllo di congestione <strong>implicito ed end-to-end</strong>. La numerazione a byte invece che a pacchetti è la particolarità rispetto ai protocolli ARQ classici, e discende dal fatto che il TCP tratta i dati applicativi come un flusso continuo.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-07-mg1-priorita.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-09-tcp-segmento.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: <em>Richiami sui concetti di controllo di flusso e di congestione</em> · Reti di Telecomunicazioni LM · UniBo · Prof. W. Cerroni</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Widget: efficienza di Stop-and-Wait contro Sliding Window ---- */
+(function () {
+  var host = document.getElementById('w-efficienza');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Quanto rende una finestra di W blocchi</h4>' +
+    '<p class="lk-step-sub">Efficienza = frazione di tempo in cui il trasmettitore sta effettivamente trasmettendo.</p>' +
+    '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;font-family:var(--lk-mono);font-size:.82rem">' +
+    '<label>lunghezza blocco [byte]<br><input id="ef-b" type="number" value="1500" step="any" min="1" style="width:120px"></label>' +
+    '<label>capacita [Mbit/s]<br><input id="ef-c" type="number" value="100" step="any" min="0.01" style="width:110px"></label>' +
+    '<label>RTT [ms]<br><input id="ef-r" type="number" value="20" step="any" min="0" style="width:100px"></label>' +
+    '<label>W = <b id="ef-wv">1</b><br><input id="ef-w" type="range" min="1" max="400" value="1" style="width:200px"></label>' +
+    '</div><div class="lk-step-state" id="ef-out"></div><div class="lk-step-verdict" id="ef-note"></div>';
+  function upd() {
+    var B = +host.querySelector('#ef-b').value;
+    var C = +host.querySelector('#ef-c').value;
+    var R = +host.querySelector('#ef-r').value / 1000;
+    var W = Math.round(+host.querySelector('#ef-w').value);
+    host.querySelector('#ef-wv').textContent = W;
+    if (!isFinite(B) || B <= 0) B = 1;
+    if (!isFinite(C) || C <= 0) C = 1;
+    if (!isFinite(R) || R < 0) R = 0;
+    var Tf = (B * 8) / (C * 1e6);          /* tempo di trasmissione di un blocco */
+    var ciclo = Tf + R;
+    var S1 = Tf / ciclo;                   /* Stop-and-Wait */
+    var SW = Math.min(1, W * Tf / ciclo);  /* finestra W */
+    var Wid = ciclo / Tf;                  /* finestra ideale, in blocchi */
+    host.querySelector('#ef-out').innerHTML =
+      '<div class="lk-step-box">tempo di trasmissione = <b>' + (1000 * Tf).toFixed(4) + ' ms</b></div>' +
+      '<div class="lk-step-box">efficienza Stop-and-Wait = <b>' + (100 * S1).toFixed(2) + '%</b></div>' +
+      '<div class="lk-step-box">efficienza con W = ' + W + ': <b>' + (100 * SW).toFixed(2) + '%</b></div>' +
+      '<div class="lk-step-box">W ideale = <b>' + Wid.toFixed(1) + ' blocchi</b></div>' +
+      '<div class="lk-step-box">throughput utile = <b>' + (SW * C).toFixed(2) + ' Mbit/s</b></div>';
+    var note = host.querySelector('#ef-note');
+    if (SW >= 0.999) {
+      note.className = 'lk-step-verdict ok';
+      note.textContent = 'Il tubo e pieno: la finestra basta a tenere la linea occupata senza interruzioni. Aumentare ancora W non aumenta il throughput, riempie solo le code nei router.';
+    } else if (W === 1) {
+      note.className = 'lk-step-verdict bad';
+      note.textContent = 'Stop-and-Wait: si usa il ' + (100 * S1).toFixed(2) + '% della capacita disponibile. Servirebbero circa ' + Math.ceil(Wid) +
+        ' blocchi in volo per saturare il collegamento.';
+    } else {
+      note.className = 'lk-step-verdict';
+      note.textContent = 'Con W = ' + W + ' si sfrutta il ' + (100 * SW).toFixed(1) + '% della capacita. Il valore di W che satura il collegamento e circa ' +
+        Math.ceil(Wid) + ': e il prodotto banda per ritardo, cioe la finestra ideale del capitolo 12.';
+    }
+  }
+  ['#ef-b', '#ef-c', '#ef-r', '#ef-w'].forEach(function (id) { host.querySelector(id).addEventListener('input', upd); });
+  upd();
+})();
+
+/* ---- Stepper: Go-Back-N contro Selective Repeat ---- */
+LessonKit.stepper('#step-arq', {
+  title: 'Recupero della perdita: due strategie a confronto',
+  sub: 'Il blocco 6 si perde. Fai avanzare i due protocolli e conta le trasmissioni effettivamente utili.',
+  shared: { trasmessi: 0, consegnati: 0, sprecati: 0 },
+  watch: ['trasmessi', 'consegnati', 'sprecati'],
+  threads: {
+    G: {
+      name: 'Go-Back-N', steps: [
+        { label: 'invio 5, 6, 7', run: function (s) { s.trasmessi += 3; } },
+        { label: '6 si perde in rete', run: function (s) { } },
+        { label: 'ricevitore scarta 7 (fuori sequenza)', run: function (s) { s.sprecati += 1; s.consegnati += 1; } },
+        { label: 'scade il time-out', run: function (s) { } },
+        { label: 'ritrasmetto 5, 6, 7 daccapo', run: function (s) { s.trasmessi += 3; s.sprecati += 1; } },
+        { label: 'ACK cumulativo N(R) = 8', run: function (s) { s.consegnati += 2; } }
+      ]
+    },
+    S: {
+      name: 'Selective Repeat', steps: [
+        { label: 'invio 5, 6, 7', run: function (s) { s.trasmessi += 3; } },
+        { label: '6 si perde in rete', run: function (s) { } },
+        { label: 'ricevitore bufferizza 7', run: function (s) { s.consegnati += 1; } },
+        { label: 'NACK per il blocco 6', run: function (s) { } },
+        { label: 'ritrasmetto il solo 6', run: function (s) { s.trasmessi += 1; } },
+        { label: 'ACK cumulativo N(R) = 8', run: function (s) { s.consegnati += 2; } }
+      ]
+    }
+  },
+  verdict: function (s, done) {
+    if (done) {
+      return {
+        status: 'ok',
+        text: 'Stessi tre blocchi consegnati, ma Go-Back-N ha usato 6 trasmissioni contro 4. La differenza e tutta lavoro buttato: ' +
+          'e il prezzo di tenere semplice il ricevitore.'
+      };
+    }
+    if (s.sprecati > 0) return { status: 'bad', text: 'Go-Back-N ha appena scartato un blocco arrivato correttamente: quel lavoro andra rifatto.' };
+    return { status: '', text: 'Avanza i due protocolli in parallelo e confronta il contatore delle trasmissioni.' };
+  }
+});
+
+/* ---- Widget: le due dimensioni del controllo di congestione reattivo ---- */
+(function () {
+  var host = document.getElementById('w-congestione');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Scegli il tuo controllo di congestione</h4>' +
+    '<p class="lk-step-sub">Due dimensioni indipendenti, quattro combinazioni. Vedi dove si colloca il TCP e che cosa costa.</p>' +
+    '<div style="display:flex;gap:1.5rem;flex-wrap:wrap;font-family:var(--lk-mono);font-size:.82rem">' +
+    '<div>retroazione<br><label><input type="radio" name="cg-f" value="impl" checked> implicita</label><br>' +
+    '<label><input type="radio" name="cg-f" value="expl"> esplicita</label></div>' +
+    '<div>livello<br><label><input type="radio" name="cg-l" value="e2e" checked> end-to-end</label><br>' +
+    '<label><input type="radio" name="cg-l" value="hbh"> hop-by-hop</label></div>' +
+    '</div><div class="lk-step-state" id="cg-out"></div><div class="lk-step-verdict" id="cg-note"></div>';
+  function get(n) { return host.querySelector('input[name="' + n + '"]:checked').value; }
+  function upd() {
+    var f = get('cg-f'), l = get('cg-l');
+    var acc = f === 'expl' ? 'alta' : 'bassa';
+    var ovh = f === 'expl' ? 'alto' : 'basso';
+    var pron = l === 'hbh' ? 'alta (non dipende dal RTT)' : 'bassa (dipende dal RTT)';
+    var compl = l === 'hbh' ? 'alta: operazioni complesse nei router' : 'bassa: router semplici';
+    host.querySelector('#cg-out').innerHTML =
+      '<div class="lk-step-box">accuratezza = <b>' + acc + '</b></div>' +
+      '<div class="lk-step-box">overhead = <b>' + ovh + '</b></div>' +
+      '<div class="lk-step-box">prontezza = <b>' + pron + '</b></div>' +
+      '<div class="lk-step-box">complessita nei nodi = <b>' + compl + '</b></div>';
+    var note = host.querySelector('#cg-note');
+    if (f === 'impl' && l === 'e2e') {
+      note.className = 'lk-step-verdict ok';
+      note.textContent = "È la scelta del TCP: overhead minimo e router semplici, al prezzo di un controllo meno accurato e di una reazione legata al RTT. " +
+        "Coerente con l architettura di Internet, che tiene l intelligenza ai bordi. Il prezzo lo pagano le connessioni con RTT lungo, sistematicamente svantaggiate.";
+    } else if (f === 'expl' && l === 'hbh') {
+      note.className = 'lk-step-verdict bad';
+      note.textContent = 'Il controllo piu accurato e piu pronto possibile, ma anche il piu costoso: ogni router deve mantenere stato e scambiare messaggi di controllo. ' +
+        'È la filosofia opposta a quella di Internet.';
+    } else {
+      note.className = 'lk-step-verdict';
+      note.textContent = 'Combinazione intermedia: un asse guadagna, l altro paga. Nessuna delle quattro caselle e gratis.';
+    }
+  }
+  [].slice.call(host.querySelectorAll('input')).forEach(function (i) { i.addEventListener('change', upd); });
+  upd();
+})();
+</script>
+</body>
+</html>

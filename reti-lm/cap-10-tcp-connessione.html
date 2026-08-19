@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 10 — TCP: gestione della connessione · Reti LM</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-09-tcp-segmento.html">&larr; Cap. 9 — TCP: funzioni e segmento</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-11-tcp-timeout-flusso.html">Cap. 11 — Time-out e controllo di flusso &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Trasporto affidabile e TCP · Capitolo 10</div>
+    <h1>TCP: gestione della connessione</h1>
+    <div class="lk-meta"><span>~34 min di lettura</span><span>4 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Porte e connessioni TCP</a></li>
+      <li><a href="#s2">La numerazione dei dati</a></li>
+      <li><a href="#s3">L'apertura: il Three-Way Handshake</a></li>
+      <li><a href="#s4">Recupero dagli errori in apertura</a></li>
+      <li><a href="#s5">La chiusura della connessione</a></li>
+      <li><a href="#s6">La macchina a stati e TIME_WAIT</a></li>
+      <li><a href="#s7">Le primitive Berkeley socket</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="TCP_ gestione della connessione.pdf">
+    <h2>1. Porte e connessioni TCP</h2>
+    <p>Per offrire affidabilità e controllo di flusso, il TCP è <strong>orientato alla connessione</strong>. Prima di trasferire il byte stream, i due sistemi terminali devono quindi creare e riconoscere uno stato condiviso; al termine devono rilasciarlo senza confondere dati vecchi e dati nuovi. Questa gestione è interamente <strong>end-to-end</strong>: riguarda i due host, non i nodi attraversati.</p>
+
+    <p>Il punto di accesso locale al TCP non è identificato dal solo numero di porta. La concatenazione fra <strong>indirizzo IP dell'host</strong> e <strong>numero di porta</strong> costituisce un <strong>end-point</strong>, detto anche <em>socket address</em>. La notazione delle slide è immediata:</p>
+
+    <pre><code>end-point = indirizzo IP + porta
+
+137.204.57.85:80</code></pre>
+
+    <p>Una connessione è univocamente determinata dall'associazione di <strong>due</strong> end-point. Per esempio, la coppia <code>137.204.57.85:80 &harr; 192.168.10.99:10364</code> identifica una connessione diversa da quella che raggiunge lo stesso server e la stessa porta partendo da un altro indirizzo o da un'altra porta del client.</p>
+
+    <table>
+      <tr><th>Proprietà</th><th>Significato operativo</th></tr>
+      <tr><td><strong>full-duplex</strong></td><td>i due host possono trasmettere simultaneamente nelle due direzioni</td></tr>
+      <tr><td><strong>punto-punto</strong></td><td>la connessione associa esattamente due end-point; TCP non gestisce il multicast</td></tr>
+      <tr><td><strong>end-to-end</strong></td><td>lo stato della connessione è mantenuto nei sistemi terminali</td></tr>
+    </table>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" width="100%" role="img" aria-label="Due host TCP con più connessioni che condividono l'end-point del server mediante multiplexing">
+        <style>
+          .fbox{fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.2}
+          .fhost{fill:var(--lk-hl);stroke:var(--lk-cobalt);stroke-width:1.8}
+          .fep{fill:var(--lk-warnbg);stroke:var(--lk-vermilion);stroke-width:1.5}
+          .fln{stroke:var(--lk-cobalt);stroke-width:1.6;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.6;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar101" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="ar101g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/>
+          </marker>
+        </defs>
+        <text class="ftb" x="20" y="22">Una connessione = coppia di end-point</text>
+        <rect class="fhost" x="20" y="48" width="210" height="210"/>
+        <text class="ftb" x="36" y="72">host client</text>
+        <text class="fts" x="36" y="91">192.168.10.99</text>
+        <rect class="fep" x="44" y="116" width="160" height="42"/>
+        <text class="ftx" x="55" y="142">:10364</text>
+        <rect class="fep" x="44" y="184" width="160" height="42"/>
+        <text class="ftx" x="55" y="210">:10365</text>
+        <rect class="fhost" x="470" y="48" width="210" height="210"/>
+        <text class="ftb" x="486" y="72">host server</text>
+        <text class="fts" x="486" y="91">137.204.57.85</text>
+        <rect class="fep" x="496" y="144" width="160" height="58"/>
+        <text class="ftx" x="548" y="178">:80</text>
+        <path class="fln" d="M204,137 C310,100 385,100 496,158" marker-end="url(#ar101)"/>
+        <path class="flng" d="M204,205 C310,242 385,242 496,188" marker-end="url(#ar101g)"/>
+        <text class="ftc" x="245" y="101">connessione 1</text>
+        <text class="ftg" x="245" y="244">connessione 2</text>
+        <path class="fhair" d="M20,278 L680,278"/>
+        <text class="fts" x="20" y="298">Lo stesso end-point 137.204.57.85:80 partecipa a più connessioni.</text>
+        <text class="fts" x="20" y="314">A distinguerle è la coppia completa: questo è il multiplexing delle connessioni.</text>
+      </svg>
+      <figcaption><b>Tavola 10.1</b> — Multiplexing su un end-point condiviso. La porta 80 del server non identifica da sola una connessione: ciascuna linea è distinta dalla coppia completa di socket address.</figcaption>
+    </figure>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Un <strong>end-point</strong> può appartenere a più connessioni sullo stesso host. Non c'è ambiguità perché l'identità della connessione comprende entrambi gli estremi: è la coppia, non il singolo indirizzo locale, a essere univoca.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="TCP_ gestione della connessione.pdf">
+    <h2>2. La numerazione dei dati</h2>
+    <p>Il TCP considera i dati applicativi come un <strong>flusso di byte</strong>, non come una sequenza di messaggi. Di conseguenza numera i singoli byte in uno spazio a <strong>32 bit</strong>: il contatore avanza modulo <code>2<sup>32</sup></code>, cioè modulo <strong>4 Gbyte</strong>. Un segmento porta quindi il numero del primo byte trasportato, mentre la quantità di spazio consumata dipende dai byte contenuti.</p>
+
+    <p>La rete fra sorgente e destinazione non è un canale sequenziale. Un segmento può essere ritardato, duplicato e consegnato quando segmenti successivi sono già arrivati. Il riuso di un numero è sicuro soltanto quando non esistono più in rete vecchi segmenti con lo stesso numero di sequenza.</p>
+
+    <table>
+      <tr><th>Velocità del flusso</th><th>Tempo per esaurire lo spazio di 4 Gbyte</th></tr>
+      <tr><td><code>2 Mbit/s</code></td><td><strong>4,8 ore</strong></td></tr>
+      <tr><td><code>100 Mbit/s</code></td><td><strong>5,7 minuti</strong></td></tr>
+      <tr><td><code>1 Gbit/s</code></td><td><strong>34 secondi</strong></td></tr>
+    </table>
+
+    <p>Questi valori mostrano perché i 32 bit non rendano il problema puramente teorico: aumentando la velocità, il contatore torna rapidamente sugli stessi valori. Il protocollo introduce perciò il <strong>Maximum Segment Lifetime</strong> (<strong>MSL</strong>), un limite al tempo di vita di un segmento. Il valore iniziale era <strong>2 minuti</strong>; implementazioni più recenti usano <strong>30 secondi</strong>.</p>
+
+    <h3>Tre vincoli da tenere distinti</h3>
+    <p>La numerazione risolve il riordinamento del byte stream, ma il suo riuso impone tre verifiche diverse. Tenerle separate evita di attribuire all'ISN un compito che appartiene al tempo di vita dei segmenti, o viceversa.</p>
+
+    <table>
+      <tr>
+        <th>Problema</th>
+        <th>Meccanismo richiamato</th>
+      </tr>
+      <tr>
+        <td>segmenti ritardati o duplicati nella stessa incarnazione</td>
+        <td>numerazione dei singoli byte nello spazio a 32 bit</td>
+      </tr>
+      <tr>
+        <td>riuso di un numero mentre un vecchio segmento è ancora in rete</td>
+        <td>limite temporale espresso dal Maximum Segment Lifetime</td>
+      </tr>
+      <tr>
+        <td>sovrapposizione fra incarnazioni successive degli stessi end-point</td>
+        <td>ISN variabile e sincronizzazione durante l'apertura</td>
+      </tr>
+    </table>
+
+    <h3>Incarnazioni successive della stessa connessione</h3>
+    <p>Il pericolo non è soltanto il giro completo del contatore dentro una connessione. Dopo un crash, gli stessi due end-point possono creare una nuova istanza, o <strong>incarnazione</strong>, mentre in rete sopravvivono segmenti ritardati dell'istanza precedente. Se i numeri coincidessero, un vecchio segmento potrebbe apparire valido nella nuova connessione.</p>
+
+    <p>All'apertura ciascun host sceglie allora un <strong>Initial Sequence Number</strong> (<strong>ISN</strong>). Per ridurre le sovrapposizioni l'ISN varia nel tempo, per esempio seguendo un contatore interno con un offset casuale. Considerando che un riavvio richiede più di un MSL, il rischio si riduce fortemente; resta però necessario che i due host <strong>sincronizzino</strong> i rispettivi ISN all'apertura.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>«Numerazione a 32 bit» non significa che il TCP possa ignorare la storia della connessione. I numeri vengono riusati: MSL, ISN variabile e sincronizzazione servono insieme a impedire che un segmento di una vecchia incarnazione venga accettato come nuovo.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="TCP_ gestione della connessione.pdf">
+    <h2>3. L'apertura: il Three-Way Handshake</h2>
+    <p>Aprire una connessione non equivale a inviare un semplice avviso. La rete può <strong>perdere, duplicare o ritardare</strong> i pacchetti; inoltre entrambi gli host devono conoscere il numero iniziale scelto dall'altro. Il TCP risolve il problema con il <strong>Three-Way Handshake</strong> (TWH), uno scambio in tre passi che sincronizza entrambe le direzioni.</p>
+
+    <ol>
+      <li><strong>A &rarr; B</strong>: <code>SYN=1, SeqN=x, ACK=0</code>. A annuncia il proprio ISN <var>x</var>.</li>
+      <li><strong>B &rarr; A</strong>: <code>SYN=1, ACK=1, SeqN=y, AckN=x+1</code>. B conferma <var>x</var> e annuncia il proprio ISN <var>y</var>.</li>
+      <li><strong>A &rarr; B</strong>: <code>SYN=0, ACK=1, SeqN=x+1, AckN=y+1</code>. A conferma <var>y</var>; la sincronizzazione è completa.</li>
+    </ol>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-label="Diagramma temporale del Three-Way Handshake TCP tra host A e host B con numeri di sequenza x e y">
+        <style>
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.8;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.8;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar102" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="ar102g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/>
+          </marker>
+        </defs>
+        <text class="ftb" x="96" y="22">host A</text>
+        <text class="ftb" x="572" y="22">host B</text>
+        <path class="fln" d="M120,40 L120,300"/>
+        <path class="fln" d="M600,40 L600,300"/>
+        <path class="flna" d="M120,68 L600,116" marker-end="url(#ar102)"/>
+        <text class="ftc" x="132" y="62">1. SYN=1, SeqN=x, ACK=0</text>
+        <path class="flng" d="M600,142 L120,190" marker-end="url(#ar102g)"/>
+        <text class="ftg" x="254" y="146">2. SYN=1, ACK=1, SeqN=y, AckN=x+1</text>
+        <path class="flna" d="M120,216 L600,264" marker-end="url(#ar102)"/>
+        <text class="ftc" x="132" y="210">3. SYN=0, ACK=1, SeqN=x+1, AckN=y+1</text>
+        <path class="fhair" d="M20,286 L680,286"/>
+        <text class="fts" x="20" y="306">Il SYN occupa una posizione nello spazio di sequenza: dopo x si usa x+1, dopo y si usa y+1.</text>
+        <text class="fts" x="20" y="322">Il solo ACK non occupa spazio di numerazione e non viene ritrasmesso autonomamente.</text>
+      </svg>
+      <figcaption><b>Tavola 10.2</b> — Il Three-Way Handshake. Il secondo messaggio conferma il numero di A e propone quello di B; il terzo prova a B che anche il suo numero iniziale è stato ricevuto.</figcaption>
+    </figure>
+
+    <p>Il primo segmento che porta dati da A usa <code>SeqN=x+1</code>, cioè lo stesso valore del campo <code>AckN</code> ricevuto nel passo precedente. Analogamente, il flusso di B comincia da <code>y+1</code>. Il <strong>SYN occupa una posizione</strong> nello spazio dei numeri di sequenza; un segmento che porta soltanto un <strong>ACK non la occupa</strong> e l'ACK non viene ritrasmesso come entità autonoma.</p>
+
+    <div id="w-handshake"></div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Il TWH non serve genericamente a «vedere se l'altro risponde»: serve a <strong>sincronizzare due numeri di sequenza iniziali</strong>. Saper ricostruire i tre segmenti con <var>x</var>, <var>y</var>, <code>x+1</code> e <code>y+1</code> chiarisce anche perché siano necessari proprio tre passi.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="TCP_ gestione della connessione.pdf">
+    <h2>4. Recupero dagli errori in apertura</h2>
+    <p>Il TWH resta efficace quando i segmenti di apertura si perdono. Se il primo <strong>SYN</strong> non arriva a B, A non riceve alcuna risposta: allo scadere del time-out invia nuovamente il SYN con lo stesso numero iniziale. Se invece si perde il <strong>SYN+ACK</strong>, A ritrasmette il SYN e B risponde di nuovo con SYN+ACK.</p>
+
+    <table>
+      <tr><th>Perdita</th><th>Ciò che osserva l'host</th><th>Recupero</th></tr>
+      <tr><td>SYN di A</td><td>A non riceve SYN+ACK</td><td>time-out di A e nuovo invio del SYN</td></tr>
+      <tr><td>SYN+ACK di B</td><td>A non riceve la risposta; B non riceve l'ACK finale</td><td>time-out e ripetizione dello scambio di apertura</td></tr>
+      <tr><td>risposta assente in modo persistente</td><td>scadono più time-out consecutivi</td><td>backoff esponenziale fino al numero massimo di tentativi</td></tr>
+    </table>
+
+    <p>La cattura mostrata nelle slide rende visibili la scadenza del time-out del SYN, l'aumento progressivo dell'attesa tramite <strong>backoff esponenziale</strong> e infine un <strong>numero massimo di tentativi</strong>. Se il socket di destinazione non esiste, il rifiuto viene invece segnalato da un segmento con <code>RST</code>.</p>
+
+    <h3>Leggere l'apertura in una cattura</h3>
+    <p>Una traccia Wireshark permette di seguire il protocollo nello stesso ordine del diagramma: prima il SYN, poi il SYN+ACK, infine l'ACK. Le slide mettono in evidenza anche le <strong>opzioni</strong> presenti nei primi due segmenti, perché sono specificate proprio durante l'apertura.</p>
+
+    <ol class="lk-timeline">
+      <li>
+        <span class="lk-tl-when">SYN</span>
+        — primo pacchetto di apertura della connessione e annuncio dell'ISN del client.
+      </li>
+      <li>
+        <span class="lk-tl-when">SYN+ACK</span>
+        — risposta del server, conferma del primo ISN e annuncio del secondo.
+      </li>
+      <li>
+        <span class="lk-tl-when">ACK</span>
+        — conferma finale che completa la sincronizzazione dei due numeri.
+      </li>
+      <li>
+        <span class="lk-tl-when">assenza di risposta</span>
+        — scadenza del time-out, nuovo SYN e intervalli crescenti fino al massimo numero di tentativi.
+      </li>
+      <li>
+        <span class="lk-tl-when">RST</span>
+        — rifiuto esplicito quando il socket di destinazione non esiste.
+      </li>
+    </ol>
+
+    <h3>Perché il TWH è robusto</h3>
+    <p>Lo schema resiste anche all'<strong>instaurazione contemporanea</strong> da parte dei due host e ignora pacchetti di apertura ritardatari. La robustezza discende dal fatto che ogni lato deve sia proporre il proprio numero sia confermare quello ricevuto: un vecchio SYN isolato non completa da solo la sincronizzazione bilaterale.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Il time-out di apertura introduce qui il principio, mentre il capitolo 11 studierà il <strong>Retransmission Time-Out</strong> usato durante il trasferimento. In entrambi i casi l'assenza della conferma è ciò che rende osservabile una perdita.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="TCP_ gestione della connessione.pdf">
+    <h2>5. La chiusura della connessione</h2>
+    <p>Il TCP cerca una <strong>chiusura ordinata</strong>, o <em>soft release</em>, che non perda dati. Il fatto che un'applicazione non abbia più nulla da inviare non implica che abbia finito di ricevere: nella direzione opposta possono esserci dati già in viaggio o ancora da trasmettere.</p>
+
+    <p>Per questo il rilascio è trattato in modalità <strong>simplex</strong>: le due direzioni sono chiuse indipendentemente. L'host che termina la propria trasmissione invia <code>FIN=1</code> ed esegue la <strong>chiusura attiva</strong>. Quando riceve l'ACK del FIN considera chiusa la direzione in uscita; se l'ACK non arriva entro il tempo previsto, rilascia comunque la connessione. L'altro host è inizialmente il lato della <strong>chiusura passiva</strong> e può continuare a inviare finché non emette il proprio FIN.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-label="Chiusura separata di una connessione TCP con FIN e ACK indipendenti nelle due direzioni">
+        <style>
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.8;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.8;fill:none}
+          .flnv{stroke:var(--lk-vermilion);stroke-width:1.8;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .ftv{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar103" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/>
+          </marker>
+          <marker id="ar103g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/>
+          </marker>
+          <marker id="ar103v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--lk-vermilion)"/>
+          </marker>
+        </defs>
+        <text class="ftb" x="96" y="22">host A</text>
+        <text class="ftb" x="572" y="22">host B</text>
+        <path class="fln" d="M120,40 L120,310"/>
+        <path class="fln" d="M600,40 L600,310"/>
+        <path class="flna" d="M120,60 L600,100" marker-end="url(#ar103)"/>
+        <text class="ftc" x="132" y="55">FIN=1, SeqN=x, ACK=1, AckN=y</text>
+        <path class="flng" d="M600,120 L120,160" marker-end="url(#ar103g)"/>
+        <text class="ftg" x="292" y="124">ACK=1, AckN=x+1</text>
+        <text class="ftv" x="24" y="182">A&rarr;B chiusa</text>
+        <path class="flng" d="M600,200 L120,240" marker-end="url(#ar103g)"/>
+        <text class="ftg" x="300" y="204">FIN=1, SeqN=w</text>
+        <path class="flna" d="M120,260 L600,300" marker-end="url(#ar103)"/>
+        <text class="ftc" x="132" y="255">ACK=1, AckN=w+1</text>
+        <text class="ftv" x="605" y="318">B&rarr;A chiusa</text>
+        <path class="fhair" d="M238,176 L580,176"/>
+        <text class="fts" x="244" y="190">fra i due FIN, B può ancora inviare dati verso A</text>
+      </svg>
+      <figcaption><b>Tavola 10.3</b> — Chiusura separata nelle due direzioni. Il primo FIN chiude soltanto il flusso A&rarr;B; il flusso B&rarr;A resta disponibile fino al secondo FIN.</figcaption>
+    </figure>
+
+    <div id="w-chiusura" class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Separata</button>
+        <button class="lk-tab">Congiunta</button>
+        <button class="lk-tab">Simultanea</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Chiusura separata.</strong> A invia FIN e riceve ACK; la direzione A&rarr;B è chiusa. B continua a trasmettere e solo in seguito invia il proprio FIN, che A conferma. I due rilasci sono nettamente distinti nel tempo.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Chiusura congiunta.</strong> Quando B riceve il FIN di A, è già pronto a terminare anche la propria direzione. La risposta può quindi associare la conferma del FIN ricevuto alla chiusura B&rarr;A, riducendo la separazione fra le due procedure.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Chiusura simultanea.</strong> A e B decidono indipendentemente di chiudere e inviano FIN quasi nello stesso momento. Ciascuno riceve il FIN dell'altro e ne invia l'ACK: l'incrocio dei FIN non elimina la necessità di confermare entrambe le direzioni.</p>
+      </div>
+    </div>
+
+    <h3>Perdita dell'ACK del FIN</h3>
+    <p>Se l'ACK del primo FIN si perde, la sorgente del FIN attende il time-out e ripete il FIN. Il destinatario può quindi inviare nuovamente la conferma. In ogni caso, trascorso il tempo previsto senza ACK, la sorgente del FIN rilascia comunque la connessione: la procedura non può restare bloccata indefinitamente.</p>
+
+    <h3>La sequenza logica del rilascio separato</h3>
+    <table>
+      <tr>
+        <th>Passo</th>
+        <th>Evento</th>
+        <th>Direzioni disponibili dopo il passo</th>
+      </tr>
+      <tr>
+        <td>1</td>
+        <td>A invia <code>FIN=1</code></td>
+        <td>B può ancora trasmettere verso A</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>B conferma il FIN di A</td>
+        <td>A considera chiusa la propria uscita</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>B termina i dati residui e invia il proprio FIN</td>
+        <td>anche la direzione B&rarr;A entra in chiusura</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>A conferma il FIN di B</td>
+        <td>entrambe le direzioni sono state rilasciate</td>
+      </tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>La parola decisiva è <strong>simplex</strong>. TCP offre una connessione full-duplex, ma la chiude come due flussi unidirezionali indipendenti. Un FIN significa «non invierò altri dati in questa direzione», non «da questo istante nessuno dei due può più trasmettere».</p>
+    </div>
+  </section>
+
+  <section id="s6" data-src="TCP_ gestione della connessione.pdf">
+    <h2>6. La macchina a stati e TIME_WAIT</h2>
+    <p>L'apertura, il trasferimento e la chiusura possono essere descritti con una <strong>macchina a stati finiti</strong>. La macchina completa del TCP distingue numerosi casi; per seguire il percorso ordinario bastano gli stati principali riportati nel widget. La rappresentazione completa mostrata nelle slide è attribuita a Fall e Stevens, <em>TCP/IP Illustrated, Vol. 1, 2nd Ed.</em></p>
+
+    <div id="w-stati"></div>
+
+    <h3>Lo stato TIME_WAIT</h3>
+    <p>Al termine della chiusura attiva l'host non passa subito a <code>CLOSED</code>: resta in <code>TIME_WAIT</code> per un intervallo pari a <strong>2 MSL</strong>. Durante questa attesa potrebbe ricevere nuovamente il FIN dell'altro host, per esempio perché l'ACK precedente si è perso, e può quindi confermarlo ancora.</p>
+
+    <p>Il secondo obiettivo è garantire l'estinzione dei segmenti appartenenti a incarnazioni precedenti. Dopo la chiusura, la stessa coppia di end-point potrebbe creare una nuova connessione e riusare numeri già impiegati; l'attesa di due massimi tempi di vita separa le due incarnazioni e impedisce ai vecchi segmenti di attraversare quel confine.</p>
+
+    <table>
+      <tr><th>Timer TCP</th><th>Ruolo indicato nelle slide</th></tr>
+      <tr><td><strong>TIME_WAIT</strong></td><td>mantiene lo stato per <code>2 MSL</code> dopo la chiusura attiva</td></tr>
+      <tr><td><strong>Retransmission Time-Out</strong></td><td>temporizzatore di ritrasmissione</td></tr>
+      <tr><td><strong>Keepalive Timer</strong></td><td>temporizzatore keepalive della connessione</td></tr>
+      <tr><td><strong>Persist Timer</strong></td><td>temporizzatore persist della connessione</td></tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p><code>TIME_WAIT</code> non è una chiusura «rimasta a metà». È una fase intenzionale della chiusura attiva: conserva per <code>2 MSL</code> la memoria minima necessaria a confermare un FIN ritrasmesso e a proteggere la prossima incarnazione.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="TCP_ gestione della connessione.pdf">
+    <h2>7. Le primitive Berkeley socket</h2>
+    <p>Le <strong>Berkeley socket</strong> sono la tipica interfaccia fra applicazione e TCP nei sistemi operativi. Le primitive trasformano il ciclo della connessione in operazioni che ricordano l'apertura, l'uso e la chiusura di un file, ma i percorsi del server e del client non sono simmetrici.</p>
+
+    <table>
+      <tr><th>Processo</th><th>Primitiva</th><th>Funzione</th></tr>
+      <tr><td rowspan="7"><strong>server</strong></td><td><code>socket</code></td><td>crea una nuova entità end-point</td></tr>
+      <tr><td><code>bind</code></td><td>associa indirizzo IP e porta alla socket</td></tr>
+      <tr><td><code>listen</code></td><td>pone la socket in ascolto e crea la lista delle richieste</td></tr>
+      <tr><td><code>accept</code></td><td>attende e accetta la richiesta di un client</td></tr>
+      <tr><td><code>send</code></td><td>trasmette dati sulla connessione stabilita</td></tr>
+      <tr><td><code>receive</code></td><td>riceve dati dalla connessione stabilita</td></tr>
+      <tr><td><code>close</code></td><td>chiude la connessione e rilascia l'indirizzo della socket</td></tr>
+      <tr><td rowspan="5"><strong>client</strong></td><td><code>socket</code></td><td>crea una nuova entità end-point</td></tr>
+      <tr><td><code>connect</code></td><td>blocca il client durante il tentativo e lo sblocca a connessione instaurata</td></tr>
+      <tr><td><code>send</code></td><td>trasmette dati sulla connessione stabilita</td></tr>
+      <tr><td><code>receive</code></td><td>riceve dati dalla connessione stabilita</td></tr>
+      <tr><td><code>close</code></td><td>chiude la connessione e rilascia l'indirizzo della socket</td></tr>
+    </table>
+
+    <h3>Workflow: apertura passiva e apertura attiva</h3>
+    <p>Il server prepara l'<strong>apertura passiva</strong> con <code>socket</code>, <code>bind</code> e <code>listen</code>, poi si ferma in <code>accept</code>. Il client esegue l'<strong>apertura attiva</strong> con <code>connect</code>. Una volta instaurata la connessione, le due applicazioni alternano <code>send</code> e <code>receive</code>; infine chiamano <code>close</code>.</p>
+
+    <ol class="lk-timeline">
+      <li>
+        <span class="lk-tl-when">preparazione del server</span>
+        — <code>socket()</code>, <code>bind()</code> e <code>listen()</code> creano e rendono raggiungibile l'end-point passivo.
+      </li>
+      <li>
+        <span class="lk-tl-when">attesa</span>
+        — <code>accept()</code> pone il server in attesa di una richiesta accodata.
+      </li>
+      <li>
+        <span class="lk-tl-when">apertura attiva</span>
+        — il client crea la propria socket e invoca <code>connect()</code> verso il socket address del server.
+      </li>
+      <li>
+        <span class="lk-tl-when">connessione instaurata</span>
+        — <code>accept()</code> restituisce la socket connessa e le parti possono eseguire <code>send()</code> e <code>receive()</code>.
+      </li>
+      <li>
+        <span class="lk-tl-when">rilascio</span>
+        — <code>close()</code> avvia la chiusura e rilascia l'indirizzo della socket.
+      </li>
+    </ol>
+
+    <h3>Server iterativo e server concorrente</h3>
+    <p>Un server <strong>iterativo</strong> usa un ciclo infinito per servire più richieste successive, ma le gestisce in sequenza: completa il lavoro su una connessione prima di tornare ad accettarne un'altra. Un server <strong>concorrente</strong> esegue invece uno <code>SPAWN</code>: genera un processo o thread worker per ogni connessione e torna immediatamente in ascolto.</p>
+
+    <table>
+      <tr><th>Modello</th><th>Dopo <code>accept</code></th><th>Effetto</th></tr>
+      <tr><td><strong>iterativo</strong></td><td>il server stesso esegue receive, send e close</td><td>le richieste sono servite in sequenza</td></tr>
+      <tr><td><strong>concorrente</strong></td><td>un worker process/thread gestisce la connessione</td><td>il server torna subito ad attendere altre richieste</td></tr>
+    </table>
+
+    <h3>Codice lato client: invio di una stringa</h3>
+    <pre><code class="language-python">from socket import *
+serverName = "hostname"
+serverPort = 55000
+clientSocket = socket(AF_INET, SOCK_STREAM)
+clientSocket.connect((serverName,serverPort))
+sentence = raw_input("Input lowercase sentence: ")
+clientSocket.send(sentence)
+modifiedSentence = clientSocket.recv(1024)
+print "From Server:", modifiedSentence
+clientSocket.close()</code></pre>
+
+    <h3>Codice lato server iterativo</h3>
+    <pre><code class="language-python">from socket import *
+serverPort = 55000
+serverSocket = socket(AF_INET, SOCK_STREAM)
+serverSocket.bind(("",serverPort))
+serverSocket.listen(5)
+print "The server is ready to receive"
+while 1:
+    connectionSocket, addr = serverSocket.accept()
+    sentence = connectionSocket.recv(1024)
+    capitalizedSentence = sentence.upper()
+    connectionSocket.send(capitalizedSentence)
+    connectionSocket.close()</code></pre>
+
+    <h3>Codice lato server concorrente</h3>
+    <pre><code class="language-python">from socket import *
+from thread import *
+# Multithread server - function to serve client requests
+def clientthread(conn):
+    sentence = conn.recv(1024)
+    capitalizedSentence = sentence.upper()
+    conn.send(capitalizedSentence)
+    conn.close()
+# Main program
+serverPort = 55000
+serverSocket = socket(AF_INET, SOCK_STREAM)
+serverSocket.bind(("",serverPort))
+serverSocket.listen(5)
+print "The server is ready to receive"
+while 1:
+    connectionSocket, addr = serverSocket.accept()
+    start_new_thread(clientthread,(connectionSocket))</code></pre>
+
+    <p>Il listato annotato permette di seguire le primitive del server concorrente una per una. Il codice conserva sintassi e nomi delle slide: l'obiettivo è riconoscere il workflow, dal socket di ascolto alla creazione del worker.</p>
+
+    <div id="w-codice"></div>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Le primitive rendono visibile il confine fra applicazione e trasporto. <code>connect</code> e <code>accept</code> espongono l'apertura; <code>close</code> avvia il rilascio ordinato; i dettagli dei segmenti SYN, ACK e FIN restano responsabilità del TCP.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="TCP_ gestione della connessione.pdf">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+
+      <details>
+        <summary>Che cos'è un end-point TCP e che cos'è una socket address?</summary>
+        <p>Un <strong>end-point</strong> è la concatenazione fra l'indirizzo IP dell'host e un numero di porta; la sua rappresentazione, per esempio <code>137.204.57.85:80</code>, è una <strong>socket address</strong>. Una connessione è determinata univocamente dall'associazione di due end-point.</p>
+      </details>
+
+      <details>
+        <summary>Che cosa significano full-duplex, punto-punto ed end-to-end?</summary>
+        <p><strong>Full-duplex</strong>: i dati possono fluire nelle due direzioni. <strong>Punto-punto</strong>: una connessione associa due soli end-point e TCP non gestisce multicast. <strong>End-to-end</strong>: la connessione è mantenuta dai due host terminali. Un end-point può comunque essere condiviso da più connessioni mediante multiplexing.</p>
+      </details>
+
+      <details>
+        <summary>Perché TCP numera i byte e quanto è grande lo spazio di numerazione?</summary>
+        <p>Perché considera i dati applicativi come un <strong>byte stream</strong>, non come messaggi separati. Ogni byte occupa una posizione in uno spazio a <strong>32 bit</strong>, usato come contatore modulo <code>2<sup>32</sup></code>, cioè modulo 4 Gbyte.</p>
+      </details>
+
+      <details>
+        <summary>Che cos'è MSL e perché condiziona il riuso dei numeri di sequenza?</summary>
+        <p>Il <strong>Maximum Segment Lifetime</strong> è il massimo tempo di vita attribuito a un segmento: inizialmente 2 minuti, 30 secondi in implementazioni più recenti. Un numero può essere riusato in sicurezza soltanto dopo che i vecchi segmenti con lo stesso numero non esistono più in rete.</p>
+      </details>
+
+      <details>
+        <summary>Quanto tempo serve a esaurire lo spazio di 4 Gbyte alle velocità indicate?</summary>
+        <p>A <code>2 Mbit/s</code> servono <strong>4,8 ore</strong>; a <code>100 Mbit/s</code> <strong>5,7 minuti</strong>; a <code>1 Gbit/s</code> appena <strong>34 secondi</strong>. L'aumento della velocità rende concreto il problema del riuso dei numeri.</p>
+      </details>
+
+      <details>
+        <summary>Perché l'ISN varia e perché deve essere sincronizzato?</summary>
+        <p>L'ISN varia nel tempo, per esempio mediante contatore interno e offset casuale, per ridurre la sovrapposizione fra incarnazioni successive della stessa connessione. Deve essere sincronizzato perché ciascun host deve conoscere il numero iniziale scelto dall'altro per interpretare correttamente byte e conferme.</p>
+      </details>
+
+      <details>
+        <summary>Quali sono i tre passi del Three-Way Handshake?</summary>
+        <p>1) A invia <code>SYN=1, SeqN=x, ACK=0</code>. 2) B risponde <code>SYN=1, ACK=1, SeqN=y, AckN=x+1</code>. 3) A conclude con <code>SYN=0, ACK=1, SeqN=x+1, AckN=y+1</code>. Lo scambio sincronizza entrambi gli ISN.</p>
+      </details>
+
+      <details>
+        <summary>Perché il primo segmento dati usa il numero indicato dall'ACK precedente?</summary>
+        <p>Perché il SYN occupa una posizione nello spazio dei numeri. Dopo il SYN con <code>SeqN=x</code>, il primo byte usa <code>x+1</code>, proprio il valore richiesto da <code>AckN=x+1</code>. Un segmento che porta soltanto ACK non occupa invece spazio di numerazione e l'ACK non viene ritrasmesso autonomamente.</p>
+      </details>
+
+      <details>
+        <summary>Come recupera TCP la perdita di un SYN o di un SYN+ACK?</summary>
+        <p>Chi attende la risposta lascia scadere un <strong>time-out</strong> e ripete il segmento di apertura. In assenza persistente di risposta i tentativi seguono un <strong>backoff esponenziale</strong> e terminano raggiunto il numero massimo. Il TWH resiste inoltre ad aperture contemporanee e ignora pacchetti d'apertura ritardatari.</p>
+      </details>
+
+      <details>
+        <summary>Che cosa significa soft release e perché la chiusura è simplex?</summary>
+        <p>La <strong>soft release</strong> è una chiusura ordinata che cerca di non perdere dati. È simplex perché le due direzioni sono rilasciate indipendentemente: dopo il FIN di A, B può ancora inviare ad A finché non chiude a sua volta con un FIN.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'è fra chiusura separata, congiunta e simultanea?</summary>
+        <p>Nella <strong>separata</strong> i due FIN sono distanti e fra essi una direzione resta attiva. Nella <strong>congiunta</strong> chi riceve il primo FIN è già pronto a chiudere anche la propria direzione. Nella <strong>simultanea</strong> entrambi inviano FIN indipendentemente e poi confermano il FIN ricevuto.</p>
+      </details>
+
+      <details>
+        <summary>Che cosa accade se si perde l'ACK di un FIN?</summary>
+        <p>La sorgente del FIN attende il time-out e può trasmettere nuovamente il FIN; il destinatario invia ancora l'ACK. Se la conferma continua a mancare, dopo il tempo previsto la sorgente del FIN rilascia comunque la connessione.</p>
+      </details>
+
+      <details>
+        <summary>Perché TIME_WAIT dura 2 MSL?</summary>
+        <p>Dopo la chiusura attiva, <code>TIME_WAIT</code> mantiene lo stato per <strong>2 MSL</strong>. In questo intervallo l'host può confermare un FIN ritrasmesso per perdita dell'ACK e garantisce l'estinzione di segmenti di precedenti incarnazioni prima che la connessione venga ricreata.</p>
+      </details>
+
+      <details>
+        <summary>Quali primitive usa un server Berkeley socket?</summary>
+        <p><code>socket</code> crea l'end-point, <code>bind</code> associa IP e porta, <code>listen</code> prepara la lista delle richieste, <code>accept</code> attende e accetta un client, <code>send/receive</code> scambiano dati e <code>close</code> chiude la connessione e rilascia l'indirizzo.</p>
+      </details>
+
+      <details>
+        <summary>Quali primitive usa il client e che cosa fa connect?</summary>
+        <p>Il client usa <code>socket</code>, <code>connect</code>, <code>send/receive</code> e <code>close</code>. <code>connect</code> blocca il processo mentre tenta l'apertura verso il server e lo sblocca quando la connessione è instaurata.</p>
+      </details>
+
+      <details>
+        <summary>Che differenza c'è fra server iterativo e concorrente?</summary>
+        <p>Il server <strong>iterativo</strong> serve le richieste una dopo l'altra nello stesso ciclo. Il server <strong>concorrente</strong> genera con uno SPAWN un processo o thread worker per ogni connessione e torna immediatamente in ascolto di nuove richieste.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-09-tcp-segmento.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-11-tcp-timeout-flusso.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: <em>TCP: gestione della connessione</em> · Reti di Telecomunicazioni LM, Instradamento e Trasporto in Internet · UniBo · Prof. W. Cerroni</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Stepper: sincronizzazione del Three-Way Handshake ---- */
+LessonKit.stepper('#w-handshake', {
+  title: 'Sincronizzare due numeri iniziali',
+  sub: 'Fai avanzare A e B: ogni lato può procedere soltanto dopo aver ricevuto il segmento atteso.',
+  shared: { syn: 0, synack: 0, ack: 0, dati: 0 },
+  watch: ['syn', 'synack', 'ack', 'dati'],
+  threads: {
+    A: {
+      name: 'Host A',
+      steps: [
+        {
+          label: 'invia SYN, SeqN=x',
+          run: function (s) { s.syn = 1; }
+        },
+        {
+          label: 'attende SYN+ACK',
+          run: function (s) { if (!s.synack) return 'block'; }
+        },
+        {
+          label: 'invia ACK, SeqN=x+1, AckN=y+1',
+          run: function (s) { s.ack = 1; }
+        },
+        {
+          label: 'può inviare dati da SeqN=x+1',
+          run: function (s) { if (!s.ack) return 'block'; s.dati += 1; }
+        }
+      ]
+    },
+    B: {
+      name: 'Host B',
+      steps: [
+        {
+          label: 'attende SYN di A',
+          run: function (s) { if (!s.syn) return 'block'; }
+        },
+        {
+          label: 'invia SYN+ACK, SeqN=y, AckN=x+1',
+          run: function (s) { s.synack = 1; }
+        },
+        {
+          label: 'attende ACK finale',
+          run: function (s) { if (!s.ack) return 'block'; }
+        },
+        {
+          label: 'può inviare dati da SeqN=y+1',
+          run: function (s) { if (!s.ack) return 'block'; s.dati += 1; }
+        }
+      ]
+    }
+  },
+  verdict: function (s, done) {
+    if (done) {
+      return {
+        status: 'ok',
+        text: 'Handshake completo: A conosce y, B conosce x e i primi byte possono usare x+1 e y+1.'
+      };
+    }
+    if (s.ack) {
+      return {
+        status: 'ok',
+        text: 'Entrambi gli ISN sono confermati. Il solo ACK non consuma un ulteriore numero di sequenza.'
+      };
+    }
+    if (s.synack) {
+      return {
+        status: '',
+        text: 'B ha confermato x e annunciato y; manca ancora la conferma finale di A.'
+      };
+    }
+    if (s.syn) {
+      return {
+        status: '',
+        text: 'A ha annunciato x, ma non conosce ancora l ISN scelto da B.'
+      };
+    }
+    return {
+      status: '',
+      text: 'Inizia dal SYN di A; se anticipi B, il suo passo resta bloccato.'
+    };
+  }
+});
+
+/* ---- Esploratore: macchina a stati TCP semplificata ---- */
+LessonKit.stateExplorer('#w-stati', {
+  start: 'CLOSED',
+  states: {
+    CLOSED: {
+      desc: 'Nessuna connessione attiva. Da qui si avvia un apertura attiva oppure si prepara quella passiva.',
+      to: [
+        ['apertura passiva: listen', 'LISTEN'],
+        ['apertura attiva: invio SYN', 'SYN_SENT']
+      ]
+    },
+    LISTEN: {
+      desc: 'Il server attende una richiesta di connessione sulla socket in ascolto.',
+      to: [
+        ['ricezione SYN, invio SYN+ACK', 'SYN_RCVD'],
+        ['close', 'CLOSED']
+      ]
+    },
+    SYN_SENT: {
+      desc: 'Il client ha inviato SYN e attende la risposta con SYN+ACK.',
+      to: [
+        ['ricezione SYN+ACK, invio ACK', 'ESTABLISHED'],
+        ['ricezione SYN simultaneo', 'SYN_RCVD']
+      ]
+    },
+    SYN_RCVD: {
+      desc: 'È stato ricevuto un SYN ed è stato inviato SYN+ACK; manca l ACK finale.',
+      to: [
+        ['ricezione ACK', 'ESTABLISHED'],
+        ['close o errore', 'CLOSED']
+      ]
+    },
+    ESTABLISHED: {
+      desc: 'I due numeri iniziali sono sincronizzati e il byte stream può fluire in entrambe le direzioni.',
+      to: [
+        ['chiusura attiva: invio FIN', 'FIN_WAIT_1']
+      ]
+    },
+    FIN_WAIT_1: {
+      desc: 'È stato inviato FIN; si attende la sua conferma o il FIN del peer.',
+      to: [
+        ['ricezione ACK del FIN', 'FIN_WAIT_2'],
+        ['chiusura congiunta o simultanea', 'TIME_WAIT']
+      ]
+    },
+    FIN_WAIT_2: {
+      desc: 'La direzione in uscita è chiusa; si attende il FIN che chiude la direzione opposta.',
+      to: [
+        ['ricezione FIN, invio ACK', 'TIME_WAIT']
+      ]
+    },
+    TIME_WAIT: {
+      desc: 'La chiusura attiva conserva lo stato per 2 MSL, confermando eventuali FIN ritrasmessi.',
+      to: [
+        ['scadenza 2 MSL', 'CLOSED']
+      ]
+    }
+  }
+});
+
+/* ---- Codice annotato: server concorrente delle slide ---- */
+LessonKit.annotatedCode('#w-codice', {
+  lang: 'python',
+  lines: [
+    ['from socket import *', 'Importa le primitive socket usate dal programma.'],
+    ['from thread import *', 'Importa la primitiva per generare il thread worker.'],
+    ['# Multithread server - function to serve client requests', 'La funzione seguente gestisce una singola connessione accettata.'],
+    ['def clientthread(conn):', 'Ogni worker riceve la socket connessa al proprio client.'],
+    ['    sentence = conn.recv(1024)', 'Riceve fino a 1024 byte dalla connessione stabilita.'],
+    ['    capitalizedSentence = sentence.upper()', 'Elabora la stringa convertendola in maiuscolo.'],
+    ['    conn.send(capitalizedSentence)', 'Invia al client il risultato sulla stessa connessione full-duplex.'],
+    ['    conn.close()', 'Chiude la socket connessa gestita dal worker.'],
+    ['# Main program', 'Da qui comincia il percorso della socket di ascolto del server.'],
+    ['serverPort = 55000', 'Sceglie la porta locale da associare alla socket.'],
+    ['serverSocket = socket(AF_INET, SOCK_STREAM)', 'Crea un end-point IPv4 di tipo stream, cioè TCP.'],
+    ['serverSocket.bind(("",serverPort))', 'Associa la socket all indirizzo locale e alla porta 55000.'],
+    ['serverSocket.listen(5)', 'Mette la socket in ascolto e predispone la lista delle richieste.'],
+    ['print "The server is ready to receive"', 'Segnala che l apertura passiva è stata preparata.'],
+    ['while 1:', 'Il server torna continuamente ad accettare nuove connessioni.'],
+    ['    connectionSocket, addr = serverSocket.accept()', 'Attende una richiesta e ottiene una nuova socket connessa e l indirizzo remoto.'],
+    ['    start_new_thread(clientthread,(connectionSocket))', 'Esegue lo SPAWN del worker e libera subito il ciclo principale per un nuovo accept.']
+  ]
+});
+</script>
+</body>
+</html>

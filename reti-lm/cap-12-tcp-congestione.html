@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 12 — TCP: controllo di congestione · Reti LM</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-11-tcp-timeout-flusso.html">&larr; Cap. 11 — Time-out e controllo di flusso</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-13-tcp-prestazioni.html">Cap. 13 — Modelli di prestazione &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Trasporto affidabile e TCP · Capitolo 12</div>
+    <h1>TCP: controllo di congestione</h1>
+    <div class="lk-meta"><span>~50 min di lettura</span><span>5 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Dal controllo di flusso al controllo di congestione</a></li>
+      <li><a href="#s2">Finestra di trasmissione e throughput</a></li>
+      <li><a href="#s3">Perché due fasi: Slow Start e Congestion Avoidance</a></li>
+      <li><a href="#s4">Slow Start</a></li>
+      <li><a href="#s5">Congestion Avoidance</a></li>
+      <li><a href="#s6">Risposta alla congestione: RTO scaduto</a></li>
+      <li><a href="#s7">Fast Retransmit e Fast Recovery</a></li>
+      <li><a href="#s8">Perdite multiple: Tahoe, Reno e New Reno</a></li>
+      <li><a href="#s9">Il modello approssimato: AIMD</a></li>
+      <li><a href="#s10">AIMD: condivisione della banda</a></li>
+      <li><a href="#s11">Limiti del TCP e varianti moderne</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="TCP_ controllo di congestione.pdf">
+    <h2>1. Dal controllo di flusso al controllo di congestione</h2>
+    <p>Il capitolo 11 ha regolato la sorgente rispetto alla capacità della destinazione. Ora il punto stretto si sposta dentro la rete. Il <strong>controllo di flusso</strong> impedisce che il trasmettitore saturi il ricevitore; il <strong>controllo di congestione</strong> impedisce che il traffico immesso saturi le code dei router lungo il percorso. Sono due problemi distinti anche quando producono lo stesso effetto finale: rallentare la sorgente.</p>
+
+    <p>Nel primo caso la destinazione notifica esplicitamente la propria <strong>advertised window</strong>, <var>AW</var>. Nel secondo il TCP opera end-to-end, con un controllo implicito e <em>closed loop</em>: interpreta ACK duplicati e scadenze del time-out come segnali dello stato della rete. In entrambi i casi è la <strong>cadenza degli ACK</strong> a regolare concretamente la trasmissione. Se gli ACK arrivano, liberano spazio nella finestra; se rallentano o non arrivano, anche la sorgente rallenta.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" width="100%" role="img" aria-label="Confronto fra collo di bottiglia alla destinazione per il controllo di flusso e collo di bottiglia nella rete per il controllo di congestione">
+        <style>
+          .p1box{fill:var(--lk-paper-light);stroke:var(--lk-ink);stroke-width:1.2}
+          .p1net{fill:var(--lk-hl);stroke:var(--lk-cobalt);stroke-width:1.5}
+          .p1flow{fill:var(--lk-warnbg);stroke:var(--lk-vermilion);stroke-width:2}
+          .p1line{fill:none;stroke:var(--lk-ink);stroke-width:1.5}
+          .p1ack{fill:none;stroke:var(--lk-forest);stroke-width:1.5;stroke-dasharray:5 3}
+          .p1hair{fill:none;stroke:var(--lk-rule-soft);stroke-width:1}
+          .p1tx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .p1sm{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .p1co{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .p1ve{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .p1gr{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .p1hd{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar121" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker>
+          <marker id="ar121g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/></marker>
+        </defs>
+        <text class="p1hd" x="20" y="24">Lo stesso percorso, due possibili punti stretti</text>
+        <rect class="p1box" x="30" y="65" width="110" height="55"/>
+        <text class="p1tx" x="52" y="97">sorgente TCP</text>
+        <rect class="p1net" x="225" y="48" width="245" height="90"/>
+        <text class="p1co" x="300" y="72">rete di router</text>
+        <circle class="p1box" cx="270" cy="105" r="17"/>
+        <circle class="p1box" cx="350" cy="105" r="17"/>
+        <circle class="p1box" cx="430" cy="105" r="17"/>
+        <path class="p1line" d="M140,92 L225,92" marker-end="url(#ar121)"/>
+        <path class="p1line" d="M287,105 L333,105 M367,105 L413,105" marker-end="url(#ar121)"/>
+        <rect class="p1box" x="560" y="65" width="110" height="55"/>
+        <text class="p1tx" x="575" y="97">destinazione</text>
+        <path class="p1line" d="M470,92 L560,92" marker-end="url(#ar121)"/>
+        <path class="p1flow" d="M548,62 L548,123"/>
+        <text class="p1ve" x="490" y="148">collo: destinazione</text>
+        <text class="p1sm" x="490" y="164">controllo di flusso → AW</text>
+        <path class="p1flow" d="M381,82 L381,128"/>
+        <text class="p1ve" x="290" y="184">collo: capacità minima della rete</text>
+        <text class="p1sm" x="300" y="200">controllo di congestione → CW</text>
+        <path class="p1ack" d="M615,225 C520,278 200,278 85,225" marker-end="url(#ar121g)"/>
+        <text class="p1gr" x="245" y="270">la cadenza degli ACK regola la sorgente</text>
+        <path class="p1hair" d="M20,290 L680,290"/>
+        <text class="p1sm" x="20" y="309">Il ricevitore dichiara AW; la rete non dichiara CW: la sorgente la adatta osservando il ritorno degli ACK.</text>
+      </svg>
+      <figcaption><b>Tavola 12.1</b> — I due colli di bottiglia. Il controllo di flusso protegge una destinazione nota; il controllo di congestione stima indirettamente la capacità minima, variabile, del percorso.</figcaption>
+    </figure>
+
+    <p>Per rappresentare il secondo limite, ogni connessione mantiene una <strong>Congestion Window</strong>, <var>CW</var>. La finestra si chiude quando il livello di congestione aumenta e si apre quando la congestione si risolve. Il vincolo effettivo resta il più severo tra quello imposto dal ricevitore e quello stimato per la rete:</p>
+
+    <pre><code>W = min{AW, CW}
+
+AW  limite imposto dalla destinazione
+CW  limite imposto dal controllo di congestione
+W   dati che la sorgente può mantenere in volo</code></pre>
+
+    <p><var>W</var>, <var>AW</var> e <var>CW</var> sono normalmente espresse in byte. Negli esempi è più comodo misurarle in segmenti di dimensione <var>MSS</var>; dire <code>W = 4</code> significa allora quattro MSS. La notazione non cambia il meccanismo: in ogni istante <var>W</var> non può superare nessuno dei due limiti.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Non confondere i soggetti protetti: <strong>AW protegge la destinazione, CW protegge la rete</strong>. La formula da cui partire è sempre <code>W = min{AW, CW}</code>. Negli sviluppi del capitolo si assumerà spesso <code>AW &gt;&gt; CW</code>, e dunque <code>W = CW</code>, ma questa è un'ipotesi di lavoro, non la definizione generale.</p>
+    </div>
+  </section>
+
+  <section id="s2" data-src="TCP_ controllo di congestione.pdf">
+    <h2>2. Finestra di trasmissione e throughput</h2>
+    <p>Per trasmettere senza interruzioni occorre mantenere in volo una quantità di dati sufficiente a riempire il percorso mentre si attende il ritorno degli ACK. Se <var>B</var> è la capacità minima lungo il percorso in bit/s e <var>RTT</var> il round-trip time, il prodotto banda per ritardo espresso in byte fornisce la <strong>finestra ideale</strong>:</p>
+
+    <pre><code>W = RTT·B/8</code></pre>
+
+    <p>Se la finestra è inferiore a questo valore, la sorgente esaurisce i dati inviabili prima che arrivi un ACK e lascia capacità inutilizzata. Il throughput normalizzato, indicato nelle slide con <var>S</var>, vale:</p>
+
+    <pre><code>W &lt; RTT·B/8   →   S = 8W/(RTT·B)
+
+W &gt; RTT·B/8   →   S = 1, ma i pacchetti si accodano nei router</code></pre>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Una <var>W</var> troppo piccola sottoutilizza la capacità; una <var>W</var> oltre il prodotto banda&times;ritardo non aumenta il throughput, che è già saturo, ma accumula pacchetti nelle code e rende più probabile la congestione. Il controllo cerca quindi il bordo fra <strong>tubo pieno</strong> e <strong>code in crescita</strong>, senza conoscere in anticipo dove si trovi.</p>
+    </div>
+
+    <div id="w-finestra"></div>
+
+    <h3>Esempio di dimensionamento</h3>
+    <p>Con <code>B = 100 Mbit/s</code> e <code>RTT = 20 ms</code>, la finestra ideale è <code>0,020 · 100·10<sup>6</sup> / 8 = 250 000 byte</code>. Se la sorgente usa soltanto 125&nbsp;000 byte, <var>S</var> vale 0,5: metà della capacità rimane inutilizzata. Con 375&nbsp;000 byte, invece, <var>S</var> resta 1 e i 125&nbsp;000 byte eccedenti devono attendere in coda.</p>
+  </section>
+
+  <section id="s3" data-src="TCP_ controllo di congestione.pdf">
+    <h2>3. Perché due fasi: Slow Start e Congestion Avoidance</h2>
+    <p>All'apertura della connessione la capacità disponibile <var>B</var> è incognita: non esiste un valore evidente con cui inizializzare <var>CW</var>. Inoltre <var>B</var> può cambiare durante la connessione, perché altre sorgenti entrano o escono dal percorso e modificano il carico sul collo di bottiglia. Una finestra fissa sarebbe quindi sbagliata sia all'inizio sia a regime.</p>
+
+    <p>Il TCP separa il problema in due dinamiche. Lo <strong>Slow Start</strong> parte con una finestra minima ma la fa crescere rapidamente, per avvicinarsi in pochi RTT alla capacità disponibile. Il <strong>Congestion Avoidance</strong> prosegue con cautela: permette di sfruttare nuova capacità, ma evita di aumentare la finestra alla stessa velocità esplosiva.</p>
+
+    <table>
+      <tr><th>Fase</th><th>Scopo</th><th>Dinamica approssimata</th><th>Uscita</th></tr>
+      <tr><td><strong>Slow Start (SS)</strong></td><td>raggiungere rapidamente una regione utile</td><td>raddoppio di <var>W</var> per RTT</td><td><var>W</var> raggiunge <var>SSThr</var> oppure scade <var>RTO</var></td></tr>
+      <tr><td><strong>Congestion Avoidance (CA)</strong></td><td>sondare con prudenza la capacità residua</td><td>circa +1 MSS per RTT</td><td>perdita rilevata da RTO o ACK duplicati</td></tr>
+    </table>
+
+    <h3>Ipotesi di lavoro</h3>
+    <p>Per isolare la congestione, le slide assumono trasmettitore e ricevitore correttamente configurati, buffer abbastanza grandi e applicazioni sempre pronte a produrre o consumare dati. Non vi sono quindi stagnazioni applicative né <em>silly window syndrome</em>. Soprattutto si assume <code>AW &gt;&gt; CW</code>, da cui segue <code>W = CW</code>: l'evoluzione della finestra è determinata interamente dal controllo di congestione.</p>
+
+    <div id="w-ciclo"></div>
+  </section>
+
+  <section id="s4" data-src="TCP_ controllo di congestione.pdf">
+    <h2>4. Slow Start</h2>
+    <p>All'inizio dello Slow Start si pone <code>W &le; 2·MSS</code>; l'esempio elementare usa <code>W = MSS</code>. La sorgente trasmette la finestra iniziale e si ferma in attesa dell'ACK. Se l'ACK arriva entro <var>RTO</var>, la finestra aumenta di un MSS. La stessa regola viene applicata a ogni ACK successivo:</p>
+
+    <pre><code>SS: W = W + MSS per ACK</code></pre>
+
+    <p>La crescita è per ACK, non per RTT. Tuttavia, se in un RTT vengono confermati tutti i segmenti della finestra corrente, ciascuno produce un incremento di un MSS: una finestra di 1 MSS diventa 2, quella da 2 diventa 4, poi 8. Per questo l'andamento temporale è <strong>esponenziale</strong>, nonostante il nome «partenza lenta».</p>
+
+    <p>L'approssimazione assume <var>RTT</var> circa costante, osserva <var>W</var> a tempi multipli del RTT e, in genere, non usa ACK ritardati in questa fase (<em>quickack mode</em>). La durata fino alla soglia è:</p>
+
+    <pre><code>Tss = RTT·log2(SSThr)</code></pre>
+
+    <p>La formula è una stima nella convenzione normalizzata delle slide: la soglia è espressa in MSS e la crescita parte dall'unità. Lo Slow Start termina quando <var>W</var> raggiunge la <strong>Slow Start Threshold</strong>, <var>SSThr</var>, oppure quando scade <var>RTO</var>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-label="Crescita esponenziale della finestra in Slow Start fino alla soglia e crescita lineare in Congestion Avoidance">
+        <style>
+          .p2axis{fill:none;stroke:var(--lk-ink);stroke-width:1.3}
+          .p2grid{fill:none;stroke:var(--lk-rule-soft);stroke-width:1;stroke-dasharray:4 4}
+          .p2ss{fill:none;stroke:var(--lk-cobalt);stroke-width:2.5}
+          .p2ca{fill:none;stroke:var(--lk-forest);stroke-width:2.5}
+          .p2thr{fill:none;stroke:var(--lk-vermilion);stroke-width:1.6;stroke-dasharray:6 3}
+          .p2dot{fill:var(--lk-paper-light);stroke:var(--lk-cobalt);stroke-width:2}
+          .p2tx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .p2sm{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .p2co{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .p2gr{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .p2ve{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .p2hd{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs><marker id="ar122" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker></defs>
+        <text class="p2hd" x="20" y="22">Evoluzione ideale della congestion window</text>
+        <path class="p2axis" d="M70,280 L70,45" marker-end="url(#ar122)"/>
+        <path class="p2axis" d="M70,280 L665,280" marker-end="url(#ar122)"/>
+        <text class="p2tx" x="20" y="55">W [MSS]</text>
+        <text class="p2tx" x="615" y="306">tempo [RTT]</text>
+        <path class="p2grid" d="M70,245 L650,245 M70,195 L650,195 M70,115 L650,115"/>
+        <text class="p2sm" x="48" y="249">1</text>
+        <text class="p2sm" x="48" y="199">2</text>
+        <text class="p2sm" x="48" y="119">4</text>
+        <path class="p2thr" d="M70,115 L650,115"/>
+        <text class="p2ve" x="510" y="106">SSThr = 4 MSS</text>
+        <path class="p2ss" d="M90,245 L180,195 L270,115"/>
+        <circle class="p2dot" cx="90" cy="245" r="5"/>
+        <circle class="p2dot" cx="180" cy="195" r="5"/>
+        <circle class="p2dot" cx="270" cy="115" r="5"/>
+        <text class="p2co" x="110" y="225">SS: 1 → 2 → 4</text>
+        <path class="p2ca" d="M270,115 L360,92 L450,69 L540,46 L625,25"/>
+        <text class="p2gr" x="385" y="145">CA: circa +1 MSS per RTT</text>
+        <path class="p2grid" d="M270,280 L270,115"/>
+        <text class="p2sm" x="238" y="304">passaggio SS → CA</text>
+      </svg>
+      <figcaption><b>Tavola 12.2</b> — Le due pendenze della finestra. Prima della soglia, ogni RTT raddoppia i segmenti in volo; dopo la soglia, il sondaggio della capacità diventa lineare.</figcaption>
+    </figure>
+
+    <div id="step-ss"></div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Le tre frasi da tenere unite sono: <code>W = W + MSS</code> <strong>per ogni ACK</strong>; ciò produce un <strong>raddoppio per RTT</strong>; quindi <code>Tss = RTT·log2(SSThr)</code>. Dire soltanto «la finestra aumenta di uno» è ambiguo e confonde lo Slow Start con la Congestion Avoidance.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="TCP_ controllo di congestione.pdf">
+    <h2>5. Congestion Avoidance</h2>
+    <p>Raggiunta <var>SSThr</var>, la crescita esponenziale sarebbe troppo aggressiva. In Congestion Avoidance il TCP applica a ogni nuovo ACK un incremento inversamente proporzionale alla finestra corrente:</p>
+
+    <pre><code>CA: W = W + MSS²/W per ACK</code></pre>
+
+    <p>Durante un RTT arrivano approssimativamente <code>W/MSS</code> ACK, ciascuno dei quali aggiunge <code>MSS²/W</code>. La somma degli incrementi è quindi circa un MSS per RTT. Se si usa il <em>delayed ACK</em> e arriva un ACK ogni due segmenti, l'aumento complessivo è circa mezzo MSS per RTT.</p>
+
+    <table>
+      <tr><th>Modalità degli ACK</th><th>Incremento per ACK</th><th>Incremento approssimato per RTT</th></tr>
+      <tr><td>un ACK per segmento</td><td><code>MSS²/W</code></td><td><code>+1·MSS</code></td></tr>
+      <tr><td>un ACK ogni due segmenti</td><td><code>MSS²/W</code></td><td><code>+½·MSS</code></td></tr>
+    </table>
+
+    <h3>La crescita reale è leggermente sub-lineare</h3>
+    <p>Con <code>MSS = 1</code> e <code>W = 4</code>, si inviano quattro segmenti. Dopo il primo ACK la finestra diventa <code>4 + 1/4 = 4,25</code>; il denominatore del passo seguente è già cambiato. L'evoluzione esatta è:</p>
+
+    <table>
+      <tr><th>ACK relativo</th><th>Calcolo</th><th><var>W</var> [MSS]</th></tr>
+      <tr><td>0</td><td>valore iniziale</td><td>4,00</td></tr>
+      <tr><td>1</td><td><code>4 + 1/4</code></td><td>4,25</td></tr>
+      <tr><td>2</td><td><code>4,25 + 1/4,25</code></td><td>4,49</td></tr>
+      <tr><td>3</td><td><code>4,49 + 1/4,49</code></td><td>4,71</td></tr>
+      <tr><td>4</td><td><code>4,71 + 1/4,71</code></td><td>4,92</td></tr>
+    </table>
+
+    <p>Non si raggiunge esattamente 5, perché ogni ACK riduce leggermente l'incremento successivo. La curva è dunque sub-lineare. Per l'analisi si trascura questo scarto e si assume una crescita strettamente lineare nel tempo: è l'approssimazione che consentirà di descrivere il TCP come AIMD.</p>
+  </section>
+
+  <section id="s6" data-src="TCP_ controllo di congestione.pdf">
+    <h2>6. Risposta alla congestione: RTO scaduto</h2>
+    <p>Se un segmento non viene riscontrato e scade <var>RTO</var>, il TCP assume che la rete sia congestionata. Con una buona stima del RTT, la scadenza è quasi sempre dovuta a una perdita; su una tecnologia affidabile, la perdita è a sua volta quasi sempre dovuta alla saturazione delle code nei router.</p>
+
+    <p>La reazione è severa indipendentemente dalla fase corrente. Se il TCP era in Slow Start, riparte da capo; se era in Congestion Avoidance, termina CA e torna a SS. In entrambi i casi riduce la finestra iniziale e aggiorna la soglia:</p>
+
+    <pre><code>W ≤ 2·MSS
+SSThr = max(FS/2, 2·MSS)</code></pre>
+
+    <p>Il <strong>flight size</strong>, <var>FS</var>, è la quantità di byte già trasmessi ma non ancora confermati. In generale <code>FS ≤ W</code>: la finestra è il permesso massimo, il flight size è ciò che si trova davvero in volo. Per questo la soglia si calcola su <var>FS</var> e non automaticamente su <var>W</var>.</p>
+
+    <table>
+      <tr><th>Evento</th><th>Interpretazione</th><th>Nuova soglia</th><th>Nuova fase</th></tr>
+      <tr><td>scadenza di RTO</td><td>congestione critica o assenza di evidenza che la rete continui a consegnare</td><td><code>SSThr = max(FS/2, 2·MSS)</code></td><td>Slow Start con <code>W ≤ 2·MSS</code></td></tr>
+    </table>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>La soglia non può scendere sotto <code>2·MSS</code>. Scrivere soltanto <code>SSThr = W/2</code> perde due dettagli: si usa il <strong>flight size</strong>, che può essere minore di <var>W</var>, e si applica il massimo <code>SSThr = max(FS/2, 2·MSS)</code>.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="TCP_ controllo di congestione.pdf,Esempi di controllo di congestione TCP.pdf">
+    <h2>7. Fast Retransmit e Fast Recovery</h2>
+    <p>Tre ACK duplicati raccontano una storia diversa da un time-out. Il segmento mancante è probabilmente perso, ma i segmenti successivi stanno raggiungendo il ricevitore: sono proprio loro a generare i duplicati. La rete è congestionata, ma non tanto da essersi fermata. Il <strong>Fast Retransmit</strong> ritrasmette subito il segmento mancante; il <strong>Fast Recovery</strong> evita l'inefficienza di ripartire da Slow Start.</p>
+
+    <pre><code>SSThr = max(FS/2, 2·MSS)
+W = SSThr + 3·MSS                  window inflation
+
+per ogni ulteriore ACK duplicato:  W = W + MSS
+all'ACK completo:                  W = SSThr, poi CA</code></pre>
+
+    <p>I tre MSS aggiunti nella <em>window inflation</em> rappresentano i tre segmenti successivi al mancante che risultano già ricevuti: ciascuno ha prodotto un ACK duplicato e ha quindi lasciato la rete. Ogni duplicato ulteriore certifica la consegna di un altro segmento e consente di aumentare <var>W</var> di un MSS. Quando arriva l'ACK del segmento perduto, la finestra viene «sgonfiata» a <var>SSThr</var> e la connessione prosegue in CA.</p>
+
+    <h3>Esempio numerico: <var>FS = W = 4</var></h3>
+    <table>
+      <tr><th>Passo</th><th>Evento</th><th><var>SSThr</var></th><th><var>W</var></th></tr>
+      <tr><td>1</td><td>tre ACK duplicati, Fast Retransmit</td><td><code>max(4/2, 2) = 2</code></td><td><code>2 + 3 = 5</code></td></tr>
+      <tr><td>2</td><td>ritrasmissione del segmento mancante</td><td>2</td><td>5, Fast Recovery</td></tr>
+      <tr><td>3</td><td>ACK completo del segmento mancante</td><td>2</td><td><code>W = 2</code>, ingresso in CA</td></tr>
+    </table>
+
+    <h3>Esempio numerico: <var>FS = W = 6</var></h3>
+    <table>
+      <tr><th>Passo</th><th>Evento</th><th><var>SSThr</var></th><th><var>W</var></th></tr>
+      <tr><td>1</td><td>tre ACK duplicati</td><td><code>max(6/2, 2) = 3</code></td><td><code>3 + 3 = 6</code></td></tr>
+      <tr><td>2</td><td>un ulteriore ACK duplicato</td><td>3</td><td><code>W = 7</code></td></tr>
+      <tr><td>3</td><td>un altro ACK duplicato</td><td>3</td><td><code>W = 8</code></td></tr>
+      <tr><td>4</td><td>ACK completo</td><td>3</td><td><code>W = 3</code>, CA</td></tr>
+    </table>
+
+    <h3>Esempio svolto: perdita del segmento 20</h3>
+    <p>Le esercitazioni fissano <code>AW = 32</code>, <code>SSThr = 8</code>, <code>CW = 2</code> all'apertura, segmenti da un MSS e 34 segmenti complessivi. L'avvio procede per finestre <code>2 → 4 → 8</code>; raggiunta la soglia, CA porta <var>CW</var> a 9 e la finestra <code>15,…,23</code> contiene il segmento 20, che si perde. I segmenti successivi producono duplicati con <code>AckN = 20</code>.</p>
+
+    <table>
+      <tr><th>Variante</th><th>Rilevazione</th><th>Riduzione</th><th>Segmenti inviati nel recupero</th><th>Ripresa</th></tr>
+      <tr><td>solo SS + CA</td><td>attende RTO</td><td><code>W = 1</code>, <code>SSThr = 4</code> da <code>FS = 9</code> nella convenzione dell'esempio</td><td>ritrasmette 20</td><td>SS: <code>1 → 2 → 4</code></td></tr>
+      <tr><td>Tahoe</td><td>Fast Retransmit al terzo duplicato</td><td><code>W = 1</code>, <code>SSThr = 2</code> con <code>FS = 4</code></td><td>20</td><td>SS, poi CA</td></tr>
+      <tr><td>Reno</td><td>Fast Retransmit + Fast Recovery</td><td><code>SSThr = 2</code>, <code>W = 2 + 3 = 5</code></td><td>20 e, se consentito, 24</td><td>CA con <code>W = 2</code></td></tr>
+    </table>
+
+    <p>Il confronto mostra perché il segnale conta: la scadenza di RTO non dà prova di attività residua e impone una ripartenza prudente; tre duplicati dimostrano invece che almeno tre segmenti hanno attraversato la rete, e Reno conserva questa informazione gonfiando temporaneamente la finestra.</p>
+  </section>
+
+  <section id="s8" data-src="TCP_ controllo di congestione.pdf,Esempi di controllo di congestione TCP.pdf">
+    <h2>8. Perdite multiple: Tahoe, Reno e New Reno</h2>
+    <p>Una sola perdita nella finestra mette in luce la velocità del Fast Retransmit. Due perdite nella stessa finestra mettono in luce i limiti delle varianti classiche. Si consideri l'esempio delle slide: i primi dodici segmenti sono confermati, <code>W = 5</code>, e nella finestra successiva si perdono i segmenti 13 e 16.</p>
+
+    <h3>Solo SS + CA</h3>
+    <p>La perdita del 13 viene scoperta da RTO. La sua ritrasmissione fa avanzare l'ACK fino al 16, ma la seconda perdita richiede un altro RTO. Il costo dominante sono dunque <strong>due time-out</strong>, non le due ritrasmissioni.</p>
+
+    <h3>Tahoe</h3>
+    <p>Tahoe riconosce il 13 con tre ACK duplicati e lo ritrasmette subito, ma porta immediatamente <var>W</var> a 1 e riparte in SS. Poiché 16 e 17 sono ancora non confermati, la finestra collassata non consente di trasmettere abbastanza nuovi segmenti da generare tre duplicati per il 16. Si finisce ancora ad attendere RTO: il vantaggio del primo Fast Retransmit resta piccolo.</p>
+
+    <h3>Reno</h3>
+    <p>Reno entra in Fast Recovery con <code>SSThr = 2</code> e <code>W = SSThr + 3 = 5</code>. Quando la ritrasmissione del 13 produce <code>AckN = 16</code>, interpreta l'ACK come completamento del recupero, esce da FR e torna a <code>W = 2</code>. Ma quell'ACK è soltanto <strong>parziale</strong>: conferma una parte della finestra presente all'ingresso in FR. L'uscita è prematura e anche il 16 finisce per richiedere RTO.</p>
+
+    <h3>New Reno e gli ACK parziali</h3>
+    <p>New Reno memorizza <code>SeqN(T0)</code>, il massimo numero di sequenza trasmesso quando arriva il terzo ACK duplicato. Nell'esempio vale 17. Un ACK successivo inferiore a quello necessario per confermare <code>SeqN(T0)</code> è parziale: indica un'altra perdita, reinizializza RTO e mantiene il recupero attivo. Nella traccia delle slide l'ACK parziale porta temporaneamente a <code>W = W + 1 − 3</code>, compensando il nuovo segmento confermato e i duplicati già contabilizzati.</p>
+
+    <p>New Reno esce da Fast Recovery soltanto quando riceve l'ACK che copre <code>SeqN(T0)</code>. Così può ritrasmettere prima il 13 e poi il 16 senza aspettare il secondo time-out. Lo stesso principio distingue l'esempio con perdite 21 e 28: Reno chiude FR dopo il recupero del 21 e attende RTO per il 28; New Reno riconosce l'ACK parziale e recupera entrambi dentro la stessa fase.</p>
+
+    <table>
+      <tr><th>Funzionalità</th><th>RFC 1122</th><th>Tahoe</th><th>Reno</th><th>New Reno</th></tr>
+      <tr><td>stima della varianza RTT</td><td>sì</td><td>sì</td><td>sì</td><td>sì</td></tr>
+      <tr><td>RTO con backoff esponenziale</td><td>sì</td><td>sì</td><td>sì</td><td>sì</td></tr>
+      <tr><td>algoritmo di Karn</td><td>sì</td><td>sì</td><td>sì</td><td>sì</td></tr>
+      <tr><td>Slow Start</td><td>sì</td><td>sì</td><td>sì</td><td>sì</td></tr>
+      <tr><td>Congestion Avoidance</td><td>sì</td><td>sì</td><td>sì</td><td>sì</td></tr>
+      <tr><td>Fast Retransmit</td><td>—</td><td>sì</td><td>sì</td><td>sì</td></tr>
+      <tr><td>Fast Recovery</td><td>—</td><td>—</td><td>sì</td><td>sì</td></tr>
+      <tr><td>reset RTO anche con ACK parziali</td><td>—</td><td>—</td><td>—</td><td>sì</td></tr>
+    </table>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Tahoe</button>
+        <button class="lk-tab">Reno</button>
+        <button class="lk-tab">New Reno</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Tahoe</strong> aggiunge Fast Retransmit a SS e CA, ma dopo la perdita porta <var>W</var> al minimo e torna in Slow Start. Con perdite multiple la finestra collassata può impedire la produzione di altri ACK duplicati: il recupero successivo attende RTO.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>Reno</strong> aggiunge Fast Recovery. Conserva il flusso durante il primo recupero, ma considera il primo nuovo ACK come conclusivo. Se quell'ACK è parziale, esce troppo presto e la perdita successiva può ancora richiedere RTO.</p>
+      </div>
+      <div class="lk-tabpanel">
+        <p><strong>New Reno</strong> conserva <code>SeqN(T0)</code> e distingue gli ACK parziali. Resta in Fast Recovery finché non è confermata tutta la finestra presente a <var>T0</var>, reinizializzando RTO e ritrasmettendo il nuovo segmento indicato dall'ACK parziale.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s9" data-src="TCP_ controllo di congestione.pdf">
+    <h2>9. Il modello approssimato: AIMD</h2>
+    <p>In una rete abbastanza stabile la durata dello Slow Start è molto inferiore a quella della Congestion Avoidance: <code>Tss &lt;&lt; Tca</code>. In prima approssimazione la vita lunga di una connessione è quindi una successione di fasi CA. Durante ciascuna fase la finestra cresce a tasso costante; a ogni perdita viene dimezzata. Ne risulta il caratteristico profilo a <strong>dente di sega</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" width="100%" role="img" aria-label="Andamento a dente di sega della congestion window con crescita additiva e dimezzamento a ogni perdita">
+        <style>
+          .p3axis{fill:none;stroke:var(--lk-ink);stroke-width:1.3}
+          .p3grow{fill:none;stroke:var(--lk-cobalt);stroke-width:2.5}
+          .p3drop{fill:none;stroke:var(--lk-vermilion);stroke-width:2.5}
+          .p3guide{fill:none;stroke:var(--lk-rule-soft);stroke-width:1;stroke-dasharray:4 4}
+          .p3x{fill:var(--lk-vermilion);font-family:var(--lk-mono);font-size:19px;font-weight:600}
+          .p3tx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .p3sm{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .p3co{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .p3ve{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .p3hd{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs><marker id="ar123" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker></defs>
+        <text class="p3hd" x="20" y="22">AIMD: una successione di fasi di Congestion Avoidance</text>
+        <path class="p3axis" d="M65,275 L65,45" marker-end="url(#ar123)"/>
+        <path class="p3axis" d="M65,275 L665,275" marker-end="url(#ar123)"/>
+        <text class="p3tx" x="20" y="55">W(t)</text>
+        <text class="p3tx" x="640" y="300">t</text>
+        <path class="p3guide" d="M65,95 L650,95 M65,185 L650,185"/>
+        <path class="p3grow" d="M85,225 L220,95"/>
+        <path class="p3drop" d="M220,95 L220,185"/>
+        <path class="p3grow" d="M220,185 L380,72"/>
+        <path class="p3drop" d="M380,72 L380,174"/>
+        <path class="p3grow" d="M380,174 L545,55"/>
+        <path class="p3drop" d="M545,55 L545,165"/>
+        <path class="p3grow" d="M545,165 L645,92"/>
+        <text class="p3x" x="211" y="87">×</text>
+        <text class="p3x" x="371" y="64">×</text>
+        <text class="p3x" x="536" y="47">×</text>
+        <text class="p3co" x="95" y="175">incremento additivo</text>
+        <text class="p3ve" x="230" y="143">W = W/2</text>
+        <text class="p3sm" x="445" y="245">ogni perdita apre un nuovo dente</text>
+      </svg>
+      <figcaption><b>Tavola 12.3</b> — Il modello approssimato della finestra. La salita lineare cerca capacità; il salto verticale restituisce rapidamente banda quando compare una perdita.</figcaption>
+    </figure>
+
+    <p>Questa legge prende il nome di <strong>Additive Increase, Multiplicative Decrease</strong>, AIMD. Indicando con <var>r(t)</var> il bit rate della connessione:</p>
+
+    <pre><code>incremento additivo:       r(t) = r(0) + ct      con c &gt; 0
+decremento moltiplicativo: r(t) = a·r(0)         con a &lt; 1</code></pre>
+
+    <p>Nel TCP classico l'incremento deriva da circa un MSS per RTT e il decremento tipico dimezza la finestra. «Additivo» significa che connessioni con uguali MSS e RTT aggiungono la stessa quantità; «moltiplicativo» significa che ciascuna conserva la stessa frazione del proprio rate prima della perdita.</p>
+
+    <p>Il controllo è <strong>greedy</strong>: continua ad aprire la finestra finché trova capacità, così tende a occupare tutta la banda disponibile. Allo stesso tempo AIMD consente un'equa distribuzione tra connessioni comparabili. Se però una rete è molto inaffidabile, per esempio wireless, non ogni perdita segnala congestione: attribuirle tutte alle code porta a riduzioni non necessarie e richiede algoritmi speciali.</p>
+  </section>
+
+  <section id="s10" data-src="TCP_ controllo di congestione.pdf">
+    <h2>10. AIMD: condivisione della banda</h2>
+    <p>Due connessioni con gli stessi MSS e RTT condividono un collo di bottiglia di capacità <var>R</var>. Nel piano con assi <var>r<sub>1</sub></var> e <var>r<sub>2</sub></var>, la retta <code>r1 + r2 = R</code> rappresenta il pieno utilizzo; la retta <code>r1 = r2</code> rappresenta l'equa allocazione. Il punto desiderato è la loro intersezione, <code>(R/2, R/2)</code>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-label="Piano dei rate di due connessioni AIMD con rette di equa allocazione e pieno utilizzo e traiettoria convergente">
+        <style>
+          .p4axis{fill:none;stroke:var(--lk-ink);stroke-width:1.3}
+          .p4fair{fill:none;stroke:var(--lk-forest);stroke-width:1.8;stroke-dasharray:6 3}
+          .p4full{fill:none;stroke:var(--lk-vermilion);stroke-width:1.8}
+          .p4ai{fill:none;stroke:var(--lk-cobalt);stroke-width:2.2}
+          .p4md{fill:none;stroke:var(--lk-ink-soft);stroke-width:2.2}
+          .p4eq{fill:var(--lk-paper-light);stroke:var(--lk-forest);stroke-width:2.5}
+          .p4tx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .p4sm{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .p4co{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-cobalt)}
+          .p4ve{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-vermilion)}
+          .p4gr{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-forest)}
+          .p4hd{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar124" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker>
+          <marker id="ar124b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/></marker>
+          <marker id="ar124s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink-soft)"/></marker>
+        </defs>
+        <text class="p4hd" x="20" y="22">Convergenza AIMD nel piano dei rate</text>
+        <path class="p4axis" d="M70,290 L70,42" marker-end="url(#ar124)"/>
+        <path class="p4axis" d="M70,290 L650,290" marker-end="url(#ar124)"/>
+        <text class="p4tx" x="28" y="52">r2</text>
+        <text class="p4tx" x="635" y="314">r1</text>
+        <path class="p4fair" d="M70,290 L315,45"/>
+        <text class="p4gr" x="155" y="170">r1 = r2</text>
+        <text class="p4gr" x="125" y="184">equa allocazione</text>
+        <path class="p4full" d="M70,45 L315,290"/>
+        <text class="p4ve" x="218" y="105">r1 + r2 = R</text>
+        <text class="p4ve" x="225" y="119">pieno utilizzo</text>
+        <path class="p4ai" d="M115,250 L245,120" marker-end="url(#ar124b)"/>
+        <path class="p4md" d="M245,120 L160,205" marker-end="url(#ar124s)"/>
+        <path class="p4ai" d="M160,205 L272,93" marker-end="url(#ar124b)"/>
+        <path class="p4md" d="M272,93 L181,184" marker-end="url(#ar124s)"/>
+        <path class="p4ai" d="M181,184 L285,80" marker-end="url(#ar124b)"/>
+        <circle class="p4eq" cx="192.5" cy="167.5" r="6"/>
+        <text class="p4gr" x="202" y="165">equilibrio (R/2, R/2)</text>
+        <text class="p4co" x="350" y="105">additive increase:</text>
+        <text class="p4co" x="350" y="121">spostamento parallelo a r1 = r2</text>
+        <text class="p4sm" x="350" y="160">multiplicative decrease:</text>
+        <text class="p4sm" x="350" y="176">spostamento verso l'origine</text>
+        <text class="p4sm" x="350" y="230">la traiettoria alterna le due mosse</text>
+        <text class="p4sm" x="350" y="246">e si avvicina all'intersezione</text>
+      </svg>
+      <figcaption><b>Tavola 12.4</b> — Perché AIMD tende all'equità. L'aumento additivo muove parallelamente alla retta equa; la riduzione moltiplicativa punta verso l'origine. L'alternanza converge all'intersezione con il pieno utilizzo.</figcaption>
+    </figure>
+
+    <p>Durante l'incremento additivo entrambi i rate crescono dello stesso valore e la traiettoria si muove parallelamente a <code>r1 = r2</code>. Quando la somma raggiunge il limite, il decremento moltiplicativo scala entrambi i rate verso l'origine. Ripetendo le due mosse, la differenza assoluta si riduce e il sistema tende al punto di equa allocazione.</p>
+
+    <div id="w-aimd"></div>
+
+    <h3>Quando i RTT sono diversi</h3>
+    <p>L'equità precedente dipende dall'ipotesi di RTT uguali. L'incremento di <var>CW</var> avviene approssimativamente una volta per RTT: una connessione con RTT breve compie più incrementi nello stesso secondo. Due connessioni che attraversano lo stesso collo di bottiglia ma sperimentano RTT diversi aumentano quindi le finestre a velocità diverse, e il TCP tende a favorire quella con RTT più breve.</p>
+  </section>
+
+  <section id="s11" data-src="TCP_ controllo di congestione.pdf">
+    <h2>11. Limiti del TCP e varianti moderne</h2>
+    <h3>Prodotto banda per ritardo e TCP CUBIC</h3>
+    <p>Dopo un evento di congestione, AIMD dimezza <var>CW</var>. Se le condizioni della rete restano stabili, la finestra ideale è ancora vicina al precedente massimo, ma tornarvi con una crescita lineare può richiedere molto tempo. Il limite è particolarmente evidente quando il prodotto banda&times;ritardo è grande: molte unità di MSS separano <code>WMAX/2</code> da <var>WMAX</var>.</p>
+
+    <p>TCP CUBIC, descritto nella RFC 8312 e adottato dalle versioni recenti di Linux considerate nelle slide, sostituisce in CA la crescita lineare di Reno con una curva cubica rispetto al tempo trascorso dall'ultima riduzione:</p>
+
+    <pre><code>W(t) = C(t−K)³ + WMAX</code></pre>
+
+    <p><var>C</var> è una costante, <var>t</var> il tempo dall'ultima riduzione, <var>K</var> l'istante in cui, in assenza di perdite, si raggiungerà nuovamente <var>WMAX</var>. La forma consente una crescita più rapida lontano dal massimo precedente e più prudente nelle sue vicinanze.</p>
+
+    <h3>Connessioni web, TLS e head-of-line blocking</h3>
+    <p>I costi del TCP emergono anche sopra il trasporto. HTTP/1.0 non persistente apre una connessione TCP per ogni oggetto della pagina. HTTP/1.1 riusa una connessione, ma pagine complesse ricorrono spesso a connessioni multiple per aumentare il parallelismo. Ciascuna connessione deve raggiungere separatamente il massimo throughput e, con HTTPS, aggiungere al 3-Way Handshake TCP la negoziazione TLS.</p>
+
+    <p>Il pipelining di HTTP/1.1 consente di inviare più richieste senza attendere le risposte precedenti, ma le risposte restano ordinate: una risposta lenta trattiene quelle successive, producendo <strong>head-of-line blocking</strong>. HTTP/2 multipla richieste e risposte nella stessa connessione TCP, alternando i dati di flussi differenti. Tuttavia una perdita TCP blocca la ricostruzione ordinata del flusso di byte e rallenta tutte le richieste multiplexate, anche quelle i cui dati non sono stati persi.</p>
+
+    <h3>QUIC e HTTP/3</h3>
+    <p>QUIC, RFC 9000, cambia il punto in cui vengono realizzate queste funzioni. Usa UDP come base, ma gestisce autonomamente connessioni affidabili e sicure con controllo di congestione. All'interno della stessa connessione distingue flussi diversi, così una perdita su un flusso non impone l'head-of-line blocking agli altri. QUIC è parte integrante di HTTP/3, RFC 9114, e consente inoltre un'apertura più veloce evitando di sovrapporre in sequenza tutti i passaggi delle architetture precedenti.</p>
+
+    <table>
+      <tr><th>Soluzione</th><th>Parallelismo</th><th>Costo evidenziato</th></tr>
+      <tr><td>HTTP/1.0</td><td>una connessione non persistente per oggetto</td><td>ripetizione dell'apertura e della salita a regime</td></tr>
+      <tr><td>HTTP/1.1</td><td>persistenza, pipelining e spesso connessioni multiple</td><td>negoziazioni multiple e HoL nell'ordine delle risposte</td></tr>
+      <tr><td>HTTP/2 su TCP</td><td>flussi HTTP multiplexati su una connessione</td><td>una perdita TCP rallenta tutti i flussi</td></tr>
+      <tr><td>HTTP/3 su QUIC</td><td>flussi distinti nella connessione QUIC</td><td>la perdita di un flusso non blocca gli altri flussi</td></tr>
+    </table>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Qui si chiude la descrizione algoritmica e si apre il problema quantitativo. Il capitolo 13 userà il dente di sega, la durata delle fasi e la probabilità di perdita per costruire <strong>modelli di prestazione</strong>: non cambierà il meccanismo, ma ne calcolerà throughput e tempi di completamento.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="TCP_ controllo di congestione.pdf">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Qual è la differenza fra controllo di flusso e controllo di congestione?</summary>
+        <p>Il controllo di flusso protegge la <strong>destinazione</strong>, che notifica esplicitamente <var>AW</var>. Il controllo di congestione protegge la <strong>rete</strong> e adatta implicitamente <var>CW</var> osservando ACK e perdite. Entrambi regolano la sorgente attraverso la cadenza degli ACK, ma rispondono a colli di bottiglia diversi.</p>
+      </details>
+      <details>
+        <summary>Come convivono AW e CW nella finestra effettiva?</summary>
+        <p>Con la relazione <code>W = min{AW, CW}</code>. La sorgente non può avere in volo più byte di quanti ne accetti la destinazione né più di quanti il controllo ritenga sostenibili per la rete. L'ipotesi <code>AW &gt;&gt; CW</code> semplifica in <code>W = CW</code>, ma non vale necessariamente sempre.</p>
+      </details>
+      <details>
+        <summary>Qual è la finestra ideale e che cosa accade sopra o sotto di essa?</summary>
+        <p>La finestra ideale è <code>W = RTT·B/8</code> byte. Se <code>W &lt; RTT·B/8</code>, il throughput normalizzato è <code>S = 8W/(RTT·B)</code> e la capacità è sottoutilizzata. Se <var>W</var> supera il valore ideale, <code>S = 1</code> ma i pacchetti eccedenti si accodano nei router, aumentando il rischio di congestione.</p>
+      </details>
+      <details>
+        <summary>Perché servono Slow Start e Congestion Avoidance?</summary>
+        <p>All'apertura la capacità <var>B</var> è incognita e durante la connessione può cambiare. SS parte da una finestra minima e cresce rapidamente per raggiungere una regione utile; CA continua a sondare la capacità disponibile con una crescita prudente, evitando che la finestra esploda a regime.</p>
+      </details>
+      <details>
+        <summary>Come cresce la finestra in Slow Start e quanto dura la fase?</summary>
+        <p>Per ogni ACK ricevuto entro RTO si applica <code>W = W + MSS</code>. Poiché in un RTT arrivano ACK per tutta la finestra, <var>W</var> raddoppia approssimativamente ogni RTT: crescita esponenziale. Nella convenzione normalizzata delle slide, <code>Tss = RTT·log2(SSThr)</code>. SS termina a <var>SSThr</var> o alla scadenza di RTO.</p>
+      </details>
+      <details>
+        <summary>Come cresce la finestra in Congestion Avoidance?</summary>
+        <p>A ogni nuovo ACK si applica <code>W = W + MSS²/W</code>. Su tutti gli ACK di una finestra l'aumento totale è circa un MSS per RTT, quindi lineare; con delayed ACK, un ACK ogni due segmenti, è circa mezzo MSS per RTT. La crescita esatta è leggermente sub-lineare.</p>
+      </details>
+      <details>
+        <summary>Che cosa fa il TCP quando scade RTO?</summary>
+        <p>Assume congestione critica, imposta <code>SSThr = max(FS/2, 2·MSS)</code>, riduce <code>W ≤ 2·MSS</code> e riparte in Slow Start. <var>FS</var> è il flight size, cioè i byte trasmessi ma non ancora confermati, e può essere minore della finestra.</p>
+      </details>
+      <details>
+        <summary>Che cos'è la window inflation del Fast Recovery?</summary>
+        <p>Dopo tre ACK duplicati si riduce la soglia e si pone <code>W = SSThr + 3·MSS</code>. I tre MSS contabilizzano i tre segmenti successivi al mancante già usciti dalla rete e ricevuti. Ogni duplicato ulteriore aggiunge un MSS; con l'ACK completo si torna a <code>W = SSThr</code> e si prosegue in CA.</p>
+      </details>
+      <details>
+        <summary>Perché Tahoe e Reno soffrono con perdite multiple, e che cosa cambia New Reno?</summary>
+        <p>Tahoe collassa <var>W</var> e può non generare abbastanza duplicati per scoprire la seconda perdita. Reno mantiene FR, ma ne esce al primo nuovo ACK anche se è parziale. New Reno memorizza <code>SeqN(T0)</code>, resta in FR davanti agli ACK parziali e ne esce solo quando è confermata tutta la finestra presente a <var>T0</var>.</p>
+      </details>
+      <details>
+        <summary>Che cosa significa AIMD e perché converge verso l'equa allocazione?</summary>
+        <p>L'incremento additivo segue <code>r(t) = r(0) + ct</code>, il decremento moltiplicativo <code>r(t) = a·r(0)</code>. Due connessioni comparabili aggiungono la stessa quantità, poi conservano la stessa frazione del rate. Nel piano <var>r1/r2</var> l'alternanza avvicina la traiettoria all'intersezione fra <code>r1 = r2</code> e <code>r1 + r2 = R</code>.</p>
+      </details>
+      <details>
+        <summary>Perché RTT diversi rompono l'equità ideale?</summary>
+        <p>La finestra aumenta di circa un MSS ogni RTT. Una connessione con RTT breve esegue più incrementi nello stesso intervallo di tempo rispetto a una con RTT lungo; condividendo lo stesso collo di bottiglia, tende quindi a ottenere una quota maggiore di capacità.</p>
+      </details>
+      <details>
+        <summary>Quale limite di AIMD affronta TCP CUBIC?</summary>
+        <p>Dopo il dimezzamento, la crescita lineare può impiegare molto tempo per tornare alla finestra ideale quando il prodotto banda&times;ritardo è grande. CUBIC usa <code>W(t) = C(t−K)³ + WMAX</code>: cresce più rapidamente lontano dal massimo precedente e rallenta nelle sue vicinanze.</p>
+      </details>
+      <details>
+        <summary>Che cos'è l'head-of-line blocking e come interviene QUIC?</summary>
+        <p>Su TCP i byte devono essere consegnati in ordine: in HTTP/2 la perdita di un segmento può rallentare tutti i flussi multiplexati. QUIC, RFC 9000, usa UDP come base ma realizza connessioni affidabili, sicure e congestion-controlled con flussi distinti; la perdita su un flusso non blocca gli altri. È il trasporto di HTTP/3, RFC 9114.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-11-tcp-timeout-flusso.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-13-tcp-prestazioni.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: <em>TCP: controllo di congestione</em> · <em>Esempi di controllo di congestione TCP</em> · Reti di Telecomunicazioni LM, Instradamento e Trasporto in Internet · UniBo · Prof. W. Cerroni</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Widget 1: finestra ideale e utilizzo del percorso ---- */
+(function () {
+  var host = document.getElementById('w-finestra');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Calcolatore della finestra ideale</h4>' +
+    '<p class="lk-step-sub">Varia banda, RTT e finestra effettiva. Il valore ideale riempie il percorso senza accumulare una coda persistente.</p>' +
+    '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;font-family:var(--lk-mono);font-size:.82rem">' +
+    '<label>B [bit/s]<br><input id="fi-b" type="number" value="100000000" min="1" step="any" style="width:145px"></label>' +
+    '<label>RTT [ms]<br><input id="fi-r" type="number" value="20" min="0.01" step="any" style="width:100px"></label>' +
+    '<label>MSS [byte]<br><input id="fi-m" type="number" value="1460" min="1" step="1" style="width:105px"></label>' +
+    '</div>' +
+    '<label style="display:block;margin-top:.8rem;font-family:var(--lk-mono);font-size:.82rem">W = <b id="fi-wv">250000</b> byte' +
+    '<input id="fi-w" type="range" min="1000" max="500000" value="250000" step="1000" style="width:100%"></label>' +
+    '<div class="lk-step-state" id="fi-out"></div>' +
+    '<div class="lk-step-verdict" id="fi-note"></div>';
+  function finitePositive(value, fallback) {
+    value = +value;
+    return isFinite(value) && value > 0 ? value : fallback;
+  }
+  function updateRange(ideal) {
+    var slider = host.querySelector('#fi-w');
+    var max = Math.max(2000, Math.ceil(ideal * 2 / 1000) * 1000);
+    slider.max = max;
+    slider.step = Math.max(1, Math.round(max / 500));
+  }
+  function update() {
+    var B = finitePositive(host.querySelector('#fi-b').value, 1);
+    var rttMs = finitePositive(host.querySelector('#fi-r').value, 1);
+    var MSS = finitePositive(host.querySelector('#fi-m').value, 1);
+    var ideal = (rttMs / 1000) * B / 8;
+    updateRange(ideal);
+    var W = finitePositive(host.querySelector('#fi-w').value, 1);
+    var rawS = 8 * W / ((rttMs / 1000) * B);
+    var useful = Math.min(1, rawS);
+    var queued = Math.max(0, W - ideal);
+    host.querySelector('#fi-wv').textContent = Math.round(W).toLocaleString('it-IT');
+    host.querySelector('#fi-out').innerHTML =
+      '<div class="lk-step-box">W ideale = <b>' + Math.round(ideal).toLocaleString('it-IT') + ' byte</b></div>' +
+      '<div class="lk-step-box">W ideale = <b>' + (ideal / MSS).toFixed(2) + ' MSS</b></div>' +
+      '<div class="lk-step-box">S utile = <b>' + (100 * useful).toFixed(1) + '%</b></div>' +
+      '<div class="lk-step-box">eccedenza in coda = <b>' + Math.round(queued).toLocaleString('it-IT') + ' byte</b></div>';
+    var note = host.querySelector('#fi-note');
+    if (rawS < 0.98) {
+      note.className = 'lk-step-verdict bad';
+      note.textContent = 'Sottoutilizzazione: S = 8W/(RTT·B) = ' + rawS.toFixed(3) + '. La sorgente resta senza dati in volo prima del ritorno degli ACK.';
+    } else if (rawS <= 1.02) {
+      note.className = 'lk-step-verdict ok';
+      note.textContent = 'Zona ideale: il percorso è pieno e la finestra non introduce una coda persistente apprezzabile.';
+    } else {
+      note.className = 'lk-step-verdict bad';
+      note.textContent = 'Zona di congestione: il throughput resta S = 1, ma circa ' + Math.round(queued).toLocaleString('it-IT') + ' byte eccedono il prodotto banda×ritardo e si accodano.';
+    }
+  }
+  ['#fi-b', '#fi-r', '#fi-m', '#fi-w'].forEach(function (id) {
+    host.querySelector(id).addEventListener('input', update);
+  });
+  update();
+})();
+
+/* ---- Widget 2: stepper dello Slow Start ---- */
+LessonKit.stepper('#step-ss', {
+  title: 'Slow Start, un RTT alla volta',
+  sub: 'La lista esplicita gli ACK del round; il contatore mostra perché +1 MSS per ACK equivale a un raddoppio per RTT.',
+  shared: { cwnd: 1, ssThr: 8, rtt: 0 },
+  watch: ['cwnd', 'ssThr', 'rtt'],
+  threads: {
+    S: {
+      name: 'Sorgente TCP',
+      steps: [
+        { label: 'riparti con W = 1 MSS', run: function (s) { s.cwnd = 1; } },
+        { label: 'RTT 1: 1 ACK, W = 1 + 1 = 2', run: function (s) { s.cwnd = 2; s.rtt = 1; } },
+        { label: 'RTT 2: 2 ACK, W = 2 + 2 = 4', run: function (s) { s.cwnd = 4; s.rtt = 2; } },
+        { label: 'RTT 3: 4 ACK, W = 4 + 4 = 8', run: function (s) { s.cwnd = 8; s.rtt = 3; } },
+        { label: 'W = SSThr: passa a Congestion Avoidance', run: function (s) { } }
+      ]
+    }
+  },
+  verdict: function (s, done) {
+    if (done) return { status: 'ok', text: 'Soglia raggiunta in 3 RTT: log2(8) = 3. Dal prossimo round la crescita sarà di circa un solo MSS per RTT.' };
+    if (s.cwnd === s.ssThr) return { status: 'ok', text: 'W ha raggiunto SSThr: lo Slow Start termina prima di un altro raddoppio.' };
+    return { status: '', text: 'Ogni ACK aggiunge un MSS; il numero di ACK del round coincide con la finestra corrente, quindi il totale raddoppia.' };
+  }
+});
+
+/* ---- Widget 3: esploratore del ciclo di vita di CW ---- */
+LessonKit.stateExplorer('#w-ciclo', {
+  start: 'Slow Start',
+  states: {
+    'Slow Start': {
+      desc: 'W cresce di un MSS per ACK, quindi approssimativamente raddoppia ogni RTT. Si cerca rapidamente una regione vicina alla capacità disponibile.',
+      to: [['W raggiunge SSThr', 'Congestion Avoidance'], ['RTO', 'Slow Start']]
+    },
+    'Congestion Avoidance': {
+      desc: 'W cresce di MSS²/W per ACK, circa un MSS per RTT. La connessione sonda lentamente la capacità residua.',
+      to: [['3 dup ACK', 'Fast Recovery'], ['RTO', 'Slow Start']]
+    },
+    'Fast Recovery': {
+      desc: 'SSThr viene dimezzata sul flight size; W è gonfiata di 3 MSS e di un MSS per ogni duplicato ulteriore.',
+      to: [['ACK completo', 'Congestion Avoidance'], ['RTO', 'Slow Start']]
+    }
+  }
+});
+
+/* ---- Widget 4: simulatore AIMD a due connessioni ---- */
+(function () {
+  var host = document.getElementById('w-aimd');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Due connessioni AIMD sullo stesso collo di bottiglia</h4>' +
+    '<p class="lk-step-sub">Ogni ciclo cresce fino a 0,8R e poi dimezza entrambi i rate. I valori iniziali riproducono t₁ = 1,67 s, t₂ = 6,67 s, t₃ = 11,67 s.</p>' +
+    '<div style="display:flex;gap:1rem;flex-wrap:wrap;font-family:var(--lk-mono);font-size:.82rem">' +
+    '<label>r1(0) [kbit/s]<br><input id="ai-r1" type="number" value="480" min="0" step="1" style="width:115px"></label>' +
+    '<label>r2(0) [kbit/s]<br><input id="ai-r2" type="number" value="320" min="0" step="1" style="width:115px"></label>' +
+    '<label>c [kbit/s²]<br><input id="ai-c" type="number" value="48" min="0.01" step="any" style="width:110px"></label>' +
+    '<label>R [kbit/s]<br><input id="ai-r" type="number" value="1200" min="1" step="any" style="width:110px"></label>' +
+    '</div>' +
+    '<div class="lk-step-state" id="ai-out"></div>' +
+    '<div class="lk-step-verdict" id="ai-note"></div>' +
+    '<div class="lk-step-btns"><button id="ai-next" type="button">Prossima perdita</button><button id="ai-reset" class="lk-step-reset" type="button">Reset</button></div>';
+  var state = { r1: 480, r2: 320, time: 0, losses: 0 };
+  function val(id, fallback) {
+    var n = +host.querySelector(id).value;
+    return isFinite(n) && n >= 0 ? n : fallback;
+  }
+  function reset() {
+    state.r1 = val('#ai-r1', 480);
+    state.r2 = val('#ai-r2', 320);
+    state.time = 0;
+    state.losses = 0;
+    render('Stato iniziale. Premi «Prossima perdita» per applicare crescita additiva e dimezzamento.');
+  }
+  function nextLoss() {
+    var c = Math.max(0.01, val('#ai-c', 48));
+    var R = Math.max(1, val('#ai-r', 1200));
+    var threshold = 0.8 * R;
+    var sum = state.r1 + state.r2;
+    var dt = sum < threshold ? (threshold - sum) / (2 * c) : 0;
+    var peak1 = state.r1 + c * dt;
+    var peak2 = state.r2 + c * dt;
+    state.time += dt;
+    state.r1 = peak1 / 2;
+    state.r2 = peak2 / 2;
+    state.losses += 1;
+    render('Perdita ' + state.losses + ' a t = ' + state.time.toFixed(2) + ' s: picco (' + peak1.toFixed(1) + ', ' + peak2.toFixed(1) + '), poi decremento moltiplicativo a metà.');
+  }
+  function render(message) {
+    var sum = state.r1 + state.r2;
+    var gap = Math.abs(state.r1 - state.r2);
+    host.querySelector('#ai-out').innerHTML =
+      '<div class="lk-step-box">t = <b>' + state.time.toFixed(2) + ' s</b></div>' +
+      '<div class="lk-step-box">r1 = <b>' + state.r1.toFixed(1) + ' kbit/s</b></div>' +
+      '<div class="lk-step-box">r2 = <b>' + state.r2.toFixed(1) + ' kbit/s</b></div>' +
+      '<div class="lk-step-box">r1+r2 = <b>' + sum.toFixed(1) + ' kbit/s</b></div>' +
+      '<div class="lk-step-box">divario = <b>' + gap.toFixed(1) + ' kbit/s</b></div>';
+    var note = host.querySelector('#ai-note');
+    note.className = 'lk-step-verdict' + (state.losses >= 3 ? ' ok' : '');
+    note.textContent = message + ' Il divario si dimezza a ogni perdita: l’allocazione tende all’equità.';
+  }
+  host.querySelector('#ai-next').addEventListener('click', nextLoss);
+  host.querySelector('#ai-reset').addEventListener('click', reset);
+  ['#ai-r1', '#ai-r2', '#ai-c', '#ai-r'].forEach(function (id) {
+    host.querySelector(id).addEventListener('change', reset);
+  });
+  reset();
+})();
+</script>
+</body>
+</html>

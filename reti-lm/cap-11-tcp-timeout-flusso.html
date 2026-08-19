@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 11 — TCP: time-out e controllo di flusso · Reti LM</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-10-tcp-connessione.html">&larr; Cap. 10 — Gestione della connessione</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-12-tcp-congestione.html">Cap. 12 — Controllo di congestione &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Trasporto affidabile e TCP · Capitolo 11</div>
+    <h1>TCP: calcolo del time-out e controllo di flusso</h1>
+    <div class="lk-meta"><span>~45 min di lettura</span><span>5 widget interattivi</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">La scelta del time-out di ritrasmissione</a></li>
+      <li><a href="#s2">La stima del Round-Trip Time</a></li>
+      <li><a href="#s3">Il metodo classico (RFC 793)</a></li>
+      <li><a href="#s4">L'algoritmo di Jacobson</a></li>
+      <li><a href="#s5">Media, EWMA e RTO a confronto</a></li>
+      <li><a href="#s6">Ambiguità del RTT e algoritmo di Karn</a></li>
+      <li><a href="#s7">Back-off esponenziale</a></li>
+      <li><a href="#s8">Conferma della trasmissione e SACK</a></li>
+      <li><a href="#s9">ACK duplicati e Fast Retransmit</a></li>
+      <li><a href="#s10">ACK ritardati e algoritmo di Nagle</a></li>
+      <li><a href="#s11">Il controllo di flusso del TCP</a></li>
+      <li><a href="#s12">Gestione dei buffer di trasmissione e ricezione</a></li>
+      <li><a href="#s13">Deadlock, Persist Timer e window probe</a></li>
+      <li><a href="#s14">Silly window syndrome e keepalive</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>1. La scelta del time-out di ritrasmissione</h2>
+    <p>Quando il TCP trasmette un segmento avvia il <strong>Retransmission Time-Out</strong>, o <strong>RTO</strong>. Il protocollo mantiene tipicamente un solo contatore per connessione: l'ACK deve arrivare prima della sua scadenza, altrimenti i dati non riscontrati vengono ritrasmessi.</p>
+
+    <p>La scelta del valore non ammette scorciatoie. Un time-out <strong>troppo breve</strong> non lascia agli ACK il tempo di tornare e produce ritrasmissioni inutili; un time-out <strong>troppo lungo</strong> fa attendere troppo un ACK che non arriverà, perdendo tempo e riducendo l'efficienza. Il valore corretto è quindi strettamente legato alla stima del <strong>Round-Trip Time</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 320" width="100%" role="img" aria-label="Confronto temporale fra un time-out troppo breve e uno troppo lungo rispetto al RTT">
+        <style>
+          .fbox{fill:var(--lk-paper-light);stroke:var(--lk-rule-soft);stroke-width:1}
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.8;fill:none}
+          .flnv{stroke:var(--lk-vermilion);stroke-width:1.8;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.6;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:12px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftv{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .ftg{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-forest)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar111c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/></marker>
+          <marker id="ar111g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/></marker>
+        </defs>
+        <rect class="fbox" x="18" y="38" width="320" height="238"/>
+        <text class="ftb" x="34" y="62">RTO troppo breve</text>
+        <path class="fln" d="M65,82 L65,245 M290,82 L290,245"/>
+        <text class="fts" x="45" y="76">Tx</text><text class="fts" x="270" y="76">Rx</text>
+        <path class="flna" d="M65,98 L290,146" marker-end="url(#ar111c)"/>
+        <text class="ftc" x="72" y="96">segmento</text>
+        <path class="flng" d="M290,158 L65,210" marker-end="url(#ar111g)"/>
+        <text class="ftg" x="208" y="190">ACK</text>
+        <path class="flnv" d="M52,160 L78,160 M52,154 L52,166 M78,154 L78,166"/>
+        <text class="ftv" x="84" y="164">RTO scade</text>
+        <path class="flna" d="M65,176 L290,224" marker-end="url(#ar111c)"/>
+        <text class="ftv" x="92" y="192">ritrasmissione inutile</text>
+        <path class="fhair" d="M65,246 L290,246"/>
+        <text class="fts" x="88" y="266">RTO &lt; RTT osservato</text>
+
+        <rect class="fbox" x="362" y="38" width="320" height="238"/>
+        <text class="ftb" x="378" y="62">RTO troppo lungo</text>
+        <path class="fln" d="M410,82 L410,245 M635,82 L635,245"/>
+        <text class="fts" x="390" y="76">Tx</text><text class="fts" x="615" y="76">Rx</text>
+        <path class="flna" d="M410,98 L535,125"/>
+        <path class="flnv" d="M529,117 L543,131 M543,117 L529,131"/>
+        <text class="ftv" x="550" y="128">perso</text>
+        <path class="flnv" d="M397,224 L423,224 M397,218 L397,230 M423,218 L423,230"/>
+        <text class="ftv" x="430" y="228">RTO scade molto tardi</text>
+        <path class="fhair" d="M410,144 L410,216" stroke-dasharray="4 3"/>
+        <text class="fts" x="420" y="176">attesa improduttiva</text>
+        <path class="flna" d="M410,238 L635,270" marker-end="url(#ar111c)"/>
+        <text class="fts" x="430" y="264">recupero ritardato</text>
+        <text class="fts" x="20" y="306">Il RTT varia con le condizioni della rete: per questo RTO deve essere determinato dinamicamente.</text>
+      </svg>
+      <figcaption><b>Tavola 11.1</b> — I due errori opposti nella scelta del time-out. Anticipare l'ACK spreca trasmissioni; aspettare troppo una perdita spreca tempo.</figcaption>
+    </figure>
+
+    <p>Il RTT è una <strong>variabile aleatoria</strong>: media e varianza cambiano con le condizioni della rete. Un RTO statico non può seguire entrambi i cambiamenti. L'idea di base è mantenere aggiornata una stima del RTT e calcolare il time-out in funzione sia del livello medio sia della variabilità osservata.</p>
+  </section>
+
+  <section id="s2" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>2. La stima del Round-Trip Time</h2>
+    <p>Il TCP campiona continuamente ciò che accade ai segmenti inviati. Per ogni misura memorizza l'istante di trasmissione di un segmento e lo sottrae dall'istante di arrivo del relativo ACK. Ottenuto un campione, aggiorna gli stimatori e avvia una nuova misura.</p>
+
+    <p>Quando l'opzione timestamp è presente, la misura può usare i valori trasportati dai segmenti: <code>TS Value</code> nel segmento dati inviato dalla sorgente e <code>TS Echo Reply</code> nel relativo ACK della destinazione. Il lessico delle formule è:</p>
+    <table>
+      <tr><th>Simbolo</th><th>Significato</th></tr>
+      <tr><td><var>RTT<sub>k</sub></var></td><td><var>k</var>-esimo campione misurato del Round-Trip Time</td></tr>
+      <tr><td><var>sRTT<sub>k</sub></var></td><td>stima smussata del valore medio, basata sui campioni fino a <var>k</var></td></tr>
+      <tr><td><var>RTTvar<sub>k</sub></var></td><td>stima della deviazione media del RTT rispetto alla media stimata</td></tr>
+    </table>
+
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>Il campione dice che cosa è appena successo; <var>sRTT</var> descrive il livello attorno a cui oscillano le misure; <var>RTTvar</var> misura quanto sia prudente allontanare RTO da quel livello. Una media senza dispersione non distingue una rete stabile da una rete molto variabile.</p>
+    </div>
+  </section>
+
+  <section id="s3" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>3. Il metodo classico (RFC 793)</h2>
+    <p>Il metodo classico aggiorna la stima media con una <strong>Exponential Weighted Moving Average</strong>, o EWMA:</p>
+
+    <pre><code>sRTTₖ = α sRTTₖ₋₁ + (1 − α) RTTₖ
+
+α raccomandato: 0.8–0.9</code></pre>
+
+    <p>La media è <strong>pesata</strong> perché <var>&alpha;</var> decide il peso dei campioni passati rispetto al nuovo; è <strong>mobile</strong> perché si aggiorna a ogni misura; è <strong>esponenziale</strong> perché il peso dei campioni precedenti diminuisce geometricamente. Con <var>&alpha;</var> vicino a 1 la memoria è lunga e la risposta ai cambiamenti è graduale.</p>
+
+    <p>Il metodo stima soltanto la media. Per trasformarla in un time-out applica un fattore di scala <var>&beta;</var> e impone limiti fissi:</p>
+
+    <pre><code>RTO = min(ubound, max(lbound, β sRTT))
+
+β = 1.3–2.0       ubound = 1 min       lbound = 1 s</code></pre>
+
+    <p>La moltiplicazione prova a lasciare margine sopra la media, ma non misura davvero la varianza. Con <code>&beta; = 1.3</code> si rischia di sottostimare RTT quando oscilla; con <code>&beta; = 2.0</code> si sovrastima troppo quando RTT è stabile. La stima è accurata soltanto se la varianza rimane limitata.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Nella formula classica il nuovo campione pesa <code>1 − α</code>, non <var>&alpha;</var>. Va scritta per intero insieme alla saturazione: <code>RTO = min(ubound, max(lbound, β sRTT))</code>. Il difetto da citare è l'assenza di una stima esplicita della variabilità.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>4. L'algoritmo di Jacobson (RFC 2988, 6298)</h2>
+    <p>Jacobson conserva l'EWMA della media e aggiunge un'EWMA della deviazione media. Con la convenzione delle RFC 2988 e 6298 le formule sono:</p>
+
+    <pre><code>sRTTₖ = (1 − α) sRTTₖ₋₁ + α RTTₖ
+RTTvarₖ = (1 − β) RTTvarₖ₋₁ + β |sRTTₖ₋₁ − RTTₖ|
+RTO = sRTT + max(G, 4 RTTvar)
+
+α = 1/8       β = 1/4       G = granularità del clock</code></pre>
+
+    <p>Qui <var>&alpha;</var> pesa direttamente il campione nuovo: è la stessa EWMA del metodo classico scritta con una convenzione complementare. Nella seconda riga lo scarto usa <strong>il valore precedente</strong> <var>sRTT<sub>k−1</sub></var>. Il termine <code>4 RTTvar</code> crea un margine che cresce quando le misure sono instabili; <var>G</var> impedisce che il margine scenda sotto la risoluzione temporale disponibile.</p>
+
+    <table>
+      <tr><th>Momento</th><th>Inizializzazione</th></tr>
+      <tr><td>prima di misurare RTT</td><td><code>RTO = 1 s</code></td></tr>
+      <tr><td>dopo il primo campione</td><td><code>sRTT₁ = RTT₁</code> e <code>RTTvar₁ = RTT₁/2</code></td></tr>
+      <tr><td>limiti</td><td>minimo <code>1 s</code>; massimo opzionale, ma almeno <code>1 min</code></td></tr>
+    </table>
+
+    <p>Se le fluttuazioni sono piccole, <var>RTTvar</var> si contrae e <code>RTO ≈ sRTT</code>, salvo i limiti. Se le fluttuazioni sono grandi, il margine cresce e <code>RTO &gt; sRTT</code> in modo consistente. È proprio il comportamento che il solo fattore di scala non riesce a ottenere.</p>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Le tre formule di Jacobson, i valori <code>α = 1/8</code>, <code>β = 1/4</code> e l'inizializzazione dopo il primo campione sono da saper ricostruire. Non confondere <var>&beta;</var> di Jacobson, che pesa la deviazione, con il fattore 1.3–2.0 del metodo classico.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>5. Esempio di stima: media semplice, EWMA e RTO a confronto</h2>
+    <p>Le figure delle slide confrontano una traccia di RTT con la media semplice, la EWMA classica e i diversi RTO. Il comportamento qualitativo è netto: la media semplice diventa sempre meno reattiva perché ogni nuovo campione pesa quanto tutti i precedenti; l'EWMA continua invece ad attribuire un peso controllato alle osservazioni recenti.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-label="Grafico qualitativo di RTT, media semplice, sRTT classico, RTO classici e RTO Jacobson">
+        <style>
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .frtt{stroke:var(--lk-rule);stroke-width:1.2;fill:none}
+          .fsimple{stroke:var(--lk-ink-soft);stroke-width:1.4;fill:none;stroke-dasharray:5 4}
+          .fsrtt{stroke:var(--lk-cobalt);stroke-width:2;fill:none}
+          .fr13{stroke:var(--lk-forest);stroke-width:1.6;fill:none}
+          .fr20{stroke:var(--lk-vermilion);stroke-width:1.5;fill:none;stroke-dasharray:4 3}
+          .fjac{stroke:var(--lk-cobalt-dark);stroke-width:2.2;fill:none;stroke-dasharray:9 3}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-cobalt)}
+          .ftv{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-vermilion)}
+          .ftg{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-forest)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs><marker id="ar112" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker></defs>
+        <text class="ftb" x="20" y="20">Risposta qualitativa a una variazione del RTT</text>
+        <path class="fln" d="M52,276 L52,46" marker-end="url(#ar112)"/>
+        <path class="fln" d="M52,276 L490,276" marker-end="url(#ar112)"/>
+        <text class="fts" x="18" y="50">RTT</text><text class="fts" x="470" y="296">k</text>
+        <path class="fhair" d="M52,230 H490 M52,184 H490 M52,138 H490 M52,92 H490"/>
+        <text class="fts" x="30" y="280">0</text><text class="fts" x="24" y="234">20</text><text class="fts" x="24" y="188">40</text><text class="fts" x="24" y="142">60</text><text class="fts" x="24" y="96">80</text><text class="fts" x="18" y="52">100</text>
+        <path class="frtt" d="M52,188 L90,180 L128,192 L166,184 L204,176 L242,76 L280,92 L318,170 L356,182 L394,188 L432,180 L470,186"/>
+        <path class="fsimple" d="M52,188 C120,187 175,184 220,180 C270,160 330,154 390,158 C430,160 455,162 470,164"/>
+        <path class="fsrtt" d="M52,188 C120,186 180,184 220,180 C250,166 280,146 310,146 C350,150 395,165 470,178"/>
+        <path class="fr13" d="M52,160 C150,158 200,156 230,150 C270,132 310,110 350,116 C390,126 430,142 470,150"/>
+        <path class="fr20" d="M52,102 C160,100 220,98 250,88 C300,64 350,52 400,70 C430,82 450,92 470,98"/>
+        <path class="fjac" d="M52,126 C150,124 205,122 230,118 C255,88 280,52 310,48 C350,58 385,92 420,112 C440,122 455,128 470,132"/>
+        <path class="fhair" d="M510,44 L510,300"/>
+        <path class="frtt" d="M530,70 H560"/><text class="fts" x="570" y="74">RTT campionato</text>
+        <path class="fsimple" d="M530,100 H560"/><text class="fts" x="570" y="104">media semplice</text>
+        <path class="fsrtt" d="M530,130 H560"/><text class="ftc" x="570" y="134">sRTT classico</text>
+        <path class="fr13" d="M530,160 H560"/><text class="ftg" x="570" y="164">RTO classico β=1.3</text>
+        <path class="fr20" d="M530,190 H560"/><text class="ftv" x="570" y="194">RTO classico β=2.0</text>
+        <path class="fjac" d="M530,220 H560"/><text class="ftc" x="570" y="224">RTO Jacobson</text>
+        <text class="fts" x="520" y="258">Jacobson allarga il margine</text>
+        <text class="fts" x="520" y="274">durante la fase variabile e</text>
+        <text class="fts" x="520" y="290">lo restringe quando si stabilizza.</text>
+        <text class="fts" x="52" y="322">Curve schematiche: mostrano il confronto delle slide, non una scala operativa del limite minimo di 1 s.</text>
+      </svg>
+      <figcaption><b>Tavola 11.2</b> — Il confronto qualitativo fra gli stimatori. Un fattore fisso non sa essere insieme prudente durante un salto e vicino alla media durante una fase stabile; la deviazione stimata sì.</figcaption>
+    </figure>
+
+    <p>Nel calcolo guidato, il primo campione inizializza entrambi i metodi. A ogni passo successivo il classico aggiorna soltanto <var>sRTT</var> e moltiplica per <code>β = 3/2</code>; Jacobson aggiorna prima la deviazione rispetto al precedente <var>sRTT</var>, poi la media. Il campione alto evidenziato nella serie allarga <var>RTTvar</var>; i campioni successivi la fanno rientrare gradualmente.</p>
+
+    <div id="w-rto"></div>
+  </section>
+
+  <section id="s6" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>6. Ambiguità del RTT e algoritmo di Karn</h2>
+    <p>Senza timestamp, un ACK ricevuto dopo una ritrasmissione è ambiguo: potrebbe confermare il segmento originale arrivato tardi oppure la sua copia ritrasmessa. Nel primo caso misurare dall'ultima trasmissione sottostima il RTT; nel secondo misurare dalla prima lo sovrastima. Il solo numero di riscontro non permette di distinguere le due storie.</p>
+
+    <p>L'<strong>algoritmo di Karn</strong> elimina il campione ambiguo invece di indovinarne l'origine:</p>
+    <ul>
+      <li>in caso di ritrasmissione <strong>non misura il RTT</strong>;</li>
+      <li>riprende la misura al prossimo segmento confermato senza ritrasmissione.</li>
+    </ul>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Karn non corregge matematicamente il campione: lo scarta. La frase completa è «non misurare RTT dopo una ritrasmissione e riprendere al prossimo ACK pulito». Questo protegge sia <var>sRTT</var> sia <var>RTTvar</var> da un dato di cui non si conosce l'origine.</p>
+    </div>
+  </section>
+
+  <section id="s7" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>7. Back-off esponenziale</h2>
+    <p>Karn introduce anche il <strong>back-off esponenziale</strong>. Dopo una ritrasmissione, il valore corrente di RTO potrebbe essere troppo basso e provocare altre scadenze premature. Per lasciare più tempo all'ACK, il TCP raddoppia RTO a ogni nuova ritrasmissione, fino al valore massimo previsto.</p>
+
+    <p>La sequenza è <code>RTO1 → RTO2 → RTO3 → RTO4</code>, con ciascun intervallo doppio del precedente. Alla ricezione dell'ACK il valore viene ripristinato: il back-off è una cautela transitoria, non una nuova misura del RTT.</p>
+
+    <div id="step-backoff"></div>
+
+    <div class="callout exam">
+      <span class="callout-label">Per l'esame</span>
+      <p>Karn e back-off risolvono problemi distinti ma collegati: Karn impedisce che un ACK ambiguo inquini lo stimatore; il back-off impedisce che un RTO già sospetto inneschi una raffica di ritrasmissioni. Il primo agisce sulla <strong>misura</strong>, il secondo sull'<strong>attesa</strong>.</p>
+    </div>
+  </section>
+
+  <section id="s8" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>8. Conferma della trasmissione e SACK</h2>
+    <p>Gli ACK possono viaggiare in <strong>piggybacking</strong>, dentro segmenti dati con <code>ACK=1</code> diretti nel verso opposto, oppure in segmenti <strong>ACK-only</strong>, formati dalla sola intestazione TCP con <code>ACK=1</code>. In entrambi i casi sono cumulativi: <var>AckN</var> identifica il primo byte non ancora ricevuto in sequenza.</p>
+
+    <p>La procedura predefinita è di tipo Go-Back-N, sebbene molte implementazioni conservino in memoria i segmenti corretti arrivati fuori sequenza. All'apertura della connessione, nelle opzioni di <code>SYN</code> e <code>SYN+ACK</code>, gli endpoint possono negoziare il <strong>Selective Acknowledgement</strong>. Con SACK il ricevitore aggiunge agli ACK cumulativi gli intervalli di numeri di sequenza ricevuti correttamente ma fuori sequenza.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-label="Sequenza temporale del meccanismo SACK con perdita del segmento 400 e ricezione fuori sequenza dei segmenti 500 e 600">
+        <style>
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.6;fill:none}
+          .flng{stroke:var(--lk-forest);stroke-width:1.4;fill:none}
+          .flnv{stroke:var(--lk-vermilion);stroke-width:1.8;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-forest)}
+          .ftv{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-vermilion)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar113c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/></marker>
+          <marker id="ar113g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/></marker>
+        </defs>
+        <text class="ftb" x="20" y="20">SACK negoziato in SYN / SYN+ACK</text>
+        <path class="fln" d="M90,42 L90,306 M610,42 L610,306"/>
+        <text class="fts" x="62" y="38">sorgente</text><text class="fts" x="580" y="38">destinazione</text>
+        <path class="flna" d="M90,54 L610,78" marker-end="url(#ar113c)"/><text class="ftc" x="98" y="52">SeqN=200</text>
+        <path class="flna" d="M90,78 L610,102" marker-end="url(#ar113c)"/><text class="ftc" x="98" y="76">SeqN=300</text>
+        <path class="flng" d="M610,108 L90,126" marker-end="url(#ar113g)"/><text class="ftg" x="452" y="104">AckN=300</text>
+        <path class="flna" d="M90,126 L345,138"/><text class="ftc" x="98" y="122">SeqN=400</text>
+        <path class="flnv" d="M337,130 L353,146 M353,130 L337,146"/><text class="ftv" x="360" y="142">X</text>
+        <path class="flng" d="M610,132 L90,150" marker-end="url(#ar113g)"/><text class="ftg" x="452" y="128">AckN=400</text>
+        <path class="flna" d="M90,154 L610,178" marker-end="url(#ar113c)"/><text class="ftc" x="98" y="152">SeqN=500</text>
+        <path class="flna" d="M90,180 L610,204" marker-end="url(#ar113c)"/><text class="ftc" x="98" y="178">SeqN=600</text>
+        <path class="flng" d="M610,210 L90,230" marker-end="url(#ar113g)"/><text class="ftg" x="342" y="206">AckN=400 · SACK: 500–599</text>
+        <path class="flng" d="M610,234 L90,254" marker-end="url(#ar113g)"/><text class="ftg" x="342" y="230">AckN=400 · SACK: 500–699</text>
+        <path class="flna" d="M90,258 L610,278" marker-end="url(#ar113c)"/><text class="ftc" x="98" y="256">ritrasmette SeqN=400</text>
+        <path class="flng" d="M610,286 L90,304" marker-end="url(#ar113g)"/><text class="ftg" x="458" y="282">AckN=700</text>
+        <text class="fts" x="190" y="324">Il riscontro cumulativo resta 400; SACK descrive i blocchi già presenti oltre il buco.</text>
+      </svg>
+      <figcaption><b>Tavola 11.3</b> — SACK non sostituisce <var>AckN</var>: lo completa. Il ricevitore continua a chiedere il byte 400, ma comunica che gli intervalli 500–599 e poi 500–699 non devono essere ritrasmessi.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s9" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>9. Segmenti persi o fuori sequenza e Fast Retransmit</h2>
+    <p>Quando manca un segmento ma arrivano i successivi, la destinazione riceve dati fuori sequenza e invia immediatamente un <strong>ACK duplicato</strong> per ciascun segmento. Tutti ripetono il numero del primo byte ancora atteso. La sorgente apprende così che quel segmento non è ancora arrivato e può reagire prima dello scadere di RTO.</p>
+
+    <p>Un singolo ACK duplicato, però, non prova una perdita: anche un segmento semplicemente ritardato rispetto ai successivi crea la stessa osservazione. Il <strong>Fast Retransmit</strong> attende tre ACK duplicati, cioè quattro ACK complessivi con lo stesso <var>AckN</var>. A quel punto assume la perdita e ritrasmette immediatamente il segmento con <code>SeqN = AckN</code>.</p>
+
+    <div class="lk-tabs" data-kit="tabs" id="w-ack-tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Segmento perso</button>
+        <button class="lk-tab">Segmento fuori sequenza</button>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Il segmento con <code>SeqN=400</code> non arriva. I segmenti successivi producono ripetutamente <code>AckN=400</code>. Dopo il terzo duplicato la sorgente esegue Fast Retransmit di <code>SeqN=400</code>, senza attendere RTO.</p>
+        <table>
+          <tr><th>Dato ricevuto</th><th>Riscontro</th><th>Interpretazione</th></tr>
+          <tr><td><code>SeqN=300</code></td><td><code>AckN=400</code></td><td>ACK nuovo</td></tr>
+          <tr><td><code>SeqN=500</code></td><td><code>AckN=400</code></td><td>primo duplicato</td></tr>
+          <tr><td><code>SeqN=600</code></td><td><code>AckN=400</code></td><td>secondo duplicato</td></tr>
+          <tr><td><code>SeqN=700</code></td><td><code>AckN=400</code></td><td>terzo duplicato: ritrasmetti 400</td></tr>
+        </table>
+      </div>
+      <div class="lk-tabpanel">
+        <p>Il segmento con <code>SeqN=400</code> è soltanto in ritardo. I primi dati fuori sequenza generano <code>AckN=400</code>, ma quando 400 arriva il riscontro avanza. Attendere tre duplicati riduce quindi il rischio di una ritrasmissione inutile per riordinamenti modesti.</p>
+        <table>
+          <tr><th>Dato ricevuto</th><th>Riscontro</th><th>Interpretazione</th></tr>
+          <tr><td><code>SeqN=300</code></td><td><code>AckN=400</code></td><td>ACK nuovo</td></tr>
+          <tr><td><code>SeqN=500</code></td><td><code>AckN=400</code></td><td>primo duplicato</td></tr>
+          <tr><td><code>SeqN=600</code></td><td><code>AckN=400</code></td><td>secondo duplicato</td></tr>
+          <tr><td><code>SeqN=400</code></td><td><code>AckN=700</code></td><td>il buco si chiude</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <p>La soglia di tre è quindi un compromesso informativo: un duplicato segnala un disordine possibile, tre duplicati consecutivi rendono plausibile che abbastanza dati successivi abbiano superato un vero buco.</p>
+  </section>
+
+  <section id="s10" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>10. ACK ritardati e algoritmo di Nagle</h2>
+    <h3>Delayed ACK</h3>
+    <p>La destinazione può inviare subito un ACK oppure ritardarlo per ridurre il numero di segmenti di conferma. L'attesa termina quando arriva un ulteriore pacchetto oppure quando si raggiunge una soglia, per esempio <strong>200 ms</strong>. Normalmente viene generato un ACK ogni due segmenti. Il ritardo non può crescere liberamente, perché rischierebbe di far scadere RTO alla sorgente.</p>
+
+    <h3>Sorgenti lente, tinygram e Nagle</h3>
+    <p>Un'applicazione interattiva, come SSH, può consegnare al TCP pochi byte alla volta. Trasmetterli immediatamente produce <strong>tinygram</strong>: per pochi byte informativi servono almeno 40 byte di intestazioni IP+TCP e altri 40 byte per l'ACK. L'overhead per byte diventa enorme.</p>
+
+    <p>L'algoritmo di <strong>Nagle</strong> trasmette un nuovo segmento soltanto se vale almeno una delle condizioni seguenti:</p>
+    <ul>
+      <li>i nuovi dati accumulati hanno dimensione almeno pari a <var>MSS</var>;</li>
+      <li>non vi sono ACK pendenti per dati già trasmessi.</li>
+    </ul>
+    <p>Altrimenti aspetta l'ACK e aggrega nel frattempo i byte prodotti dall'applicazione. Insieme ai delayed ACK può emergere un effetto Stop-and-Wait: meno overhead ma più latenza. In una LAN gli ACK arrivano rapidamente e l'effetto si nota poco; in una WAN la latenza diventa percepibile. Le applicazioni interattive possono disabilitare Nagle con l'opzione socket <code>TCP_NODELAY</code>.</p>
+
+    <div id="w-nagle"></div>
+  </section>
+
+  <section id="s11" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>11. Il controllo di flusso del TCP</h2>
+    <p>Il controllo di flusso TCP è un meccanismo a <strong>finestra scorrevole variabile</strong>, o <em>credit based</em>. La sorgente conosce il proprio buffer di trasmissione, ma non lo spazio disponibile nel buffer remoto; perciò la destinazione annuncia esplicitamente la <strong>Advertised Window</strong>, <var>AW</var>.</p>
+
+    <p>I due endpoint mantengono finestre con ruoli diversi:</p>
+    <table>
+      <tr><th>Finestra</th><th>Definizione</th></tr>
+      <tr><td><var>W<sub>T</sub></var></td><td>insieme dei segmenti inviabili dal trasmettitore senza nuove conferme</td></tr>
+      <tr><td><var>W<sub>R</sub></var></td><td>insieme dei segmenti memorizzabili fuori sequenza dal ricevitore</td></tr>
+      <tr><td><var>M</var></td><td>spazio di numerazione; nel TCP <code>M = 2<sup>32</sup></code></td></tr>
+    </table>
+
+    <p>Per evitare conflitti nel riuso dei numeri di sequenza deve valere <code>W<sub>T</sub> + W<sub>R</sub> &le; M</code>. Nel flusso a byte, <var>AckN</var> fissa il margine sinistro e <var>AW</var> il credito: il limite destro della finestra è <code>AckN + AW</code>. I byte già inviati ma non confermati sono <em>inflight</em> e consumano una parte del credito.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 330" width="100%" role="img" aria-label="Finestra di trasmissione TCP sui segmenti da 1 a 13 con dati confermati, inflight, trasmissibili e bloccati">
+        <style>
+          .fack{fill:var(--lk-okbg);stroke:var(--lk-forest);stroke-width:1.2}
+          .ffly{fill:var(--lk-hl);stroke:var(--lk-cobalt);stroke-width:1.4}
+          .fready{fill:var(--lk-paper-light);stroke:var(--lk-cobalt);stroke-width:1.4}
+          .fstop{fill:var(--lk-warnbg);stroke:var(--lk-vermilion);stroke-width:1.2}
+          .fln{stroke:var(--lk-ink);stroke-width:1.2;fill:none}
+          .flna{stroke:var(--lk-cobalt);stroke-width:1.6;fill:none}
+          .fhair{stroke:var(--lk-rule-soft);stroke-width:.8;fill:none}
+          .ftx{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-ink)}
+          .fts{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-ink-soft)}
+          .ftc{font-family:var(--lk-mono);font-size:11px;fill:var(--lk-cobalt)}
+          .ftg{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-forest)}
+          .ftv{font-family:var(--lk-mono);font-size:10px;fill:var(--lk-vermilion)}
+          .ftb{font-family:var(--lk-mono);font-size:13px;font-weight:600;fill:var(--lk-ink)}
+        </style>
+        <defs>
+          <marker id="ar114l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-ink)"/></marker>
+          <marker id="ar114r" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="var(--lk-ink)"/></marker>
+        </defs>
+        <text class="ftb" x="20" y="20">AW = 5 kB · MSS = 1 kB</text>
+        <text class="fts" x="20" y="44">stato prima dell'ACK</text>
+        <g transform="translate(46,58)">
+          <rect class="fack" x="0" y="0" width="44" height="38"/><rect class="fack" x="44" y="0" width="44" height="38"/><rect class="fack" x="88" y="0" width="44" height="38"/>
+          <rect class="fack" x="132" y="0" width="44" height="38"/><rect class="fack" x="176" y="0" width="44" height="38"/>
+          <rect class="ffly" x="220" y="0" width="44" height="38"/><rect class="ffly" x="264" y="0" width="44" height="38"/>
+          <rect class="fready" x="308" y="0" width="44" height="38"/><rect class="fready" x="352" y="0" width="44" height="38"/><rect class="fready" x="396" y="0" width="44" height="38"/>
+          <rect class="fstop" x="440" y="0" width="44" height="38"/><rect class="fstop" x="484" y="0" width="44" height="38"/><rect class="fstop" x="528" y="0" width="44" height="38"/>
+          <text class="ftx" x="18" y="24">1</text><text class="ftx" x="62" y="24">2</text><text class="ftx" x="106" y="24">3</text><text class="ftx" x="150" y="24">4</text><text class="ftx" x="194" y="24">5</text>
+          <text class="ftx" x="238" y="24">6</text><text class="ftx" x="282" y="24">7</text><text class="ftx" x="326" y="24">8</text><text class="ftx" x="370" y="24">9</text><text class="ftx" x="410" y="24">10</text>
+          <text class="ftx" x="454" y="24">11</text><text class="ftx" x="498" y="24">12</text><text class="ftx" x="542" y="24">13</text>
+        </g>
+        <path class="fln" d="M266,112 L266,128 M486,112 L486,128 M266,122 L486,122" marker-start="url(#ar114r)" marker-end="url(#ar114l)"/>
+        <text class="ftc" x="348" y="144">W<tspan baseline-shift="sub">T</tspan> = AW</text>
+        <text class="ftg" x="70" y="116">confermati</text><text class="ftc" x="274" y="116">inflight</text><text class="ftc" x="362" y="116">inviabili</text><text class="ftv" x="500" y="116">bloccati</text>
+        <text class="fts" x="20" y="178">arriva AckN = 6 kB: la finestra scorre, non cambia ampiezza</text>
+        <g transform="translate(46,194)">
+          <rect class="fack" x="0" y="0" width="44" height="38"/><rect class="fack" x="44" y="0" width="44" height="38"/><rect class="fack" x="88" y="0" width="44" height="38"/>
+          <rect class="fack" x="132" y="0" width="44" height="38"/><rect class="fack" x="176" y="0" width="44" height="38"/><rect class="fack" x="220" y="0" width="44" height="38"/>
+          <rect class="ffly" x="264" y="0" width="44" height="38"/><rect class="ffly" x="308" y="0" width="44" height="38"/>
+          <rect class="fready" x="352" y="0" width="44" height="38"/><rect class="fready" x="396" y="0" width="44" height="38"/><rect class="fready" x="440" y="0" width="44" height="38"/>
+          <rect class="fstop" x="484" y="0" width="44" height="38"/><rect class="fstop" x="528" y="0" width="44" height="38"/>
+          <text class="ftx" x="18" y="24">1</text><text class="ftx" x="62" y="24">2</text><text class="ftx" x="106" y="24">3</text><text class="ftx" x="150" y="24">4</text><text class="ftx" x="194" y="24">5</text>
+          <text class="ftx" x="238" y="24">6</text><text class="ftx" x="282" y="24">7</text><text class="ftx" x="326" y="24">8</text><text class="ftx" x="370" y="24">9</text><text class="ftx" x="410" y="24">10</text>
+          <text class="ftx" x="454" y="24">11</text><text class="ftx" x="498" y="24">12</text><text class="ftx" x="542" y="24">13</text>
+        </g>
+        <path class="fln" d="M310,248 L310,264 M530,248 L530,264 M310,258 L530,258" marker-start="url(#ar114r)" marker-end="url(#ar114l)"/>
+        <text class="ftc" x="402" y="280">W<tspan baseline-shift="sub">T</tspan></text>
+        <text class="fts" x="46" y="312">Ogni byte inflight riduce la Effective Window; ogni ACK cumulativo libera credito sul margine destro.</text>
+      </svg>
+      <figcaption><b>Tavola 11.4</b> — La finestra sul byte stream. I dati confermati restano a sinistra, gli inflight consumano credito e i dati oltre <code>AckN + AW</code> non sono ancora trasmissibili.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s12" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>12. Gestione dei buffer di trasmissione e ricezione</h2>
+    <p>La finestra annunciata collega direttamente i due buffer alle applicazioni. Alla sorgente gli indici devono rispettare:</p>
+
+    <pre><code>LastByteAcked ≤ LastByteSent ≤ LastByteWritten
+LastByteWritten − LastByteAcked ≤ MaxSendBuffer</code></pre>
+
+    <p>Il primo vincolo separa dati confermati, dati già trasmessi e dati soltanto scritti dall'applicazione. Il secondo impedisce all'applicazione trasmittente di superare il buffer locale.</p>
+
+    <p>Alla destinazione valgono invece:</p>
+
+    <pre><code>LastByteRead &lt; NextByteExpected ≤ LastByteRcvd + 1
+LastByteRcvd − LastByteRead ≤ MaxRcvBuffer
+
+NextByteExpected &lt; LastByteRcvd + 1  ⇒  segmenti fuori sequenza</code></pre>
+
+    <p>Se <var>LastByteRcvd</var> è oltre il prossimo byte atteso, nel buffer esistono dati ricevuti dopo un buco. Lo spazio libero che la destinazione comunica è:</p>
+
+    <pre><code>AW = MaxRcvBuffer − ((NextByteExpected − 1) − LastByteRead)</code></pre>
+
+    <p>La sorgente deve rispettare il credito già occupato:</p>
+
+    <pre><code>LastByteSent − LastByteAcked ≤ AW
+EW = AW − (LastByteSent − LastByteAcked)</code></pre>
+
+    <p><var>EW</var>, la <strong>Effective Window</strong>, è il credito ancora spendibile subito. Se l'applicazione ricevente legge lentamente, <var>AW</var> si chiude; di conseguenza si chiude <var>EW</var>, il buffer di trasmissione si riempie e infine l'applicazione trasmittente viene rallentata. Il controllo di flusso propaga così la capacità del consumatore remoto fino al produttore locale.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p><var>AW</var> protegge la destinazione; non descrive lo stato della rete. Nel capitolo 12 comparirà una seconda finestra, la congestion window, che protegge i router. Il TCP potrà inviare soltanto quanto consentito dal vincolo più stretto.</p>
+    </div>
+  </section>
+
+  <section id="s13" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>13. Deadlock, Persist Timer e window probe</h2>
+    <p>Quando il buffer remoto si riempie, la destinazione invia <code>AW = 0</code> e la sorgente sospende i dati. Se poi l'applicazione ricevente libera spazio ma non ha dati propri da spedire, l'unico annuncio di <code>AW &gt; 0</code> è un ACK di <em>window update</em>. Quell'ACK può perdersi e non viene ritrasmesso: la sorgente resta ferma perché crede la finestra chiusa, la destinazione attende dati perché la finestra è aperta. È un deadlock.</p>
+
+    <p>Il <strong>Persist Timer</strong> rende questo stato verificabile. Ricevuto un ACK con <code>AckN = X</code> e <code>AW = 0</code>, il trasmettitore avvia PT, per esempio usando RTO con back-off esponenziale. Alla scadenza invia una <strong>window probe</strong> di un byte con <code>SeqN = X</code>, ritrasmettendola se si perde.</p>
+
+    <table>
+      <tr><th>Risposta alla sonda</th><th>Significato e azione</th></tr>
+      <tr><td><code>AckN = X+1, AW &gt; 0</code></td><td>il byte è stato ricevuto e c'è spazio: la trasmissione riprende normalmente</td></tr>
+      <tr><td><code>AckN = X, AW = 0</code></td><td>il byte X non entra nel buffer: <code>PT = 2 × PT</code> e si attende di nuovo</td></tr>
+    </table>
+
+    <div id="w-flow-state"></div>
+  </section>
+
+  <section id="s14" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>14. Silly window syndrome e keepalive</h2>
+    <h3>Destinazione lenta: silly window syndrome</h3>
+    <p>Una finestra che si riapre non è necessariamente una finestra utile. Se il buffer è pieno, l'applicazione legge un byte e il ricevitore annuncia <code>AW = 1</code>, la sorgente invia un byte e il buffer torna pieno. Ripetuto, il ciclo trasporta un byte per RTT indipendentemente dalla capacità della rete: è il <strong>silly window syndrome</strong>.</p>
+
+    <p>La soluzione lato ricevitore è non aumentare <var>AW</var> finché l'incremento non raggiunge almeno:</p>
+
+    <pre><code>min(MSS, metà del buffer di ricezione)</code></pre>
+
+    <p>In questo modo il credito non viene frammentato in annunci troppo piccoli. Nagle affronta un problema affine alla sorgente, aggregando scritture minute; la regola della finestra evita che sia la destinazione a sollecitare segmenti minuscoli.</p>
+
+    <h3>Keepalive Timer</h3>
+    <p>Una connessione TCP attiva può restare senza dati teoricamente all'infinito: è il caso di una sessione SSH lasciata inattiva. Molte implementazioni usano un <strong>Keepalive Timer</strong> per verificare che l'endpoint remoto sia ancora attivo e per mantenere lo stato nei nodi intermedi <em>stateful</em>, come NAT e firewall.</p>
+
+    <p>Allo scadere vengono inviati messaggi keepalive e relativi ACK. Questi messaggi <strong>non incrementano il numero di sequenza</strong>: verificano la vitalità della connessione senza avanzare il flusso dati.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Nota del redattore</span>
+      <p>Persist e keepalive non sono sinonimi. Persist risolve un possibile blocco del <strong>controllo di flusso</strong> mentre <code>AW = 0</code>; keepalive verifica una connessione <strong>inattiva</strong> e conserva lo stato lungo il percorso. Il capitolo 13 tornerà invece sui timer dal punto di vista delle prestazioni complessive.</p>
+    </div>
+  </section>
+
+  <section id="quiz" data-src="TCP_ calcolo del time-out e controllo di flusso.pdf">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Perché un RTO statico non è adeguato al TCP?</summary>
+        <p>Perché RTT è una variabile aleatoria la cui media e varianza dipendono dalle condizioni della rete. Un valore statico può essere troppo breve, causando ritrasmissioni inutili, oppure troppo lungo, ritardando il recupero delle perdite. RTO deve essere aggiornato dinamicamente in funzione delle misure.</p>
+      </details>
+      <details>
+        <summary>Come funziona l'EWMA classica e quale ruolo ha <var>α</var>?</summary>
+        <p><code>sRTT<sub>k</sub> = α sRTT<sub>k−1</sub> + (1−α) RTT<sub>k</sub></code>. Con <var>α</var> raccomandato fra 0.8 e 0.9, un valore alto dà più memoria alla stima precedente e meno peso al campione nuovo. I pesi dei campioni passati decadono esponenzialmente.</p>
+      </details>
+      <details>
+        <summary>Come calcola RTO il metodo classico e qual è il suo limite?</summary>
+        <p><code>RTO = min(ubound, max(lbound, β sRTT))</code>, con <var>β</var> fra 1.3 e 2.0, <code>ubound = 1 min</code> e <code>lbound = 1 s</code>. Un fattore fisso non stima la varianza: il metodo è accurato soltanto quando la variabilità del RTT è limitata.</p>
+      </details>
+      <details>
+        <summary>Quali sono le formule di Jacobson e perché compare <code>4 RTTvar</code>?</summary>
+        <p><code>sRTT<sub>k</sub> = (1−α)sRTT<sub>k−1</sub> + αRTT<sub>k</sub></code>; <code>RTTvar<sub>k</sub> = (1−β)RTTvar<sub>k−1</sub> + β|sRTT<sub>k−1</sub>−RTT<sub>k</sub>|</code>; <code>RTO = sRTT + max(G, 4 RTTvar)</code>. Il termine di deviazione allarga il margine quando RTT oscilla e lo restringe quando è stabile.</p>
+      </details>
+      <details>
+        <summary>Come si inizializzano RTO, sRTT e RTTvar?</summary>
+        <p>Prima della prima misura si usa <code>RTO = 1 s</code>. Dopo il primo campione: <code>sRTT<sub>1</sub> = RTT<sub>1</sub></code> e <code>RTTvar<sub>1</sub> = RTT<sub>1</sub>/2</code>. I parametri raccomandati sono <code>α = 1/8</code>, <code>β = 1/4</code> e <var>G</var> pari alla granularità del clock.</p>
+      </details>
+      <details>
+        <summary>Qual è l'ambiguità risolta dall'algoritmo di Karn?</summary>
+        <p>Dopo una ritrasmissione, senza timestamp non si sa se l'ACK confermi l'originale o la copia. Karn evita di misurare quel RTT ambiguo e riprende il campionamento con il prossimo segmento confermato senza ritrasmissione.</p>
+      </details>
+      <details>
+        <summary>Perché il back-off è esponenziale e quando viene ripristinato?</summary>
+        <p>Una ritrasmissione suggerisce che il RTO corrente possa essere troppo breve. Il TCP lo raddoppia a ogni ulteriore ritrasmissione, fino al massimo, per evitare scadenze ripetute. Alla ricezione dell'ACK ripristina il valore di RTO.</p>
+      </details>
+      <details>
+        <summary>Che cosa aggiunge SACK agli ACK cumulativi?</summary>
+        <p>SACK, negoziato nelle opzioni di SYN e SYN+ACK, indica gli intervalli di numeri di sequenza ricevuti correttamente ma fuori sequenza. <var>AckN</var> continua a indicare il primo byte mancante; gli intervalli SACK evitano di ritrasmettere dati già presenti nel buffer remoto.</p>
+      </details>
+      <details>
+        <summary>Che cosa significano gli ACK duplicati e perché Fast Retransmit ne aspetta tre?</summary>
+        <p>Indicano che il primo byte identificato da <var>AckN</var> non è ancora arrivato mentre sono arrivati dati successivi. Anche un semplice riordinamento li può produrre; attendere tre duplicati riduce le ritrasmissioni inutili. Alla soglia si ritrasmette subito il segmento con <code>SeqN = AckN</code>.</p>
+      </details>
+      <details>
+        <summary>Come funzionano i delayed ACK?</summary>
+        <p>La destinazione ritarda l'ACK fino all'arrivo di un ulteriore pacchetto o fino a una soglia, per esempio 200 ms, allo scopo di ridurre il numero di ACK. Normalmente genera un ACK ogni due segmenti, senza ritardare tanto da rischiare la scadenza di RTO.</p>
+      </details>
+      <details>
+        <summary>Che cos'è un tinygram e quali condizioni usa Nagle?</summary>
+        <p>È un segmento con pochissimi dati e overhead elevato: almeno 40 byte IP+TCP più altri 40 per l'ACK. Nagle trasmette se i dati accumulati sono almeno MSS oppure se non ci sono ACK pendenti; altrimenti attende. <code>TCP_NODELAY</code> lo disabilita nelle applicazioni interattive sensibili alla latenza.</p>
+      </details>
+      <details>
+        <summary>Qual è la differenza fra <var>W<sub>T</sub></var> e <var>W<sub>R</sub></var>?</summary>
+        <p><var>W<sub>T</sub></var> è l'insieme dei segmenti inviabili senza nuove conferme; <var>W<sub>R</sub></var> è l'insieme memorizzabile fuori sequenza dal ricevitore. Con spazio di numerazione <code>M = 2<sup>32</sup></code> deve valere <code>W<sub>T</sub> + W<sub>R</sub> ≤ M</code> per evitare conflitti.</p>
+      </details>
+      <details>
+        <summary>Quali invarianti descrivono i buffer di trasmissione e ricezione?</summary>
+        <p>Trasmissione: <code>LastByteAcked ≤ LastByteSent ≤ LastByteWritten</code>. Ricezione: <code>LastByteRead &lt; NextByteExpected ≤ LastByteRcvd+1</code>. Se <code>NextByteExpected &lt; LastByteRcvd+1</code>, sono presenti segmenti fuori sequenza.</p>
+      </details>
+      <details>
+        <summary>Come si calcolano AW ed EW?</summary>
+        <p><code>AW = MaxRcvBuffer − ((NextByteExpected−1) − LastByteRead)</code>. La sorgente impone <code>LastByteSent − LastByteAcked ≤ AW</code>; il credito ancora utilizzabile è <code>EW = AW − (LastByteSent − LastByteAcked)</code>.</p>
+      </details>
+      <details>
+        <summary>Come nasce il deadlock con AW=0 e come lo risolve la window probe?</summary>
+        <p>La sorgente è ferma e un window update con AW&gt;0 può perdersi senza essere ritrasmesso. Il Persist Timer fa inviare una sonda di un byte con <code>SeqN=X</code>. La risposta comunica la finestra corrente; se resta zero, PT raddoppia e il tentativo verrà ripetuto.</p>
+      </details>
+      <details>
+        <summary>Che cos'è il silly window syndrome e qual è la soluzione?</summary>
+        <p>È il ciclo in cui una destinazione lenta libera e annuncia un solo byte, che viene subito inviato, ottenendo un throughput dell'ordine di un byte per RTT. Il ricevitore non deve aumentare AW finché l'incremento non è almeno <code>min(MSS, metà del buffer di ricezione)</code>.</p>
+      </details>
+      <details>
+        <summary>A che cosa serve il Keepalive Timer?</summary>
+        <p>Serve a verificare un endpoint remoto durante connessioni inattive e a mantenere lo stato nei nodi intermedi stateful, come NAT e firewall. I messaggi keepalive e i relativi ACK non incrementano il numero di sequenza.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-10-tcp-connessione.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-12-tcp-congestione.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: <em>TCP: calcolo del time-out e controllo di flusso</em> · Reti di Telecomunicazioni LM, Instradamento e Trasporto in Internet · UniBo · Prof. W. Cerroni</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Calcolatore RTO: metodo classico e Jacobson ---- */
+(function () {
+  var host = document.getElementById('w-rto');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Calcolatore RTO: segui il campione anomalo</h4>' +
+    '<p class="lk-step-sub">Serie RTT [ms]: 50, 50, 50, 90, 50, 50. Sposta k per ricostruire gli aggiornamenti; G = 1 ms.</p>' +
+    '<label style="font-family:var(--lk-mono);font-size:.82rem">passo k = <b id="rt-kv">1</b>' +
+    '<input id="rt-k" type="range" min="1" max="6" value="1" style="display:block;width:100%"></label>' +
+    '<div class="lk-step-state" id="rt-out"></div><div class="lk-step-verdict" id="rt-note"></div>';
+  var samples = [50, 50, 50, 90, 50, 50];
+  var slider = host.querySelector('#rt-k');
+  function bounded(v) { return Math.min(60000, Math.max(1000, v)); }
+  function upd() {
+    var stop = +slider.value;
+    host.querySelector('#rt-kv').textContent = stop;
+    var cs = samples[0];
+    var js = samples[0];
+    var jv = samples[0] / 2;
+    var rows = '';
+    for (var i = 0; i < stop; i++) {
+      var r = samples[i];
+      if (i > 0) {
+        var oldJs = js;
+        cs = (7 / 8) * cs + (1 / 8) * r;
+        jv = (3 / 4) * jv + (1 / 4) * Math.abs(oldJs - r);
+        js = (7 / 8) * oldJs + (1 / 8) * r;
+      }
+      var crto = bounded((3 / 2) * cs);
+      var jrto = bounded(js + Math.max(1, 4 * jv));
+      rows += '<tr' + (i === 3 ? ' style="background:var(--lk-warnbg)"' : '') + '><td>' + (i + 1) + '</td><td>' + r.toFixed(0) + '</td>' +
+        '<td>' + cs.toFixed(2) + '</td><td>—</td><td>' + crto.toFixed(2) + '</td>' +
+        '<td>' + js.toFixed(2) + '</td><td>' + jv.toFixed(2) + '</td><td>' + jrto.toFixed(2) + '</td></tr>';
+    }
+    host.querySelector('#rt-out').innerHTML =
+      '<table style="margin:.2rem 0"><tr><th>k</th><th>RTTₖ</th><th>sRTT class.</th><th>RTTvar class.</th><th>RTO class.</th><th>sRTT Jac.</th><th>RTTvar Jac.</th><th>RTO Jac.</th></tr>' + rows + '</table>';
+    var note = host.querySelector('#rt-note');
+    if (stop < 4) {
+      note.className = 'lk-step-verdict ok';
+      note.textContent = 'Fase stabile: sRTT coincide con i campioni; Jacobson riduce progressivamente RTTvar. Il metodo classico non possiede una colonna di varianza: il trattino è parte del suo limite.';
+    } else if (stop === 4) {
+      note.className = 'lk-step-verdict bad';
+      note.textContent = 'Campione anomalo: entrambe le medie si muovono, ma solo Jacobson misura esplicitamente l aumento della deviazione e allarga il margine di RTO.';
+    } else {
+      note.className = 'lk-step-verdict';
+      note.textContent = 'Tornano campioni stabili: sRTT e RTTvar rientrano gradualmente. I valori mostrati includono il limite minimo di RTO = 1 s, perciò entrambi i risultati operativi restano a 1000 ms.';
+    }
+  }
+  slider.addEventListener('input', upd);
+  upd();
+})();
+
+/* ---- Stepper: back-off esponenziale ---- */
+LessonKit.stepper('#step-backoff', {
+  title: 'Dal primo invio all ACK finale',
+  sub: 'Fai avanzare il segmento: ogni scadenza raddoppia l intervallo, l ACK pulito ripristina RTO.',
+  shared: { tentativi: 0, 'RTO corrente': 'RTO1' },
+  watch: ['tentativi', 'RTO corrente'],
+  threads: {
+    S: {
+      name: 'segmento', steps: [
+        { label: 'trasmissione, parte RTO1', run: function (s) { s.tentativi = 1; s['RTO corrente'] = 'RTO1'; } },
+        { label: 'scade RTO1: prima ritrasmissione', run: function (s) { s.tentativi = 2; s['RTO corrente'] = 'RTO2 = 2×RTO1'; } },
+        { label: 'scade RTO2: seconda ritrasmissione', run: function (s) { s.tentativi = 3; s['RTO corrente'] = 'RTO3 = 2×RTO2'; } },
+        { label: 'scade RTO3: terza ritrasmissione', run: function (s) { s.tentativi = 4; s['RTO corrente'] = 'RTO4 = 2×RTO3'; } },
+        { label: 'arriva ACK: ripristino', run: function (s) { s['RTO corrente'] = 'RTO ripristinato'; } }
+      ]
+    }
+  },
+  verdict: function (s, done) {
+    if (done) return { status: 'ok', text: 'ACK ricevuto: il back-off termina e RTO viene ripristinato. Nessun RTT dei segmenti ritrasmessi entra nello stimatore di Karn.' };
+    if (s.tentativi > 1) return { status: 'bad', text: 'Il valore precedente poteva essere troppo basso: il nuovo intervallo è doppio e riduce la frequenza delle ritrasmissioni.' };
+    return { status: '', text: 'Avanza il segmento fino alle scadenze e osserva RTO1 → RTO2 → RTO3 → RTO4.' };
+  }
+});
+
+/* ---- Simulatore tinygram con Nagle on/off ---- */
+(function () {
+  var host = document.getElementById('w-nagle');
+  if (!host) return;
+  host.className = 'lk-step';
+  host.innerHTML =
+    '<h4>Nove scritture da un byte con ACK ritardati</h4>' +
+    '<p class="lk-step-sub">Confronta invio immediato e aggregazione di Nagle; ciascuna intestazione dati o ACK pesa 40 byte.</p>' +
+    '<div style="font-family:var(--lk-mono);font-size:.82rem">' +
+    '<label><input type="radio" name="ng-mode" value="off" checked> Nagle disabilitato</label> ' +
+    '<label><input type="radio" name="ng-mode" value="on"> Nagle abilitato</label></div>' +
+    '<div class="lk-step-state" id="ng-out"></div><div class="lk-step-verdict" id="ng-note"></div>';
+  function upd() {
+    var on = host.querySelector('input[name="ng-mode"]:checked').value === 'on';
+    var seg = on ? 3 : 9;
+    var ack = on ? 3 : 5;
+    var overhead = (seg + ack) * 40;
+    host.querySelector('#ng-out').innerHTML =
+      '<div class="lk-step-box">segmenti dati = <b>' + seg + '</b></div>' +
+      '<div class="lk-step-box">ACK = <b>' + ack + '</b></div>' +
+      '<div class="lk-step-box">dati utili = <b>9 byte</b></div>' +
+      '<div class="lk-step-box">overhead IP+TCP = <b>' + overhead + ' byte</b></div>';
+    var note = host.querySelector('#ng-note');
+    if (on) {
+      note.className = 'lk-step-verdict ok';
+      note.textContent = 'Nagle aggrega le scritture mentre un ACK è pendente: meno segmenti e meno overhead, ma con delayed ACK fino a 200 ms compare latenza di tipo Stop-and-Wait.';
+    } else {
+      note.className = 'lk-step-verdict bad';
+      note.textContent = 'TCP_NODELAY privilegia la prontezza: ogni byte parte subito, al costo di molti tinygram e di un overhead molto superiore ai dati utili.';
+    }
+  }
+  [].slice.call(host.querySelectorAll('input')).forEach(function (i) { i.addEventListener('change', upd); });
+  upd();
+})();
+
+/* ---- Macchina del controllo di flusso ---- */
+LessonKit.stateExplorer('#w-flow-state', {
+  start: 'Sospeso',
+  states: {
+    'Sospeso': {
+      desc: 'La sorgente ha ricevuto AW=0, ferma i dati e avvia il Persist Timer.',
+      to: [['PT scade', 'Window probe']]
+    },
+    'Window probe': {
+      desc: 'Invia un byte con SeqN=X. La sonda è ritrasmessa se si perde e obbliga il ricevitore a dichiarare la finestra corrente.',
+      to: [['AckN=X, AW=0', 'Attesa raddoppiata'], ['AckN=X+1, AW>0', 'Ripresa']]
+    },
+    'Attesa raddoppiata': {
+      desc: 'Il buffer resta pieno: PT diventa 2×PT e la sorgente attende senza entrare in deadlock.',
+      to: [['nuova scadenza PT', 'Window probe']]
+    },
+    'Ripresa': {
+      desc: 'Il ricevitore ha spazio e la trasmissione torna normale entro il credito AW annunciato.',
+      to: [['AW torna a zero', 'Sospeso'], ['AW cresce di un solo byte', 'SWS']]
+    },
+    'SWS': {
+      desc: 'Una riapertura minuscola produrrebbe un byte per RTT. Il ricevitore trattiene l aggiornamento.',
+      to: [['incremento ≥ min(MSS, metà buffer)', 'Ripresa']]
+    }
+  }
+});
+</script>
+</body>
+</html>
