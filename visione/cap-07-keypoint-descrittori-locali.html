@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 7 — Keypoint e descrittori locali · V&amp;R</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .vr-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1rem 1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .vr-w h4{margin:0 0 .3rem;color:var(--lk-cobalt-dark)}
+  .vr-w .vr-sub{margin:0 0 .8rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .vr-ctl{display:flex;flex-wrap:wrap;gap:.7rem 1.1rem;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.8rem}
+  .vr-ctl label{display:flex;gap:.4rem;align-items:center}
+  .vr-ctl input[type=range]{width:130px;accent-color:var(--lk-cobalt)}
+  .vr-ctl select{font-family:var(--lk-mono);font-size:.8rem;padding:.2rem .35rem;border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper)}
+  .vr-btn{font-family:var(--lk-utility);font-size:.82rem;font-weight:600;cursor:pointer;padding:.4rem .85rem;border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .vr-btn:hover{background:var(--lk-cobalt-dark)}
+  .vr-btn.sec{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .vr-out{font-family:var(--lk-mono);font-size:.85rem;background:var(--lk-paper);border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .75rem;margin-top:.7rem;overflow-x:auto}
+  .vr-out b{color:var(--lk-cobalt-dark)}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-06-trasformazioni-2d-image-stitching.html">&larr; Cap. 6 — Trasformazioni 2D e image stitching</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-08-bag-of-words.html">Cap. 8 — Bag of Words &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Feature locali: allineamento e localizzazione · Capitolo 7</div>
+    <h1>Keypoint e descrittori locali</h1>
+    <div class="lk-meta"><span>~55 min di lettura</span><span>4 widget interattivi</span><span>5 tavole</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Feature locali: l'idea e i requisiti</a></li>
+      <li><a href="#s2">Quali punti scegliere: flat, edge e corner</a></li>
+      <li><a href="#s3">Il corner detector di Harris</a></li>
+      <li><a href="#s4">L'invarianza di scala: scale space, LoG e DoG</a></li>
+      <li><a href="#s5">SIFT: la localizzazione dei keypoint</a></li>
+      <li><a href="#s6">Orientazione e descrittore SIFT</a></li>
+      <li><a href="#s7">SURF: box filter e immagine integrale</a></li>
+      <li><a href="#s8">FAST e BRIEF: l'efficienza estrema</a></li>
+      <li><a href="#s9">Feature matching: dai descrittori ai match presunti</a></li>
+      <li><a href="#s10">RANSAC: la trasformazione ottimale in presenza di outlier</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>1. Feature locali: l'idea e i requisiti</h2>
+    <p>Per allineare due immagini (il problema lasciato aperto dal <a href="cap-06-trasformazioni-2d-image-stitching.html">capitolo 6</a>) la soluzione passa dalle <strong>feature locali</strong>. La pipeline è composta da tre fasi:</p>
+    <ol>
+      <li><strong>Localizzazione dei punti di interesse</strong> (keypoint);</li>
+      <li><strong>Calcolo di un descrittore</strong> per ciascun punto;</li>
+      <li><strong>Matching</strong>, cioè la corrispondenza tra descrittori di immagini diverse.</li>
+    </ol>
+    <p>Le buone feature locali devono possedere quattro caratteristiche:</p>
+    <table>
+      <tr><th>Requisito</th><th>Significato</th></tr>
+      <tr><td><strong>Ripetibilità</strong></td><td>Le stesse feature possono essere individuate in immagini diverse, nonostante possibili trasformazioni geometriche e fotometriche.</td></tr>
+      <tr><td><strong>Rilevanza</strong></td><td>Ciascuna feature deve essere significativa e rappresentativa della porzione di immagine che la circonda, e permettere un matching significativo.</td></tr>
+      <tr><td><strong>Compartezza ed efficienza</strong></td><td>Il numero di feature usate per rappresentare un'immagine deve essere molto inferiore al numero di pixel.</td></tr>
+      <tr><td><strong>Località</strong></td><td>Ogni feature deve occupare una porzione relativamente piccola dell'immagine: la rende robusta rispetto a occlusioni o rumore.</td></tr>
+    </table>
+    <p>Per rendere l'approccio più robusto si usa solitamente un'<strong>analisi multi-scala</strong>, che permette di gestire meglio la variabilità delle immagini. Le scelte principali per la localizzazione sono <strong>Harris–Laplace</strong>, <strong>Laplacian of Gaussian</strong>, <strong>Difference of Gaussian</strong> e <strong>dense sampling</strong>; per i descrittori <strong>SIFT</strong>, <strong>SURF</strong> e <strong>BRIEF</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="100%" role="img" aria-label="Pipeline delle feature locali: localizzazione, descrittore, matching">
+        <rect x="15" y="70" width="110" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="70" y="105" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">immagine</text>
+        <path d="M130 105 L170 105" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#h7a)"/>
+        <rect x="175" y="40" width="150" height="60" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="250" y="63" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">localizzazione</text>
+        <text x="250" y="81" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">Harris–Laplace · LoG · DoG</text>
+        <text x="250" y="94" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">· dense sampling</text>
+        <path d="M330 70 Q345 70 345 88" fill="none" stroke="var(--lk-ink)" stroke-width="1.3"/>
+        <path d="M250 100 L250 130 L175 130 L175 100" fill="none" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <path d="M250 105 L250 130" stroke="var(--lk-ink)" stroke-width="1.2"/>
+        <rect x="175" y="130" width="150" height="60" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="250" y="153" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">descrittore per punto</text>
+        <text x="250" y="171" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">SIFT · SURF · BRIEF</text>
+        <path d="M330 160 L370 160" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#h7a)"/>
+        <rect x="375" y="80" width="150" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="450" y="110" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">matching</text>
+        <text x="450" y="130" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">x₁ = [x₁⁽¹⁾ … x_d⁽¹⁾]</text>
+        <text x="450" y="146" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">x₂ = [x₁⁽²⁾ … x_d⁽²⁾]</text>
+        <rect x="560" y="80" width="120" height="80" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <text x="620" y="112" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">allineamento</text>
+        <text x="620" y="130" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">stima di H</text>
+        <text x="620" y="146" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">(RANSAC, §10)</text>
+        <text x="350" y="230" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">requisiti: ripetibilità · rilevanza · compattezza/efficienza · località</text>
+        <defs><marker id="h7a" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-ink)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 7.1</b> — La pipeline delle feature locali: si localizzano i punti notevoli, si descrive un intorno di ciascuno con un vettore, e si confrontano i vettori per trovare le corrispondenze, da cui stimare la trasformazione (capitolo 6).</figcaption>
+    </figure>
+  </section>
+
+  <section id="s2" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>2. Quali punti scegliere: flat, edge e corner</h2>
+    <p>I punti di interesse dovrebbero essere <strong>facilmente riconoscibili</strong> analizzando una piccola porzione di immagine nel loro intorno: uno spostamento anche piccolo della finestra di osservazione in <em>qualsiasi</em> direzione dovrebbe portare a un <strong>cambiamento notevole di intensità</strong>. Questo criterio divide i punti in tre classi:</p>
+    <ul>
+      <li>nelle regioni <strong>flat</strong> non si rilevano cambiamenti di intensità in <strong>nessuna</strong> direzione;</li>
+      <li>in corrispondenza di <strong>edge</strong> si rilevano cambiamenti di intensità nella direzione <strong>ortogonale</strong> all'edge;</li>
+      <li>nei <strong>corner</strong> si misurano cambiamenti <strong>significativi in tutte le direzioni</strong>.</li>
+    </ul>
+    <p>Solo i corner sono candidati affidabili: un edge lascia ambigua la posizione lungo la sua direzione (il «problema dell'apertura»).</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-label="Regioni flat, edge e corner con finestra di osservazione e piano degli autovalori">
+        <g transform="translate(15,10)">
+          <text x="105" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">flat</text>
+          <rect x="30" y="38" width="150" height="150" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)"/>
+          <rect x="70" y="80" width="52" height="52" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="4 3"/>
+          <text x="105" y="215" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">nessun cambiamento</text>
+        </g>
+        <g transform="translate(245,10)">
+          <text x="105" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">edge</text>
+          <rect x="30" y="38" width="150" height="150" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)"/>
+          <rect x="30" y="88" width="150" height="50" fill="var(--lk-ink)" opacity=".75"/>
+          <rect x="80" y="80" width="52" height="52" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="4 3"/>
+          <text x="105" y="215" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">cambiamento solo ortogonale all'edge</text>
+        </g>
+        <g transform="translate(475,10)">
+          <text x="105" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">corner</text>
+          <rect x="30" y="38" width="150" height="150" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)"/>
+          <rect x="30" y="38" width="75" height="75" fill="var(--lk-ink)" opacity=".75"/>
+          <rect x="80" y="80" width="52" height="52" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6" stroke-dasharray="4 3"/>
+          <text x="105" y="215" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">cambiamento in tutte le direzioni</text>
+        </g>
+        <g transform="translate(60,240)">
+          <line x1="10" y1="40" x2="250" y2="40" stroke="var(--lk-ink)" stroke-width="1.1"/>
+          <line x1="10" y1="40" x2="10" y2="5" stroke="var(--lk-ink)" stroke-width="1.1"/>
+          <text x="5" y="52" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">λ₂</text>
+          <text x="250" y="52" text-anchor="end" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">λ₁</text>
+          <text x="120" y="34" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">corner: λ₁ e λ₂ grandi, λ₁ ≈ λ₂</text>
+          <text x="200" y="52" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">edge</text>
+          <text x="40" y="52" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">flat</text>
+          <path d="M20 20 Q100 6 230 26" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="4 3"/>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 7.2</b> — La finestra di osservazione e la diagnosi tramite gli autovalori λ₁, λ₂ della matrice M: entrambi piccoli → flat; uno grande → edge; entrambi grandi e simili → corner.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s3" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>3. Il corner detector di Harris</h2>
+    <p>Il <strong>corner detector di Harris</strong> [Harris88] individua i corner come i punti in cui <strong>si incontrano due edge</strong>, caratterizzati da un gradiente elevato in entrambe le direzioni (orizzontale e verticale). Il cambiamento di intensità all'interno di una finestra in seguito a una traslazione di <var>u, v</var> è:</p>
+    <pre><code>E(u, v) = Σ_{x,y} w(x, y) · [ I(x+u, y+v) − I(x, y) ]²</code></pre>
+    <p>dove <code>w(x, y)</code> è la <strong>window function</strong> (1 dentro la finestra, 0 fuori, oppure Gaussiana). Con l'espansione di Taylor del secondo ordine si arriva alla forma quadratica:</p>
+    <pre><code>E(u, v) ≈ [u  v] · M · [u  v]ᵀ        M = Σ_{x,y} w(x, y) · ⎡ ∇x²    ∇x·∇y ⎤
+                                                              ⎣ ∇x·∇y  ∇y²    ⎦</code></pre>
+    <p>L'analisi degli <strong>autovalori λ₁, λ₂</strong> di M permette di rilevare la presenza di corner (Tavola 7.2). Nella pratica si usa il <strong>coefficiente di cornerness</strong>, che non richiede il calcolo esplicito degli autovalori:</p>
+    <pre><code>R = λ₁·λ₂ − α·(λ₁ + λ₂)² = det(M) − α·trace(M)²</code></pre>
+    <p>con α costante normalmente in <code>[0.04, 0.06]</code>. Il valore di R è <strong>grande nei corner</strong>, <strong>piccolo nelle regioni flat</strong> e <strong>negativo in corrispondenza degli edge</strong>. L'algoritmo è quindi in tre passi:</p>
+    <ol>
+      <li>calcolo del valore di cornerness <var>R</var> per ciascun pixel;</li>
+      <li>identificazione dei punti con score elevati (<code>R &gt; soglia</code>);</li>
+      <li>selezione dei punti di <strong>massimo locale</strong> (soppressione dei non massimi).</li>
+    </ol>
+
+    <div class="vr-w" id="w-harris">
+      <h4>E(u, v) e la diagnosi di Harris</h4>
+      <p class="vr-sub">Scegli il tipo di patch e sposta la finestra di <var>u</var>, <var>v</var>: la mappa a destra mostra E(u,v) (più scuro = valore più alto). Il riquadro sotto riporta autovalori e cornerness R, con la diagnosi flat/edge/corner.</p>
+      <div class="vr-ctl">
+        <label>patch <select id="h-type">
+          <option value="corner">corner</option>
+          <option value="edge">edge</option>
+          <option value="flat">flat</option>
+        </select></label>
+        <label>u <input type="range" id="h-u" min="-50" max="50" value="30"><span id="h-uv">3.0</span></label>
+        <label>v <input type="range" id="h-v" min="-50" max="50" value="20"><span id="h-vv">2.0</span></label>
+      </div>
+      <svg id="h-svg" viewBox="0 0 700 280" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="h-out"></div>
+    </div>
+
+    <h3>Proprietà del detector di Harris</h3>
+    <table>
+      <tr><th>Proprietà</th><th>Esito</th></tr>
+      <tr><td><strong>Invarianza per rotazione</strong></td><td>Sì: la diagnosi su λ₁, λ₂ non cambia ruotando l'immagine.</td></tr>
+      <tr><td><strong>Invarianza parziale a cambiamenti di intensità</strong></td><td>Sì, per <code>I → I + b</code> (offset) e <code>I → a·I</code> (contrasto): cambia la scala di R ma la soglia si adatta.</td></tr>
+      <tr><td><strong>Invarianza a cambiamenti di scala</strong></td><td><strong>No</strong>: un corner a una scala può diventare un edge (o sparire) a un'altra.</td></tr>
+    </table>
+    <div class="callout warn">
+      <span class="callout-label">Attenzione</span>
+      <p>La <strong>mancata invarianza per scala</strong> è il limite che motiva tutto il resto del capitolo: da qui nascono LoG, DoG (SIFT) e la selezione automatica della scala.</p>
+    </div>
+  </section>
+
+  <section id="s4" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>4. L'invarianza di scala: scale space, LoG e DoG</h2>
+    <p>Date due immagini a scala diversa, regioni di dimensioni corrispondenti hanno aspetto simile; il problema è trovarle in modo indipendente nelle due immagini. L'idea: definire una <strong>funzione invariante per cambiamenti di scala</strong> (es. intensità media) sulla regione e prendere i punti di <strong>massimo</strong> di questa funzione: il rapporto tra le scale dei massimi corrisponde al <strong>fattore di scala</strong> tra le immagini.</p>
+    <p>Lo <strong>scale space</strong> è la rappresentazione multi-scala ottenuta applicando <strong>filtri Gaussiani</strong> con valori crescenti di σ — l'effetto visivo è una progressiva sfuocatura. La Gaussiana 2D:</p>
+    <pre><code>G(σ) = 1/(2πσ²) · exp( −(x² + y²) / (2σ²) )</code></pre>
+    <p>è un filtro <strong>separabile</strong>: il filtraggio 2D si sostituisce con due filtraggi 1D, uno per dimensione, con notevole risparmio di calcolo. Alcune strutture caratteristiche (edge, blob) si individuano con le <strong>derivate</strong> della Gaussiana. La funzione più interessante per la localizzazione di blob è il <strong>Laplacian of Gaussian</strong>, la derivata seconda:</p>
+    <pre><code>LoG = ∂²G/∂x² + ∂²G/∂y²</code></pre>
+    <p>Poiché la risposta del Laplaciano <strong>diminuisce all'aumentare della scala</strong>, per rendere la risposta invariante per scala si moltiplica per σ²:</p>
+    <pre><code>LoG_norm(x, y) = σ² · ( ∂²G/∂x² + ∂²G/∂y² )</code></pre>
+    <p>I localizzatori invarianti per scala visti a lezione:</p>
+    <table>
+      <tr><th>Localizzatore</th><th>Idea</th></tr>
+      <tr><td><strong>Laplacian detector</strong> [Lind98]</td><td>Convoluzione dell'immagine con il Laplaciano normalizzato a diverse scale; si cercano massimi e minimi nello scale space.</td></tr>
+      <tr><td><strong>Difference of Gaussian</strong> [Lowe99]</td><td>Approssimazione del LoG per un calcolo più efficiente.</td></tr>
+      <tr><td><strong>Harris–Laplace</strong> [Miko01]</td><td>Localizzazione dei corner con Harris a diverse scale e selezione dei punti corrispondenti a massimi del Laplaciano.</td></tr>
+    </table>
+    <p>I passaggi del <strong>LoG detector</strong> [Lind98]: 1) convoluzione dell'immagine con il Laplaciano normalizzato a diverse scale; 2) ricerca dei <strong>massimi nello scale-space</strong> della risposta del Laplaciano al quadrato.</p>
+  </section>
+
+  <section id="s5" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>5. SIFT: la localizzazione dei keypoint</h2>
+    <p>La <strong>Scale Invariant Feature Transform</strong> (SIFT) [Lowe99] estrae punti salienti basandosi su un'approssimazione del LoG denominata <strong>Difference of Gaussian</strong>:</p>
+    <pre><code>LoG = σ² · ( G_xx(x, y, σ) + G_yy(x, y, σ) )        DoG = G(x, y, kσ) − G(x, y, σ)</code></pre>
+    <p>Si costruisce una rappresentazione multi-risoluzione convolvendo l'immagine con Gaussiane di scala variabile, <code>L(x, y, kσ) = G(x, y, kσ) ∗ I(x, y)</code>, e i punti si localizzano come <strong>estremi della funzione DoG</strong>:</p>
+    <pre><code>D(x, y, σ) = [ G(x, y, kσ) − G(x, y, σ) ] ∗ I(x, y) = L(x, y, kσ) − L(x, y, σ)</code></pre>
+    <p>Perché la DoG? Due motivazioni: le immagini smoothed servono comunque per il calcolo dei descrittori, quindi la localizzazione richiede in aggiunta <strong>semplici sottrazioni</strong>; inoltre la DoG è un'<strong>ottima approssimazione della LoG</strong>, necessaria per la vera invarianza per scala.</p>
+    <h3>La piramide e le ottave</h3>
+    <p>Il calcolo dello scale-space e delle DoG è computazionalmente oneroso: si usa una <strong>struttura piramidale</strong> che sfrutta <code>L(x, y, 2σ) = L′(x, y, σ)</code>, dove <var>L′</var> è un livello dello scale-space a metà risoluzione. Lo scale-space si divide in <strong>ottave</strong>, ciascuna con mappe ottenute convolvendo con filtri di scala nel range <code>[σ, 2σ]</code>. Il numero di livelli per ottava è regolato dal parametro <var>s</var> (intervalli), con moltiplicatore di scala <code>k = 2^(1/s)</code>; servono <code>s + 3</code> livelli di convoluzioni gaussiane per individuare i punti su un'intera ottava.</p>
+    <p>Una volta calcolate tutte le DoG, i punti di interesse sono gli <strong>estremi (massimi e minimi) delle differenze</strong>: un pixel è estremo se è maggiore (o minore) di tutti gli <strong>8 vicini</strong> nella stessa immagine e dei <strong>9 + 9 vicini</strong> delle scale adiacenti — 26 confronti totali.</p>
+    <h3>Localizzazione accurata e filtri</h3>
+    <p>I punti individuati nello scale-space sono localizzati sui pixel, che per loro natura sono discreti e non rappresentano esattamente l'estremo dell'intorno: si effettua un'<strong>interpolazione</strong> tra i valori dell'intorno. Seguono una <strong>soglia di contrasto</strong> (si scartano gli estremi poco pronunciati) e il filtraggio degli <strong>edge</strong> (i punti su edge sono mal localizzati lungo la direzione dell'edge).</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-label="Scale space a ottave e ricerca dell'estremo con 26 vicini nella DoG">
+        <g transform="translate(20,10)">
+          <text x="140" y="24" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">scale space: σ crescente</text>
+          <g fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1">
+            <rect x="60" y="40" width="160" height="120"/>
+            <rect x="60" y="168" width="160" height="90"/>
+            <rect x="60" y="266" width="160" height="60"/>
+          </g>
+          <line x1="60" y1="40" x2="220" y2="40" stroke="var(--lk-cobalt)" stroke-width="1"/>
+          <line x1="60" y1="168" x2="220" y2="168" stroke="var(--lk-cobalt)" stroke-width="1"/>
+          <line x1="60" y1="266" x2="220" y2="266" stroke="var(--lk-cobalt)" stroke-width="1"/>
+          <text x="40" y="105" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">σ</text>
+          <text x="40" y="213" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">σk</text>
+          <text x="40" y="296" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">σk²</text>
+          <text x="140" y="340" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">k = 2^(1/s) · s+3 livelli per ottava</text>
+        </g>
+        <path d="M250 150 L300 150" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#h7b)"/>
+        <g transform="translate(305,20)">
+          <text x="180" y="24" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">DoG: estremo con 26 vicini</text>
+          <g fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width=".8">
+            <rect x="30" y="40" width="100" height="80"/><rect x="135" y="40" width="100" height="80"/><rect x="240" y="40" width="100" height="80"/>
+          </g>
+          <text x="80" y="128" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">scala k−1</text>
+          <text x="185" y="128" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">scala k</text>
+          <text x="290" y="128" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-ink-soft)">scala k+1</text>
+          <g fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width=".7">
+            <rect x="55" y="65" width="16" height="16"/><rect x="74" y="65" width="16" height="16"/><rect x="93" y="65" width="16" height="16"/>
+            <rect x="55" y="84" width="16" height="16"/><rect x="74" y="84" width="16" height="16"/><rect x="93" y="84" width="16" height="16"/>
+            <rect x="160" y="65" width="16" height="16"/><rect x="179" y="65" width="16" height="16"/><rect x="198" y="65" width="16" height="16"/>
+            <rect x="160" y="84" width="16" height="16"/><rect x="198" y="84" width="16" height="16"/>
+            <rect x="265" y="65" width="16" height="16"/><rect x="284" y="65" width="16" height="16"/><rect x="303" y="65" width="16" height="16"/>
+            <rect x="265" y="84" width="16" height="16"/><rect x="284" y="84" width="16" height="16"/><rect x="303" y="84" width="16" height="16"/>
+          </g>
+          <rect x="179" y="84" width="16" height="16" fill="var(--lk-vermilion)"/>
+          <text x="187" y="106" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">candidato</text>
+          <text x="187" y="160" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">8 + 9 + 9 = 26 confronti</text>
+        </g>
+        <defs><marker id="h7b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 7.3</b> — Lo scale-space a ottave con σ crescente (sinistra) e l'estrazione degli estremi nella DoG (destra): un pixel deve superare i 26 vicini — 8 nella stessa scala, 9 + 9 nelle scale adiacenti.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s6" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>6. Orientazione e descrittore SIFT</h2>
+    <h3>Orientazione dei keypoint</h3>
+    <p>Per costruire descrittori invarianti rispetto alla <strong>rotazione (planare)</strong> della scena, si assegna a ogni punto di interesse un'<strong>orientazione</strong>: si individua la direzione con gradiente maggiore. Si prende come riferimento l'immagine smoothed <var>L</var> alla scala più vicina a quella del punto e si calcolano magnitudo e orientazione del gradiente:</p>
+    <pre><code>m(x, y) = √( [L(x+1, y) − L(x−1, y)]² + [L(x, y+1) − L(x, y−1)]² )
+θ(x, y) = tan⁻¹( [L(x, y+1) − L(x, y−1)] / [L(x+1, y) − L(x−1, y)] )</code></pre>
+    <p>Si costruisce un <strong>istogramma delle orientazioni a 36 bin</strong>, ciascuno che copre 10°. Ogni pixel contribuisce al bin della propria orientazione con un valore pari alla <strong>magnitudo pesata con una Gaussiana</strong> (σ = 1.5 volte la scala del punto) centrata nel punto stesso. Il <strong>massimo assoluto</strong> dell'istogramma è l'orientazione assegnata; se esistono massimi locali che superano <strong>l'80% del massimo assoluto</strong>, vengono generati <strong>nuovi keypoint</strong> con quelle orientazioni (stessa posizione e scala).</p>
+
+    <div class="vr-w" id="w-orient">
+      <h4>Istogramma delle orientazioni (36 bin)</h4>
+      <p class="vr-sub">Genera un intorno con direzione di gradiente dominante θ₀ (più rumore σ cresce la dispersione). L'istogramma pesato con la Gaussiana produce l'orientazione assegnata (freccia blu) e segnala i picchi secondari sopra l'80% del massimo (vermiglio).</p>
+      <div class="vr-ctl">
+        <label>θ₀ <input type="range" id="o-th" min="0" max="360" value="120"><span id="o-thv">120°</span></label>
+        <label>rumore σ <input type="range" id="o-sig" min="0" max="60" value="15"><span id="o-sigv">15°</span></label>
+        <button class="vr-btn sec" id="o-new">Nuovo campione</button>
+      </div>
+      <svg id="o-svg" viewBox="0 0 700 280" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="o-out"></div>
+    </div>
+
+    <h3>Il descrittore SIFT</h3>
+    <p>I descrittori SIFT si calcolano sulle mappe di orientazione e magnitudo del gradiente in una <strong>finestra attorno al punto di interesse</strong>: la <strong>scala</strong> del keypoint seleziona le mappe, l'<strong>orientazione</strong> orienta la finestra (invarianza a rotazione). I valori di magnitudo vengono pesati con una Gaussiana con σ pari a <strong>metà della larghezza della finestra</strong>. I punti della regione sono partizionati in <strong>sottoregioni</strong>, e a ciascuna è associato un <strong>istogramma di 8 bin</strong> delle distribuzioni pesate della magnitudo per orientazione. Per robustezza si usa un'<strong>interpolazione trilineare</strong> per distribuire i valori del gradiente anche nei bin adiacenti.</p>
+    <p>Segue la <strong>normalizzazione</strong> per l'invarianza all'illuminazione: dapprima tutto il vettore viene normalizzato a 1 (variazioni lineari); poi, per eliminare l'effetto delle variazioni non lineari (es. saturazione della camera), si applica una <strong>soglia a 0.2</strong> — si mantengono gli elementi con valore non superiore a 0.2 — e si normalizza di nuovo a 1. I parametri suggeriti: <strong>4×4 istogrammi da 8 bin ciascuno → descrittore di dimensione 128</strong>.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 300" width="100%" role="img" aria-label="Costruzione del descrittore SIFT: finestra orientata, 4 per 4 sottoregioni, istogrammi a 8 bin">
+        <g transform="translate(30,15)">
+          <text x="150" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">finestra orientata secondo θ</text>
+          <rect x="40" y="35" width="220" height="220" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)"/>
+          <g stroke="var(--lk-rule-soft)" stroke-width=".7">
+            <line x1="95" y1="35" x2="95" y2="255"/><line x1="150" y1="35" x2="150" y2="255"/><line x1="205" y1="35" x2="205" y2="255"/>
+            <line x1="40" y1="90" x2="260" y2="90"/><line x1="40" y1="145" x2="260" y2="145"/><line x1="40" y1="200" x2="260" y2="200"/>
+          </g>
+          <line x1="150" y1="145" x2="150" y2="145" stroke="var(--lk-vermilion)"/>
+          <g fill="var(--lk-vermilion)" stroke="none">
+            <line x1="150" y1="145" x2="185" y2="118" stroke="var(--lk-vermilion)" stroke-width="2"/>
+          </g>
+          <circle cx="150" cy="145" r="4" fill="var(--lk-vermilion)"/>
+          <text x="150" y="280" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">4 × 4 sottoregioni · 8 bin ciascuna</text>
+        </g>
+        <path d="M300 145 L340 145" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#h7c)"/>
+        <g transform="translate(345,20)">
+          <text x="150" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">istogrammi pesati (8 bin)</text>
+          <g transform="translate(0,35)">
+            <g fill="var(--lk-cobalt)">
+              <rect x="8" y="40" width="7" height="30"/><rect x="18" y="60" width="7" height="10"/><rect x="28" y="52" width="7" height="18"/><rect x="38" y="30" width="7" height="40"/><rect x="48" y="58" width="7" height="12"/><rect x="58" y="66" width="7" height="4"/><rect x="68" y="55" width="7" height="15"/><rect x="78" y="45" width="7" height="25"/>
+            </g>
+            <g fill="var(--lk-cobalt)">
+              <rect x="98" y="62" width="7" height="8"/><rect x="108" y="45" width="7" height="25"/><rect x="118" y="20" width="7" height="50"/><rect x="128" y="58" width="7" height="12"/><rect x="138" y="35" width="7" height="35"/><rect x="148" y="64" width="7" height="6"/><rect x="158" y="52" width="7" height="18"/><rect x="168" y="30" width="7" height="40"/>
+            </g>
+            <g fill="var(--lk-cobalt)">
+              <rect x="188" y="48" width="7" height="22"/><rect x="198" y="58" width="7" height="12"/><rect x="208" y="25" width="7" height="45"/><rect x="218" y="62" width="7" height="8"/><rect x="228" y="40" width="7" height="30"/><rect x="238" y="55" width="7" height="15"/><rect x="248" y="20" width="7" height="50"/><rect x="258" y="60" width="7" height="10"/>
+            </g>
+            <g fill="var(--lk-cobalt)">
+              <rect x="278" y="35" width="7" height="35"/><rect x="288" y="62" width="7" height="8"/><rect x="298" y="48" width="7" height="22"/><rect x="308" y="25" width="7" height="45"/><rect x="318" y="58" width="7" height="12"/><rect x="328" y="40" width="7" height="30"/><rect x="338" y="52" width="7" height="18"/><rect x="348" y="30" width="7" height="40"/>
+            </g>
+          </g>
+          <text x="180" y="260" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">16 istogrammi × 8 bin = 128 dimensioni</text>
+          <text x="180" y="280" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">normalizzazione (1) → soglia 0.2 → normalizzazione (1)</text>
+        </g>
+        <defs><marker id="h7c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 7.4</b> — Il descrittore SIFT: la finestra viene orientata secondo l'orientazione del keypoint, divisa in 4×4 sottoregioni, e da ogni sottoregione si estrae un istogramma a 8 bin delle orientazioni pesate: 128 valori, normalizzati con la soglia a 0.2.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s7" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>7. SURF: box filter e immagine integrale</h2>
+    <p>La tecnica <strong>SURF</strong> (Speeded-Up Robust Features) [Bay08] localizza e descrive i punti di interesse in modo estremamente efficiente mantenendo le proprietà di invarianza di SIFT: <strong>rotazioni, cambiamenti di scala e di illuminazione</strong> e <strong>prospettive limitate</strong>. L'idea è approssimare i filtri tradizionali (LoG) con <strong>box filter</strong> applicabili molto velocemente grazie all'<strong>immagine integrale</strong>.</p>
+    <h3>L'immagine integrale</h3>
+    <p>L'immagine integrale in posizione <code>(r, c)</code> è la somma dei valori dei pixel sopra e a sinistra di <code>(r, c)</code>:</p>
+    <pre><code>II(r, c) = Σ_{r′≤r, c′≤c} I(r′, c′)</code></pre>
+    <p>Si calcola con una <strong>sola scansione</strong> dell'immagine originale usando le formule ricorsive <code>S(r,c) = S(r,c−1) + I(r,c)</code> e <code>II(r,c) = II(r−1,c) + S(r,c)</code>, con <code>S(r,−1) = 0</code> e <code>II(−1,c) = 0</code>. Con l'immagine integrale la somma in <strong>qualsiasi rettangolo</strong> richiede solo 4 letture: per il rettangolo D, <code>II(4) + II(1) − II(2) − II(3)</code>. Le feature a 2, 3 o 4 rettangoli usano rispettivamente 6, 8 e 9 valori di riferimento.</p>
+    <h3>Localizzazione e descrittore</h3>
+    <p>La localizzazione si basa sulla matrice <strong>Hessiana</strong> <code>H = [L_xx L_xy; L_xy L_yy]</code>, dove <code>L_xx(x,y,σ)</code> è il LoG dell'immagine; l'algoritmo ne usa un'<strong>approssimazione con box filter</strong> <code>D_xx, D_yy, D_xy</code> (scala più piccola: Gaussiana con σ = 1.2). Il determinante approssimato:</p>
+    <pre><code>det(H_approx) = D_xx · D_yy − w · D_xy²       (w = 0.9)</code></pre>
+    <p>La risposta ai filtri va normalizzata rispetto alla dimensione del filtro; i keypoint sono i <strong>massimi locali</strong> della mappa del determinante, con soppressione dei non massimi in un intorno <strong>3×3×3</strong> e interpolazione. A differenza di SIFT non serve una piramide di immagini: lo scale-space si ottiene <strong>ridimensionando i box filter</strong> e applicandoli all'immagine originale (stessa complessità a ogni scala), diviso in ottave con filtri di dimensione crescente.</p>
+    <p>L'<strong>orientazione</strong> si assegna calcolando la risposta pesata a due filtri <strong>Haar-like</strong> (in x e y) in un intorno circolare di dimensione 6s: ogni punto dell'intorno diventa un punto nello spazio 2D (risposta x, risposta y), e l'orientazione dominante si stima sommando le risposte su una serie di <strong>finestre di dimensione π/3</strong>.</p>
+    <p>Il <strong>descrittore</strong> parte da una regione quadrata centrata nel punto e orientata secondo l'orientazione assegnata, di dimensione <strong>20s</strong>; la regione è divisa in <strong>4×4 sottoregioni</strong>, in ciascuna si calcola la risposta ai filtri Haar-like su una griglia di punti (<code>d_x</code> orizzontale, <code>d_y</code> verticale), pesata con una Gaussiana. Per ogni sottoregione:</p>
+    <pre><code>v = ( Σ d_x , Σ d_y , Σ |d_x| , Σ |d_y| )</code></pre>
+    <p>La concatenazione su tutte le sottoregioni produce un descrittore di dimensione <strong>64</strong>, normalizzato a vettore unitario per l'invarianza al contrasto. La versione estesa (dimensione 128) separa le somme di <code>d_x</code> e <code>|d_x|</code> per <code>d_y &lt; 0</code> e <code>d_y &gt; 0</code> (e viceversa per <code>d_y</code>).</p>
+  </section>
+
+  <section id="s8" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>8. FAST e BRIEF: l'efficienza estrema</h2>
+    <h3>FAST keypoints</h3>
+    <p>Il keypoint <strong>FAST</strong> è un corner identificato sulla base delle <strong>variazioni locali di luminosità</strong>: un punto rappresenta un corner se ha un colore molto diverso (più chiaro o più scuro) da quello dei pixel circostanti. L'algoritmo:</p>
+    <ol>
+      <li>consideriamo un pixel <var>p</var> e indichiamo con <var>I_p</var> la sua luminosità;</li>
+      <li>fissiamo una soglia <code>T</code> (es. <code>T = 0.2 × I_p</code>);</li>
+      <li>selezioniamo i <strong>16 pixel</strong> in un intorno circolare di <strong>raggio 3</strong>;</li>
+      <li><var>p</var> è un corner se ci sono <strong>N punti consecutivi</strong> con luminosità maggiore di <code>I_p + T</code> oppure minore di <code>I_p − T</code> (N tipicamente 12, 11 o 9 → FAST-12, FAST-11, FAST-9);</li>
+      <li>il procedimento si itera per tutti i pixel.</li>
+    </ol>
+    <p>Per velocizzare la ricerca si controllano prima i pixel <strong>1, 5, 9 e 13</strong>: il pixel <var>p</var> è candidato corner solo se <strong>almeno 3 di questi 4</strong> soddisfano una delle due condizioni. I corner FAST sono spesso clusterizzati: dopo la detection serve una <strong>non-maxima suppression</strong>.</p>
+    <table>
+      <tr><th>Proprietà / limite</th><th>Note</th></tr>
+      <tr><td>Elevata efficienza</td><td>La detection richiede solo confronti di luminosità.</td></tr>
+      <tr><td>Bassa ripetibilità</td><td>Basato sulla sola luminosità.</td></tr>
+      <tr><td>Nessuna informazione direzionale</td><td>Non invariante per rotazione.</td></tr>
+      <tr><td>Raggio di analisi fisso (3)</td><td>Non invariante per cambiamenti di scala.</td></tr>
+    </table>
+    <p><strong>Varianti</strong> per raggiungere invarianza: per la <strong>rotazione</strong> si assegna un'orientazione al keypoint individuando un <strong>centroide di intensità</strong>: calcolati i momenti della patch <code>m_pq = Σ_{x,y∈B} xᵖ yᵍ I(x, y)</code> con <code>p, q ∈ {0, 1}</code>, il centroide è <code>C = (m_10/m_00, m_01/m_00)</code>; la direzione del keypoint è quella che congiunge il centro geometrico O con C: <code>θ = arctan(m_01 / m_10)</code>. Per la <strong>scala</strong> si cerca i corner dentro una <strong>image pyramid</strong> (immagini riscalate a diverse risoluzioni).</p>
+    <h3>BRIEF: il descrittore binario</h3>
+    <p><strong>BRIEF</strong> (Binary Robust Independent Elementary Features) [Cal12] crea descrittori di <strong>dimensioni limitate, efficaci ed efficienti</strong>: una <strong>stringa binaria</strong> ottenuta valutando le differenze di intensità tra coppie di pixel nell'intorno del keypoint. Il test τ su una patch <var>p</var> di dimensione S×S:</p>
+    <pre><code>τ(p; x, y) = 1 se p(x) &lt; p(y)      altrimenti 0</code></pre>
+    <p>dove <code>p(x)</code> è l'intensità in una versione smoothed di <var>p</var> in posizione <code>x = (u, v)ᵀ</code>. Si effettuano <var>n_d</var> test binari su coppie di pixel, ottenendo:</p>
+    <pre><code>f_{n_d}(p) = Σ_{1 ≤ i ≤ n_d} 2^(i−1) · τ(p; x_i, y_i)</code></pre>
+    <p>I valori di <var>n_d</var> suggeriti sono <strong>128, 256 e 512</strong>. Il test τ considera solo le informazioni dei pixel in esame ed è <strong>molto sensibile al rumore</strong>: è preferibile uno <strong>smoothing</strong> preliminare (per efficienza, un box filter applicato al punto di interesse invece della Gaussiana). Le distribuzioni per il campionamento delle coppie: <strong>uniforme</strong> in [−S/2, S/2], <strong>Gaussiana isotropica</strong>, campionamento <strong>in due fasi</strong> (prima x_i, poi y_i con Gaussiana centrata in x_i), griglia polare, e il caso <code>x_i = (0,0)ᵀ</code> con y_i su una <strong>griglia polare approssimata</strong>.</p>
+
+    <div class="vr-w" id="w-brief">
+      <h4>Costruttore di descrittore BRIEF</h4>
+      <p class="vr-sub">Genera una patch sintetica, scegli la distribuzione di campionamento delle coppie e osserva i bit del descrittore. Aumenta il rumore: il test binario è sensibile e i bit cambiano — misurato con la distanza di Hamming dal descrittore pulito.</p>
+      <div class="vr-ctl">
+        <label>campione <select id="b-dist">
+          <option value="u">uniforme</option>
+          <option value="g">gaussiana isotropica</option>
+          <option value="p">griglia polare</option>
+        </select></label>
+        <label>rumore <input type="range" id="b-noise" min="0" max="80" value="0"><span id="b-noisev">0</span></label>
+        <button class="vr-btn sec" id="b-new">Nuova patch</button>
+      </div>
+      <svg id="b-svg" viewBox="0 0 700 270" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="b-out"></div>
+    </div>
+
+    <div class="callout idea">
+      <span class="callout-label">ORB: la sintesi</span>
+      <p><strong>ORB</strong> combina <strong>Oriented FAST</strong> (keypoint FAST con informazioni di scala e orientazione) con <strong>Rotated BRIEF</strong> (descrittori BRIEF calcolati orientando le patch sulla base dell'orientazione dei keypoint).</p>
+    </div>
+  </section>
+
+  <section id="s9" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>9. Feature matching: dai descrittori ai match presunti</h2>
+    <p>Il matching tra due immagini avviene in tre passi:</p>
+    <ol>
+      <li><strong>rilevare</strong> i keypoint e <strong>calcolarne</strong> i descrittori (SIFT, SURF, BRIEF, ...);</li>
+      <li>determinare un set di <strong>presunti match</strong>: ricerca esaustiva o strutture dati;</li>
+      <li>sulla base dei migliori match determinare la <strong>trasformazione ottimale</strong> (RANSAC).</li>
+    </ol>
+    <p>Come confrontare due set di punti con descrittori locali? La <strong>ricerca esaustiva</strong> confronta ogni feature di un'immagine con tutte le feature dell'altra; per limitare la complessità si restringe il numero di confronti con <strong>hashing</strong> (una funzione hash organizza i descrittori in bucket di elementi «simili») o con <strong>index-based nearest neighbor search</strong> (es. <strong>KD-tree</strong>). Il problema di fondo: la <strong>presenza di outlier</strong>.</p>
+    <h3>Come selezionare i match presunti</h3>
+    <p>Per ciascun keypoint, il suo <strong>nearest neighbor</strong> è il keypoint a distanza euclidea minima. Molte feature non avranno un match corretto (background, rumore, occlusioni). Una <strong>soglia globale</strong> sulla distanza (<code>SSD(patch₁, patch₂) &lt; thr</code>) non dà buoni risultati; è possibile scartare alcuni match errati osservando la distanza dal <strong>nearest neighbor (1-NN) in rapporto alla distanza dal secondo keypoint più simile (2-NN)</strong> — il cosiddetto ratio test.</p>
+  </section>
+
+  <section id="s10" data-src="07 - Keypoint e descrittori locali.pdf">
+    <h2>10. RANSAC: la trasformazione ottimale in presenza di outlier</h2>
+    <p>Come calcolare la trasformazione ottimale a partire dai match presunti, che contengono outlier? <strong>RANSAC</strong> (RAndom SAmple Consensus) è un metodo <strong>iterativo</strong> che stima un modello (es. i parametri di trasformazione) da un insieme di osservazioni in presenza di outlier. L'idea: i dati si dividono in <strong>inliers</strong> (dati la cui distribuzione è compatibile con i parametri del modello) e <strong>outliers</strong> (non rappresentati correttamente dal modello). Dati <var>N</var> punti (osservazioni) generati da un modello con parametri Θ, l'algoritmo cerca di stimare Θ:</p>
+    <pre><code>Ripeti K volte:
+  1. scegli n campioni casuali;
+  2. adatta i parametri Θ agli n campioni;
+  3. per ciascuno dei restanti N−n punti, calcola la distanza dal modello
+     e conta il numero c di inliers.
+Output: il modello Θ con c più elevato.</code></pre>
+    <p>Ogni tipo di modello ha un <strong>minimal set</strong>: il numero minimo di esempi per calcolare il modello (es. linea → 2 punti). Per le trasformazioni di immagine il minimal set è di <var>s</var> coppie di punti: per l'<strong>omografia</strong> servono <strong>4 coppie</strong> — la matrice <code>H = [a b c; d e f; g h 1]</code> si ricalcola a ogni iterazione e si contano gli inlier con <code>SSD(p′ᵢ, H·pᵢ) &lt; ε</code>.</p>
+    <h3>I parametri</h3>
+    <ul>
+      <li><strong>s</strong>: numero iniziale di punti nel minimal set (4 coppie per l'omografia);</li>
+      <li><strong>t</strong>: soglia di distanza che definisce un punto come inlier;</li>
+      <li><strong>K</strong>: numero di iterazioni necessarie per un modello affidabile.</li>
+    </ul>
+    <p>Per la <strong>soglia</strong>: se il rumore nella posizione dei pattern è Gaussiano con deviazione standard σ, la distanza segue una distribuzione con <var>g</var> gradi di libertà; fissando <code>t² = 3.84·σ²</code>, con probabilità del 95% tutti gli inlier avranno distanza <code>d &lt; t</code>. Per il <strong>numero di iterazioni</strong>, con <var>e</var> = percentuale ipotetica di outlier e probabilità di successo <var>p</var>:</p>
+    <pre><code>K &gt; log(1 − p) / log(1 − (1 − e)^s)</code></pre>
+    <p>Il numero K non dipende dal numero totale di punti. Con s = 4 e p = 0.99, la tabella vista a lezione dà: e = 0.05 → 3; e = 0.25 → 13; e = 0.40 → 34; e = 0.50 → 72 iterazioni.</p>
+
+    <div class="vr-w" id="w-ransac">
+      <h4>Simulatore RANSAC su una retta</h4>
+      <p class="vr-sub">Il dataset contiene inlier su una retta con rumore e outlier sparsi. Ogni iterazione campiona 2 punti, stima la retta e conta gli inlier (banda di tolleranza t). La migliore retta trovata resta disegnata; sotto, la formula di K con i tuoi parametri.</p>
+      <div class="vr-ctl">
+        <label>outlier e <input type="range" id="r-e" min="10" max="60" value="30"><span id="r-ev">0.30</span></label>
+        <label>p <input type="range" id="r-p" min="90" max="999" value="990"><span id="r-pv">0.99</span></label>
+        <label>tolleranza t <input type="range" id="r-t" min="4" max="25" value="12"><span id="r-tv">12</span></label>
+        <button class="vr-btn" id="r-step">Iterazione</button>
+        <button class="vr-btn sec" id="r-reset">Reset</button>
+      </div>
+      <svg id="r-svg" viewBox="0 0 700 300" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="r-out"></div>
+    </div>
+
+    <h3>Vantaggi e svantaggi</h3>
+    <table>
+      <tr><th>Vantaggi</th><th>Svantaggi</th></tr>
+      <tr><td>Semplice e generale</td><td>La complessità computazionale cresce significativamente al crescere dei parametri del modello</td></tr>
+      <tr><td>Robusto anche con un elevato numero di outlier</td><td>Non ottimale per modelli multipli</td></tr>
+      <tr><td>Più facilmente applicabile a problemi con molti parametri rispetto alla trasformata di Hough</td><td>Non ottimale per modelli approssimati</td></tr>
+    </table>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="100%" role="img" aria-label="RANSAC: punti con outlier, retta stimata e formula del numero di iterazioni">
+        <g transform="translate(15,10)">
+          <text x="170" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">insieme di punti (con outlier)</text>
+          <g fill="var(--lk-cobalt)">
+            <circle cx="40" cy="150" r="4"/><circle cx="70" cy="135" r="4"/><circle cx="100" cy="125" r="4"/><circle cx="130" cy="110" r="4"/>
+            <circle cx="160" cy="95" r="4"/><circle cx="190" cy="85" r="4"/><circle cx="220" cy="68" r="4"/><circle cx="250" cy="55" r="4"/>
+            <circle cx="280" cy="42" r="4"/><circle cx="310" cy="30" r="4"/>
+          </g>
+          <g fill="var(--lk-vermilion)">
+            <circle cx="60" cy="60" r="4"/><circle cx="140" cy="170" r="4"/><circle cx="300" cy="150" r="4"/><circle cx="210" cy="190" r="4"/>
+            <circle cx="100" cy="40" r="4"/><circle cx="270" cy="190" r="4"/>
+          </g>
+          <line x1="25" y1="163" x2="325" y2="15" stroke="var(--lk-cobalt-dark)" stroke-width="2"/>
+          <line x1="25" y1="183" x2="325" y2="35" stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>
+          <line x1="25" y1="143" x2="325" y2="-5" stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>
+          <text x="170" y="225" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">retta con RANSAC: massimo numero di inlier</text>
+        </g>
+        <g transform="translate(360,10)">
+          <text x="150" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">quante iterazioni?</text>
+          <rect x="20" y="40" width="260" height="70" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="150" y="66" text-anchor="middle" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-ink)">K &gt; log(1 − p) / log(1 − (1 − e)^s)</text>
+          <text x="150" y="92" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">e = outlier ipotizzati · s = minimal set · p = probabilità di successo</text>
+          <text x="150" y="135" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">soglia di inlier: t² = 3.84·σ² (95%)</text>
+          <text x="150" y="155" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">omografia: minimal set = 4 coppie di punti</text>
+        </g>
+      </svg>
+      <figcaption><b>Tavola 7.5</b> — RANSAC su una retta: gli inlier stanno nella banda di tolleranza t attorno al modello; K non dipende dal numero totale di punti ma solo da e, s e p.</figcaption>
+    </figure>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Quali sono i quattro requisiti delle buone feature locali?</summary>
+        <p><strong>Ripetibilità</strong> (le stesse feature si individuano in immagini diverse nonostante trasformazioni geometriche e fotometriche); <strong>rilevanza</strong> (significative e rappresentative dell'intorno, matching significativo); <strong>compartezza ed efficienza</strong> (numero di feature molto inferiore ai pixel); <strong>località</strong> (porzione piccola dell'immagine → robustezza a occlusioni e rumore).</p>
+      </details>
+      <details>
+        <summary>Come si distinguono flat, edge e corner con una finestra di osservazione?</summary>
+        <p>Nelle regioni <strong>flat</strong> uno spostamento della finestra in qualsiasi direzione non produce cambiamenti di intensità; sugli <strong>edge</strong> i cambiamenti si rilevano solo nella direzione ortogonale all'edge; nei <strong>corner</strong> si misurano cambiamenti significativi <strong>in tutte le direzioni</strong>.</p>
+      </details>
+      <details>
+        <summary>Scrivete la formula del coefficiente di cornerness di Harris e la sua interpretazione.</summary>
+        <p><code>R = λ₁λ₂ − α(λ₁+λ₂)² = det(M) − α·trace(M)²</code>, con α ∈ [0.04, 0.06]. R assume <strong>valori grandi nei corner</strong> (R &gt; 0), <strong>valori negativi sugli edge</strong> (R &lt; 0) e <strong>valori piccoli nelle regioni flat</strong> (|R| piccolo). Il calcolo di R non richiede gli autovalori espliciti.</p>
+      </details>
+      <details>
+        <summary>Quali proprietà ha (e non ha) il corner detector di Harris?</summary>
+        <p>È <strong>invariante per rotazione</strong>; ha <strong>invarianza parziale</strong> a cambiamenti di intensità (<code>I → I + b</code> e <code>I → a·I</code>, la soglia si adatta); <strong>non è invariante per cambiamenti di scala</strong> — un corner a una scala può diventare edge o sparire a un'altra.</p>
+      </details>
+      <details>
+        <summary>Che cos'è il LoG e perché va normalizzato per la scala?</summary>
+        <p>Il <strong>Laplacian of Gaussian</strong> è la derivata seconda della Gaussiana: <code>LoG = ∂²G/∂x² + ∂²G/∂y²</code>, usato per localizzare blob. Poiché la risposta del Laplaciano <strong>diminuisce all'aumentare della scala</strong>, si moltiplica per σ²: <code>LoG_norm = σ²(∂²G/∂x² + ∂²G/∂y²)</code>.</p>
+      </details>
+      <details>
+        <summary>Perché SIFT usa la Difference of Gaussian invece del Laplacian of Gaussian?</summary>
+        <p>Per due motivi: (1) le immagini smoothed servono comunque per i descrittori, quindi la localizzazione richiede in aggiunta <strong>semplici operazioni di sottrazione</strong>; (2) la DoG è un'<strong>ottima approssimazione della LoG</strong>, necessaria per raggiungere la vera invarianza per scala.</p>
+      </details>
+      <details>
+        <summary>Come si definiscono ottave e livelli nella piramide DoG di SIFT?</summary>
+        <p>Lo scale-space si divide in <strong>ottave</strong> (range di scala [σ, 2σ]) sfruttando <code>L(x,y,2σ) = L′(x,y,σ)</code> a metà risoluzione; il parametro <var>s</var> è il numero di intervalli per ottava, <code>k = 2^(1/s)</code>, e servono <code>s + 3</code> livelli di convoluzioni gaussiane per individuare i punti su un'intera ottava.</p>
+      </details>
+      <details>
+        <summary>Come si stabilisce che un pixel della DoG è un punto estremo?</summary>
+        <p>Deve essere <strong>maggiore o minore di tutti i suoi 8 vicini</strong> nella stessa immagine e di tutti i vicini (9 + 9) delle immagini alla scala superiore e inferiore: <strong>26 confronti</strong> totali. La localizzazione si perfeziona poi con <strong>interpolazione</strong>, soglia di contrasto e filtraggio degli edge.</p>
+      </details>
+      <details>
+        <summary>Come si assegna l'orientazione a un keypoint SIFT?</summary>
+        <p>Si calcolano magnitudo e orientazione del gradiente sull'immagine smoothed alla scala del punto; si costruisce un <strong>istogramma a 36 bin</strong> (10° ciascuno) pesato con una Gaussiana (σ = 1.5 volte la scala); il <strong>massimo assoluto</strong> è l'orientazione assegnata; i massimi locali oltre <strong>l'80%</strong> del massimo generano keypoint aggiuntivi.</p>
+      </details>
+      <details>
+        <summary>Descrivete il descrittore SIFT: dimensioni e normalizzazione.</summary>
+        <p>Finestra orientata secondo l'orientazione del keypoint, magnitudo pesata con Gaussiana (σ = metà larghezza), <strong>4×4 sottoregioni</strong> con <strong>istogrammi a 8 bin</strong> (interpolazione trilineare) → descrittore di dimensione <strong>128</strong>. Normalizzazione: vettore unitario, <strong>soglia a 0.2</strong> e nuova normalizzazione, per gestire variazioni di illuminazione lineari e non lineari.</p>
+      </details>
+      <details>
+        <summary>Come funziona l'immagine integrale e a cosa serve in SURF?</summary>
+        <p><code>II(r,c)</code> è la somma dei pixel sopra e a sinistra di (r,c), calcolabile in <strong>una sola scansione</strong> con <code>S(r,c) = S(r,c−1) + I(r,c)</code> e <code>II(r,c) = II(r−1,c) + S(r,c)</code>. La somma in un rettangolo richiede solo 4 letture (<code>II(4) + II(1) − II(2) − II(3)</code>), rendendo velocissimi i <strong>box filter</strong> con cui SURF approssima il LoG e la Hessiana.</p>
+      </details>
+      <details>
+        <summary>Come si localizzano i keypoint SURF?</summary>
+        <p>Si calcola il determinante della Hessiana approssimata con box filter: <code>det(H_approx) = D_xx·D_yy − w·D_xy²</code> con w = 0.9, normalizzato per la dimensione del filtro; i keypoint sono i <strong>massimi locali</strong> della mappa (soppressione non massimi in 3×3×3 e interpolazione). Lo scale-space si ottiene <strong>ridimensionando i filtri</strong>, non l'immagine: nessuna piramide da costruire.</p>
+      </details>
+      <details>
+        <summary>Descrivete il descrittore SURF.</summary>
+        <p>Regione quadrata di dimensione <strong>20s</strong> orientata secondo l'orientazione del keypoint, divisa in <strong>4×4 sottoregioni</strong>; per ciascuna si sommano le risposte Haar-like pesate <code>v = (Σd_x, Σd_y, Σ|d_x|, Σ|d_y|)</code> → descrittore di dimensione <strong>64</strong>, normalizzato a vettore unitario. La versione estesa a 128 separa le somme per segno di d_y (e viceversa).</p>
+      </details>
+      <details>
+        <summary>Spiegate l'algoritmo FAST e le sue limitazioni.</summary>
+        <p>Un pixel p è corner se in un intorno circolare di <strong>raggio 3</strong> (16 pixel) ci sono <strong>N punti consecutivi</strong> con luminosità &gt; <code>I_p + T</code> o &lt; <code>I_p − T</code>, con T tipicamente <code>0.2·I_p</code> e N ∈ {12, 11, 9}. Velocizzazione: controllo preliminare dei pixel 1, 5, 9, 13 (almeno 3 devono soddisfare la condizione). Limitazioni: <strong>bassa ripetibilità</strong>, <strong>nessuna invarianza a rotazione</strong> (nessuna informazione direzionale) e <strong>nessuna invarianza a scala</strong> (raggio fisso 3).</p>
+      </details>
+      <details>
+        <summary>Come si rendono FAST e BRIEF invarianti a rotazione e scala?</summary>
+        <p>FAST: per la rotazione si assegna un'orientazione tramite il <strong>centroide di intensità</strong> della patch (<code>m_pq = Σ xᵖyᵍI(x,y)</code>, <code>θ = arctan(m_01/m_10)</code>); per la scala si usa una <strong>image pyramid</strong>. BRIEF: l'orientazione dei keypoint orienta le patch (Rotated BRIEF). La combinazione è <strong>ORB</strong> = Oriented FAST + Rotated BRIEF.</p>
+      </details>
+      <details>
+        <summary>Perché una soglia globale sulla distanza dei descrittori non basta per selezionare i match?</summary>
+        <p>Molte feature non hanno un match corretto (background, rumore, occlusioni) e la distanza assoluta varia con il contenuto. Meglio osservare la distanza dal <strong>nearest neighbor (1-NN) in rapporto alla distanza dal secondo più simile (2-NN)</strong>: un match affidabile ha 1-NN molto più vicino di 2-NN.</p>
+      </details>
+      <details>
+        <summary>Descrivete l'algoritmo RANSAC e i suoi parametri.</summary>
+        <p>Ripeti K volte: scegli <var>n</var> campioni casuali, adatta il modello Θ, conta gli inlier (distanza &lt; t); output: il modello con più inlier. Parametri: <strong>s</strong> = minimal set (4 coppie per l'omografia), <strong>t</strong> = soglia di distanza (<code>t² = 3.84σ²</code> per il 95% degli inlier), <strong>K</strong> = numero di iterazioni (<code>K &gt; log(1−p)/log(1−(1−e)^s)</code>). K non dipende dal numero totale di punti.</p>
+      </details>
+      <details>
+        <summary>Quali sono vantaggi e svantaggi di RANSAC rispetto alla trasformata di Hough?</summary>
+        <p>Vantaggi: semplice e generale, robusto anche con molti outlier, più facilmente applicabile a problemi con <strong>molti parametri</strong>. Svantaggi: complessità che cresce con i parametri del modello, <strong>non ottimale per modelli multipli</strong> né per modelli approssimati.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-06-trasformazioni-2d-image-stitching.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-08-bag-of-words.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonte: dispensa "07 - Keypoint e descrittori locali" · Visione Artificiale e Riconoscimento, UniBo · Prof.ssa Annalisa Franco</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Widget: E(u,v) di Harris ---- */
+(function(){
+  var svg=document.getElementById("h-svg");
+  if(!svg) return;
+  var PATCH={ corner:{A:50,B:48,C:2}, edge:{A:50,B:1,C:0}, flat:{A:0.5,B:0.5,C:0} };
+  function classify(A,B,C){
+    var tr=A+B, det=A*B-C*C;
+    var l1=(tr+Math.sqrt(Math.max(0,(A-B)*(A-B)+4*C*C)))/2;
+    var l2=(tr-Math.sqrt(Math.max(0,(A-B)*(A-B)+4*C*C)))/2;
+    var R=det-0.05*tr*tr;
+    var verb=R>3?"corner":(R<0?"edge":"flat (|R| piccolo)");
+    return {l1:l1,l2:l2,R:R,verb:verb};
+  }
+  function upd(){
+    var k=document.getElementById("h-type").value;
+    var u=document.getElementById("h-u").value/10, v=document.getElementById("h-v").value/10;
+    document.getElementById("h-uv").textContent=u.toFixed(1);
+    document.getElementById("h-vv").textContent=v.toFixed(1);
+    var P=PATCH[k], E=P.A*u*u+2*P.C*u*v+P.B*v*v;
+    var cls=classify(P.A,P.B,P.C);
+    var s="";
+    var x0=40, y0=50, W=300, H=200, mx=Math.max(60,E*1.1);
+    for(var i=0;i<20;i++) for(var j=0;j<14;j++){
+      var uu=(i-9.5)*0.55, vv=(9.5-j)*0.55;
+      var e=P.A*uu*uu+2*P.C*uu*vv+P.B*vv*vv;
+      var t=Math.min(1,e/mx);
+      s+='<rect x="'+(x0+j*W/14)+'" y="'+(y0+i*H/20)+'" width="'+(W/14+0.5)+'" height="'+(H/20+0.5)+'" fill="var(--lk-cobalt)" opacity="'+(0.05+0.5*t)+'"/>';
+    }
+    s+='<rect x="'+x0+'" y="'+y0+'" width="'+W+'" height="'+H+'" fill="none" stroke="var(--lk-rule)"/>';
+    var px=x0+(u+3)/6*W, py=y0+(3-v)/6*H;
+    s+='<circle cx="'+px.toFixed(1)+'" cy="'+py.toFixed(1)+'" r="4.5" fill="var(--lk-vermilion)"/>';
+    s+='<text x="'+(x0+W/2)+'" y="'+(y0+H+22)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">E(u,v) = Au² + 2Cuv + Bv² — più scuro = valore più alto</text>';
+    s+='<text x="420" y="80" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">patch: '+k+'</text>';
+    s+='<text x="420" y="106" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">A = '+P.A.toFixed(2)+' &nbsp;B = '+P.B.toFixed(2)+' &nbsp;C = '+P.C.toFixed(2)+'</text>';
+    s+='<text x="420" y="132" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">λ₁ = '+cls.l1.toFixed(2)+' &nbsp;λ₂ = '+cls.l2.toFixed(2)+'</text>';
+    s+='<text x="420" y="158" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt-dark)">R = det M − 0.05·(trace M)² = '+cls.R.toFixed(2)+'</text>';
+    s+='<text x="420" y="190" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">diagnosi: '+cls.verb+'</text>';
+    s+='<text x="420" y="222" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">spostamento corrente: u = '+u.toFixed(1)+', v = '+v.toFixed(1)+'</text>';
+    s+='<text x="420" y="244" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">E = '+E.toFixed(1)+'</text>';
+    svg.innerHTML=s;
+    document.getElementById("h-out").innerHTML=
+      "E("+u.toFixed(1)+", "+v.toFixed(1)+") = <b>"+E.toFixed(1)+"</b> · λ₁ = "+cls.l1.toFixed(2)+" · λ₂ = "+cls.l2.toFixed(2)+"<br>"+
+      "cornerness R = det M − α·(trace M)² = <b>"+cls.R.toFixed(2)+"</b> → <b>"+cls.verb+"</b><br>"+
+      "(α = 0.05 · soglia di esempio R &gt; 3 per il corner)";
+  }
+  ["h-type","h-u","h-v"].forEach(function(id){
+    var el=document.getElementById(id);
+    el.addEventListener("input", upd); el.addEventListener("change", upd);
+  });
+  upd();
+})();
+
+/* ---- Widget: istogramma orientazioni SIFT ---- */
+(function(){
+  var svg=document.getElementById("o-svg");
+  if(!svg) return;
+  var PTS=[];
+  function gauss(){ var u=0,v=0; for(var i=0;i<6;i++){u+=Math.random();v+=Math.random();} return [u-3,v-3]; }
+  function sample(){
+    PTS=[];
+    for(var i=0;i<160;i++){
+      var p=gauss(), r=Math.sqrt(p[0]*p[0]+p[1]*p[1]);
+      if(r>3.2) continue;
+      PTS.push({x:p[0], y:p[1]});
+    }
+  }
+  sample();
+  function upd(){
+    var th0=document.getElementById("o-th").value*Math.PI/180;
+    var sig=document.getElementById("o-sig").value*Math.PI/180;
+    document.getElementById("o-thv").textContent=Math.round(th0*180/Math.PI)+"°";
+    document.getElementById("o-sigv").textContent=Math.round(sig*180/Math.PI)+"°";
+    var hist=[]; for(var b=0;b<36;b++) hist.push(0);
+    PTS.forEach(function(p){
+      var ang=th0+((Math.random()*2-1)+(Math.random()*2-1)+(Math.random()*2-1))*sig*0.9;
+      var m=14*Math.exp(-(p.x*p.x+p.y*p.y)/16);
+      var w=Math.exp(-(p.x*p.x+p.y*p.y)/(2*Math.pow(1.5*3.2,2)));
+      var bi=((ang%(2*Math.PI))+2*Math.PI)%(2*Math.PI);
+      hist[Math.floor(bi/(2*Math.PI)*36)]+=m*w;
+    });
+    var max=Math.max.apply(null,hist), imax=hist.indexOf(max);
+    var s="";
+    var cx=95, cy=120, R=75;
+    s+='<circle cx="'+cx+'" cy="'+cy+'" r="'+R+'" fill="none" stroke="var(--lk-rule-soft)" stroke-width="1"/>';
+    PTS.forEach(function(p){
+      var ang=th0;
+      var x2=p.x*Math.cos(ang)-p.y*Math.sin(ang), y2=p.x*Math.sin(ang)+p.y*Math.cos(ang);
+      s+='<line x1="'+(cx+p.x*R/4).toFixed(1)+'" y1="'+(cy+p.y*R/4).toFixed(1)+'" x2="'+(cx+p.x*R/3.2).toFixed(1)+'" y2="'+(cy+p.y*R/3.2).toFixed(1)+'" stroke="var(--lk-cobalt)" stroke-width=".8" opacity=".5"/>';
+    });
+    s+='<line x1="'+cx+'" y1="'+cy+'" x2="'+(cx+R*1.15*Math.cos(imax/36*2*Math.PI-Math.PI/2)).toFixed(1)+'" y2="'+(cy+R*1.15*Math.sin(imax/36*2*Math.PI-Math.PI/2)).toFixed(1)+'" stroke="var(--lk-cobalt-dark)" stroke-width="2.6"/>';
+    s+='<text x="'+cx+'" y="'+(cy-R-14)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">orientazione assegnata = massimo</text>';
+    s+='<text x="'+cx+'" y="'+(cy+R+26)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">patch con gradiente dominante θ₀</text>';
+    var x0=340, y0=225, W=330, H=160;
+    s+='<line x1="'+x0+'" y1="'+y0+'" x2="'+(x0+W)+'" y2="'+y0+'" stroke="var(--lk-ink)"/>';
+    s+='<line x1="'+x0+'" y1="'+y0+'" x2="'+x0+'" y2="'+(y0-H)+'" stroke="var(--lk-ink)"/>';
+    for(var b2=0;b2<36;b2++){
+      var hh=hist[b2]/max*H;
+      var col=b2===imax?"var(--lk-cobalt-dark)":(hist[b2]>0.8*max?"var(--lk-vermilion)":"var(--lk-cobalt)");
+      s+='<rect x="'+(x0+2+b2*(W/36)).toFixed(1)+'" y="'+(y0-hh).toFixed(1)+'" width="'+(W/36-2)+'" height="'+hh.toFixed(1)+'" fill="'+col+'"/>';
+    }
+    s+='<line x1="'+x0+'" y1="'+(y0-0.8*H)+'" x2="'+(x0+W)+'" y2="'+(y0-0.8*H)+'" stroke="var(--lk-vermilion)" stroke-width="1" stroke-dasharray="4 3"/>';
+    s+='<text x="'+(x0+W)+'" y="'+(y0-0.8*H-4)+'" text-anchor="end" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">80% del massimo</text>';
+    s+='<text x="'+(x0+W/2)+'" y="'+(y0+20)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">istogramma 36 bin (10° ciascuno), pesi Gaussiani</text>';
+    svg.innerHTML=s;
+    var sec=[];
+    for(var b3=0;b3<36;b3++) if(hist[b3]>0.8*max&&b3!==imax) sec.push(b3*10+"°");
+    document.getElementById("o-out").innerHTML=
+      "massimo assoluto: bin <b>"+(imax*10)+"°</b> → orientazione assegnata<br>"+
+      "picchi secondari &gt; 80% del massimo: <b>"+(sec.length?sec.join(", "):"nessuno")+"</b> — generano keypoint aggiuntivi";
+  }
+  ["o-th","o-sig"].forEach(function(id){
+    document.getElementById(id).addEventListener("input", upd);
+  });
+  document.getElementById("o-new").addEventListener("click", function(){ sample(); upd(); });
+  upd();
+})();
+
+/* ---- Widget: descrittore BRIEF ---- */
+(function(){
+  var svg=document.getElementById("b-svg");
+  if(!svg) return;
+  var SIZE=14, PIX=[], BASE=[], PAIRS=[];
+  function makeBase(){
+    BASE=[]; for(var i=0;i<SIZE*SIZE;i++) BASE.push(80+Math.random()*110);
+    PIX=BASE.slice();
+  }
+  function addNoise(n){
+    PIX=[];
+    for(var i=0;i<SIZE*SIZE;i++) PIX.push(Math.max(0,Math.min(255,BASE[i]+(Math.random()*2-1)*n*2.2)));
+  }
+  function makePairs(kind){
+    PAIRS=[];
+    var N=256, S=SIZE/2;
+    for(var i=0;i<N;i++){
+      var x1,y1,x2,y2;
+      if(kind==="u"){ x1=(Math.random()*2-1)*S; y1=(Math.random()*2-1)*S; x2=(Math.random()*2-1)*S; y2=(Math.random()*2-1)*S; }
+      else if(kind==="g"){
+        var g=function(){ return (Math.random()+Math.random()+Math.random()+Math.random()-2)/2; };
+        x1=g()*S*0.8; y1=g()*S*0.8; x2=x1+g()*S*0.4; y2=y1+g()*S*0.4;
+      } else {
+        var ang=Math.random()*2*Math.PI, r=1.5+Math.random()*3.5;
+        x1=0; y1=0; x2=r*Math.cos(ang); y2=r*Math.sin(ang);
+      }
+      PAIRS.push([x1,y1,x2,y2]);
+    }
+  }
+  function bits(){
+    var out=[];
+    for(var i=0;i<PAIRS.length;i++){
+      var p=PAIRS[i];
+      function at(x,y){ var c=Math.min(SIZE-1,Math.max(0,Math.round(x+SIZE/2))); var r=Math.min(SIZE-1,Math.max(0,Math.round(y+SIZE/2))); return PIX[r*SIZE+c]; }
+      out.push(at(p[2],p[3])<at(p[0],p[1])?1:0);
+    }
+    return out;
+  }
+  function hamming(a,b){ var d=0; for(var i=0;i<a.length;i++) if(a[i]!==b[i]) d++; return d; }
+  var clean=[];
+  function upd(){
+    var kind=document.getElementById("b-dist").value;
+    var noise=+document.getElementById("b-noise").value;
+    document.getElementById("b-noisev").textContent=noise;
+    if(noise===0) PIX=BASE.slice();
+    else addNoise(noise);
+    if(!clean.length) clean=bits();
+    var now=bits();
+    var s="";
+    var cell=16, ox=45, oy=60;
+    for(var r=0;r<SIZE;r++) for(var c=0;c<SIZE;c++){
+      var v=PIX[r*SIZE+c];
+      s+='<rect x="'+(ox+c*cell)+'" y="'+(oy+r*cell)+'" width="'+cell+'" height="'+cell+'" fill="var(--lk-hl)" opacity="'+(0.25+v/255*0.75)+'" stroke="var(--lk-rule-soft)" stroke-width=".4"/>';
+    }
+    s+='<rect x="'+ox+'" y="'+oy+'" width="'+(SIZE*cell)+'" height="'+(SIZE*cell)+'" fill="none" stroke="var(--lk-rule)"/>';
+    for(var i=0;i<Math.min(36,PAIRS.length);i++){
+      var p=PAIRS[i];
+      s+='<line x1="'+(ox+(p[0]+SIZE/2)*cell+cell/2).toFixed(1)+'" y1="'+(oy+(p[1]+SIZE/2)*cell+cell/2).toFixed(1)+'" x2="'+(ox+(p[2]+SIZE/2)*cell+cell/2).toFixed(1)+'" y2="'+(oy+(p[3]+SIZE/2)*cell+cell/2).toFixed(1)+'" stroke="var(--lk-vermilion)" stroke-width=".8" opacity=".7"/>';
+    }
+    s+='<text x="'+(ox+SIZE*cell/2)+'" y="'+(oy+SIZE*cell+20)+'" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">patch S×S · prime '+Math.min(36,PAIRS.length)+' coppie (τ: 1 se p(x) &lt; p(y))</text>';
+    var hex1=[]; for(var hx=0;hx<4;hx++){ var bv=0; for(var b2=0;b2<8;b2++) bv=(bv<<1)|clean[hx*8+b2]; hex1.push(bv.toString(16)); }
+    var hex2=[]; for(var hx2=0;hx2<4;hx2++){ var bv2=0; for(var b3=0;b3<8;b3++) bv2=(bv2<<1)|now[hx2*8+b3]; hex2.push(bv2.toString(16)); }
+    s+='<text x="320" y="70" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">descrittore (primi 32 bit, esadecimale):</text>';
+    s+='<text x="320" y="92" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt-dark)">'+hex1.join("")+'</text>';
+    s+='<text x="320" y="114" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">con rumore '+noise+':</text>';
+    s+='<text x="320" y="136" font-family="var(--lk-mono)" font-size="13" fill="var(--lk-vermilion)">'+hex2.join("")+'</text>';
+    s+='<text x="320" y="168" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">n_d = '+PAIRS.length+' bit ('+PAIRS.length/8+' byte)</text>';
+    s+='<text x="320" y="190" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">distanza di Hamming: <tspan fill="var(--lk-cobalt-dark)"><b>'+hamming(clean,now)+'</b></tspan></text>';
+    s+='<text x="320" y="220" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">lo smoothing (box filter) aumenta</text>';
+    s+='<text x="320" y="236" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">ripetibilità e stabilità del descrittore</text>';
+    svg.innerHTML=s;
+    document.getElementById("b-out").innerHTML=
+      "distribuzione di campionamento: <b>"+kind+"</b> · dimensione: <b>"+PAIRS.length+" bit</b><br>"+
+      "bit flippati con rumore "+noise+": <b>"+hamming(clean,now)+"</b> su "+PAIRS.length+" — la sensibilità al rumore è il motivo dello smoothing preliminare";
+  }
+  document.getElementById("b-dist").addEventListener("change", function(){ makePairs(this.value); clean=[]; upd(); });
+  document.getElementById("b-noise").addEventListener("input", upd);
+  document.getElementById("b-new").addEventListener("click", function(){ makeBase(); clean=[]; upd(); });
+  makeBase(); makePairs("u"); clean=bits();
+  upd();
+})();
+
+/* ---- Widget: simulatore RANSAC ---- */
+(function(){
+  var svg=document.getElementById("r-svg");
+  if(!svg) return;
+  var N=60, PTS=[], best=null, iter=0;
+  function gauss(){ return (Math.random()+Math.random()+Math.random()+Math.random()-2)/2; }
+  function gen(e){
+    PTS=[]; best=null; iter=0;
+    var nIn=Math.round(N*(1-e/100));
+    for(var i=0;i<N;i++){
+      if(i<nIn){ var x=30+Math.random()*280; PTS.push([x, 205-0.55*x+gauss()*8]); }
+      else { PTS.push([30+Math.random()*280, 20+Math.random()*220]); }
+    }
+  }
+  function fit(p1,p2){
+    var dx=p2[0]-p1[0], dy=p2[1]-p1[1];
+    if(Math.abs(dx)<1e-6){ return null; }
+    var m=dy/dx, q=p1[1]-m*p1[0];
+    return {m:m,q:q};
+  }
+  function countInliers(model,t){
+    var c=0;
+    PTS.forEach(function(p){
+      var d=Math.abs(model.m*p[0]-p[1]+model.q)/Math.sqrt(model.m*model.m+1);
+      if(d<t) c++;
+    });
+    return c;
+  }
+  function drawLine(model, col, w){
+    var x1=25, x2=335;
+    var y1=model.m*x1+model.q, y2=model.m*x2+model.q;
+    return '<line x1="'+x1+'" y1="'+y1.toFixed(1)+'" x2="'+x2+'" y2="'+y2.toFixed(1)+'" stroke="'+col+'" stroke-width="'+w+'"/>';
+  }
+  function upd(){
+    var e=+document.getElementById("r-e").value, p=document.getElementById("r-p").value/1000;
+    var t=+document.getElementById("r-t").value;
+    document.getElementById("r-ev").textContent=(e/100).toFixed(2);
+    document.getElementById("r-pv").textContent=p.toFixed(2);
+    document.getElementById("r-tv").textContent=t;
+    var s=4;
+    var K=Math.ceil(Math.log(1-p)/Math.log(1-Math.pow(1-e/100,s)));
+    var s1="";
+    PTS.forEach(function(pt){
+      s1+='<circle cx="'+pt[0].toFixed(1)+'" cy="'+pt[1].toFixed(1)+'" r="4" fill="var(--lk-cobalt)"/>';
+    });
+    if(best){
+      var m=best.model;
+      var yTop=m.m*25+m.q, yBot=m.m*335+m.q;
+      var ang=Math.atan(m.m);
+      var off=t*Math.cos(ang);
+      s1+='<line x1="25" y1="'+(yTop-off).toFixed(1)+'" x2="335" y2="'+(yBot-off).toFixed(1)+'" stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>';
+      s1+='<line x1="25" y1="'+(yTop+off).toFixed(1)+'" x2="335" y2="'+(yBot+off).toFixed(1)+'" stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>';
+      s1+=drawLine(m,"var(--lk-cobalt-dark)",2.4);
+      s1+='<text x="370" y="60" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt-dark)">migliore: '+best.inliers+' inlier</text>';
+      s1+='<text x="370" y="80" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">trovata all\'iterazione '+best.it+'</text>';
+    } else {
+      s1+='<text x="370" y="60" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">nessuna iterazione ancora eseguita</text>';
+    }
+    s1+='<text x="370" y="110" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink)">iterazioni eseguite: '+iter+'</text>';
+    s1+='<text x="370" y="136" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">con e = '+(e/100).toFixed(2)+', p = '+p.toFixed(2)+', s = '+s+':</text>';
+    s1+='<text x="370" y="158" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt-dark)">K &gt; '+K+' iterazioni</text>';
+    s1+='<text x="370" y="184" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">ogni iterazione: 2 punti casuali → retta</text>';
+    s1+='<text x="370" y="202" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">→ inlier con distanza &lt; t = '+t+'</text>';
+    svg.innerHTML=s1;
+    document.getElementById("r-out").innerHTML=
+      "K = log(1 − p) / log(1 − (1 − e)^s) = <b>"+K+"</b> iterazioni raccomandate · eseguite: <b>"+iter+"</b> · miglior modello: <b>"+(best?best.inliers+" inlier":"—")+"</b>";
+  }
+  document.getElementById("r-step").addEventListener("click", function(){
+    if(PTS.length<2) return;
+    var a=Math.floor(Math.random()*PTS.length), b=Math.floor(Math.random()*PTS.length);
+    while(b===a) b=Math.floor(Math.random()*PTS.length);
+    var model=fit(PTS[a],PTS[b]);
+    if(model){
+      var t=+document.getElementById("r-t").value;
+      var c=countInliers(model,t);
+      if(!best||c>best.inliers){ best={model:model,inliers:c,it:iter+1}; }
+    }
+    iter++;
+    upd();
+  });
+  document.getElementById("r-reset").addEventListener("click", function(){
+    gen(+document.getElementById("r-e").value);
+    upd();
+  });
+  document.getElementById("r-e").addEventListener("input", function(){ gen(+this.value); upd(); });
+  document.getElementById("r-t").addEventListener("input", function(){ upd(); });
+  gen(30); upd();
+})();
+</script>
+</body>
+</html>

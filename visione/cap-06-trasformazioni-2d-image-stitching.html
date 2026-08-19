@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 6 — Trasformazioni 2D e image stitching · V&amp;R</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+  .vr-w{border:1px solid var(--lk-rule);border-radius:3px;padding:1rem 1.1rem;margin:1.4rem 0;background:var(--lk-paper-light)}
+  .vr-w h4{margin:0 0 .3rem;color:var(--lk-cobalt-dark)}
+  .vr-w .vr-sub{margin:0 0 .8rem;font-size:.9rem;color:var(--lk-ink-soft)}
+  .vr-ctl{display:flex;flex-wrap:wrap;gap:.7rem 1.1rem;align-items:center;margin:.6rem 0;font-family:var(--lk-mono);font-size:.8rem}
+  .vr-ctl label{display:flex;gap:.4rem;align-items:center}
+  .vr-ctl input[type=range]{width:130px;accent-color:var(--lk-cobalt)}
+  .vr-ctl select{font-family:var(--lk-mono);font-size:.8rem;padding:.2rem .35rem;border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper)}
+  .vr-btn{font-family:var(--lk-utility);font-size:.82rem;font-weight:600;cursor:pointer;padding:.4rem .85rem;border-radius:3px;border:1px solid var(--lk-cobalt);background:var(--lk-cobalt);color:var(--lk-paper-light)}
+  .vr-btn:hover{background:var(--lk-cobalt-dark)}
+  .vr-btn.sec{background:var(--lk-paper-light);color:var(--lk-ink-soft);border-color:var(--lk-rule)}
+  .vr-out{font-family:var(--lk-mono);font-size:.85rem;background:var(--lk-paper);border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.6rem .75rem;margin-top:.7rem;overflow-x:auto}
+  .vr-out b{color:var(--lk-cobalt-dark)}
+  .vr-mat{display:grid;grid-template-columns:repeat(3,auto);gap:2px 8px;justify-items:center;font-family:var(--lk-mono);font-size:.78rem;line-height:1.35}
+  .vr-mat .br{grid-column:1/4;border-top:1px solid var(--lk-rule-soft);height:0}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-05-feature-forma-cbir.html">&larr; Cap. 5 — Feature di forma e CBIR</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-07-keypoint-descrittori-locali.html">Cap. 7 — Keypoint e descrittori locali &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Feature locali: allineamento e localizzazione · Capitolo 6</div>
+    <h1>Trasformazioni 2D e image stitching</h1>
+    <div class="lk-meta"><span>~35 min di lettura</span><span>3 widget interattivi</span><span>4 tavole</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Coordinate omogenee: un punto è un raggio</a></li>
+      <li><a href="#s2">Image reprojection: allineare immagini come trasformazione 2D</a></li>
+      <li><a href="#s3">La gerarchia delle trasformazioni</a></li>
+      <li><a href="#s4">Traslazione e cambiamento di scala</a></li>
+      <li><a href="#s5">Trasformazione euclidea e affine</a></li>
+      <li><a href="#s6">La trasformazione proiettiva: l'omografia</a></li>
+      <li><a href="#s7">Stimare l'omografia e costruire il panorama</a></li>
+      <li><a href="#s8">Image warping: mapping diretto e inverso</a></li>
+      <li><a href="#s9">Interpolazione: quando il punto cade tra i pixel</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <section id="s1" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>1. Coordinate omogenee: un punto è un raggio</h2>
+    <p>Le trasformazioni 2D si scrivono in modo compatto usando le <strong>coordinate omogenee</strong>, la cui intuizione geometrica è: <em>un punto nell'immagine è un raggio nello spazio proiettivo</em>. Un punto <code>(x, y)</code> sul piano <code>z = 1</code> è rappresentato dal raggio <code>(sx, sy, s)</code>: tutti i punti del raggio sono equivalenti, perché vengono proiettati nello stesso punto sul piano dell'immagine:</p>
+    <pre><code>(x, y, 1) ≅ (sx, sy, s)</code></pre>
+    <p>La conversione da coordinate omogenee a coordinate non omogenee è immediata: si divide per la coordinata <var>w</var>:</p>
+    <pre><code>(x, y, w)  ⇒  (x/w, y/w)</code></pre>
+    <p>Da qui una proprietà centrale: <strong>le coordinate omogenee sono invarianti per cambiamenti di scala</strong> — moltiplicare tutte le coordinate per una costante non cambia il punto rappresentato.</p>
+
+    <div class="vr-w" id="w-hc">
+      <h4>Un punto è un raggio</h4>
+      <p class="vr-sub">Muovi il fattore di scala <var>s</var>: il punto <code>(sx, sy, s)</code> scorre lungo il raggio, ma la proiezione sul piano <code>z = 1</code> resta fissa. È il motivo per cui la matrice dell'omografia è definita <em>a meno di un fattore di scala</em>.</p>
+      <div class="vr-ctl">
+        <label>s <input type="range" id="hc-s" min="50" max="300" value="100"><span id="hc-sv">1.00</span></label>
+        <button class="vr-btn sec" id="hc-reset">Reset</button>
+      </div>
+      <svg id="hc-svg" viewBox="0 0 700 250" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="hc-out"></div>
+    </div>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 250" width="100%" role="img" aria-label="Rappresentazione di un punto dell'immagine come raggio nello spazio proiettivo">
+        <g transform="translate(20,0)">
+          <text x="150" y="28" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">un punto sul piano z = 1 è un raggio</text>
+          <line x1="50" y1="190" x2="300" y2="190" stroke="var(--lk-ink)" stroke-width="1.2"/>
+          <line x1="50" y1="190" x2="50" y2="40" stroke="var(--lk-ink)" stroke-width="1.2"/>
+          <text x="44" y="202" text-anchor="end" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">O</text>
+          <line x1="40" y1="150" x2="310" y2="150" stroke="var(--lk-cobalt)" stroke-width="1.2" stroke-dasharray="6 4"/>
+          <text x="300" y="142" text-anchor="end" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">piano immagine z = 1</text>
+          <line x1="50" y1="190" x2="230" y2="62" stroke="var(--lk-cobalt)" stroke-width="1.6" marker-end="url(#h6a)"/>
+          <circle cx="150" cy="150" r="5" fill="var(--lk-vermilion)"/>
+          <text x="160" y="145" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">(x, y, 1)</text>
+          <circle cx="230" cy="62" r="4.5" fill="var(--lk-cobalt-dark)"/>
+          <text x="238" y="57" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt-dark)">(sx, sy, s)</text>
+          <text x="95" y="95" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">raggio proiettivo</text>
+        </g>
+        <g transform="translate(380,10)">
+          <text x="150" y="28" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">conversione: dividere per w</text>
+          <rect x="40" y="55" width="220" height="95" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+          <text x="150" y="95" text-anchor="middle" font-family="var(--lk-mono)" font-size="15" fill="var(--lk-ink)">(x, y, w) → (x/w, y/w)</text>
+          <text x="150" y="122" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink-soft)">esempio: (6, 4, 2) ≅ (3, 2, 1) → (3, 2)</text>
+          <text x="150" y="185" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">invarianti per cambiamenti di scala</text>
+        </g>
+        <defs><marker id="h6a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-cobalt)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 6.1</b> — Il punto (x, y, 1) sul piano z = 1 è il rappresentante canonico del raggio (sx, sy, s). La conversione divide per la terza coordinata; per questo le coordinate omogenee sono definite a meno di un fattore di scala.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s2" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>2. Image reprojection: allineare immagini come trasformazione 2D</h2>
+    <p>L'<strong>image stitching</strong> (o costruzione di panorami) parte da una domanda: <em>come mettere in relazione due immagini acquisite dalla stessa camera?</em> Dato il punto di osservazione (la camera) e il punto proiettato nel piano P₁ è possibile identificare il <strong>raggio</strong>; per sapere dove quello stesso raggio viene proiettato nel piano P₂ <strong>non è necessario avere informazioni sulla posizione del raggio nel «mondo»</strong>.</p>
+    <p>Il mapping tra le due immagini non richiede quindi informazioni 3D: può essere rappresentato semplicemente come <strong>trasformazione 2D (warping)</strong>. L'idea è proiettare le immagini acquisite da diverse angolazioni su un <strong>unico piano: l'immagine panoramica</strong>.</p>
+    <div class="callout note">
+      <span class="callout-label">Limite del modello a piano</span>
+      <p>Questo modello funziona per <strong>campi visivi limitati</strong>. Nel caso più generale la proiezione non avviene su un piano ma su un <strong>cilindro</strong>, che viene poi «srotolato» per ottenere una rappresentazione lineare.</p>
+    </div>
+    <p>I problemi da affrontare sono due: l'<strong>allineamento</strong> delle diverse immagini e il <strong>blending</strong>, con attenzione alle variazioni che possono interessare le immagini (per esempio la luce).</p>
+  </section>
+
+  <section id="s3" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>3. La gerarchia delle trasformazioni</h2>
+    <p>Le possibili trasformazioni tra immagini formano una <strong>gerarchia</strong>: ogni livello è un caso particolare del successivo, e ogni livello <strong>preserva un sottoinsieme diverso di proprietà</strong>. Le cinque famiglie, in ordine di generalità crescente:</p>
+    <table>
+      <tr><th>Trasformazione</th><th>Preserva</th><th>Forma della matrice</th></tr>
+      <tr><td><strong>Traslazione</strong></td><td>Lunghezze/aree, angoli, orientazioni, linee</td><td><code>[1 0 t_x; 0 1 t_y; 0 0 1]</code></td></tr>
+      <tr><td><strong>Cambiamento di scala</strong></td><td>Rapporto tra lunghezze/aree, angoli, orientazioni, linee</td><td><code>[s_x 0 0; 0 s_y 0; 0 0 1]</code></td></tr>
+      <tr><td><strong>Euclidea (rigid body)</strong></td><td>Lunghezze/aree, angoli, linee</td><td><code>[cosθ −sinθ t_x; sinθ cosθ t_y; 0 0 1]</code></td></tr>
+      <tr><td><strong>Affine</strong></td><td>Rapporto tra aree, linee parallele, rapporto tra linee</td><td><code>[a b c; d e f; 0 0 1]</code></td></tr>
+      <tr><td><strong>Proiettiva (omografia)</strong></td><td>Linee</td><td><code>[a b c; d e f; g h 1]</code></td></tr>
+    </table>
+    <p>Leggere la tabella dal basso verso l'alto è il modo migliore per fissarla: la proiettiva preserva <em>solo</em> le linee; l'affine in più il parallelismo e i rapporti di area; l'euclidea le lunghezze e gli angoli; la traslazione perfino le orientazioni. La scala è un caso particolare di affine (matrice diagonale).</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 340" width="100%" role="img" aria-label="Gerarchia delle trasformazioni 2D con proprietà preservate e matrici">
+        <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">
+          <g transform="translate(20,30)">
+            <text x="110" y="14" text-anchor="middle" font-size="12" fill="var(--lk-cobalt-dark)">proiettiva</text>
+            <rect x="30" y="24" width="160" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+            <text x="45" y="42">a b c</text><text x="45" y="55">d e f</text><text x="45" y="68">g h 1</text>
+            <text x="250" y="52" font-size="11" fill="var(--lk-ink)">preserva: linee</text>
+          </g>
+          <g transform="translate(20,110)">
+            <text x="110" y="14" text-anchor="middle" font-size="12" fill="var(--lk-cobalt-dark)">affine</text>
+            <rect x="30" y="24" width="160" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+            <text x="45" y="42">a b c</text><text x="45" y="55">d e f</text><text x="45" y="68">0 0 1</text>
+            <text x="250" y="45" font-size="11" fill="var(--lk-ink)">preserva: rapporto tra aree,</text>
+            <text x="250" y="62" font-size="11" fill="var(--lk-ink)">linee parallele, rapporto tra linee</text>
+          </g>
+          <g transform="translate(20,190)">
+            <text x="110" y="14" text-anchor="middle" font-size="12" fill="var(--lk-cobalt-dark)">euclidea</text>
+            <rect x="30" y="24" width="160" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+            <text x="45" y="42">cosθ −sinθ t_x</text><text x="45" y="55">sinθ cosθ t_y</text><text x="45" y="68">0    0    1</text>
+            <text x="250" y="52" font-size="11" fill="var(--lk-ink)">preserva: lunghezze/aree, angoli</text>
+          </g>
+          <g transform="translate(20,270)">
+            <text x="110" y="14" text-anchor="middle" font-size="12" fill="var(--lk-cobalt-dark)">traslazione</text>
+            <rect x="30" y="24" width="160" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+            <text x="45" y="42">1 0 t_x</text><text x="45" y="55">0 1 t_y</text><text x="45" y="68">0 0 1</text>
+            <text x="250" y="52" font-size="11" fill="var(--lk-ink)">preserva: anche le orientazioni</text>
+          </g>
+          <g transform="translate(330,190)">
+            <text x="110" y="14" text-anchor="middle" font-size="12" fill="var(--lk-cobalt-dark)">scala</text>
+            <rect x="30" y="24" width="160" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+            <text x="45" y="42">s_x 0  0</text><text x="45" y="55">0  s_y 0</text><text x="45" y="68">0   0  1</text>
+            <text x="250" y="45" font-size="11" fill="var(--lk-ink)">preserva: rapporto tra</text>
+            <text x="250" y="62" font-size="11" fill="var(--lk-ink)">lunghezze/aree, angoli, orientazioni</text>
+          </g>
+        </g>
+        <path d="M100 80 L100 106" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#h6b)"/>
+        <path d="M100 160 L100 186" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#h6b)"/>
+        <path d="M100 240 L100 266" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#h6b)"/>
+        <path d="M435 216 Q495 216 495 190" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#h6b)"/>
+        <text x="600" y="320" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">traslazione ⊂ euclidea ⊂ affine ⊂ proiettiva · la scala è un caso particolare di affine</text>
+        <defs><marker id="h6b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-vermilion)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 6.2</b> — La gerarchia delle trasformazioni 2D. Salendo di livello aumenta il numero di parametri (2 → 3 → 6 → 8) e diminuiscono le proprietà preservate: l'esame chiede spesso di dire cosa sopravvive a ciascuna trasformazione.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s4" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>4. Traslazione e cambiamento di scala</h2>
+    <h3>Traslazione</h3>
+    <p>La traslazione sposta il punto di <var>t_x</var>, <var>t_y</var>. Preserva <strong>lunghezze/aree, angoli, orientazioni e linee</strong>:</p>
+    <pre><code>⎡x′⎤   ⎡1  0  t_x⎤ ⎡x⎤          x′ = x + t_x
+⎢y′⎥ = ⎢0  1  t_y⎥ ⎢y⎥          y′ = y + t_y
+⎣1 ⎦   ⎣0  0   1 ⎦ ⎣1⎦</code></pre>
+    <h3>Cambiamento di scala</h3>
+    <p>La scala moltiplica le coordinate per <var>s_x</var> e <var>s_y</var>. Preserva il <strong>rapporto tra lunghezze/aree</strong> (non le lunghezze assolute), gli <strong>angoli</strong>, le <strong>orientazioni</strong> e le <strong>linee</strong>:</p>
+    <pre><code>⎡x′⎤   ⎡s_x  0   0⎤ ⎡x⎤          x′ = s_x · x
+⎢y′⎥ = ⎢0    s_y 0⎥ ⎢y⎥          y′ = s_y · y
+⎣1 ⎦   ⎣0    0   1⎦ ⎣1⎦</code></pre>
+    <div class="callout exam">
+      <span class="callout-label">Domanda da esame</span>
+      <p>«Quali proprietà preserva la traslazione e quali la scala?» La differenza sottile è <em>lunghezze</em> contro <em>rapporti tra lunghezze</em>: la scala non conserva le dimensioni assolute, ma conserva i rapporti. Entrambe conservano angoli e orientazioni, a differenza della rotazione.</p>
+    </div>
+  </section>
+
+  <section id="s5" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>5. Trasformazione euclidea e affine</h2>
+    <h3>Trasformazione euclidea (rigid body)</h3>
+    <p>Combina <strong>rotazione</strong> (angolo θ) e <strong>traslazione</strong>. Preserva <strong>lunghezze/aree, angoli e linee</strong>; perde l'invarianza delle orientazioni (l'oggetto ruota con la scena):</p>
+    <pre><code>⎡x′⎤   ⎡ cosθ  −sinθ  t_x⎤ ⎡x⎤     x′ = x·cosθ − y·sinθ + t_x
+⎢y′⎥ = ⎢ sinθ   cosθ  t_y⎥ ⎢y⎥     y′ = x·sinθ + y·cosθ + t_y
+⎣1 ⎦   ⎣  0      0     1 ⎦ ⎣1⎦</code></pre>
+    <h3>Trasformazione affine</h3>
+    <p>Generalizza le precedenti con sei parametri <var>a, b, c, d, e, f</var>. Preserva <strong>il rapporto tra aree, le linee parallele e il rapporto tra linee</strong> — il parallelismo è la proprietà che la distingue dalla proiettiva:</p>
+    <pre><code>⎡x′⎤   ⎡a  b  c⎤ ⎡x⎤          x′ = a·x + b·y + c
+⎢y′⎥ = ⎢d  e  f⎥ ⎢y⎥          y′ = d·x + e·y + f
+⎣1 ⎦   ⎣0  0  1⎦ ⎣1⎦</code></pre>
+    <p>Con la scomposizione <code>a = s·cosθ, b = −s·sinθ, c = t_x, d = s·sinθ, e = s·cosθ, f = t_y</code> si ottiene il caso particolare «scala uniforme + rotazione + traslazione».</p>
+  </section>
+
+  <section id="s6" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>6. La trasformazione proiettiva: l'omografia</h2>
+    <p>La trasformazione proiettiva (o <strong>omografia</strong>) è la più generale tra quelle studiate e <strong>preserva soltanto le linee</strong>. Nella terza riga compaiono i parametri <var>g</var> e <var>h</var>, che introducono la <strong>prospettiva</strong>:</p>
+    <pre><code>⎡x′⎤   ⎡a  b  c⎤ ⎡x⎤
+⎢y′⎥ = ⎢d  e  f⎥ ⎢y⎥        p′ = H·p
+⎣w′⎦   ⎣g  h  1⎦ ⎣1⎦</code></pre>
+    <p>Notare la terza coordinata <var>w′</var>: per tornare alle coordinate dell'immagine si divide per <var>w′</var>, esattamente come nella sezione 1. È la divisione per <var>w′</var> a rompere il parallelismo: due rette parallele possono convergere in un punto di fuga.</p>
+    <div class="callout idea">
+      <span class="callout-label">Idea chiave</span>
+      <p>L'omografia è la trasformazione <em>giusta</em> per l'image stitching: quando la camera ruota (o si sposta di poco), la scena fotografata da due posizioni diverse è legata da un'omografia. Per questo il problema dell'allineamento si riduce a: <strong>trovare la matrice H</strong> che mappa una foto nell'altra.</p>
+    </div>
+  </section>
+
+    <div class="vr-w" id="w-tf">
+      <h4>Parco trasformazioni</h4>
+      <p class="vr-sub">Scegli una famiglia di trasformazioni e muovi i suoi parametri: la casa grigia è l'immagine originale, quella blu la trasformata, il punto vermiglio è il colmo del tetto. Osserva quali proprietà geometriche sopravvivono (parallelismo, angoli, lunghezze, ...).</p>
+      <div class="vr-ctl">
+        <label>trasformazione <select id="tf-type">
+          <option value="t">traslazione</option>
+          <option value="s">scala</option>
+          <option value="e">euclidea</option>
+          <option value="a">affine</option>
+          <option value="p">proiettiva</option>
+        </select></label>
+        <span id="tf-ctl"></span>
+      </div>
+      <svg id="tf-svg" viewBox="0 0 700 300" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="tf-out"></div>
+    </div>
+
+  <section id="s7" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>7. Stimare l'omografia e costruire il panorama</h2>
+    <p>Per determinare l'omografia che rappresenta la trasformazione tra due immagini servono <strong>(almeno) 4 coppie di punti</strong> corrispondenti. Date le corrispondenze è possibile risalire alla matrice <var>H</var> attraverso <strong>SVD o il metodo dei minimi quadrati</strong>.</p>
+    <p>L'immagine panoramica si ottiene <strong>allineando progressivamente le immagini due a due</strong>: prima si stimano le omografie tra coppie consecutive, poi si applicano le trasformazioni e si fondono i risultati. Uno step finale di <strong>«normalizzazione»</strong> è spesso necessario per rendere <em>invisibile la transizione tra immagini diverse</em> (il blending della sezione 2).</p>
+    <p>Ma da dove arrivano le corrispondenze? Questo è il ponte verso il prossimo capitolo: <a href="cap-07-keypoint-descrittori-locali.html">i keypoint e i descrittori locali</a> servono proprio a trovare in modo automatico i punti corrispondenti tra due immagini.</p>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 280" width="100%" role="img" aria-label="Pipeline dell'image stitching: corrispondenze, stima dell'omografia, warping e blending">
+        <rect x="15" y="45" width="120" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="75" y="88" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">immagine 1</text>
+        <circle cx="45" cy="70" r="4" fill="var(--lk-vermilion)"/><circle cx="60" cy="100" r="4" fill="var(--lk-vermilion)"/>
+        <circle cx="105" cy="70" r="4" fill="var(--lk-vermilion)"/><circle cx="100" cy="108" r="4" fill="var(--lk-vermilion)"/>
+        <rect x="155" y="45" width="120" height="80" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="215" y="88" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">immagine 2</text>
+        <circle cx="190" cy="74" r="4" fill="var(--lk-vermilion)"/><circle cx="205" cy="102" r="4" fill="var(--lk-vermilion)"/>
+        <circle cx="250" cy="68" r="4" fill="var(--lk-vermilion)"/><circle cx="245" cy="106" r="4" fill="var(--lk-vermilion)"/>
+        <g stroke="var(--lk-vermilion)" stroke-width="1" stroke-dasharray="3 3">
+          <line x1="49" y1="70" x2="186" y2="74"/><line x1="64" y1="100" x2="201" y2="102"/>
+          <line x1="109" y1="70" x2="246" y2="68"/><line x1="104" y1="108" x2="241" y2="106"/>
+        </g>
+        <text x="215" y="35" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">≥ 4 coppie di punti corrispondenti</text>
+        <path d="M280 85 L325 85" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#h6c)"/>
+        <rect x="330" y="52" width="140" height="66" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="400" y="76" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">stima di H</text>
+        <text x="400" y="94" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">SVD / minimi quadrati</text>
+        <path d="M475 85 L520 85" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#h6c)"/>
+        <rect x="525" y="52" width="155" height="66" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="602" y="76" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">warping</text>
+        <text x="602" y="94" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">+ blending</text>
+        <path d="M602 122 L602 175" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#h6c)"/>
+        <rect x="462" y="180" width="280" height="70" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-width="1.3"/>
+        <text x="602" y="212" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt-dark)">immagine panoramica</text>
+        <text x="602" y="232" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">normalizzazione finale: transizione invisibile</text>
+        <text x="100" y="175" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">campo visivo limitato → piano</text>
+        <text x="100" y="192" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">campo visivo ampio → cilindro srotolato</text>
+        <defs><marker id="h6c" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--lk-ink)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 6.3</b> — La pipeline del panorama: quattro (o più) corrispondenze permettono di stimare l'omografia con SVD o minimi quadrati; warping e blending producono l'immagine panoramica, con una normalizzazione finale che nasconde la transizione.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s8" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>8. Image warping: mapping diretto e inverso</h2>
+    <p>Sia <var>f</var> la funzione che rappresenta la trasformazione da applicare. Eseguendo la trasformazione <strong>a partire da una scansione dell'immagine di partenza</strong> (mapping diretto), si incontrano tre problemi:</p>
+    <ul>
+      <li>i <strong>valori dei nuovi pixel non sono necessariamente interi</strong> (serve un'approssimazione);</li>
+      <li>alcuni pixel vengono <strong>mappati al di fuori della nuova immagine</strong>;</li>
+      <li>alcuni pixel della nuova immagine <strong>non vengono colpiti</strong>: restano i cosiddetti <strong>buchi</strong>.</li>
+    </ul>
+    <p>Un modo efficace di risolvere questi problemi è il <strong>mapping inverso</strong>: si scandisce la nuova immagine e, per ogni pixel <code>[x_new, y_new]</code>, si determina il punto di riferimento <code>[x_old, y_old]</code> sulla vecchia immagine attraverso la <strong>funzione inversa f⁻¹</strong>. Per una trasformazione affine:</p>
+    <pre><code>⎡x_old⎤   ⎡1/s  0   ⎤ ⎡ cos(−θ)  −sin(−θ) ⎤ ⎛ ⎡x_new⎤   ⎡t_x⎤ ⎞
+⎢y_old⎥ = ⎢ 0   1/s  ⎥ ⎢ sin(−θ)   cos(−θ) ⎥ · ⎜ ⎢y_new⎥ − ⎢t_y⎥ ⎟
+⎣ 1   ⎦   ⎣ 0    0   ⎦ ⎣   0         0     ⎦ ⎝ ⎣  1  ⎦   ⎣ 1 ⎦ ⎠</code></pre>
+    <p>Il punto di riferimento <code>[x_old, y_old]</code>, in coordinate continue (floating point), può cadere:</p>
+    <ul>
+      <li><strong>fuori dalla vecchia immagine</strong>: si imposta un valore di base (es. nero);</li>
+      <li><strong>su un pixel</strong> della vecchia immagine: si copia l'intensità;</li>
+      <li><strong>a metà strada tra 4 pixel</strong>: si interpola (sezione successiva).</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <svg viewBox="0 0 700 290" width="100%" role="img" aria-label="Confronto tra mapping diretto e mapping inverso">
+        <g transform="translate(15,10)">
+          <text x="160" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">mapping diretto: buchi e pixel fuori</text>
+          <rect x="20" y="40" width="200" height="150" fill="none" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <g fill="var(--lk-vermilion)">
+            <circle cx="70" cy="90" r="3"/><circle cx="130" cy="70" r="3"/><circle cx="100" cy="140" r="3"/><circle cx="180" cy="110" r="3"/>
+          </g>
+          <rect x="290" y="40" width="200" height="150" fill="none" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <g stroke="var(--lk-cobalt)" stroke-width="1.1" fill="none">
+            <path d="M75 95 L330 75"/><path d="M133 72 L400 150" marker-end="url(#h6d)"/>
+            <path d="M103 143 L320 60"/><path d="M183 112 L430 140"/>
+          </g>
+          <circle cx="330" cy="75" r="4" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+          <text x="330" y="65" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-cobalt-dark)">fuori</text>
+          <circle cx="400" cy="150" r="3.5" fill="var(--lk-cobalt)"/><circle cx="320" cy="60" r="3.5" fill="var(--lk-cobalt)"/>
+          <rect x="378" y="52" width="16" height="12" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-dasharray="3 2"/>
+          <text x="386" y="46" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">buco</text>
+          <text x="255" y="225" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">coordinate non intere → approssimazione</text>
+        </g>
+        <g transform="translate(380,150)">
+          <text x="150" y="22" text-anchor="middle" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">mapping inverso: f⁻¹ per ogni pixel nuovo</text>
+          <rect x="60" y="40" width="180" height="140" fill="none" stroke="var(--lk-rule)" stroke-width="1.2"/>
+          <line x1="60" y1="110" x2="240" y2="110" stroke="var(--lk-rule-soft)"/>
+          <line x1="150" y1="40" x2="150" y2="180" stroke="var(--lk-rule-soft)"/>
+          <text x="82" y="55" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">A</text>
+          <text x="230" y="55" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">B</text>
+          <text x="230" y="177" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">C</text>
+          <text x="82" y="177" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink)">D</text>
+          <path d="M175 95 L205 95" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#h6d)"/>
+          <text x="196" y="88" text-anchor="middle" font-family="var(--lk-mono)" font-size="9" fill="var(--lk-vermilion)">f⁻¹</text>
+          <circle cx="205" cy="95" r="4" fill="var(--lk-vermilion)"/>
+          <text x="209" y="113" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">[x_old,y_old]</text>
+          <circle cx="175" cy="95" r="3" fill="var(--lk-cobalt)"/>
+          <text x="147" y="88" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">[x_new,y_new]</text>
+          <text x="150" y="215" text-anchor="middle" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">fuori dall'immagine → valore di base (nero)</text>
+        </g>
+        <defs><marker id="h6d" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--lk-cobalt)"/></marker></defs>
+      </svg>
+      <figcaption><b>Tavola 6.4</b> — A sinistra i tre guai del mapping diretto: coordinate non intere, punti che escono dall'immagine, buchi. A destra il mapping inverso: si parte dal pixel nuovo e si risale alla posizione continua nella vecchia immagine con f⁻¹.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s9" data-src="06 - Trasformazioni 2D e image stitching.pdf">
+    <h2>9. Interpolazione: quando il punto cade tra i pixel</h2>
+    <p>Se <code>[x_old, y_old]</code> cade a metà strada tra quattro pixel <var>A, B, C, D</var>, il valore di intensità del nuovo pixel si calcola <strong>interpolando</strong> i valori di intensità dei 4 pixel circostanti. L'<strong>interpolazione di Lagrange</strong> cerca il piano che meglio approssima i 4 punti (ai minimi quadrati):</p>
+    <pre><code>New I(x_new, y_new) = ( Old I(A)·w_A + Old I(B)·w_B + Old I(C)·w_C + Old I(D)·w_D ) / ( w_A + w_B + w_C + w_D )</code></pre>
+    <p>con i pesi (indicando con <code>x_old, y_old</code> le coordinate frazionarie dentro la cella, e con <code>x_i, y_j</code> il vertice in basso a sinistra):</p>
+    <pre><code>w_A = (x_i+1 − x_old)·(y_j+1 − y_old)        w_C = (x_old − x_i)·(y_old − y_j)
+w_B = (x_old − x_i)·(y_j+1 − y_old)           w_D = (x_i+1 − x_old)·(y_old − y_j)</code></pre>
+    <p>La lettura è semplice: ogni peso è il <strong>prodotto delle distanze dal vertice opposto</strong> — un vertice vicino al punto riceve un peso grande, uno lontano un peso piccolo.</p>
+
+    <div class="vr-w" id="w-int">
+      <h4>Interpolazione bilineare</h4>
+      <p class="vr-sub">I quattro vertici della cella hanno intensità A = 40, B = 190, C = 230, D = 95. Muovi il punto frazionario dentro la cella: il valore interpolato segue i pesi della formula di Lagrange.</p>
+      <div class="vr-ctl">
+        <label>x <input type="range" id="in-x" min="0" max="100" value="40"><span id="in-xv">0.40</span></label>
+        <label>y <input type="range" id="in-y" min="0" max="100" value="60"><span id="in-yv">0.60</span></label>
+      </div>
+      <svg id="in-svg" viewBox="0 0 700 240" width="100%" aria-hidden="true"></svg>
+      <div class="vr-out" id="in-out"></div>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Perché le coordinate omogenee sono invarianti per cambiamenti di scala?</summary>
+        <p>Perché un punto <code>(x, y, 1)</code> è rappresentato dal <strong>raggio</strong> <code>(sx, sy, s)</code>: tutti i punti del raggio sono equivalenti, essendo proiettati nello stesso punto sul piano dell'immagine. La conversione <code>(x, y, w) → (x/w, y/w)</code> elimina il fattore di scala.</p>
+      </details>
+      <details>
+        <summary>Perché il mapping tra due immagini acquisite dalla stessa camera non richiede informazioni 3D?</summary>
+        <p>Perché, noti il punto di osservazione e il punto proiettato nel piano P₁, è possibile identificare il <strong>raggio</strong>; il punto in cui quel raggio viene proiettato nel piano P₂ si determina senza conoscere la posizione del raggio nel mondo. Il mapping è quindi una <strong>trasformazione 2D (warping)</strong>.</p>
+      </details>
+      <details>
+        <summary>Quali sono i due problemi principali dell'image stitching?</summary>
+        <p>L'<strong>allineamento</strong> delle diverse immagini e il <strong>blending</strong>, con attenzione alle variazioni che possono interessare le immagini (es. luce). Per campi visivi ampi la proiezione avviene su un <strong>cilindro</strong> poi srotolato, non su un piano.</p>
+      </details>
+      <details>
+        <summary>Elencate le proprietà preservate da traslazione, scala, euclidea, affine e proiettiva.</summary>
+        <p><strong>Traslazione</strong>: lunghezze/aree, angoli, orientazioni, linee. <strong>Scala</strong>: rapporto tra lunghezze/aree, angoli, orientazioni, linee. <strong>Euclidea</strong>: lunghezze/aree, angoli, linee. <strong>Affine</strong>: rapporto tra aree, linee parallele, rapporto tra linee. <strong>Proiettiva</strong>: linee.</p>
+      </details>
+      <details>
+        <summary>Quante coppie di punti servono (al minimo) per stimare un'omografia?</summary>
+        <p><strong>Almeno 4 coppie di punti</strong> corrispondenti. Data la matrice <code>p′ = H·p</code>, l'omografia ha 8 parametri liberi (la matrice 3×3 è definita a meno di un fattore di scala); con le corrispondenze si risale a H tramite <strong>SVD o metodo dei minimi quadrati</strong>.</p>
+      </details>
+      <details>
+        <summary>Come si costruisce l'immagine panoramica a partire dalle singole foto?</summary>
+        <p>Allineando <strong>progressivamente le immagini due a due</strong>: per ogni coppia si stimano le corrispondenze (≥ 4 coppie) e l'omografia, si applica il warping e si fonde. Uno step finale di <strong>normalizzazione</strong> rende invisibile la transizione tra immagini diverse.</p>
+      </details>
+      <details>
+        <summary>Quali sono i tre problemi del mapping diretto?</summary>
+        <p>I valori dei <strong>nuovi pixel non sono necessariamente interi</strong> (serve approssimazione); alcuni pixel vengono <strong>mappati fuori dalla nuova immagine</strong>; alcuni pixel della nuova immagine <strong>non vengono colpiti</strong>, lasciando dei <strong>buchi</strong>.</p>
+      </details>
+      <details>
+        <summary>Come funziona il mapping inverso e cosa succede se il punto di riferimento cade fuori?</summary>
+        <p>Si scandisce la <strong>nuova</strong> immagine e per ogni pixel <code>[x_new, y_new]</code> si determina il punto <code>[x_old, y_old]</code> nella vecchia immagine con la funzione inversa <code>f⁻¹</code>. Se cade <strong>fuori</strong> dalla vecchia immagine si imposta un <strong>valore di base</strong> (es. nero); se cade su un pixel si copia l'intensità; se cade tra 4 pixel si interpola.</p>
+      </details>
+      <details>
+        <summary>Come si calcola l'interpolazione di Lagrange su 4 pixel?</summary>
+        <p>Come media pesata: <code>New I = (I(A)·w_A + I(B)·w_B + I(C)·w_C + I(D)·w_D) / (w_A + w_B + w_C + w_D)</code>, dove ogni peso è il prodotto delle distanze dal vertice opposto: <code>w_A = (x_i+1 − x_old)(y_j+1 − y_old)</code>, <code>w_B = (x_old − x_i)(y_j+1 − y_old)</code>, <code>w_C = (x_old − x_i)(y_old − y_j)</code>, <code>w_D = (x_i+1 − x_old)(y_old − y_j)</code>.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra la matrice affine e quella proiettiva?</summary>
+        <p>L'affine ha l'ultima riga <code>[0 0 1]</code> (6 parametri) e preserva parallelismo e rapporti di aree; la <strong>proiettiva</strong> ha l'ultima riga <code>[g h 1]</code> (8 parametri) e preserva <strong>solo le linee</strong>: la divisione per <var>w′</var> rompe il parallelismo, producendo punti di fuga.</p>
+      </details>
+    </div>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-05-feature-forma-cbir.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-07-keypoint-descrittori-locali.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonte: dispensa "06 - Trasformazioni 2D e image stitching" · Visione Artificiale e Riconoscimento, UniBo · Prof.ssa Annalisa Franco</p>
+  </footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="assets/lesson-kit.js"></script>
+<script>
+hljs.highlightAll();
+
+/* ---- Widget: coordinate omogenee ---- */
+(function(){
+  var svg=document.getElementById("hc-svg");
+  if(!svg) return;
+  var X=2, Y=1.5;
+  function upd(){
+    var s=document.getElementById("hc-s").value/100;
+    document.getElementById("hc-sv").textContent=s.toFixed(2);
+    var ox=70, oy=210, unit=55;
+    var px=ox+unit*X*s, py=oy-unit*s;
+    var s1="";
+    s1+='<line x1="40" y1="'+oy+'" x2="330" y2="'+oy+'" stroke="var(--lk-ink)" stroke-width="1.2"/>';
+    s1+='<line x1="'+ox+'" y1="210" x2="'+ox+'" y2="30" stroke="var(--lk-ink)" stroke-width="1.2"/>';
+    s1+='<line x1="30" y1="155" x2="340" y2="155" stroke="var(--lk-cobalt)" stroke-width="1.2" stroke-dasharray="6 4"/>';
+    s1+='<text x="332" y="148" text-anchor="end" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">piano z = 1</text>';
+    s1+='<line x1="'+ox+'" y1="'+oy+'" x2="'+px.toFixed(1)+'" y2="'+py.toFixed(1)+'" stroke="var(--lk-cobalt)" stroke-width="1.6"/>';
+    s1+='<circle cx="'+(ox+unit*X).toFixed(1)+'" cy="155" r="5" fill="var(--lk-vermilion)"/>';
+    s1+='<text x="'+(ox+unit*X+8).toFixed(1)+'" y="150" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">(x, y, 1)</text>';
+    s1+='<circle cx="'+px.toFixed(1)+'" cy="'+py.toFixed(1)+'" r="4.5" fill="var(--lk-cobalt-dark)"/>';
+    s1+='<text x="'+(px+8).toFixed(1)+'" y="'+(py-6).toFixed(1)+'" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-cobalt-dark)">(sx, sy, s)</text>';
+    s1+='<text x="'+(ox+unit*X*0.5+12).toFixed(1)+'" y="'+(oy-unit*0.5+14).toFixed(1)+'" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">raggio</text>';
+    svg.innerHTML=s1;
+    document.getElementById("hc-out").innerHTML =
+      "punto omogeneo: <b>("+(X*s).toFixed(2)+", "+(Y*s).toFixed(2)+", "+s.toFixed(2)+")</b> &nbsp;·&nbsp; proiezione (x/w, y/w): <b>("+X+", "+Y+")</b> — costante al variare di s<br>"+
+      "tutti i punti del raggio sono equivalenti: (x, y, 1) ≅ (sx, sy, s)";
+  }
+  document.getElementById("hc-s").addEventListener("input", upd);
+  document.getElementById("hc-reset").addEventListener("click", function(){
+    document.getElementById("hc-s").value=100; upd();
+  });
+  upd();
+})();
+
+/* ---- Widget: parco trasformazioni ---- */
+(function(){
+  var svg=document.getElementById("tf-svg");
+  var ctl=document.getElementById("tf-ctl");
+  if(!svg||!ctl) return;
+  var P={t:{tx:40,ty:20},s:{sx:120,sy:80},e:{th:30,tx:30,ty:10},a:{a:100,b:25,c:30,d:10,e:100,f:15},p:{tx:20,ty:10,g:12,h:8}};
+  var FIELDS={t:[["tx",-60,60,1],["ty",-60,60,1]], s:[["sx",30,250,5],["sy",30,250,5]],
+    e:[["th",-180,180,1],["tx",-60,60,1],["ty",-60,60,1]],
+    a:[["a",-120,120,5],["b",-120,120,5],["c",-80,80,1],["d",-120,120,5],["e",-120,120,5],["f",-80,80,1]],
+    p:[["tx",-60,60,1],["ty",-60,60,1],["g",-40,40,1],["h",-40,40,1]]};
+  var PRES={t:["preserva: lunghezze/aree, angoli,","orientazioni, linee"],
+    s:["preserva: rapporti tra lunghezze/aree,","angoli, orientazioni, linee"],
+    e:["preserva: lunghezze/aree, angoli, linee","(perde le orientazioni)"],
+    a:["preserva: rapporto tra aree,","linee parallele, rapporto tra linee"],
+    p:["preserva solo le linee:","il parallelismo può rompersi"]};
+  function mOf(k){
+    var q=P[k], R=k==="e"?q.th*Math.PI/180:0, c=Math.cos(R), sn=Math.sin(R);
+    if(k==="t") return [[1,0,q.tx],[0,1,q.ty],[0,0,1]];
+    if(k==="s") return [[q.sx/100,0,0],[0,q.sy/100,0],[0,0,1]];
+    if(k==="e") return [[c,-sn,q.tx],[sn,c,q.ty],[0,0,1]];
+    if(k==="a") return [[q.a/100,q.b/100,q.c],[q.d/100,q.e/100,q.f],[0,0,1]];
+    return [[1,0,q.tx],[0,1,q.ty],[q.g/10000,q.h/10000,1]];
+  }
+  function apply(M,p){
+    var x=M[0][0]*p[0]+M[0][1]*p[1]+M[0][2];
+    var y=M[1][0]*p[0]+M[1][1]*p[1]+M[1][2];
+    var w=M[2][0]*p[0]+M[2][1]*p[1]+M[2][2];
+    return [x/w, y/w];
+  }
+  function build(){
+    var k=document.getElementById("tf-type").value, h="";
+    FIELDS[k].forEach(function(f){
+      var v=P[k][f[0]], disp=(k==="p"&&(f[0]==="g"||f[0]==="h"))?(v/10000).toFixed(4):v;
+      h+='<label>'+f[0]+' <input type="range" data-k="'+k+'" data-f="'+f[0]+'" min="'+f[1]+'" max="'+f[2]+'" value="'+v+'"><span id="tfv-'+f[0]+'">'+disp+'</span></label>';
+    });
+    ctl.innerHTML=h;
+    [].slice.call(ctl.querySelectorAll("input[type=range]")).forEach(function(inp){
+      inp.addEventListener("input", function(){
+        var f=inp.dataset.f, v=+inp.value, isP=inp.dataset.k==="p"&&(f==="g"||f==="h");
+        P[inp.dataset.k][f]=v;
+        document.getElementById("tfv-"+f).textContent=isP?(v/10000).toFixed(4):v;
+        upd();
+      });
+    });
+  }
+  function upd(){
+    var k=document.getElementById("tf-type").value, M=mOf(k);
+    var ox=70, oy=55, W=230, H=195;
+    var fxs=[0.5,0.28,0.72,0.72,0.28,0.44,0.56,0.56,0.44], fys=[0.18,0.45,0.45,0.82,0.82,0.60,0.60,0.82,0.82];
+    function imgP(fx,fy){ return [ox+W*fx, oy+H*fy]; }
+    var s="";
+    // cornice originale e trasformata
+    var c0=[[ox,oy],[ox+W,oy],[ox+W,oy+H],[ox,oy+H]];
+    var c1=c0.map(function(p){ return apply(M,p); });
+    s+='<path d="'+c0.map(function(p,i){return (i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1);}).join("")+'Z" fill="none" stroke="var(--lk-rule-soft)" stroke-width="1"/>';
+    s+='<path d="'+c1.map(function(p,i){return (i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1);}).join("")+'Z" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.5" stroke-dasharray="5 3"/>';
+    // casa originale
+    var pts=fxs.map(function(fx,i){ return imgP(fx,fys[i]); });
+    s+='<path d="'+pts.map(function(p,i){return (i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1);}).join("")+'Z" fill="var(--lk-hl)" stroke="var(--lk-ink)" stroke-width="1.4" opacity=".55"/>';
+    // casa trasformata
+    var tpts=fxs.map(function(fx,i){ return apply(M,imgP(fx,fys[i])); });
+    s+='<path d="'+tpts.map(function(p,i){return (i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1);}).join("")+'Z" fill="none" stroke="var(--lk-cobalt-dark)" stroke-width="2"/>';
+    s+='<circle cx="'+apply(M,imgP(0.5,0.18))[0].toFixed(1)+'" cy="'+apply(M,imgP(0.5,0.18))[1].toFixed(1)+'" r="3" fill="var(--lk-vermilion)"/>';
+    s+='<text x="395" y="58" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">grigio: immagine originale</text>';
+    s+='<text x="395" y="76" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">blu: immagine trasformata</text>';
+    s+='<text x="395" y="94" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">colmo del tetto: punto di riferimento</text>';
+    s+='<text x="395" y="122" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">matrice applicata:</text>';
+    var mh='<text x="395" y="142" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">'+M[0][0].toFixed(2)+'  '+M[0][1].toFixed(2)+'  '+M[0][2].toFixed(1)+'</text>'+
+          '<text x="395" y="158" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">'+M[1][0].toFixed(2)+'  '+M[1][1].toFixed(2)+'  '+M[1][2].toFixed(1)+'</text>'+
+          '<text x="395" y="174" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">'+M[2][0].toFixed(2)+'  '+M[2][1].toFixed(2)+'  '+M[2][2].toFixed(2)+'</text>';
+    s+=mh;
+    s+='<text x="395" y="202" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">'+PRES[k][0]+'</text>';
+    s+='<text x="395" y="220" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-forest)">'+PRES[k][1]+'</text>';
+    svg.innerHTML=s;
+    var disp=FIELDS[k].map(function(f){ return f[0]+"="+(k==="p"&&(f[0]==="g"||f[0]==="h")?(P[k][f[0]]/10000).toFixed(4):P[k][f[0]]); }).join(", ");
+    document.getElementById("tf-out").innerHTML="tipo: <b>"+k+"</b> · parametri: "+disp;
+  }
+  document.getElementById("tf-type").addEventListener("change", function(){ build(); upd(); });
+  build(); upd();
+})();
+
+/* ---- Widget: interpolazione bilineare ---- */
+(function(){
+  var svg=document.getElementById("in-svg");
+  if(!svg) return;
+  var IA=40, IB=190, IC=230, ID=95;
+  function upd(){
+    var x=document.getElementById("in-x").value/100, y=document.getElementById("in-y").value/100;
+    document.getElementById("in-xv").textContent=x.toFixed(2);
+    document.getElementById("in-yv").textContent=y.toFixed(2);
+    var x0=60, y0=190, W=170, H=130;
+    var A=[x0,y0], B=[x0+W,y0], C=[x0+W,y0-H], D=[x0,y0-H];
+    var px=x0+x*W, py=y0-y*H;
+    var wA=(1-x)*(1-y), wB=x*(1-y), wC=x*y, wD=(1-x)*y;
+    var val=(IA*wA+IB*wB+IC*wC+ID*wD)/(wA+wB+wC+wD);
+    var s="";
+    s+='<rect x="'+x0+'" y="'+(y0-H)+'" width="'+W+'" height="'+H+'" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-width="1.2"/>';
+    s+='<line x1="'+x0+'" y1="'+y0+'" x2="'+(x0+W)+'" y2="'+(y0-H)+'" stroke="var(--lk-rule-soft)" stroke-width=".7"/>';
+    s+='<line x1="'+(x0+W)+'" y1="'+y0+'" x2="'+x0+'" y2="'+(y0-H)+'" stroke="var(--lk-rule-soft)" stroke-width=".7"/>';
+    [[A,"A",IA,-18,10],[B,"B",IB,8,10],[C,"C",IC,8,-18],[D,"D",ID,-18,-18]].forEach(function(q){
+      s+='<circle cx="'+q[0][0]+'" cy="'+q[0][1]+'" r="3.5" fill="var(--lk-cobalt)"/>';
+      s+='<text x="'+(q[0][0]+q[3])+'" y="'+(q[0][1]+q[4])+'" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">'+q[1]+' = '+q[2]+'</text>';
+    });
+    s+='<circle cx="'+px.toFixed(1)+'" cy="'+py.toFixed(1)+'" r="4.5" fill="var(--lk-vermilion)"/>';
+    s+='<text x="'+(px+8).toFixed(1)+'" y="'+(py-8).toFixed(1)+'" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">[x_old, y_old]</text>';
+    s+='<text x="330" y="60" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">pesi (prodotto delle distanze</text>';
+    s+='<text x="330" y="78" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink-soft)">dal vertice opposto):</text>';
+    s+='<text x="330" y="100" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">w_A = '+(wA).toFixed(2)+'</text>';
+    s+='<text x="330" y="118" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">w_B = '+(wB).toFixed(2)+'</text>';
+    s+='<text x="330" y="136" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">w_C = '+(wC).toFixed(2)+'</text>';
+    s+='<text x="330" y="154" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-ink)">w_D = '+(wD).toFixed(2)+'</text>';
+    s+='<text x="330" y="186" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-cobalt-dark)">New I = '+val.toFixed(1)+'</text>';
+    svg.innerHTML=s;
+    document.getElementById("in-out").innerHTML =
+      "intensità ai vertici: A = "+IA+", B = "+IB+", C = "+IC+", D = "+ID+"<br>"+
+      "punto frazionario: <b>("+x.toFixed(2)+", "+y.toFixed(2)+")</b> &nbsp;·&nbsp; valore interpolato: <b>New I = "+val.toFixed(1)+"</b>";
+  }
+  ["in-x","in-y"].forEach(function(id){
+    document.getElementById(id).addEventListener("input", upd);
+  });
+  upd();
+})();
+</script>
+</body>
+</html>
