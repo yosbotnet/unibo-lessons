@@ -24,8 +24,9 @@ Scope and conventions (authoritative corpus:
   or a bespoke wrapper div (w-*).  The chapter meta count equals the number
   of UNIQUE ids among (LessonKit call targets ∪ id="w-*" hosts); a stepper
   hosted at #w-x counts once even though it appears in both sets.
-* Plates convention: every <figure class="lk-fig"> counts as one plate; the
-  meta "plates" number must match.
+* Plates convention: every <figure class="lk-fig"> containing an inline SVG
+  counts as one technical plate; illustrative raster scenes do not. The meta
+  "plates" number must match.
 * Navigation: every chapter links prev/next (>=2 occurrences each: top nav +
   footer) and index.html (>=2); chapter 1 has no prev, chapter 18 is
   terminal (no forward links).
@@ -351,7 +352,7 @@ def main():
                 r'LessonKit\.(?:stateExplorer|stepper|annotatedCode)\(\s*[\'"]#([^\'"]+)[\'"]', html))
             w_hosts = set(re.findall(r'id="(w-[a-z0-9-]+)"', html))
             unique_widgets = lk_targets | w_hosts
-            plates = len(re.findall(r'<figure class="lk-fig"', html))
+            plates = len(re.findall(r'<figure class="lk-fig"[^>]*>.*?<svg\b', html, re.S))
             if mw != len(unique_widgets):
                 problems.append(f"{name}: meta says {mw} widgets, computed {len(unique_widgets)} "
                                 f"(unique LessonKit targets {sorted(lk_targets)} + w-* hosts {sorted(w_hosts)})")
@@ -438,7 +439,7 @@ def main():
     total_w = total_t = 0
     for name in CHAPTERS:
         html = (SAP / name).read_text(encoding="utf-8")
-        figs = len(re.findall(r'<figure class="lk-fig"', html))
+        figs = len(re.findall(r'<figure class="lk-fig"[^>]*>.*?<svg\b', html, re.S))
         quizzes = len(re.findall(r"<details>", html))
         secs = len(re.findall(r"<section id=", html))
         w, t = EXPECTED[name]
