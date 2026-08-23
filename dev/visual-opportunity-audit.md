@@ -2,16 +2,17 @@
 
 Date: 2026-08-23
 Scope: all 23 resources linked from the root catalog
-Status: read-only audit; no lesson or asset changes
+Status: visual direction corrected after the two-image pilot; first two plates integrated
 
 ## Decision
 
 Use a restrained hybrid system:
 
 - keep technical SVGs, charts, state machines, formulas, schemas, protocol flows, and code diagrams;
-- add generated images only when a physical scene, historical object, or concrete analogy carries learning value that the technical plate cannot;
+- add generated images only when a mechanism-specific editorial plate carries learning value that the precise technical SVG cannot;
 - use real/canonical images for empirical visual evidence, screenshots, adversarial examples, image-processing outputs, and historical artifacts when rights permit;
-- avoid generated text, labels, formulas, arrows, dashboards, branded interfaces, or generic futuristic decoration.
+- follow the PCD/ybc.sh archival plate family: warm fibrous paper, one or two risograph inks, cobalt dominant, sparse vermilion or occasional forest, fine linework, registration marks, and negative space;
+- avoid people, photography, generated text, labels, formulas, dashboards, generic software imagery, glossy 3D, gradients, and shadows.
 
 The audit found no reason to add generated imagery to every course. Macro and Politics are already image-rich. BI, most of ASMD, most of Deep Learning, and the formal/protocol-heavy chapters are correctly diagram-first.
 
@@ -25,7 +26,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 4, immediately after the environment/materials paragraph.
 - Evidence: the lesson specifies a whole wall covered with butcher paper, many coloured sticky notes, and markers (`sap/cap-08-eventstorming.html:112`, `:397`).
 - Learning purpose: make the physical, collaborative nature of EventStorming memorable; complement rather than replace the ten-step technical plate.
-- Draft prompt: `Documentary-style workshop scene, diverse software and domain team standing at a very long wall covered edge-to-edge with butcher paper and many colored sticky notes arranged as a timeline, participants actively adding notes with markers, warm natural studio light, candid collaboration, restrained paper-and-cobalt palette with sparse vermilion accents, no readable text, no arrows, no logos, 16:9.`
+- Plate brief: `Long horizontal event timeline made from blank note rectangles; clusters resolve into domain regions; sparse vermilion marks identify pivotal transitions. Warm fibrous paper, cobalt risograph linework, registration marks, generous negative space. No people, room, words, photography, gradients, shadows, or 3D.`
 
 ### 2. Grey Walter tortoises
 
@@ -33,7 +34,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 5, after the Elmer-and-Elsie description.
 - Evidence: two candle-equipped tortoises approach and produce an unplanned “dance” (`irs/cap-02-history-of-robotics.html:211`); the lesson identifies this as environment-coupled and locally emergent behaviour (`:367`).
 - Learning purpose: anchor synthetic psychology, situated behaviour, and early swarm emergence in one historical scene.
-- Draft prompt: `Historically inspired 1940s robotics laboratory at night, two small Grey Walter-style tortoise robots on a dark tabletop, each with a softly glowing candle-like light, graceful long-exposure light trails showing their mutual dance, mid-century instruments in soft background, archival documentary illustration, no labels, no text, no logos, 16:9.`
+- Plate brief: `Top-down schematic of two simplified tortoise machines with photocell mast and steering wheel; curved motion traces converge on one vermilion light source and cross into a dance. Warm paper, cobalt risograph linework, registration marks, no text or photographic laboratory.`
 - Note: stylistic reconstruction, not a claimed archival photograph.
 
 ### 3. Alice and Bob’s milk race
@@ -42,7 +43,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 2, beside “Alice e Bob comprano il latte.”
 - Evidence: both actors can inspect the refrigerator and notes concurrently, then both buy milk because the check-and-note operation is not atomic (`pcd/cap-01-introduzione.html:534-537`; scenario heading at `pcd/cap-02-modellazione.html:129`).
 - Learning purpose: make race condition and non-atomic check-then-act behavior retrievable through an everyday scene.
-- Draft prompt: `Warm shared-apartment kitchen, two roommates arriving simultaneously from opposite sides, each holding a grocery bag containing a milk carton, both looking surprised at the already-stocked open refrigerator, two overlapping handwritten note slips on the refrigerator door but no readable writing, natural morning light, pedagogical editorial illustration, no labels or arrows, 16:9.`
+- Plate brief: `Two independent cobalt process traces perform check and buy operations against one shared refrigerator state; both traces terminate in duplicate milk cartons, with the non-atomic overlap indexed in vermilion. No people, kitchen scene, text, or labels.`
 
 ### 4. Passive dynamic walker
 
@@ -50,7 +51,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 3, after the characteristic-cases list.
 - Evidence: the machine walks down a slope without motors, sensors, controller, or computer; gait emerges from slope and mechanical parameters (`irs/cap-16-morphological-computation.html:145`, `:301`).
 - Learning purpose: make “the body performs part of the computation” physically intuitive.
-- Draft prompt: `Minimal two-legged passive dynamic walking machine mid-stride down a shallow laboratory ramp, bare mechanical legs and torso, visibly no motors, wires, sensors, or computer, engineer observing from a distance, clean neutral studio, strong sense of balance and momentum, realistic educational photography style, no labels, no arrows, 16:9.`
+- Plate brief: `Side-elevation sequence of a bare passive walker descending a shallow inclined plane; repeated cobalt leg positions and one continuous center-of-mass path express momentum without motors or controller. No person, laboratory, text, or photorealism.`
 
 ### 5. Predictive maintenance on the factory floor
 
@@ -58,7 +59,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 3, before the cost-curve plate.
 - Evidence: failure prediction relies on vibration, noise, temperature, pressure, oil, current, and corrosion measurements (`oa/cap-01-operational-analytics.html:155`, `:413`).
 - Learning purpose: connect later time-series variables to the physical machine and maintenance decision that generate them.
-- Draft prompt: `Industrial maintenance technician inspecting a large rotating machine on a clean factory floor, tablet in hand, several small attached condition-monitoring sensors, subtle heat and vibration cues expressed through light and motion rather than graphics, realistic documentary photography, no readable interface, no labels, no arrows, 16:9.`
+- Plate brief: `A simplified rotating machine cross-section emits several distinct sensor traces that converge into a maintenance threshold and intervention mark; cobalt mechanism, sparse vermilion warning, warm paper. No technician, factory scene, interface, or labels.`
 
 ### 6. Purdue level 0–2 factory scene
 
@@ -66,7 +67,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 4, before or after the Purdue stack plate.
 - Evidence: level 0 consists of sensors, drives, valves, motors, conveyor movement, temperature, pressure, flow, and batch processes (`netprog/cap-09-industrial-networks.html:155`).
 - Learning purpose: establish the physical process that OT networking and security ultimately control and protect.
-- Draft prompt: `Modern industrial production line with conveyor, motors, valves and visible sensors in foreground, nearby PLC control cabinet and an operator at an HMI station in the middle distance, realistic clean factory, layered depth suggesting process-control-supervision without diagrams, no readable screens, no labels, no arrows, 16:9.`
+- Plate brief: `Vertical industrial control stack built from a physical process strip—conveyor, motor, valve, sensor—feeding a compact controller layer and supervisory layer. Use pictographic mechanism marks without embedded labels; no operator, factory photography, or screens.`
 
 ### 7. Distributed computational bubble
 
@@ -74,7 +75,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section 2, after the opening computational-bubble paragraph.
 - Evidence: computation surrounds the learner across homes, cars, workplaces, hospitals, transport hubs, education, and public infrastructure (`ds/DS-M0.html:50-52`).
 - Learning purpose: open the course with a concrete sense that distributed computation has no single visible center.
-- Draft prompt: `Wide cinematic cross-section of one contemporary city day: smart home interior, connected car, hospital monitor, railway station display and traffic lights all naturally present in one coherent urban panorama, very subtle threads of light suggesting invisible computation, human-scale and believable, no labels, no arrows, no futuristic holograms, 16:9.`
+- Plate brief: `Distributed field of small home, vehicle, hospital, rail, and traffic-system glyphs connected into overlapping computational clusters with no single center; cobalt network linework and one sparse vermilion active path. No city panorama, people, photography, or text.`
 
 ### 8. University call center queue
 
@@ -82,7 +83,7 @@ These eight provide the clearest test of whether generated imagery improves reca
 - Placement: section containing Exercise 13.
 - Evidence: the exercise sizes operators for a university call center and compares distributed and centralized staffing (`reti-lm/cap-06-code-attesa.html:192`, `:425-426`).
 - Learning purpose: give Erlang queueing quantities a physical referent—callers waiting and parallel servers handling work.
-- Draft prompt: `University information call center, multiple operators with headsets working in parallel at desks, several active calls and a restrained wall status display with abstract non-readable indicators, calm realistic office, composition emphasizes finite operators and waiting demand, no text, no formulas, no logos, 16:9.`
+- Plate brief: `An incoming stream of call tokens accumulates in a queue and fans out across a finite row of parallel service stations; a second compact arrangement contrasts centralized and distributed capacity. No operators, office, text, formulas, or photography.`
 
 ## Second wave: eight candidates
 
@@ -119,7 +120,7 @@ Do not use generated images where the pixels are evidence:
 ## Implementation contract for approved images
 
 1. Generate one candidate at a time at 16:9, preferably 1200×675 or larger.
-2. Inspect for accidental text, impossible geometry, misleading equipment, malformed people, and factual implications absent from the lesson.
+2. Inspect for accidental text, impossible geometry, photographic or 3D drift, palette drift, and factual implications absent from the lesson. Compare paper/ink proportions against PCD reference plates.
 3. Convert the accepted image to WebP with a practical quality/size target; retain the source generation record outside the public lesson tree if desired.
 4. Store under `<course>/assets/img/` with a semantic filename.
 5. Place in `<figure class="lk-fig">` with explicit width/height, descriptive alt text, and a caption that states the course concept rather than describing decoration.
