@@ -2,6 +2,75 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: phase king, consensus assumptions and literal formulas
+
+Preview: [PCD16, section 19](../../pcd/cap-16-algoritmi-distribuiti.html#s19).
+The new native flowchart separates the two communication rounds, candidate count,
+strict threshold, king choice, phase loop and final decision. Verbose explanation
+stays in the caption and chapter; neither font size nor the canvas is squeezed.
+
+The previous text incorrectly applied N ≥ 3f+1 to a two-round variant requiring
+N > 4f, and called f+1 phases f+1 rounds. It also left undefined values able to
+escape the input domain. The chapter and model now explicitly use binary values,
+one vote per identified sender, default 0, distinct kings, f+1 phases and
+2(f+1) rounds. General Byzantine lower bounds are qualified by their unsigned
+synchronous model rather than described as an approximate correct-node percentage.
+
+The new round simulator and 22-row static traces show three executions. With N=5,
+the first shows strong-validity preservation and the second reaches agreement
+from split inputs. The N=4/f=1 example is deliberately marked outside the
+variant's guarantee: three copies do not exceed threshold 3, and the Byzantine
+second king produces correct decisions 0,1,1 despite a correct first king.
+
+Tests exhaust 143,360 binary N=5 one-Byzantine schedules across all five possible
+fault identities and all correct inputs, both exchange-round equivocations and
+Byzantine-king equivocations. They also cover all 32 fault-free N=5 inputs and
+1,000 seeded executions over 2–9 processes (3,150 rounds), including N=9/f=2.
+The independent oracle reconstructs received vectors, candidates and choices
+using integer threshold arithmetic in the seeded, fault-free and illustrated
+runs; the exhaustive suite checks agreement, strong validity, completion and
+binary decisions. The N=4 counterexample is tested separately
+and is not included as a passing consensus execution. Invalid parameters, forged
+correct-sender overrides, copied snapshots and post-decision actions are tested.
+
+All three UI scenarios are exercised on desktop and mobile, checking every row
+of each round, decision, reset and focus. All 22 static trace rows are available
+with JavaScript disabled. Table columns are checked for text overflow and the
+interactive table fits the desktop content column without shrinking fonts.
+Horizontal keyboard scrolling handles mobile widths.
+An attempted narrower static table initially failed the new cell-overflow test:
+two long headers crossed their column boundaries. Shorter, explicitly explained
+headers fixed this without reducing the font. The revised table and all cell
+bounds pass. Native and desktop/mobile screenshots were visually inspected.
+
+A visual check found a missing `>` in the first generated decision diamond:
+Mermaid had dropped the raw operator despite passing geometry tests. The shared
+adapter now encodes literal comparison signs in quoted labels while preserving
+line breaks and graph arrows. Required-formula assertions and explicit operator
+probes prevent this from silently recurring. The other reviewed SVG assets did
+not change. All 19 flowcharts pass XML, bounds, text-collision, deterministic
+output, node/edge completeness and invalid-input tests. All 21 standalone SVGs
+retain the exact original embedded font and license, verified in browser pixels.
+
+The text also separates origin validity, strong correct-input validity and
+irrevocability, identifies the minimum-flooding counterexample to the stronger
+claim, replaces indefinite receives with the synchronous round deadline, and
+distinguishes message count from payload size. FLP now explicitly concerns
+deterministic termination guarantees. Original slides 35–42 and the linked FLP,
+Byzantine Generals and phase-king references were checked; the round model and
+counterexample provide independent executable evidence for the key correction.
+
+Evidence under `/home/ybc/notes-legacy-review-artifacts/`: `king-test.json`,
+`king-*.png`, `pcd-phase-king.png`, `static-test.json`, `font-test.json` and
+`browser-http-test.json` (12 desktop/mobile visits, 5 pages without JavaScript).
+The consistent-cut regression also passes all 16 cuts and 19 conceptual snapshot
+transitions. The 20-case native preset suite passes, with the four approved DL
+SVGs unchanged byte-for-byte. Inventory: 315 pages and 983 figure elements, not a
+certificate of correctness for the entire site.
+Remaining: operational snapshot and crash-flooding traces, precise CAP/SMR review,
+and the broader full-site audit. This checkpoint does not certify all course
+content, and it does not publish the preview.
+
 ## Latest addition: consistent cuts and snapshot explanations
 
 Preview: [PCD16, sections 14–16](../../pcd/cap-16-algoritmi-distribuiti.html#s14).

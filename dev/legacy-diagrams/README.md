@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Eighteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Nineteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -35,6 +35,8 @@ node central-test.cjs
 node central-traces.cjs --check
 node cut-test.cjs
 node cut-timeline.cjs --check
+node king-test.cjs
+node king-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -115,6 +117,77 @@ The build adapter also now emits chapter patch hunks in document order, even
 when source records are registered in reverse order. Source-order hunks previously
 caused apply_patch to reject a valid two-figure update. Generation still does not
 apply patches or deploy automatically.
+
+### Phase king: fault bounds, real rounds and a failing example
+
+PCD16 sections 17–19 now separate validity of origin, strong validity over correct
+inputs and irrevocability. FLP statements explicitly concern deterministic
+termination guarantees, not the impossibility of every successful execution.
+The crash-stop minimum-of-set example no longer claims the stronger validity:
+a proposal sent by a subsequently crashed process can still be the chosen minimum.
+A set does not preserve voting multiplicities, and the round deadline is not an
+indefinite wait for every sender. The original slide discrepancy is explained.
+
+The two-round binary phase-king variant has its own bound, **N > 4f**, distinct
+from the classical unsigned Byzantine lower bound N > 3f. There are f+1 phases
+and 2(f+1) communication rounds, with distinct kings. The phase flowchart is a
+native SVG generated through the shared Mermaid adapter; it is a control-flow
+diagram, not a neuron template or a purported network-message trace.
+
+`pcd/assets/phase-king.js` contains a pure synchronous round model and three UI
+scenarios. It supports 2–9 processes, binary inputs, a fixed Byzantine subset of
+at most f processes, identified point-to-point senders, and kings P1…P(f+1).
+Every receiver counts one value per sender, including itself. Adversarial values
+can differ per recipient. Missing values normalize to 0; the API accepts 0, 1
+and null, representing all binary effects of invalid/missing messages. A tie uses
+candidate 0. Correct messages cannot be overridden or impersonated. Constructor
+validation rejects N ≤ 4f unless `allowUnsafe:true` explicitly requests an
+out-of-guarantee experiment. The UI marks that case in vermilion, never as a
+working four-node consensus protocol.
+
+Each click executes an entire synchronous communication round. This is not an
+asynchronous network simulator or a Byzantine-failure detector. The model stores
+actual per-recipient vectors, candidates, multiplicities, king messages and
+threshold choices; recorded logical receipts distinguish local self-votes and
+omissions from network messages. Only correct-process states are displayed.
+`king-traces.cjs` generates 22 static phase/process rows from those same rounds.
+
+Three scenarios show unanimous-input preservation with N=5, convergence from
+split inputs with N=5, and a failure with N=4/f=1. In the failing case the first
+king is correct, but the second Byzantine king can undo agreement because three
+copies equal, rather than exceed, the threshold. Correct decisions become 0,1,1.
+This demonstrates failure of this variant, not impossibility of all N=4 protocols.
+
+`king-test.cjs` exhausts 143,360 N=5 executions: every single Byzantine identity,
+every assignment to the four correct inputs, both rounds of exchange
+equivocations and every Byzantine-king equivocation. Omissions have the same
+binary effects as 0. It also checks 32 fault-free inputs, 1,000 seeded executions
+over 2–9 processes (including N=9/f=2), and the exact N=4 counterexample. A separate
+oracle reconstructs vectors and uses the integer condition `2*copies > N+2*f`
+for the seeded, fault-free and illustrated runs; the exhaustive suite checks
+agreement, strong validity, completion and binary decisions.
+All displayed states, decisions, reset/focus, table columns, horizontal keyboard
+scrolling and no-JavaScript traces are tested at 1280 and 390 px. These are bounded
+tests plus the chapter proof sketch, not a proof for all network models.
+
+Original module-4.2 slides 35–42 were compared against the
+[FLP paper](https://groups.csail.mit.edu/tds/papers/Lynch/jacm85.pdf),
+[Byzantine Generals paper](https://lamport.azurewebsites.net/pubs/byz.pdf) and
+[Aspnes's phase-king notes](https://www.cs.yale.edu/homes/aspnes/pinewiki/ByzantineAgreement.html).
+The strict threshold's preservation inequality is derived in the chapter;
+transferable signatures require a separate model, not an unqualified 3f rule.
+
+### Preserve literal mathematical operators
+
+Visual inspection caught Mermaid 11.17.2 dropping a raw `>` inside a quoted
+node label: the decision diamond lost its crucial comparison sign even though
+XML and geometry tests passed. `literalLabels()` now treats quoted labels as
+plain text, with `<br/>` as the supported line-break markup, and encodes literal
+`<`/`>` before parsing. It never rewrites graph arrows outside labels. Other HTML
+inside quoted labels becomes literal text; this is not a rich-HTML label API.
+Existing reviewed assets remain unchanged. Formula probes cover >, <, ≤, ≥ and ←.
+Optional `requiredText` strings make the renderer reject output that loses a
+declared formula; phase king checks its threshold, final-phase test and increment.
 
 ### Quantitative figures are not flowcharts
 
@@ -338,8 +411,10 @@ These are concrete next checks, not claims that whole chapters are repaired:
 
 - PCD 16: consistent-cut definitions, marker explanations and both conceptual
   state browsers have been corrected and tested. Still needed: an operational
-  marker/channel simulation, a concrete snapshot trace, and review of the stated
-  resilience of the two-phase king variant and remaining consensus material.
+  marker/channel simulation and concrete snapshot trace. Phase-king resilience
+  and the FLP/validity explanations are now corrected; the crash-stop flooding
+  algorithm still needs an executable failure trace. Remaining CAP, Paxos/Raft
+  and state-machine claims need their own precise-model review.
 - DS C4: qualify CAP, FLP, hash-chain immutability and BFT threshold/termination
   claims against their precise system models.
 - DS M1: numerical availability examples, reliability assumptions, nines thresholds

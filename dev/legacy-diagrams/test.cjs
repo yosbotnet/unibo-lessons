@@ -10,6 +10,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'pcd-causal-dependencies':[6,6],'pcd-causal-buffer':[4,3]});
    Object.assign(counts,{'pcd-central-causal':[8,8],'pcd-central-token':[8,9]});
    Object.assign(counts,{'pcd-cut-events':[6,5],'pcd-snapshot-fifo':[7,7]});
+   Object.assign(counts,{'pcd-phase-king':[10,11]});
+   if(e.id==='pcd-phase-king')for(const pair of ['A_B','B_C','C_D','D_E','E_F','E_G','F_H','G_H','H_I','I_A','H_J'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Phase king control-flow edge '+pair);
    if(e.id==='pcd-snapshot-fifo')for(const pair of ['P0_P1','P1_P2','P2_P3','Q0_Q1','Q1_Q2','P1_Q1','P2_Q2'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'FIFO event/message edge '+pair);
    if(e.id==='pcd-central-token')for(const pair of ['R_Q','Q_D','D_W','W_D','D_T','T_C','C_L','L_B','B_D'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Token lifecycle edge '+pair);
    if(e.id==='pcd-central-causal')for(const pair of ['A_B','B_C','C_D','D_E','E_F','F_G','G_H','A_E'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Causal request edge '+pair);
@@ -34,7 +36,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
   }
   const types=await r.render({id:'test-edge-types',title:'Directed, undirected and bidirectional links',source:'flowchart LR\nA((A)) --- B{B}\nB <--> C[C]\nC -.-> D[D]'});
   assert.equal(types.edges.length,3);assert(!types.edges[0].start&&!types.edges[0].end);assert(types.edges[1].start&&types.edges[1].end);assert(!types.edges[2].start&&types.edges[2].end);
-  const bad=[{overrides:{fontSize:9}},{overrides:{direction:'XX'}},{overrides:{rankSpacing:0}},{source:'sequenceDiagram\nA->>B: Hi'},{source:'flowchart LR\nA[broken(label] --> B'}];
+  const math=await r.render({id:'test-comparisons',title:'Keep formula operators',source:'flowchart LR\nA["m > N/2 + f?<br/>k ← k + 1"] --> B["a < b; a ≤ b; c ≥ d"]',requiredText:['m > N/2 + f?','k ← k + 1','a < b; a ≤ b; c ≥ d']});assert.equal(math.edges.length,1);assert(!math.svg.includes('&amp;gt;'));
+  const bad=[{overrides:{fontSize:9}},{overrides:{direction:'XX'}},{overrides:{rankSpacing:0}},{source:'sequenceDiagram\nA->>B: Hi'},{source:'flowchart LR\nA[broken(label] --> B'},{requiredText:['missing formula']},{requiredText:42}];
   for(const x of bad)await assert.rejects(()=>r.render({id:'test-invalid',title:'Invalid',source:'flowchart LR\nA-->B',...x}));
   fs.writeFileSync(path.join(out,'static-test.json'),JSON.stringify({results,edgeTypes:true,invalidInputs:bad.length},null,2));
   console.log(`${results.length} diagrams: XML, bounds, text collisions, determinism; 3 edge types; ${bad.length} invalid inputs rejected`);

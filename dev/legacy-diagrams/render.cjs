@@ -4,6 +4,10 @@ const fixture=process.env.MERMAID_FIXTURE||path.join(path.dirname(require.resolv
 const {chromium}=require(process.env.PLAYWRIGHT_PATH||'playwright');
 const font=require('./font.cjs');
 const palette={paper:'#F3EFE3',panel:'#FAF7EF',ink:'#171813',cobalt:'#1546B8',accent:'#B83D2D',rule:'#C9C3B6',mono:"'IBM Plex Mono',ui-monospace,SFMono-Regular,Consolas,monospace"};
+// Quoted labels are plain text with optional <br/> line breaks. Mermaid 11.17.2
+// silently drops a raw > in these labels. Encode literal comparisons before
+// parsing, leaving graph arrows and supported line breaks untouched.
+function literalLabels(source){return source.replace(/"([^"\n]*)"/g,(_,label)=>'"'+label.replace(/<br\s*\/?>|[<>]/gi,t=>/^<br/i.test(t)?t:t==='<'?'&lt;':'&gt;')+'"')}
 async function createRenderer(){
   assert.equal(JSON.parse(fs.readFileSync(path.resolve(fixture,'../../package.json'))).version,'11.17.2','Use the reviewed Mermaid version');
   const browser=await chromium.launch(),page=await browser.newPage({viewport:{width:1600,height:1200}});
@@ -18,6 +22,7 @@ async function createRenderer(){
     for(const k of Object.keys(spec.overrides||{}))assert(['direction','nodeSpacing','rankSpacing'].includes(k),'Unknown override '+k);
     for(const k of ['nodeSpacing','rankSpacing'])if(spec.overrides?.[k]!==undefined)assert(Number.isFinite(spec.overrides[k])&&spec.overrides[k]>=20&&spec.overrides[k]<=300,'Invalid '+k);
     if(spec.overrides?.direction)assert(['LR','RL','TD','TB','BT'].includes(spec.overrides.direction),'Invalid direction');
+    assert(spec.requiredText===undefined||Array.isArray(spec.requiredText)&&spec.requiredText.every(t=>typeof t==='string'&&t.length>0&&t.length<=200),'Invalid required text');
     return page.evaluate(async({spec,p,font})=>{
       let source=spec.source;const o=spec.overrides||{};
       if(o.direction)source=source.replace(/^(flowchart|graph)\s+\w+/,`$1 ${o.direction}`);
@@ -42,8 +47,9 @@ async function createRenderer(){
       const edges=[...root.querySelectorAll('.flowchart-link')].map(e=>({id:e.id,d:e.getAttribute('d'),start:e.getAttribute('marker-start'),end:e.getAttribute('marker-end')}));
       if(edges.some(e=>/[CQAST]/i.test(e.d)))throw Error('Unexpected curved flowchart route');
       const text=[...root.querySelectorAll('text')].map(e=>e.textContent);
+      for(const expected of spec.requiredText||[])if(!text.some(t=>t.replace(/\s+/g,'').includes(expected.replace(/\s+/g,''))))throw Error('Required diagram text lost: '+expected);
       return {svg:root.outerHTML,width:Math.ceil(vb.width),height:Math.ceil(vb.height),nodes:root.querySelectorAll('.node').length,edges,text,font:{sha256:font.sha256,byteLength:font.byteLength}};
-    },{spec,p:palette,font});
+    },{spec:{...spec,source:literalLabels(spec.source)},p:palette,font});
   }};
 }
-module.exports={createRenderer,palette};
+module.exports={createRenderer,palette,literalLabels};

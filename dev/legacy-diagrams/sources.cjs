@@ -1,6 +1,24 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'pcd-phase-king',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:null,
+ title:'Phase king binario: una fase contiene due round',
+ requiredText:['copie > N/2 + f?','k = f + 1?','k ← k + 1'],
+ caption:'Flusso locale di un processo corretto, non elenco dei singoli messaggi. Il primo round raccoglie le preferenze; il secondo raccoglie la proposta del king. La soglia usa la molteplicità del candidato calcolata nel primo round e include il proprio voto. Si decide soltanto dopo f + 1 fasi. Garanzia della variante: rete sincrona completa, al massimo f bizantini, N > 4f e king distinti. Valori mancanti/non validi e parità seguono il default binario 0.',
+ overrides:{rankSpacing:30,nodeSpacing:30},
+ source:`flowchart TD
+ A["Fase k · bit corrente"] --> B["Round 1 · scambio<br/>V: un voto per mittente"]
+ B --> C["Candidato e numero di copie"]
+ C --> D["Round 2 · king Pk<br/>Ricevi il suo candidato"]
+ D --> E{"copie > N/2 + f?"}
+ E -->|"sì"| F["Mantieni candidato"]
+ E -->|"no"| G["Adotta bit del king"]
+ F --> H{"k = f + 1?"}
+ G --> H
+ H -->|"no"| I["k ← k + 1"]
+ I --> A
+ H -->|"sì"| J["Decidi il bit"]
+ style E stroke:#B83D2D`},
  {id:'pcd-snapshot-fifo',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:8,
  title:'Due messaggi sullo stesso canale FIFO',
  caption:'Gli archi continui collegano eventi dello stesso processo. Gli archi tratteggiati sono i due messaggi P → Q: m′ è inviato in e1 e ricevuto in f1; m è inviato dopo, in e2, e ricevuto dopo, in f2. La precedente figura invertiva le ricezioni e contraddiceva l’ipotesi FIFO. Questo è il programma osservato: non è una traccia dei marker, che non sono rappresentati.',
