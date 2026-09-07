@@ -1613,41 +1613,267 @@ public final class SketchCounter {
   </section>
   <section id="s15" data-src="PCD-2026-03-20.html#s7">
     <h2>15. Simulazione fisica: palle che rimbalzano</h2>
-        <p>L'esercizio delle palle che rimbalzano e un caso studio di simulazione fisica concorrente. Il professore presenta un modello in cui delle palline si muovono in uno spazio bidimensionale, con:</p>
+    <p>Il caso discusso a lezione è un gioco con molte palline, giocatori, collisioni, buche e punteggi. Il problema concorrente è separare l’avanzamento del modello dalla visualizzazione e coordinare gli accessi allo stato. <strong>L’esempio editoriale seguente isola moto, smorzamento e urti contro le pareti</strong>: non implementa collisioni fra palline, giocatori o punteggi, e non sostituisce il progetto completo dell’assignment.</p>
 
-    <ul>
-      <li><strong>Attrito</strong> — una decelerazione costante che dipende dalla velocita (<code>friction factor</code>)</li>
-      <li><strong>Rimbalzo ai bordi</strong> — quando una pallina raggiunge il bordo, inverte il vettore velocita</li>
-      <li><strong>Aggiornamento cinematico</strong> — posizione = posizione + velocita * delta tempo</li>
-    </ul>
+    <h3>Unità e legge di smorzamento</h3>
+    <p>Posizioni e raggi sono in unità logiche, velocità in unità al secondo e <code>dt</code> in <strong>secondi</strong>. Usiamo il modello lineare <code>dv/dt = −k v</code>, con <code>k ≥ 0</code> in s⁻¹. Non è una decelerazione costante: la sua intensità diminuisce insieme alla velocità. Fra gli urti, il passo analitico è:</p>
+    <pre tabindex="0" role="region" aria-label="Legge del moto con smorzamento"><code>v(t + Δt) = v(t) · exp(−k Δt)
+Δp = v(t) · (1 − exp(−k Δt)) / k       se k &gt; 0
+Δp = v(t) · Δt                        se k = 0</code></pre>
+    <p>Moltiplicare per 0,98 a ogni callback produce invece risultati diversi a 60 e 120 aggiornamenti: il coefficiente deve riferirsi a un intervallo temporale definito. Per una ritenzione <code>0 &lt; q ≤ 1</code> ogni <code>τ &gt; 0</code> secondi si ha <code>k = −ln(q)/τ</code>. Il sorgente usa <code>expm1</code> per evitare la sottrazione numericamente instabile di due numeri quasi uguali; non impone una soglia arbitraria di arresto.</p>
 
-    <p>Ecco la logica di aggiornamento del modello fisico:</p>
+    <h3>Il bordo limita il centro, tenendo conto del raggio</h3>
+    <p>In uno spazio largo <code>W</code> e alto <code>H</code>, il centro rimane in <code>[r, W−r] × [r, H−r]</code>. L’urto elastico con un bordo verticale cambia il segno di <code>vₓ</code>, non di <code>vᵧ</code>; per un bordo orizzontale vale l’opposto. La restituzione è fissata a 1. Non basta riportare il centro sul bordo con clamp: occorre conservare la distanza percorsa dopo l’urto, anche quando un singolo passo attraversa più pareti.</p>
 
-    <pre><code class="language-java">class Particle {
-    double x, y;       // posizione
-    double vx, vy;     // velocita
+<!-- BEGIN PHYSICS PLOT -->
+<figure data-static-plot="pcd-wall-reflection" style="margin:1.6rem 0;max-width:100%">
+<div tabindex="0" role="region" aria-label="Rimbalzo: scorrimento orizzontale" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-wall-reflection.svg" width="332" height="448" alt="Da A a B al bordo, poi verso C: il rimbalzo cambia vx da 5 a meno 5, mentre vy rimane 2." style="display:block;width:332px;max-width:none;height:auto;margin:auto">
+</div>
+<figcaption>Esempio verificato: spazio 10 × 10, raggio 1, nessuno smorzamento. Il centro urta a x = 9 dopo 0,2 s; il cerchio tratteggiato rappresenta la pallina soltanto nell’istante B. Nei successivi 0,8 s prosegue verso C, senza perdere la distanza residua. Le frecce descrivono la traiettoria del centro, non vettori di forza. Un bordo verticale inverte soltanto vₓ; all’angolo possono invertirsi entrambe le componenti.</figcaption>
+</figure>
+<!-- END PHYSICS PLOT -->
 
-    void update(double dt) {
-        // Applica attrito (decelerazione costante)
-        double friction = 0.98;  // coefficiente
-        vx *= friction;
-        vy *= friction;
+    <p><code>ParticleModel</code> calcola la distanza del percorso “srotolato” e la ripiega nell’intervallo ammesso con periodo doppio: così conserva anche i rimbalzi multipli. Questo metodo vale per pareti rettangolari, urti elastici e lo smorzamento uniforme scelto qui, non per ostacoli arbitrari o collisioni tra corpi. Una variazione di <code>dt</code> non cambia la soluzione ideale di questo modello, salvo arrotondamenti numerici.</p>
 
-        // Se la velocita e molto bassa, ferma del tutto
-        if (Math.abs(vx) &lt; 0.01) vx = 0;
-        if (Math.abs(vy) &lt; 0.01) vy = 0;
+<!-- BEGIN PHYSICS CONTENT ParticleModel -->
+<p><a href="assets/examples/ParticleModel.java" download>Scarica ParticleModel.java</a> · Java 17.</p>
+<details data-physics-example="ParticleModel"><summary>ParticleModel: sorgente completo verificato</summary>
+<pre data-physics-source="ParticleModel" tabindex="0" role="region" aria-label="Sorgente Java ParticleModel"><code class="language-java">/** Java 17: linear drag and elastic wall reflections; no ball-ball collisions. */
+public final class ParticleModel {
+    public record State(double x, double y, double vx, double vy, double radius) { }
+    private final double width, height, radius, drag;
+    private double x, y, vx, vy;
 
-        // Aggiorna posizione (cinematica)
-        x += vx * dt;
-        y += vy * dt;
-
-        // Boundary check: rimbalzo sui bordi
-        if (x &lt; 0 || x &gt; maxX) { vx = -vx; x = clamp(x, 0, maxX); }
-        if (y &lt; 0 || y &gt; maxY) { vy = -vy; y = clamp(y, 0, maxY); }
+    public ParticleModel(double width, double height, double radius,
+            double x, double y, double vx, double vy, double drag) {
+        require(Double.isFinite(width) &amp;&amp; width &gt;= 1 &amp;&amp; width &lt;= 1e6);
+        require(Double.isFinite(height) &amp;&amp; height &gt;= 1 &amp;&amp; height &lt;= 1e6);
+        require(Double.isFinite(radius) &amp;&amp; radius &gt; 0);
+        require(width - 2 * radius &gt;= 1 &amp;&amp; height - 2 * radius &gt;= 1);
+        require(Double.isFinite(x) &amp;&amp; x &gt;= radius &amp;&amp; x &lt;= width - radius);
+        require(Double.isFinite(y) &amp;&amp; y &gt;= radius &amp;&amp; y &lt;= height - radius);
+        require(Double.isFinite(vx) &amp;&amp; Math.abs(vx) &lt;= 1e6);
+        require(Double.isFinite(vy) &amp;&amp; Math.abs(vy) &lt;= 1e6);
+        require(Double.isFinite(drag) &amp;&amp; drag &gt;= 0 &amp;&amp; drag &lt;= 100);
+        this.width = width; this.height = height; this.radius = radius;
+        this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.drag = drag;
     }
-}</code></pre>
 
-    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Il professore sottolinea la separazione netta: le coordinate del modello sono <strong>logiche</strong>, non pixel. Sara la view a mappare le coordinate logiche nello spazio visivo (viewport). Questo e il pattern MVC applicato alla simulazione fisica.</p></div>
+    private static void require(boolean valid) {
+        if (!valid) throw new IllegalArgumentException(&quot;Outside demo domain&quot;);
+    }
+
+    /** Seconds, not milliseconds. Only the simulation owner may call this. */
+    public void update(double dt) {
+        require(Double.isFinite(dt) &amp;&amp; dt &gt;= 0 &amp;&amp; dt &lt;= 60);
+        if (dt == 0) return;
+        double decay = drag * dt;
+        double attenuation = Math.exp(-decay);
+        double travelTime = decay == 0 ? dt : dt * (-Math.expm1(-decay) / decay);
+        double[] horizontal = reflect(x - radius, vx, width - 2 * radius,
+                travelTime, attenuation);
+        double[] vertical = reflect(y - radius, vy, height - 2 * radius,
+                travelTime, attenuation);
+        x = radius + horizontal[0]; vx = horizontal[1];
+        y = radius + vertical[0]; vy = vertical[1];
+    }
+
+    // Unfold the path, then fold it into [0,length], including multiple hits.
+    private static double[] reflect(double position, double velocity,
+            double length, double travelTime, double attenuation) {
+        double period = 2 * length;
+        double folded = (position + velocity * travelTime) % period;
+        if (folded &lt; 0) folded += period;
+        double speed = velocity * attenuation;
+        if (folded == 0) return new double[]{0, Math.abs(speed)};
+        if (folded == length) return new double[]{length, -Math.abs(speed)};
+        if (folded &lt; length) return new double[]{folded, speed};
+        return new double[]{period - folded, -speed};
+    }
+
+    /** Immutable value. The mutable model itself is not thread-safe. */
+    public State snapshot() { return new State(x, y, vx, vy, radius); }
+}
+</code></pre>
+</details>
+<!-- END PHYSICS CONTENT ParticleModel -->
+
+    <h3>Un proprietario del modello, snapshot immutabili per la vista</h3>
+    <p><code>BouncingBallsDemo</code> usa un solo worker per aggiornare le tre palline. I modelli mutabili appartengono esclusivamente a quel worker: non sono oggetti thread-safe da condividere liberamente. Il worker pubblica una lista immutabile di stati tramite <code>AtomicReference</code>; l’EDT ne legge uno snapshot completo e ridisegna la vista con un timer Swing. La GUI non legge direttamente le singole coordinate del modello in aggiornamento.</p>
+    <p>Il tempo trascorso viene misurato come differenza fra letture di <code>System.nanoTime()</code>, non contando i callback. Per evitare salti dopo una lunga sospensione, la demo avanza al massimo di 0,25 s per callback e <strong>mostra il tempo scartato</strong>: in quel caso il tempo simulato resta indietro rispetto al tempo reale. È una politica esplicita di animazione, non un simulatore real-time con scadenze garantite.</p>
+    <p>La scala grafica è uniforme sui due assi: un cerchio resta circolare anche ridimensionando la finestra. Le coordinate logiche non cambiano con i pixel; i margini assorbono la differenza di proporzioni. Alla chiusura si fermano timer e worker, senza attenderne la terminazione sull’EDT. Eventi di refresh già accodati vengono ignorati dopo la chiusura.</p>
+
+<!-- BEGIN PHYSICS CONTENT BouncingBallsDemo -->
+<p><a href="assets/examples/BouncingBallsDemo.java" download>Scarica BouncingBallsDemo.java</a> · Java 17.</p>
+<details data-physics-example="BouncingBallsDemo"><summary>BouncingBallsDemo: sorgente completo verificato</summary>
+<pre data-physics-source="BouncingBallsDemo" tabindex="0" role="region" aria-label="Sorgente Java BouncingBallsDemo"><code class="language-java">import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
+import javax.swing.JFrame;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
+
+/** Worker-owned simulation; the EDT sees immutable snapshots, not mutable balls. */
+public final class BouncingBallsDemo {
+    private BouncingBallsDemo() { }
+    static final double WORLD_WIDTH = 100, WORLD_HEIGHT = 60;
+    record Frame(List&lt;ParticleModel.State&gt; balls, double time, double discarded) {
+        Frame { balls = List.copyOf(balls); }
+    }
+
+    static final class Engine {
+        private final List&lt;ParticleModel&gt; balls = List.of(
+                new ParticleModel(WORLD_WIDTH, WORLD_HEIGHT, 3, 20, 20, 34, 17, 0.12),
+                new ParticleModel(WORLD_WIDTH, WORLD_HEIGHT, 4, 70, 40, -27, -24, 0.12),
+                new ParticleModel(WORLD_WIDTH, WORLD_HEIGHT, 2, 50, 30, 21, -35, 0.12));
+        private final LongSupplier clock;
+        private final ScheduledThreadPoolExecutor worker;
+        final AtomicReference&lt;Frame&gt; latest;
+        private long previous;
+        private double time, discarded;
+        private volatile boolean closed;
+
+        Engine(LongSupplier clock, boolean automatic) {
+            this.clock = clock;
+            previous = clock.getAsLong();
+            latest = new AtomicReference&lt;&gt;(capture());
+            worker = new ScheduledThreadPoolExecutor(1,
+                    task -&gt; new Thread(task, &quot;balls-simulation&quot;));
+            if (automatic) worker.scheduleWithFixedDelay(this::pulse,
+                    20, 20, TimeUnit.MILLISECONDS);
+        }
+
+        private Frame capture() {
+            return new Frame(balls.stream().map(ParticleModel::snapshot).toList(),
+                    time, discarded);
+        }
+
+        // Called only by the worker, or sequentially by tests in manual mode.
+        void pulse() {
+            if (closed) return;
+            long now = clock.getAsLong();
+            double elapsed = Math.max(0, (now - previous) / 1e9);
+            previous = now;
+            // Explicit animation policy: report time discarded after long stalls.
+            double dt = Math.min(elapsed, 0.25);
+            discarded += elapsed - dt;
+            for (ParticleModel ball : balls) ball.update(dt);
+            time += dt;
+            latest.set(capture());
+        }
+
+        void close() { closed = true; worker.shutdownNow(); }
+        boolean awaitClosed() throws InterruptedException {
+            if (SwingUtilities.isEventDispatchThread()) {
+                throw new IllegalStateException(&quot;Do not wait for a worker on EDT&quot;);
+            }
+            return worker.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    // Uniform scale keeps logical circles circular, with letterboxing on resize.
+    record Viewport(double scale, double left, double top) {
+        static Viewport of(int width, int height) {
+            double scale = Math.max(0,
+                    Math.min((width - 32) / WORLD_WIDTH, (height - 64) / WORLD_HEIGHT));
+            return new Viewport(scale, (width - WORLD_WIDTH * scale) / 2,
+                    16 + (height - 64 - WORLD_HEIGHT * scale) / 2);
+        }
+    }
+
+    static final class View extends JPanel {
+        private static final long serialVersionUID = 1L;
+        private Frame frame;
+        View(Frame initial) {
+            requireEdt(); frame = initial;
+            setPreferredSize(new Dimension(720, 470));
+            setBackground(new Color(0xF3EFE3));
+        }
+        void show(Frame value) { requireEdt(); frame = value; repaint(); }
+        @Override protected void paintComponent(Graphics graphics) {
+            super.paintComponent(graphics);
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                        RenderingHints.VALUE_ANTIALIAS_ON);
+                Viewport v = Viewport.of(getWidth(), getHeight());
+                g.translate(v.left(), v.top()); g.scale(v.scale(), v.scale());
+                g.setStroke(new java.awt.BasicStroke((float) (1.5 / Math.max(v.scale(), 1e-6))));
+                g.setColor(new Color(0xC9C3B6));
+                g.draw(new java.awt.geom.Rectangle2D.Double(0, 0, WORLD_WIDTH, WORLD_HEIGHT));
+                int index = 0;
+                for (ParticleModel.State s : frame.balls()) {
+                    g.setColor(new Color(index++ == 1 ? 0xB83D2D : 0x1546B8));
+                    g.fill(new java.awt.geom.Ellipse2D.Double(s.x() - s.radius(),
+                            s.y() - s.radius(), 2 * s.radius(), 2 * s.radius()));
+                }
+            } finally { g.dispose(); }
+            graphics.setColor(new Color(0x171813));
+            graphics.drawString(String.format(Locale.ROOT,
+                    &quot;t simulato %.2f s · tempo scartato %.2f s&quot;,
+                    frame.time(), frame.discarded()), 16, getHeight() - 12);
+        }
+    }
+
+    static final class Controller {
+        final Engine engine;
+        final View view;
+        final Timer refresh;
+        private boolean closed;
+        Controller() {
+            requireEdt(); engine = new Engine(System::nanoTime, true);
+            view = new View(engine.latest.get());
+            refresh = new Timer(20, event -&gt; {
+                if (!closed) view.show(engine.latest.get());
+            });
+            refresh.setCoalesce(true); refresh.start();
+        }
+        void close() {
+            requireEdt(); closed = true; refresh.stop(); engine.close();
+        }
+    }
+    static void requireEdt() {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException(&quot;View/controller belong to EDT&quot;);
+        }
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -&gt; {
+            Controller controller = new Controller();
+            JFrame frame = new JFrame(&quot;Moto e bordi · esempio editoriale&quot;);
+            frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+            frame.setContentPane(controller.view);
+            frame.addWindowListener(new WindowAdapter() {
+                @Override public void windowClosing(WindowEvent event) {
+                    controller.close();
+                }
+                @Override public void windowClosed(WindowEvent event) {
+                    controller.close();
+                }
+            });
+            frame.pack(); frame.setLocationByPlatform(true); frame.setVisible(true);
+        });
+    }
+}
+</code></pre>
+</details>
+<!-- END PHYSICS CONTENT BouncingBallsDemo -->
+
+    <p>Salva i due file nella stessa directory. Con JDK 17 esegui <code>javac ParticleModel.java BouncingBallsDemo.java</code>, poi <code>java BouncingBallsDemo</code> in un ambiente grafico. Le palline possono sovrapporsi perché le loro collisioni reciproche sono volutamente fuori da questo esempio. La separazione worker/EDT illustra concorrenza e proprietà dello stato, non un’accelerazione del calcolo tramite un thread per pallina.</p>
+    <p>La trascrizione del 20 marzo descrive raggio, massa, friction e restitution factor del gioco; le slide «GUI Frameworks and Concurrency», tavola 12, motivano la separazione dei componenti attivi. Non è stato reperito qui il sorgente originale del gioco: la legge analitica e la demo sono esplicitamente editoriali. Riferimenti API: <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.desktop/javax/swing/Timer.html">timer Swing</a>, <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/lang/System.html#nanoTime()">tempo trascorso</a> e <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.desktop/javax/swing/package-summary.html">confinamento Swing sull’EDT</a>.</p>
   
   </section>
   <section id="s16">

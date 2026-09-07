@@ -2,6 +2,38 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD8 motion, wall geometry and immutable animation frames
+
+Preview: [physics section](../../pcd/cap-08-java.html#s15).
+
+Replaced the incomplete per-callback damping/clamp fragment with complete Java17
+model and GUI sources. The chapter defines seconds, linear drag, radius-aware
+center bounds, normal-component reflection and residual/multiple-wall travel.
+It distinguishes the original larger game from the editorial motion/boundary
+example. One worker owns the models; immutable snapshots go to the EDT, with
+explicit elapsed-time capping/discard reporting, uniform viewport scale and cleanup.
+One native geometric SVG follows an executed collision fixture; it is not another
+box flowchart or a generated raster. [Evidence and scope](../../dev/legacy-diagrams/PHYSICS.md).
+
+Warning-free Java17 compilation, headless and actual Xvfb-window runs passed.
+Each run checks 2,000 cases against an independent event-by-event collision oracle;
+20,043/20,046 checks cover split timesteps, radius bounds, speed decay, exact/corner
+and multiple hits, subnormal drag, invalid steps, snapshots, clocks and worker/EDT
+cleanup. Visual inspection caught a real inherited WIDTH/HEIGHT-name bug in the
+GUI; the corrected world constants and arena-edge pixel test prevent recurrence.
+
+Four desktop/mobile, JS/no-JS views check canonical source/downloads, HTML5 markup,
+SVG XML, label bounds/collisions, plotted points against Java results, image loading
+and keyboard access. The geometric plot, chapter/code and actual Java window were
+visually inspected. Its mobile canvas was trimmed without changing scale or fonts.
+Existing widget checks pass, along with the shared drift check, 39 embedded-font
+assets, twenty shared desktop/mobile visits and ten no-JS image checks.
+
+Current inventory: 315 tracked pages / 1,000 figure elements. The original 15-course
+scope remains 208 chapters / 882 figures. These counts do not certify the full site.
+The broader visual/content review remains active. Production and preexisting root
+review/report modifications remain untouched; no paid generation was performed.
+
 ## Latest addition: historical structured concurrency and real close wait
 
 Preview: [version and lifecycle](../../pcd/cap-08-java.html#structured-concurrency).

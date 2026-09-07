@@ -1,0 +1,10 @@
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-artifacts';
+const tool=n=>process.env.NOTES_JDK?path.join(process.env.NOTES_JDK,'bin',n):n;
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'notes-physics-classes-')),options={encoding:'utf8',timeout:60000};
+execFileSync(tool('javac'),['-Xlint:all','-Werror','-d',dir,...['ParticleModel','BouncingBallsDemo'].map(n=>root+'/pcd/assets/examples/'+n+'.java'),__dirname+'/PhysicsExamplesTest.java'],options);
+const headless=execFileSync(tool('java'),['-Djava.awt.headless=true','-ea','-cp',dir,'PhysicsExamplesTest'],options).trim();
+const windows=execFileSync('xvfb-run',['-a',tool('java'),'-ea','-cp',dir,'PhysicsExamplesTest',out],options).trim();
+const trace=JSON.parse(headless.match(/trace=(\[[^\n]+\])/)[1]);assert.deepEqual(trace,[8,3,9,3.4,5,5,-5,2]);
+fs.writeFileSync(out+'/physics-java-test.json',JSON.stringify({compiler:execFileSync(tool('javac'),['-version'],options).trim(),headless,windows,trace,classDirectory:dir},null,2)+'\n');
+console.log(headless+'\n'+windows);

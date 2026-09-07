@@ -67,5 +67,5 @@ right.compute can skip left.join. The main requests shutdown in finally but its
 subsequent awaitTermination is reached only on the normal path. The diagram
 represents successful data dependencies, not guaranteed worker scheduling.
 The later [structured-concurrency revision](STRUCTURED.md) verifies the historical
-JDK20 API and lifecycle example. Physics and the rest of the site's visual and
-scientific review remain open.
+JDK20 API and lifecycle example. The [physics revision](PHYSICS.md) verifies the
+editorial motion/boundary example; the full-site visual/scientific review remains open.

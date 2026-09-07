@@ -71,6 +71,10 @@ node forkjoin-browser-test.cjs
 NOTES_JDK20=/path/to/jdk20 node structured-java-test.cjs
 node structured-content.cjs --check
 node structured-browser-test.cjs
+NOTES_JDK=/path/to/jdk17 node physics-java-test.cjs
+node physics-content.cjs --check
+node physics-plot.cjs --check
+node physics-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -83,6 +87,14 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Physical motion and geometric wall reflection
+
+PCD8 now separates linear drag, radius-aware elastic wall hits and elapsed-time
+animation policy. Two compilable sources include a worker-owned model and actual
+Swing window; a native geometric SVG follows an independently verified collision
+fixture. This is a geometric plot, not an extra Mermaid flowchart.
+See [Physics evidence and boundaries](PHYSICS.md).
 
 ### Historical structured concurrency and actual close completion
 

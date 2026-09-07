@@ -113,7 +113,7 @@ introduction, bounded counter and several quiz absolutes; the later
 [barrier/latch revision](BARRIERS.md) handles section 7. The later
 [Fork-Join revision](FORKJOIN.md) completes sum and merge sort, and the
 [structured-concurrency revision](STRUCTURED.md) verifies the JDK20 example.
-Physics remains outside these
-checkpoints; passing widget clicks do not certify them.
+The [physics revision](PHYSICS.md) verifies the editorial motion/boundary example
+separately; passing widget clicks alone do not certify that model.
 At this executor checkpoint the inventory was 315 pages/994 figure elements, with 96 raw Mermaid
 blocks remaining across 27 pages; neither count establishes content correctness.

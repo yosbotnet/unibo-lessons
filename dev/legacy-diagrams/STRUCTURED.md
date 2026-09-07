@@ -90,6 +90,7 @@ under `/home/ybc/content/exams/Programmazione Concorrente e Distribuita (PCD)/sl
 
 No certification of later JDK revisions, custom scope policies, scoped-value
 inheritance, nested-scope misuse, arbitrary external services or third-party
-cancellation behavior. The physics section and the full-site visual/content
-review remain open. Preexisting root review/index and review/report edits are
+cancellation behavior. The later [physics revision](PHYSICS.md) verifies the
+editorial motion/boundary example. The full-site visual/content review remains
+open. Preexisting root review/index and review/report edits are
 preserved and unstaged.
