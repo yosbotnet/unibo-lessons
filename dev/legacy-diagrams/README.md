@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-eight reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Thirty reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -49,6 +49,9 @@ node raft-commit-test.cjs
 node raft-commit-traces.cjs --check
 node dining-test.cjs
 node dining-traces.cjs --check
+node monitor-code.cjs --check
+NOTES_JDK=/path/to/jdk node monitor-java-test.cjs
+node monitor-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -61,6 +64,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Monitors: wait, notify, ownership and real Java examples
+
+PCD7 has two native shared-renderer figures and four canonical downloadable Java
+examples with optional source-derived annotations. Compilation and real thread
+tests check cell/buffer behavior, interruption, FIFO, monitor ownership and
+reentrant wait. The original circular buffers are retained. See
+[Monitor evidence, scripts and limits](MONITORS.md); abstract monitor/semaphore
+pseudocode is explicitly separate from the Java execution tests.
 
 ### Dining philosophers: derive waits from actual ownership
 

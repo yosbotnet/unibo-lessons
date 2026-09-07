@@ -2,6 +2,36 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD7 monitors and compilable examples
+
+Preview: [figures](../../pcd/cap-07-monitor.html#s2),
+[intrinsic monitor examples](../../pcd/cap-07-monitor.html#s6),
+[explicit-lock examples](../../pcd/cap-07-monitor.html#s8).
+
+Two shared-renderer native SVGs distinguish components from ownership transitions.
+The old curved queue-to-active arrow no longer implies automatic lock transfer
+under signal-and-continue. Font and ivory/cobalt/vermilion are preserved.
+Four downloadable Java classes replace incomplete or misleading embedded snippets;
+the circular array remains. Static code and optional line annotations share one
+source. The chapter no longer needs Mermaid in the reader's browser.
+
+Verified compilation with warnings treated as errors on an isolated JDK 17,
+plus 5,099 Java assertions covering FIFO, producer/consumer contention, two-reader
+wakeup, interruption, reuse, nested monitor release/reentry and correct method
+bytecode flags. Four desktop/mobile JS/no-JS views verify exact source/downloads,
+annotations, tabs, quiz, markup and native SVG. A no-JS discipline-table overflow
+was fixed with keyboard-scrollable HTML, not smaller text or hidden content.
+All 30 shared native graphs and 32 embedded original-font assets pass their tests.
+The shared browser suite also passes 18 visits across nine chapters at both widths,
+plus nine no-JavaScript image-loading checks (complete rerun after a closed-page
+failure in an unchanged PCD16 screenshot).
+[Evidence and remaining verification limits](../../dev/legacy-diagrams/MONITORS.md).
+
+Current static inventory: 315 pages/993 figure elements; separately, 97 raw
+Mermaid blocks remain in 28 pages. The original 15-course scope is still
+208 chapters/882 figures. These counts do not certify completeness. Production
+and preexisting review/report edits remain untouched.
+
 ## Latest addition: PCD6 dining philosophers and deadlock scope
 
 Preview: [executable model](../../pcd/cap-06-deadlock.html#s2),
