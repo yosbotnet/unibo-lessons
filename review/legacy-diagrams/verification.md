@@ -2,6 +2,34 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD8 thread launch, lock contracts and bounded actions
+
+Preview: [launch diagram](../../pcd/cap-08-java.html#s1),
+[lock experiment](../../pcd/cap-08-java.html#s5),
+[canonical bounded counter](../../pcd/cap-08-java.html#s6).
+
+One native shared-renderer diagram distinguishes direct run from start/join.
+The renderer gains a bounded optional label-width override; the original font
+stays intact and existing defaults are unchanged. Three canonical Java sources
+replace unsupported launch/lock claims and the incomplete bounded-counter widget.
+Two annotation widgets now read the exact downloadable source. Lost-update,
+thread-safety, visibility and several quiz explanations are corrected.
+
+Verified warning-free Java 17 compilation, twenty run/start demonstrations,
+100 lock scenarios, a specific negative AutoCloseable compiler fixture, and
+bounded-counter validation/exception/contender/stale-check cases. Four responsive
+JS/no-JS page views verify markup, source/download/annotation identity, scrolling,
+native image and explanations. Existing executor/widget and Swing checks pass.
+The split exception label was found visually and corrected. Shared tests pass for
+33 diagrams, ten invalid inputs and 35 original-font assets; twenty shared
+desktop/mobile visits and ten no-JS image-loading checks also pass.
+[Evidence, commands and limits](../../dev/legacy-diagrams/JAVA-BASICS.md).
+
+The barrier/latch, physics and Fork-Join/structured-concurrency sections remain
+open, as does the full-site review. Current inventory: 315 pages/996 figure
+elements; 96 raw Mermaid blocks across 27 pages. Production and preexisting
+root review/report edits remain untouched.
+
 ## Latest addition: PCD8 Swing ownership and complete GUI examples
 
 Preview: [EDT bug](../../pcd/cap-08-java.html#s12),

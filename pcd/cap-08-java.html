@@ -45,9 +45,9 @@
 
   <section id="s1" data-src="PCD-2026-02-16-2.html#s8">
     <h2>1. Multithreading in Java: Thread e Runnable</h2>
-        <p>Il professor Ricci introduce la programmazione multi-thread in Java con una precisazione importante: Java adotta un <strong>approccio ibrido</strong>. Da un lato, le classi per i thread sono librerie di base (J2SE, <code>java.util.concurrent</code>), indipendenti dal sistema operativo — a differenza dei PThread in C che sono specifici per sistemi POSIX. Dall'altro, il linguaggio include elementi nativi come la parola chiave <code>synchronized</code> e il fatto che ogni oggetto Java ha nativamente un lock associato.</p>
+    <p>Java combina supporto del linguaggio e API di libreria: <code>Thread</code> e <code>Runnable</code> sono in <code>java.lang</code>; executor, lock espliciti e altre astrazioni sono in <code>java.util.concurrent</code> e relativi sottopacchetti. <code>synchronized</code> è un costrutto del linguaggio e usa il monitor intrinseco dell’oggetto scelto. Gli esempi eseguibili di questa sezione usano thread di piattaforma di Java 17; non vanno generalizzati alla gestione dei thread virtuali delle versioni successive.</p>
 
-    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Java non ha voluto "bucare" il paradigma a oggetti introducendo oggetti attivi come concetto di prima classe. Se lo avesse fatto, si sarebbe aperto un mondo di ricerca (a cui il gruppo di Bologna ha contribuito) su "oggetti che inglobano il flusso di controllo". Ma non sarebbe piu stata programmazione orientata agli oggetti pura. Java ha scelto la via pragmatica: thread come oggetti normali, con il supporto del linguaggio per la sincronizzazione.</p></div>
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Creare un oggetto Thread non lo rende già attivo. Runnable descrive un comportamento; Thread fornisce un contesto di esecuzione che si avvia con start. La distinzione tra oggetto, task e flusso di controllo evita di attribuire concorrenza a una normale chiamata di metodo.</p></div>
 
     <h3>Creazione di thread in Java</h3>
     <p>Due modi principali per creare thread in Java:</p>
@@ -59,7 +59,7 @@
       <div class="lk-tabpanel">
         <p>Si estende la classe <code>Thread</code> e si sovrascrive il metodo <code>run()</code>:</p>
         <pre><code class="language-java">class MyThread extends Thread {
-    private int id;
+    private final int id;
 
     MyThread(int id) {
         this.id = id;
@@ -67,7 +67,12 @@
 
     public void run() {
         System.out.println("Thread " + id + " avviato");
-        try { Thread.sleep(5000); } catch (InterruptedException e) {}
+        try {
+            Thread.sleep(5000);
+        } catch (InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+            return; // Politica di questo thread: termina, senza stampare done.
+        }
         System.out.println("Thread " + id + " done");
     }
 }
@@ -101,13 +106,70 @@ t2.start();</code></pre>
       </div>
     </div>
 
+    <h3>run() è una chiamata; start() avvia il thread</h3>
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Chiamare direttamente run non è vietato: nell’esempio con <code>new Thread(task)</code> esegue il task sul chiamante, che non è necessariamente main, senza avviare t. Per un nuovo flusso di controllo si usa start una sola volta. Il ritorno da start non implica che il task sia finito; join permette di attenderne la terminazione e può essere interrotto.</p></div>
+
+<!-- BEGIN STATIC DIAGRAM pcd-thread-start -->
+<figure data-static-diagram="pcd-thread-start" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Chiamare run non equivale ad avviare un thread — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-thread-start.svg" width="366" height="603" alt="Chiamare run non equivale ad avviare un thread" style="display:block;width:366px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Esempio Java 17 con t creato da new Thread(task), non un thread virtuale. La chiamata diretta esegue il task sul chiamante e non cambia lo stato NEW di t. Se poi si chiama start, il task viene eseguito di nuovo, questa volta sul thread t. start è ammesso una sola volta, anche se t è già terminato. join attende la terminazione; non riavvia il thread. Le frecce descrivono queste operazioni, non tutti gli stati JVM possibili.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-thread-start -->
+<!-- BEGIN JAVA BASICS CONTENT ThreadStartDemo -->
+<p><a href="assets/examples/ThreadStartDemo.java" download>Scarica ThreadStartDemo.java</a> · Java 17, sorgente verificato.</p>
+<details data-basics-example="ThreadStartDemo"><summary>ThreadStartDemo: sorgente completo</summary>
+<pre data-basics-source="ThreadStartDemo" tabindex="0" role="region" aria-label="Codice Java ThreadStartDemo"><code class="language-java">import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+/** Java 17 platform thread: a direct call and a started thread are different. */
+public final class ThreadStartDemo {
+    private ThreadStartDemo() { }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        Thread caller = Thread.currentThread();
+        AtomicReference&lt;Thread&gt; executedBy = new AtomicReference&lt;&gt;();
+        AtomicInteger executions = new AtomicInteger();
+        Runnable task = () -&gt; {
+            executedBy.set(Thread.currentThread());
+            executions.incrementAndGet();
+        };
+        Thread t = new Thread(task, &quot;demo-worker&quot;);
+
+        t.run(); // Deliberate direct call: still on the caller.
+        require(executedBy.get() == caller, &quot;Direct run must use caller thread&quot;);
+        require(t.getState() == Thread.State.NEW, &quot;Direct run does not start t&quot;);
+        System.out.println(&quot;run: caller thread; t is NEW&quot;);
+
+        t.start(); // The same task now executes on t.
+        t.join(); // Wait for t to finish; do not infer completion from start.
+        require(executedBy.get() == t, &quot;Started task must execute on t&quot;);
+        require(t.getState() == Thread.State.TERMINATED, &quot;Join returned after termination&quot;);
+        require(executions.get() == 2, &quot;The task executed twice in this experiment&quot;);
+        System.out.println(&quot;start + join: worker thread; t is TERMINATED; executions = 2&quot;);
+
+        try {
+            t.start();
+            throw new AssertionError(&quot;A Thread cannot be started twice&quot;);
+        } catch (IllegalThreadStateException expected) {
+            System.out.println(&quot;second start: IllegalThreadStateException&quot;);
+        }
+    }
+}
+</code></pre>
+</details>
+<!-- END JAVA BASICS CONTENT ThreadStartDemo -->
     <div id="ac-thread"></div>
 
-    <h3>Il metodo run() non va chiamato direttamente</h3>
-    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Il metodo <code>run()</code> non va mai chiamato direttamente dal codice applicativo. Quando chiamiamo <code>start()</code>, il sistema (JVM + librerie) crea un nuovo thread del sistema operativo e invoca <code>run()</code> su quel thread. Se chiamiamo <code>run()</code> direttamente, viene eseguito sul thread corrente (quello del main) in modo sequenziale, senza creare un nuovo flusso di controllo. <code>run()</code> e pubblico solo per definizione del contratto dell'interfaccia — idealmente non dovrebbe essere pubblico.</p></div>
+    <p>Compila con <code>javac ThreadStartDemo.java</code>, poi esegui <code>java ThreadStartDemo</code>. Le verifiche confrontano l’identità del thread che esegue il task, non soltanto il suo nome. Il task viene eseguito due volte perché il programma dimostra intenzionalmente sia la chiamata diretta sia l’avvio. Il secondo start sullo stesso oggetto fallisce anche dopo join.</p>
 
     <h3>Comportamento attivo e terminazione</h3>
-    <p>I componenti attivi spesso <strong>non devono terminare</strong>. A differenza di una computazione tradizionale (input, processa, output, termina), i thread tipicamente hanno un comportamento ciclico, persistente. Il metodo <code>run()</code> non restituisce nulla (<code>void</code>) e non viene chiamato da noi: lo chiama la JVM sul nuovo thread.</p>
+    <p>Un task può terminare dopo un lavoro finito oppure servire richieste in un ciclo con una politica di arresto. Il tipo di ritorno void non impone un comportamento persistente. Quando l’esecuzione avviata da start esce da run, normalmente o per un’eccezione non gestita, il thread termina e non è riavviabile; per un nuovo avvio serve un nuovo Thread.</p>
 
     <h3>Un esempio: ordinamento parallelo con quicksort</h3>
     <p>Il professor Ricci anticipa un esempio che sara sviluppato nella prossima lezione. L'idea e ordinare un vettore enorme usando quicksort, ma sfruttando tutti i core del processore. Nel main si genera un array di 400 milioni di elementi, si chiama <code>Arrays.sort()</code> (sequenziale) e si misura il tempo. La sfida e parallelizzare l'ordinamento.</p>
@@ -119,9 +181,9 @@ t2.start();</code></pre>
 
     <div id="ac-sync-block"></div>
 
-    <p>L'idea base e: un blocco <code>synchronized(lock)</code> crea una regione critica: prima di entrare, il thread cerca di acquisire il <strong>lock intrinseco</strong> dell'oggetto specificato. Se un altro thread lo possiede gia, il thread si blocca (viene messo nell'<code>entry set</code> dell'oggetto). Quando il lock viene rilasciato (usciendo dal blocco), un thread in attesa viene risvegliato e puo acquisirlo.</p>
+    <p><code>synchronized(lock)</code> acquisisce il monitor dell’oggetto specificato. Se lo possiede un altro thread, l’ingresso attende; se lo possiede già il chiamante, l’acquisizione è rientrante. Al rilascio i contendenti possono competere: non è garantito un ordine FIFO. L’attesa di ingresso non è il wait set usato da Object.wait e non si interrompe chiamando interrupt.</p>
 
-    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Il costrutto <code>synchronized</code> implementa automaticamente: (1) <strong>mutua esclusione</strong> sul blocco, (2) <strong>rilascio automatico del lock</strong> anche in caso di eccezione, (3) relazione <strong>happens-before</strong> di memoria. Non e possibile dimenticare di rilasciare il lock, a differenza dei lock espliciti.</p></div>
+    <div class="callout exam"><span class="callout-label">Per l’esame</span><p>Synchronized assicura mutua esclusione rispetto agli accessi che usano lo stesso monitor e rilascio all’uscita, anche per eccezione. Il rilascio precede in happens-before una successiva acquisizione dello stesso monitor. Non protegge un accesso che usa un altro lock o nessun lock, e non rende atomica un’operazione più ampia che esce dal blocco.</p></div>
 
     <h3>Schema dell'esempio WorkerA/WorkerB</h3>
     <p>Nel codice mostrato dal professore, i worker estendono una classe base <code>Worker</code> che fornisce metodi di utilita come <code>waitSome()</code> (attesa casuale). La struttura e:</p>
@@ -150,9 +212,9 @@ synchronized (lock) {
 
     <div id="ac-counter"></div>
 
-    <p>Nel codice del professore, questo si manifesta come <strong>lost update</strong>: due thread possono leggere lo stesso valore, incrementarlo ciascuno nella propria variabile locale, e riscriverlo, perdendo uno degli incrementi. Con 100.000 incrementi per thread (totale atteso 200.000), il risultato effettivo sara minore, e diverso a ogni esecuzione.</p>
+    <p>Due thread possono leggere lo stesso valore e riscrivere lo stesso incremento, perdendone uno. Con 100.000 incrementi per thread il risultato atteso è 200.000, ma senza sincronizzazione non è garantito. Può essere inferiore, può ripetersi uguale fra esecuzioni e può anche risultare corretto: un test che osserva 200.000 non dimostra thread safety.</p>
 
-    <div class="callout idea"><span class="callout-label">Idea chiave</span><p><code>count++</code> non e atomico. A livello macchina corrisponde a: (1) carica count in un registro, (2) incrementa il registro, (3) scrivi il registro in count. Un interleaving fra (1) e (3) di due thread produce risultati errati. <code>synchronized</code> rende l'intera sequenza atomica rispetto agli altri thread sincronizzati sullo stesso lock.</p></div>
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Leggi, incrementa e scrivi è un modello didattico della read-modify-write, non una promessa su tre precise istruzioni macchina o su tutte le ottimizzazioni JVM. Un interleaving può perdere aggiornamenti. Synchronized protegge la sequenza rispetto agli altri accessi che rispettano lo stesso lock; rendere solo count volatile non rende atomico count++.</p></div>
 
     <h3>Dimostrazione dell'interleaving</h3>
     <p>Il professore simula mentalmente lo scenario: se entrambi i thread leggono count=5 prima che uno dei due lo abbia scritto, entrambi scriveranno 6 invece di 7. Ecco un simulatore interattivo per visualizzare il fenomeno:</p>
@@ -162,9 +224,9 @@ synchronized (lock) {
   </section>
   <section id="s4" data-src="PCD-2026-03-02.html#s6">
     <h2>4. Thread safety e metodi synchronized</h2>
-        <p>Il professore introduce la definizione di <strong>thread safety</strong> tratta dal testo "Java Concurrency in Practice": una classe e <strong>thread-safe</strong> se puo essere usata correttamente in qualsiasi contesto, sequenziale o concorrente, senza che chi la usa debba preoccuparsi di sincronizzazione aggiuntiva. Le classi di <code>java.util</code> (es. <code>ArrayList</code>) non sono thread-safe perche la sincronizzazione ha un costo e sarebbe sprecata in contesti sequenziali.</p>
+    <p>Una classe thread-safe mantiene il proprio contratto documentato anche con chiamate concorrenti, senza richiedere sincronizzazione esterna per le operazioni coperte da quel contratto. Non significa che qualsiasi sequenza di più chiamate sia atomica. ArrayList non è sincronizzata, ma non si può generalizzare a tutte le classi di java.util: esistono anche classi e wrapper sincronizzati.</p>
 
-    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>La scelta di non rendere thread-safe le classi della libreria standard per default e una decisione progettuale: il programmatore sceglie quando serve e paga solo quel costo. In contesti concorrenti si usano wrapper sincronizzati (<code>Collections.synchronizedList(...)</code>) o strutture specializzate (<code>ConcurrentHashMap</code>).</p></div>
+    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>Collections.synchronizedList protegge le singole operazioni, ma la sua documentazione richiede sincronizzazione sul wrapper durante l’iterazione. Anche un check-and-act composto da due chiamate sicure può richiedere un’operazione atomica dedicata. ConcurrentHashMap offre per esempio putIfAbsent per evitare una separazione fra controllo e inserimento.</p></div>
 
     <h3>synchronized a livello di metodo</h3>
     <p>Il professore mostra un'evoluzione: invece di un blocco <code>synchronized</code> esplicito, si puo dichiarare l'intero metodo come <code>synchronized</code>. In Java, scrivere:</p>
@@ -181,7 +243,7 @@ synchronized (lock) {
     }
 }</code></pre>
 
-    <p>Il lock viene acquisito sull'oggetto stesso (<code>this</code>) prima di eseguire il corpo del metodo e rilasciato automaticamente all'uscita. Questo pattern si avvicina all'idioma del <strong>monitor</strong>: una classe i cui metodi pubblici sono eseguiti in mutua esclusione per costruzione.</p>
+    <p>Per un metodo di istanza synchronized il monitor è this; per un metodo static synchronized è l’oggetto Class della classe che dichiara il metodo. Metodi di istanze diverse non condividono automaticamente il monitor. L’idioma monitor richiede che tutti gli accessi allo stato protetto rispettino una disciplina coerente, non semplicemente una parola chiave su qualche metodo.</p>
 
     <div class="lk-tabs" data-kit="tabs">
       <div class="lk-tablist">
@@ -212,7 +274,7 @@ synchronized (lock) {
       </div>
     </div>
 
-    <p>Il professore nota che <code>get()</code> deve essere <code>synchronized</code> anch'esso: altrimenti un thread potrebbe leggere un valore incoerente mentre un altro sta eseguendo <code>inc()</code> (anche se count++ e su una variabile <code>int</code>, la visibilita di memoria non e garantita senza sincronizzazione).</p>
+    <p>In questo SafeCounter anche get usa lo stesso monitor per la visibilità. Una lettura int non si spezza in metà valore, ma senza la necessaria relazione di memoria potrebbe essere obsoleta. Altri progetti possono usare AtomicInteger o altre discipline coerenti: non è una regola che imponga synchronized a ogni getter. Due chiamate consecutive get e inc restano due operazioni distinte.</p>
   
   </section>
   <section id="s5" data-src="PCD-2026-03-02.html#s7">
@@ -238,24 +300,183 @@ public void m() {
     <table>
       <thead><tr><th>Metodo</th><th>Comportamento</th></tr></thead>
       <tbody>
-        <tr><td><code>lock()</code></td><td>Acquisisce il lock, bloccandosi se necessario. Ignora gli interrupt.</td></tr>
-        <tr><td><code>lockInterruptibly()</code></td><td>Come <code>lock()</code> ma risponde all'interrupt: se il thread viene interrotto mentre aspetta, lancia <code>InterruptedException</code> e si sblocca.</td></tr>
-        <tr><td><code>tryLock()</code></td><td>Tenta di acquisire il lock senza bloccarsi: restituisce subito <code>true</code> (lock preso) o <code>false</code> (lock occupato).</td></tr>
-        <tr><td><code>tryLock(time, unit)</code></td><td>Tenta di acquisire il lock aspettando al piu il tempo specificato; restituisce <code>false</code> se scaduto.</td></tr>
+        <tr><td><code>lock()</code></td><td>Attende l’acquisizione senza terminare per interrupt. Un’interruzione durante l’attesa non viene trasformata in InterruptedException; lo stato di interruzione rimane osservabile dopo l’acquisizione.</td></tr>
+        <tr><td><code>lockInterruptibly()</code></td><td>Può lanciare InterruptedException per interruzione già presente o ricevuta durante l’attesa; in quel caso azzera lo stato e non acquisisce un nuovo possesso.</td></tr>
+        <tr><td><code>tryLock()</code></td><td>Non attende: restituisce true se acquisisce, anche rientrando come proprietario attuale, altrimenti false. La variante senza timeout può superare altri contendenti anche con lock fair.</td></tr>
+        <tr><td><code>tryLock(time, unit)</code></td><td>Può acquisire e restituire true, scadere restituendo false oppure essere interrotta con InterruptedException e stato azzerato. Il timeout non è un risultato booleano garantito in presenza di interruzione.</td></tr>
       </tbody>
     </table>
     </div>
 
     <div class="callout warn"><span class="callout-label">Attenzione</span><p>A differenza di <code>synchronized</code>, con <code>ReentrantLock</code> e possibile <strong>dimenticare di rilasciare il lock</strong> (se si omette il <code>finally</code>). Un'eccezione nel corpo del blocco lascerebbe il lock perpetuamente acquisito, bloccando tutti gli altri thread. Il pattern try/finally e <strong>obbligatorio</strong>.</p></div>
 
-    <p>Il professore nota che Java offre anche una sintassi piu moderna con <code>try(var lock = ...)</code> (ARM per lock, introdotta in versioni recenti), ma il pattern classico rimane il piu diffuso.</p>
+    <p>ReentrantLock non implementa AutoCloseable: <code>try (var lock = new ReentrantLock())</code> non compila in Java 17. Un eventuale wrapper applicativo deve implementare esplicitamente quel contratto; var non aggiunge gestione automatica delle risorse. Nel pattern sopra l’acquisizione precede il try: si esegue unlock soltanto per un’acquisizione riuscita. Con acquisizioni rientranti occorre un rilascio per ciascun livello.</p>
+
+<!-- BEGIN JAVA BASICS CONTENT LockSemanticsDemo -->
+<p><a href="assets/examples/LockSemanticsDemo.java" download>Scarica LockSemanticsDemo.java</a> · Java 17, sorgente verificato.</p>
+<details data-basics-example="LockSemanticsDemo"><summary>LockSemanticsDemo: sorgente completo</summary>
+<pre data-basics-source="LockSemanticsDemo" tabindex="0" role="region" aria-label="Codice Java LockSemanticsDemo"><code class="language-java">import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
+
+/** Controlled Java 17 lock experiment. Deadlines are test guards, not benchmarks. */
+public final class LockSemanticsDemo {
+    private LockSemanticsDemo() { }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    private static void joined(Thread worker) throws InterruptedException {
+        worker.join(5000);
+        require(!worker.isAlive(), &quot;Worker deadline exceeded&quot;);
+    }
+
+    private static void runCase(String mode) throws Exception {
+        ReentrantLock lock = new ReentrantLock();
+        CountDownLatch ready = new CountDownLatch(1);
+        AtomicBoolean acquired = new AtomicBoolean();
+        AtomicBoolean caught = new AtomicBoolean();
+        AtomicBoolean interruptStatus = new AtomicBoolean();
+        AtomicReference&lt;Throwable&gt; failure = new AtomicReference&lt;&gt;();
+        Thread worker = new Thread(() -&gt; {
+            ready.countDown();
+            try {
+                boolean owns;
+                switch (mode) {
+                    case &quot;lock&quot;: lock.lock(); owns = true; break;
+                    case &quot;interruptible&quot;: lock.lockInterruptibly(); owns = true; break;
+                    case &quot;try&quot;: owns = lock.tryLock(); break;
+                    case &quot;timeout&quot;: owns = lock.tryLock(10, TimeUnit.MILLISECONDS); break;
+                    case &quot;timed-interrupt&quot;: owns = lock.tryLock(1, TimeUnit.DAYS); break;
+                    default: throw new AssertionError(mode);
+                }
+                if (owns) {
+                    try {
+                        acquired.set(true);
+                        interruptStatus.set(Thread.currentThread().isInterrupted());
+                    } finally { lock.unlock(); }
+                }
+            } catch (InterruptedException expected) {
+                caught.set(true);
+                interruptStatus.set(Thread.currentThread().isInterrupted());
+            } catch (Throwable error) { failure.set(error); }
+        }, &quot;lock-experiment&quot;);
+        worker.setDaemon(true); // Failure guard only: every successful run joins.
+        lock.lock();
+        try {
+            worker.start();
+            require(ready.await(5, TimeUnit.SECONDS), &quot;Worker did not start&quot;);
+            if (!mode.equals(&quot;try&quot;) &amp;&amp; !mode.equals(&quot;timeout&quot;)) {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (!lock.hasQueuedThread(worker)) {
+                    require(System.nanoTime() &lt; deadline, &quot;Worker did not queue for lock&quot;);
+                    Thread.sleep(1);
+                }
+                worker.interrupt();
+            }
+            if (mode.equals(&quot;lock&quot;)) {
+                require(!acquired.get(), &quot;Main still owns lock&quot;);
+                lock.unlock();
+            }
+            joined(worker);
+            if (failure.get() != null) throw new AssertionError(failure.get());
+            require(acquired.get() == mode.equals(&quot;lock&quot;), &quot;Acquisition outcome&quot;);
+            require(caught.get() == (mode.equals(&quot;interruptible&quot;) || mode.equals(&quot;timed-interrupt&quot;)), &quot;Exception outcome&quot;);
+            require(interruptStatus.get() == mode.equals(&quot;lock&quot;), &quot;Interrupt status after acquisition/exception&quot;);
+            System.out.println(mode + &quot;\t&quot; + acquired + &quot;\t&quot; + caught + &quot;\t&quot; + interruptStatus);
+        } finally {
+            if (lock.isHeldByCurrentThread()) lock.unlock();
+            worker.interrupt();
+            joined(worker);
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        require(!AutoCloseable.class.isAssignableFrom(ReentrantLock.class), &quot;Standard ReentrantLock is not AutoCloseable&quot;);
+        ReentrantLock reentrant = new ReentrantLock();
+        reentrant.lock();
+        try {
+            require(reentrant.tryLock(), &quot;Current owner may acquire again&quot;);
+            try { require(reentrant.getHoldCount() == 2, &quot;Two holds require two releases&quot;); }
+            finally { reentrant.unlock(); }
+            require(reentrant.getHoldCount() == 1, &quot;One remaining hold&quot;);
+        } finally { reentrant.unlock(); }
+        require(!reentrant.isLocked(), &quot;All holds released&quot;);
+        System.out.println(&quot;method\tacquired\tInterruptedException\tinterruptStatus&quot;);
+        for (String mode : List.of(&quot;lock&quot;, &quot;interruptible&quot;, &quot;try&quot;, &quot;timeout&quot;, &quot;timed-interrupt&quot;)) runCase(mode);
+    }
+}
+</code></pre>
+</details>
+<!-- END JAVA BASICS CONTENT LockSemanticsDemo -->
+
+    <p><code>javac LockSemanticsDemo.java</code> e <code>java LockSemanticsDemo</code> eseguono cinque casi controllati mentre il main possiede inizialmente il lock. Il programma verifica acquisizione, eccezione e stato di interruzione, più la rientranza. Le scadenze sono guardie dei test, non misure delle prestazioni. Fonti API: <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/lang/Thread.html">Thread</a>, <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/locks/ReentrantLock.html">ReentrantLock</a>, <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/Collections.html#synchronizedList(java.util.List)">synchronizedList</a>.</p>
   
   </section>
   <section id="s6" data-src="PCD-2026-03-02.html#s8">
     <h2>6. Check-and-act e il BoundedCounter</h2>
         <p>Il professore introduce un esempio piu complesso che illustra il pattern <strong>check-and-act</strong> e le sue insidie. Un <code>BoundedCounter</code> e un contatore con soglie minime e massime: se si tenta di incrementare oltre il massimo, lancia <code>OverflowException</code>; se si tenta di decrementare sotto il minimo, lancia <code>UnderflowException</code>.</p>
 
+<!-- BEGIN JAVA BASICS CONTENT BoundedCounter -->
+<p><a href="assets/examples/BoundedCounter.java" download>Scarica BoundedCounter.java</a> · Java 17, sorgente verificato.</p>
+<details data-basics-example="BoundedCounter"><summary>BoundedCounter: sorgente completo</summary>
+<pre data-basics-source="BoundedCounter" tabindex="0" role="region" aria-label="Codice Java BoundedCounter"><code class="language-java">/** Each operation is atomic; separate getVal + inc calls are not one operation. */
+public final class BoundedCounter {
+    public static final class OverflowException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+    }
+    public static final class UnderflowException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+    }
+
+    private int val;
+    private final int min;
+    private final int max;
+
+    public BoundedCounter(int min, int max, int initial) {
+        if (min &gt; max || initial &lt; min || initial &gt; max) {
+            throw new IllegalArgumentException(&quot;Require min &lt;= initial &lt;= max&quot;);
+        }
+        this.min = min;
+        this.max = max;
+        this.val = initial;
+    }
+
+    public synchronized void inc() {
+        if (val &gt;= max) throw new OverflowException();
+        val++;
+    }
+
+    public synchronized void dec() {
+        if (val &lt;= min) throw new UnderflowException();
+        val--;
+    }
+
+    public synchronized boolean tryInc() {
+        if (val &gt;= max) return false;
+        val++;
+        return true;
+    }
+
+    public synchronized boolean tryDec() {
+        if (val &lt;= min) return false;
+        val--;
+        return true;
+    }
+
+    public synchronized int getVal() {
+        return val;
+    }
+}
+</code></pre>
+</details>
+<!-- END JAVA BASICS CONTENT BoundedCounter -->
     <div id="ac-bounded"></div>
+    <p>Il sorgente completo valida min ≤ initial ≤ max. inc/dec possono lanciare le eccezioni definite nella classe; tryInc/tryDec combinano controllo e modifica restituendo false al limite, senza cambiare il valore. Il valore iniziale valido e tutte le operazioni protette mantengono min ≤ val ≤ max.</p>
 
     <p>Il problema emerge quando due worker operano sullo stesso contatore:</p>
     <ul>
@@ -263,9 +484,9 @@ public void m() {
       <li><strong>WorkerB</strong>: se il valore e minore di 1 (cioe minore del massimo), lo incrementa.</li>
     </ul>
 
-    <p>Il pattern <strong>check-and-act</strong> consiste nel controllare una condizione e poi agire di conseguenza. In un contesto concorrente, questo pattern e <strong>intrinsecamente non atomico</strong>: tra la lettura della condizione e l'azione, un altro thread puo modificare lo stato, invalidando la condizione appena letta.</p>
+    <p>Se il controllo e l’azione sono operazioni separate, un altro thread può modificare lo stato tra le due. Il problema non è inevitabile per ogni check-and-act: controllo e modifica possono essere racchiusi in una singola operazione atomica. Un metodo inc che ricontrolla il limite sotto lock mantiene l’invariante anche se un controllo esterno è ormai obsoleto; può però rifiutare l’operazione.</p>
 
-    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Il pattern check-and-act e una delle cause piu comuni di race condition. La soluzione e <strong>rendere atomico l'intero blocco check+act</strong> usando <code>synchronized</code> o un lock. Il BoundedCounter mostra anche che bisogna sincronizzare <em>tutti</em> i metodi pubblici, non solo quelli che modificano lo stato.</p></div>
+    <div class="callout exam"><span class="callout-label">Per l’esame</span><p>Proteggi l’intera operazione composta e tutti gli accessi al suo stato condiviso con una disciplina coerente, comprese le letture. Non basta sincronizzare due metodi separati, né occorre sincronizzare indiscriminatamente ogni metodo pubblico che non accede a quello stato.</p></div>
   
   </section>
   <section id="s7" data-src="PCD-2026-03-16.html#s15">
@@ -1459,20 +1680,20 @@ Response handle() throws ExecutionException, InterruptedException {
       <p>Accoda un task nella coda degli eventi dell'EDT e ritorna immediatamente (asincrono). Il task verra eseguito dall'EDT quando sara il suo turno. E il meccanismo standard per aggiornare la GUI da un thread diverso dall'EDT.</p></details>
 
       <details><summary>Quale invariante soddisfa un semaforo?</summary>
-      <p>Due invarianti: <code>S.V &gt;= 0</code> e <code>S.V = k + #signal(S) - #wait(S)</code>, dove k e il valore iniziale, #signal(S) e il numero di signal completati, #wait(S) e il numero di wait completati (esclusi i processi bloccati).</p></details>
+      <p>Con la convenzione classica V = permessi disponibili non negativi e k ≥ 0: <code>S.V ≥ 0</code> e <code>S.V = k + #signal(S) − #wait(S)</code>. Si contano i rilasci e le acquisizioni nel momento di assegnazione del permesso, non tutte le chiamate iniziate né necessariamente i ritorni già osservati. Le rappresentazioni con contatore negativo o permessi riservati richiedono una contabilità esplicita; vedi <a href="cap-07-monitor.html#quiz">il quiz sui monitor</a>.</p></details>
 
       <details><summary>Quali sono le quattro condizioni necessarie per il deadlock (Coffman)?</summary>
       <p>1. Mutua esclusione — una risorsa non condivisibile<br>2. Hold and wait — processi tengono risorse mentre ne richiedono altre<br>3. No preemption — le risorse non possono essere revocate<br>4. Circular wait — esiste un ciclo di attesa tra processi</p>
       <p>Se una qualsiasi delle quattro e assente, il deadlock e impossibile.</p></details>
 
       <details><summary>Differenza tra semaforo (wait/signal) e condition variable (waitC/signalC)?</summary>
-      <p>Tre differenze chiave: (1) wait sul semaforo puo non bloccare se S.V &gt; 0; waitC blocca sempre. (2) signal sul semaforo ha sempre effetto (incrementa S.V); signalC non ha effetto se la coda e vuota. (3) signal sblocca un processo arbitrario; signalC sblocca il processo in testa alla coda (FIFO).</p></details>
+      <p>Nel modello classico il semaforo conserva permessi; una condition variable non conserva notifiche per chiamanti futuri. Attendere su una condizione rilascia il monitor, mentre il risveglio richiede di riacquisirlo e ricontrollare il predicato. L’ordine dipende dall’astrazione: Object.notify sceglie arbitrariamente, non FIFO. Una Condition può avere garanzie specifiche; quelle create da ReentrantLock documentano segnalazione FIFO, distinta dalla successiva acquisizione del lock.</p></details>
 
       <details><summary>Perche un monitor usa while invece di if nella condizione di wait?</summary>
-      <p>Con la semantica Signal &amp; Continue (usata da Java), il thread risvegliato non ha garanzia che la condizione sia ancora vera: un altro thread potrebbe averla invalidata prima che il risvegliato riacquisisca il lock. Il while ricontrolla la condizione, garantendo la correttezza.</p></details>
+      <p>Con Signal &amp; Continue il risveglio non assicura che il predicato sia ancora vero dopo la riacquisizione del monitor; in Java sono ammessi anche risvegli spuri. Il while deve ricontrollare il predicato sotto lo stesso lock. Da solo non corregge un predicato sbagliato, accessi non protetti o un protocollo di notifica incompleto.</p></details>
 
       <details><summary>Qual e la differenza tra testing e model checking?</summary>
-      <p>Il testing verifica che una proprieta valga per <em>alcuni</em> scenari selezionati. Il model checking verifica che la proprieta valga per <em>tutti</em> gli scenari possibili, esplorando esaustivamente lo spazio degli stati. Il testing rivela la presenza di errori; il model checking puo provare l'assenza.</p></details>
+      <p>I test esercitano scenari selezionati. Un model checker verifica una proprietà del modello rispetto agli stati/esecuzioni coperti, oppure produce un controesempio. Un’esplorazione esaustiva di un modello finito può stabilire quella proprietà nel modello, non l’assenza di qualsiasi bug nel programma reale. Ipotesi, astrazione e limiti di una verifica bounded fanno parte del risultato.</p></details>
 
       <details><summary>Cosa significa bounded overtaking nel CS problem?</summary>
       <p>Dal momento in cui un processo P cerca di entrare in CS, un altro processo Q puo entrare al massimo k volte prima che P riesca ad entrare. In LTL: <code>tryp &rarr; (&not;CSq) W (CSq W ((&not;CSq) W CSp))</code> per 1-bounded overtaking.</p></details>
@@ -1493,19 +1714,6 @@ Response handle() throws ExecutionException, InterruptedException {
 <script src="assets/lesson-kit.js"></script>
 <script>
 /* ---- Annotated Code: Java Thread (da PCD-2026-02-16-2) ---- */
-    LessonKit.annotatedCode('#ac-thread', { lang:'java', lines:[
-      ['class MyThread extends Thread {', 'Estendere Thread: una classe che rappresenta un flusso di controllo attivo.'],
-      ['  private int id;', 'Ogni thread ha un identificativo per distinguere i messaggi.'],
-      ['  public void run() {', 'Il metodo run() definisce il comportamento attivo. Non chiamarlo direttamente!'],
-      ['    System.out.println("t"+id+" avviato");', 'Messaggio di avvio — eseguito sul NUOVO thread.'],
-      ['    Thread.sleep(5000);', 'Simula un\'operazione lunga (5 secondi). Il thread si sospende senza consumare CPU.'],
-      ['    System.out.println("t"+id+" done");', 'Al risveglio, stampa "done" e termina.'],
-      ['  }', 'Fine del metodo run(). Dopo l\'uscita, il thread termina automaticamente.'],
-      ['}', 'Fine della classe.'],
-      ['...', 'Nel main: creiamo due istanze e le avviamo con start().'],
-      ['t1.start();', 'start() crea un nuovo thread OS e invoca run() su quel thread.'],
-      ['t2.start();', 'Secondo thread: parte concorrentemente. L\'ordine di esecuzione non e deterministico.']
-    ]});
 
 /* ---- Widgets da PCD-2026-03-02 ---- */
       LessonKit.annotatedCode('#ac-sync-block', { lang: 'java', lines: [
@@ -1532,32 +1740,10 @@ Response handle() throws ExecutionException, InterruptedException {
         ['        count++;', 'count++ e read-modify-write: (1) load count, (2) add 1, (3) store count.'],
         ['    }', 'Senza sincronizzazione, due thread possono perdere un incremento.'],
         ['}', ''],
-        ['// Concorrenza: risultato atteso 200000, ottenuto < 200000', 'Lost update: alcuni incrementi vengono sovrascritti.'],
+        ['// Concorrenza: atteso 200000, possibile risultato inferiore', 'Una race può perdere incrementi; anche ottenere 200000 non dimostra correttezza.'],
         ['// Esempio: count=5, T1 legge 5, T2 legge 5, T1 scrive 6, T2 scrive 6 -> perso +1', 'Dovrebbe essere 7, ma il secondo thread sovrascrive il primo.']
       ]});
 
-      LessonKit.annotatedCode('#ac-bounded', { lang: 'java', lines: [
-        ['public class BoundedCounter {', 'Contatore con minimo e massimo.'],
-        ['    private int val;', 'Valore corrente del contatore.'],
-        ['    private final int min, max;', 'Soglie inferiori e superiori.'],
-        ['', ''],
-        ['    public BoundedCounter(int min, int max, int init) {', 'Costruttore: inizializza soglie e valore.'],
-        ['        this.min = min; this.max = max; this.val = init;', ''],
-        ['    }', ''],
-        ['', ''],
-        ['    public synchronized void inc() {', 'synchronized: incremento atomico e mutuamente esclusivo.'],
-        ['        if (val >= max) throw new OverflowException();', 'Check: se gia al massimo, eccezione.'],
-        ['        val++;', 'Act: incremento effettivo.'],
-        ['    }', 'Grazie a synchronized, check e act sono atomici insieme.'],
-        ['', ''],
-        ['    public synchronized void dec() {', 'Decremento: stessa protezione di inc().'],
-        ['        if (val <= min) throw new UnderflowException();', 'Check: se gia al minimo, eccezione.'],
-        ['        val--;', 'Act: decremento effettivo.'],
-        ['    }', ''],
-        ['', ''],
-        ['    public synchronized int getVal() { return val; }', 'Anche la lettura deve essere synchronized per visibilita.'],
-        ['}', 'Thread-safe per costruzione: tutti i metodi pubblici sono synchronized.']
-      ]});
 
       LessonKit.stepper('#step-lostupdate', {
         title: 'Simulatore: Lost Update su count++',
@@ -1609,5 +1795,6 @@ Response handle() throws ExecutionException, InterruptedException {
 
 
 </script>
+<script src="assets/thread-basics.js"></script>
 </body>
 </html>

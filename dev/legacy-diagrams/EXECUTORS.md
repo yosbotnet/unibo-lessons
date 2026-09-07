@@ -108,9 +108,9 @@ authoritative executable code. API evidence checked against Java 17:
 
 The subsequent [Swing revision](SWING.md) handles sections 12–14, including their
 EDT claims, partial GUI examples, annotations and related quiz answer.
-PCD8 still needs substantive review of its physics example,
-version-specific structured-concurrency example, thread/lock
-introduction (including the claimed automatic resource management for locks),
-and absolute claims in quizzes. These are not covered by a passing widget click
-test. At this executor checkpoint the inventory was 315 pages/994 figure elements, with 96 raw Mermaid
+The later [Java basics revision](JAVA-BASICS.md) corrects the thread/lock
+introduction, bounded counter and several quiz absolutes. Physics, barrier/latch
+and version-specific Fork-Join/structured-concurrency material remain outside these
+checkpoints; passing widget clicks do not certify them.
+At this executor checkpoint the inventory was 315 pages/994 figure elements, with 96 raw Mermaid
 blocks remaining across 27 pages; neither count establishes content correctness.

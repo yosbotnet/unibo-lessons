@@ -21,6 +21,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'pcd-monitor-components':[5,4],'pcd-monitor-reentry':[7,7]});
    Object.assign(counts,{'pcd-executor-types':[4,3]});
    Object.assign(counts,{'pcd-swing-refresh':[7,6]});
+   Object.assign(counts,{'pcd-thread-start':[7,7]});
+   if(e.id==='pcd-thread-start')for(const pair of ['T_D','D_C','T_S','C_S','S_W','W_E','E_X'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Thread launch relation '+pair);
    if(e.id==='pcd-swing-refresh')for(const pair of ['W_M','M_S','S_Q','Q_E','E_V','E_D'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Swing snapshot transition '+pair);
    if(e.id==='pcd-executor-types')for(const pair of ['S_E','E_B','F_E'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Executor relation '+pair);
    if(e.id==='pcd-monitor-reentry')for(const pair of ['E_A','A_P','P_U','P_W','W_N','N_E','U_X'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Monitor ownership transition '+pair);
@@ -53,13 +55,14 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
     return {outside,collisions,xmlErrors:xml.querySelectorAll('parsererror').length,invalid};
    });
    assert.deepEqual(bounds,{outside:[],collisions:[],xmlErrors:0,invalid:0},e.id);
+   if(e.id==='pcd-thread-start')assert(await r.page.evaluate(()=>[...document.querySelectorAll('svg text')].some(t=>t.textContent.replace(/\s/g,'')==='IllegalThreadStateException'&&t.getBBox().height<22)),'Exception name must fit on one line');
    await r.page.locator('svg').screenshot({path:path.join(out,e.id+'.png')});
    results.push({id:e.id,nodes:a.nodes,edges:a.edges.length,width:a.width,height:a.height,...bounds});
   }
   const types=await r.render({id:'test-edge-types',title:'Directed, undirected and bidirectional links',source:'flowchart LR\nA((A)) --- B{B}\nB <--> C[C]\nC -.-> D[D]'});
   assert.equal(types.edges.length,3);assert(!types.edges[0].start&&!types.edges[0].end);assert(types.edges[1].start&&types.edges[1].end);assert(!types.edges[2].start&&types.edges[2].end);
   const math=await r.render({id:'test-comparisons',title:'Keep formula operators',source:'flowchart LR\nA["m > N/2 + f?<br/>k ← k + 1"] --> B["a < b; a ≤ b; c ≥ d"]',requiredText:['m > N/2 + f?','k ← k + 1','a < b; a ≤ b; c ≥ d']});assert.equal(math.edges.length,1);assert(!math.svg.includes('&amp;gt;'));
-  const bad=[{overrides:{fontSize:9}},{overrides:{direction:'XX'}},{overrides:{rankSpacing:0}},{source:'sequenceDiagram\nA->>B: Hi'},{source:'flowchart LR\nA[broken(label] --> B'},{requiredText:['missing formula']},{requiredText:42}];
+  const bad=[{overrides:{fontSize:9}},{overrides:{direction:'XX'}},{overrides:{rankSpacing:0}},{overrides:{wrappingWidth:119}},{overrides:{wrappingWidth:601}},{overrides:{wrappingWidth:'270'}},{source:'sequenceDiagram\nA->>B: Hi'},{source:'flowchart LR\nA[broken(label] --> B'},{requiredText:['missing formula']},{requiredText:42}];
   for(const x of bad)await assert.rejects(()=>r.render({id:'test-invalid',title:'Invalid',source:'flowchart LR\nA-->B',...x}));
   fs.writeFileSync(path.join(out,'static-test.json'),JSON.stringify({results,edgeTypes:true,invalidInputs:bad.length},null,2));
   console.log(`${results.length} diagrams: XML, bounds, text collisions, determinism; 3 edge types; ${bad.length} invalid inputs rejected`);

@@ -19,15 +19,16 @@ async function createRenderer(){
     assert(/^[a-z][a-z0-9-]+$/.test(spec.id),'SVG-safe id required');
     assert(/^(flowchart|graph)\s+(LR|RL|TD|TB|BT)\b/.test(spec.source.trim()),'Only flowcharts supported by this adapter');
     assert(!/%%\{|^---|\bclick\s/m.test(spec.source),'No embedded configuration or interaction');
-    for(const k of Object.keys(spec.overrides||{}))assert(['direction','nodeSpacing','rankSpacing'].includes(k),'Unknown override '+k);
+    for(const k of Object.keys(spec.overrides||{}))assert(['direction','nodeSpacing','rankSpacing','wrappingWidth'].includes(k),'Unknown override '+k);
     for(const k of ['nodeSpacing','rankSpacing'])if(spec.overrides?.[k]!==undefined)assert(Number.isFinite(spec.overrides[k])&&spec.overrides[k]>=20&&spec.overrides[k]<=300,'Invalid '+k);
+    if(spec.overrides?.wrappingWidth!==undefined)assert(Number.isFinite(spec.overrides.wrappingWidth)&&spec.overrides.wrappingWidth>=120&&spec.overrides.wrappingWidth<=600,'Invalid wrappingWidth');
     if(spec.overrides?.direction)assert(['LR','RL','TD','TB','BT'].includes(spec.overrides.direction),'Invalid direction');
     assert(spec.requiredText===undefined||Array.isArray(spec.requiredText)&&spec.requiredText.every(t=>typeof t==='string'&&t.length>0&&t.length<=200),'Invalid required text');
     return page.evaluate(async({spec,p,font})=>{
       let source=spec.source;const o=spec.overrides||{};
       if(o.direction)source=source.replace(/^(flowchart|graph)\s+\w+/,`$1 ${o.direction}`);
       mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',htmlLabels:false,deterministicIds:true,deterministicIDSeed:spec.id,
-        flowchart:{curve:'linear',useMaxWidth:false,padding:16,nodeSpacing:o.nodeSpacing||40,rankSpacing:o.rankSpacing||64},
+        flowchart:{curve:'linear',useMaxWidth:false,padding:16,nodeSpacing:o.nodeSpacing||40,rankSpacing:o.rankSpacing||64,...(o.wrappingWidth===undefined?{}:{wrappingWidth:o.wrappingWidth})},
         themeVariables:{fontFamily:p.mono,fontSize:'14px',background:p.paper,primaryColor:p.panel,primaryTextColor:p.ink,primaryBorderColor:p.cobalt,lineColor:p.cobalt,secondaryColor:p.panel,tertiaryColor:p.paper,clusterBkg:p.paper,clusterBorder:p.rule,edgeLabelBackground:p.paper},
         themeCSS:'.node rect,.node circle,.node polygon,.node path,.flowchart-link{stroke-width:1.5px}.edgeLabel rect{opacity:1}.cluster rect{stroke-width:1px}'
       });

@@ -122,8 +122,10 @@ Primary API references:
 [Swing Timer Java 17](https://docs.oracle.com/en/java/javase/17/docs/api/java.desktop/javax/swing/Timer.html),
 [key bindings tutorial](https://docs.oracle.com/javase/tutorial/uiswing/misc/keybinding.html).
 
-The chapter's physics example, structured-concurrency version/API, introductory
-thread/lock claims and broader quiz absolutes still require review. Site-wide
+The later [Java basics revision](JAVA-BASICS.md) handles introductory thread/lock
+claims, BoundedCounter and several quiz absolutes. The chapter's physics example,
+barrier/latch examples, and structured-concurrency/Fork-Join material still require
+review. At this Swing checkpoint the site-wide
 inventory: 315 tracked HTML pages and 995 figure elements; 96 raw Mermaid blocks
 remain across 27 pages. The original fifteen-course scope remains 208 chapters
 and 882 figures. Counts and passing local tests are not a full-site certificate.

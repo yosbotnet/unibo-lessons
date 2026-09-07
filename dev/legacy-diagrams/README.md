@@ -7,8 +7,9 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Thirty-two reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
-these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
+Thirty-three reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+these source records. Supported overrides: direction, nodeSpacing, rankSpacing and
+wrappingWidth (120–600 px, to keep long identifiers on a line without smaller text).
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
 their existing renderers until separately reviewed; neuron presets remain intact.
@@ -58,6 +59,9 @@ node executor-browser-test.cjs
 NOTES_JDK=/path/to/jdk node swing-java-test.cjs
 node swing-content.cjs --check
 node swing-browser-test.cjs
+NOTES_JDK=/path/to/jdk node java-basics-test.cjs
+node java-basics-content.cjs --check
+node java-basics-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -70,6 +74,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Java basics: run versus start, lock contracts and bounded check-and-act
+
+PCD8 sections 1–6 now distinguish a direct call from a started thread, a protected
+operation from a compound action, and interruptible lock acquisition from timeout.
+The native launch diagram uses the shared renderer's optional label-width override.
+Three canonical Java sources, source-derived annotations, real thread/lock tests
+and a negative compiler fixture replace unsupported claims and incomplete code.
+See [Java basics evidence and limits](JAVA-BASICS.md).
 
 ### Swing: short EDT work, protected state and stale refreshes
 
