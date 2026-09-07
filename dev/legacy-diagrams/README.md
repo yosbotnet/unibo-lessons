@@ -101,6 +101,9 @@ node robustness-browser-test.cjs
 node feature-content.cjs --check
 NOTES_AMICH_PDF=/path/to/amich.pdf NOTES_ILYAS_PDF=/path/to/ilyas.pdf node feature-test.cjs
 node feature-browser-test.cjs
+node impact-content.cjs --check
+NOTES_IMPACT_EVIDENCE=/path/to/reviewed-evidence node impact-test.cjs
+node impact-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -113,6 +116,13 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Model errors, physical channels and actual system impact
+
+Both cybersecurity chapter-05 versions now share a native nine-node evaluation
+flowchart and eight sourced domain rows. They distinguish measured component
+errors from downstream consequences and correct the linked slide attributions.
+See [impact evidence, reproduction and limits](IMPACT.md).
 
 ### Useful features and perturbation sensitivity
 

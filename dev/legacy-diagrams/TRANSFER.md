@@ -119,8 +119,9 @@ and direct source checks; see [FGSM.md](FGSM.md). Training/smoothing guarantees,
 algorithms and related quizzes are covered by [ROBUSTNESS.md](ROBUSTNESS.md).
 The generic neuron-feature claims and asserted OOD percentage are addressed by
 the subsequent [feature revision](FEATURES.md). Also still open in these chapters:
-physical-world/vehicle-transfer assertions, model inversion and the later LLM/privacy/agentic
-pipeline claims. The full-site goal
+model inversion and the later LLM/privacy/agentic
+pipeline claims. Physical-world/vehicle-transfer assertions are addressed by
+the subsequent [impact revision](IMPACT.md). The full-site goal
 remains open; this checkpoint is not approval of all chapter content. The existing
 audio narration was not regenerated and can still contain superseded statements.
 Production and the preexisting root review files are unchanged.

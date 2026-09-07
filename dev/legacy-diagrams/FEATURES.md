@@ -114,7 +114,9 @@ through the existing SSH tunnel; the reworked chapter has the same `#s7` anchor.
 
 ## Still open
 
-Physical attacks and vehicle-transfer assertions, the RL aside, privacy/model
+The subsequent [impact revision](IMPACT.md) addresses physical attacks,
+vehicle-transfer assertions and the separate reworked CIA introduction.
+The RL aside, privacy/model
 inversion/memorization, LLM and agentic content still need review. Existing audio
 has not been regenerated and may contain superseded claims. These changes do not
 certify the remaining site or authorize deployment. Production and preexisting
