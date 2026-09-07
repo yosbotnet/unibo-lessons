@@ -138,7 +138,7 @@
         <p>Un processo coordinatore gestisce un token. I processi inviano richieste al coordinatore, che le accoda e assegna il token rispettando l'ordinamento causale. Piu semplice da implementare, ma il coordinatore e un collo di bottiglia e un punto unico di fallimento.</p>
       </div>
       <div class="lk-tabpanel">
-        <p>Ogni processo che vuole entrare in CS invia una richiesta timestampata a tutti gli altri processi. Un processo concede il permesso (OK) se non e interessato alla CS o se la propria richiesta ha un timestamp maggiore. Simmetrico, senza coordinatori, ma richiede O(N-1) messaggi per richiesta.</p>
+        <p>Ogni richiedente invia una richiesta timestampata agli altri processi. Chi è già in CS differisce gli OK; chi attende confronta le coppie (timestamp, ID), mentre chi è libero risponde subito. Ricart–Agrawala richiede 2(N − 1) messaggi per ingresso: N − 1 richieste e N − 1 OK.</p>
       </div>
     </div>
   </section>
@@ -147,9 +147,9 @@
     <h2>3. Algoritmo centralizzato con coordinatore</h2>
 
     <div data-src="PCD-2026-05-15.html#s3">
-      <p>Nell'algoritmo centralizzato esiste un processo coordinatore <code>P0</code> che detiene il token. I processi clients <code>Pi</code> (con i = 1..N) cooperano trasportando il proprio vector clock <code>v</code> in ogni messaggio (piggybacking), cosi che il coordinatore possa ricostruire l'ordinamento causale delle richieste.</p>
+      <p>Un coordinatore <code>P0</code> gestisce un unico permesso, qui chiamato <strong>token</strong>, per N client P1…PN. Il modello assume partecipanti fissi, processi corretti, canali affidabili senza duplicati e consegna eventuale; non richiede FIFO. Ogni client ha al massimo una richiesta di acquisizione pendente e può scambiare messaggi applicativi anche mentre attende. Il token può trovarsi a P0, presso un client o <strong>in un messaggio in transito</strong>: durante il viaggio non è disponibile per una seconda concessione.</p>
 
-      <p>Il punto fondamentale e la <strong>fairness</strong>: se due richieste arrivano, la richiesta che e accaduta prima nella relazione happened-before deve essere servita prima, anche se arriva al coordinatore dopo. Per fare questo, ogni processo allega il proprio vector clock <code>v</code> alla richiesta: <code>v[j]</code> rappresenta il numero di richieste fatte da <code>Pj</code> che precedono causalmente lo stato corrente.</p>
+      <p>Questa variante aggiunge <strong>precedenza causale delle richieste</strong>, non garantita da una semplice coda in ordine di arrivo. Il vettore <code>v[j]</code> conta le richieste di Pj note al processo: si incrementa soltanto la propria componente quando si crea una nuova richiesta. Tutti i messaggi del modello trasportano una copia del vettore del mittente; alla consegna il destinatario fa il massimo componente per componente. È un vettore di contatori di richieste, non un orologio incrementato a ogni evento.</p>
 
       <div class="callout idea">
         <span class="callout-label">Idea chiave</span>
@@ -157,73 +157,63 @@
       </div>
 
       <h3>Strutture dati del coordinatore</h3>
-      <p>Il coordinatore mantiene due strutture:</p>
+      <p>Il coordinatore distingue questi dati:</p>
       <ul>
-        <li><code>reqList</code>: lista delle richieste ricevute ma non ancora soddisfatte.</li>
-        <li><code>reqDone</code>: array tale che <code>reqDone[i]</code> = numero di richieste di <code>Pi</code> gia soddisfatte.</li>
+        <li><code>reqList</code>: richieste ricevute ma non ancora concesse, in ordine di arrivo.</li>
+        <li><code>granted[i]</code>: concessioni inviate a Pi. Il vecchio nome <code>reqDone</code> indicava questo conteggio, non necessariamente CS completate.</li>
+        <li><code>completed[i]</code>: rilasci di Pi già ricevuti da P0.</li>
+        <li><code>haveToken</code>: vero solo quando il token è a P0; falso anche durante TOKEN e RELEASE in viaggio.</li>
       </ul>
-      <p>Una richiesta <code>w</code> in <code>reqList</code> e <strong>eligible</strong> se per ogni <code>j</code>, <code>w.v[j] == reqDone[j]</code> (e per <code>j == w.p</code>, <code>w.v[j] == reqDone[j] + 1</code>). Cio significa: non ci sono richieste accadute prima di <code>w</code> che non sono state ancora soddisfatte.</p>
+      <p>La richiesta w di Pi è <strong>eligible</strong> quando <code>w.v[i] == granted[i] + 1</code> e, per ogni j ≠ i, <code>w.v[j] ≤ granted[j]</code>. P0 sceglie la prima richiesta eligible <strong>solo se haveToken è vero</strong>. Il confronto non è «w.v ≤ granted» sull'intero vettore, perché la componente del richiedente vale esattamente uno in più. Le altre componenti possono essere minori: P0 può avere già servito richieste concorrenti sconosciute al richiedente.</p>
 
-      <p>Vediamo un esempio concreto. P1 invia una richiesta con vettore [1,0]. P2 invia una richiesta con vettore [1,1] (perche sa che P1 ha gia fatto richiesta). Il coordinatore, quando riceve [1,0] da P1, nota che non ci sono richieste pendenti da altri, quindi puo servire subito P1. Quando riceve [1,1] da P2, vede che P2 stesso dichiara che P1 ha una richiesta in sospeso &mdash; ma il coordinatore ha gia servito P1, quindi il suo <code>reqDone[1]</code> ora vale 1, e la richiesta di P2 diventa eligible.</p>
+      <p>P1 invia REQUEST [1,0] e poi APP [1,0] a P2. Dopo aver ricevuto APP, P2 crea REQUEST [1,1]. Se [1,1] arriva per prima a P0, deve attendere la richiesta di P1. Quando [1,0] arriva, P0 concede P1; [1,1] diventa numericamente eligible ma aspetta ancora il ritorno del token. La figura mostra esplicitamente il messaggio APP che giustifica il vettore di P2.</p>
 
-<pre class="mermaid">sequenceDiagram
-    participant P1
-    participant P0 as Coordinatore
-    participant P2
-
-    P1->>P0: req(v=[1,0])
-    P0->>P0: reqDone=[0,0] serve P1
-    P0->>P1: token
-    P1->>P0: release(token)
-    P2->>P0: req(v=[1,1])
-    P0->>P0: reqDone=[1,0] w.v=[1,1] eligible
-    P0->>P2: token</pre>
+<!-- BEGIN STATIC DIAGRAM pcd-central-causal -->
+<figure data-static-diagram="pcd-central-causal" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Coordinatore: ordine causale, non semplice ordine di arrivo — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-central-causal.svg" width="421" height="772" alt="Coordinatore: ordine causale, non semplice ordine di arrivo" style="display:block;width:421px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">P1 invia la richiesta [1,0], poi un messaggio applicativo APP a P2. Solo dopo aver ricevuto APP, P2 può inviare [1,1]. La rete consegna a P0 prima la richiesta di P2, che resta in coda; [1,0] arriva dopo ed è servita per prima. Gli archi seguono questo esempio, non durate misurate. Il TOKEN di P2 parte soltanto dopo il ritorno del RELEASE di P1; anche P2 deve riceverlo prima di entrare in CS.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-central-causal -->
     </div>
 
     <div data-src="PCD-2026-05-08.html#s16">
-      <p>In termini piu formali: se s &rarr; t (lo stato s precede causalmente lo stato t), la richiesta fatta in s deve essere servita prima di quella fatta in t, anche se la richiesta t arriva al coordinatore prima. Sul lato coordinatore, una richiesta w e eleggibile se w.v &le; reqDone: per ogni j &ne; w.p, w.v[j] == reqDone[j] (nessuna richiesta pendente da altri), e per j = w.p, w.v[j] == reqDone[j] + 1 (esattamente una richiesta pendente dal richiedente).</p>
+      <p>Controesempio all'uguaglianza: P1 e P2 richiedono indipendentemente con [1,0] e [0,1]. Dopo il ciclo di P1, granted = [1,0]. La richiesta [0,1] di P2 è pronta perché 0 ≤ 1 sulla componente di P1; pretendere 0 == 1 la bloccherebbe per sempre. La precedenza causale non impone un ordine tra queste due richieste concorrenti.</p>
+      <p class="small"><strong>Confronto con le slide:</strong> nella slide 10 di «[module-4.2] Distributed Algorithms – An Overview» compare <code>==</code> per gli altri client, mentre la spiegazione parla di «at most». Il controesempio sopra rende esplicita la correzione a <code>≤</code>. La stessa slide incrementa reqDone all'invio del token: qui il nome granted ne chiarisce il significato, separandolo dai completamenti.</p>
 
       <div class="callout exam">
         <span class="callout-label">Per l'esame</span>
-        <p>La condizione di eleggibilit&agrave; &egrave; il cuore dell'algoritmo: garantisce che le richieste siano servite secondo l'ordine causale, non secondo l'ordine di arrivo al coordinatore. &Egrave; un esempio perfetto di come gli orologi vettoriali possano essere usati per implementare fairness in un sistema distribuito.</p>
+        <p>La precedenza causale è distinta dall'assenza di starvation. Qui si usa la prima richiesta eligible in ordine di arrivo. Il progresso richiede che ogni messaggio arrivi, P0 continui a processare gli eventi e ogni possessore esca dalla CS e restituisca il token. Un client o coordinatore guasto può fermare il protocollo; non è prevista rigenerazione automatica del token.</p>
       </div>
     </div>
 
     <div data-src="PCD-2026-05-11.html#s13">
       <div class="callout idea">
         <span class="callout-label">Idea chiave</span>
-        <p>I processi <strong>piggybackano</strong> il proprio vector clock su tutti i messaggi in uscita. Quando un processo riceve un messaggio, aggiorna il proprio vector clock con il component-wise max. Cosi il vettore nella richiesta contiene la conoscenza causale del richiedente.</p>
+        <p>Il vettore allegato è una <strong>copia al momento dell'invio</strong>: non cambia quando il mittente apprende nuove richieste. REQUEST, TOKEN, RELEASE e i messaggi applicativi APP propagano tutti la conoscenza nel modello. Il coordinatore mantiene a sua volta un vettore noto, distinto dai contatori granted e completed.</p>
       </div>
 
       <div class="callout exam">
         <span class="callout-label">Per l'esame</span>
-        <p>L'algoritmo centralizzato richiede <strong>2 messaggi per richiesta</strong> (richiesta + token di risposta) piu i messaggi per propagare i vector clock. Il coordinatore e un single point of failure e puo diventare un collo di bottiglia.</p>
+        <p>Un ciclo completo usa <strong>3 messaggi di controllo</strong>: REQUEST, TOKEN, RELEASE. I primi due consentono l'ingresso; il terzo restituisce il permesso. Il piggyback del vettore aumenta la dimensione dei messaggi, non richiede di per sé messaggi ulteriori. Nell'esempio causale si aggiunge un APP esplicito per mostrare la dipendenza. P0 resta un collo di bottiglia e un punto unico di fallimento.</p>
       </div>
     </div>
 
     <div data-src="PCD-2026-05-18.html#s3">
       <p>Il flusso completo richiesta&ndash;token&ndash;rilascio, con la chiamata a <code>checkReq</code> sia alla ricezione di una richiesta sia al ritorno del token, e riassunto nel diagramma seguente.</p>
 
-      <pre class="mermaid">
-sequenceDiagram
-    participant P1 as Pi (client)
-    participant C as P0 (coordinator)
-    participant P2 as Pj (client)
+      <!-- BEGIN STATIC DIAGRAM pcd-central-token -->
+<figure data-static-diagram="pcd-central-token" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Un solo token: richiesta, concessione, ingresso e ritorno — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-central-token.svg" width="598" height="844" alt="Un solo token: richiesta, concessione, ingresso e ritorno" style="display:block;width:598px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">TOKEN è il permesso di P0; RELEASE è il suo ritorno. Una richiesta eligible non basta: il coordinatore deve anche possedere il token. Il client scelto può differire dall’ultimo richiedente. Quando invia TOKEN, P0 lo marca subito assente e incrementa le concessioni, non i completamenti. Il client entra solo alla ricezione, esce prima di inviare RELEASE, e P0 registra il completamento quando RELEASE arriva. Senza una richiesta eligible o il token, P0 conserva la coda e ricontrolla ai successivi arrivi; non esegue attesa attiva.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-central-token -->
 
-    Note over P1: v[i]++, send(req, v)
-    P1->>C: (req, v = [1,0,0,...])
-    Note over C: append reqList<br/>if haveToken: checkReq()
-    Note over C: w = first(eligible)<br/>send token, incr reqDone
-    C->>P1: token
-    Note over P1: inCS = true
-    Note over P1: [sezione critica]
-    P1->>C: token (release)
-    Note over P1: inCS = false
-    Note over C: haveToken = true<br/>checkReq() again
-    C->>P2: token (prossimo eligible)
-    </pre>
-
-      <p>Il processo client Pi, quando riceve un messaggio da un altro processo, aggiorna il proprio vettore v con il component-wise max del suo vecchio valore e del vettore ricevuto. Questo garantisce che la conoscenza causale si propaghi correttamente.</p>
+      <p>Il client esce dalla CS <em>prima</em> di inviare RELEASE. P0 considera il token assente dall'invio di TOKEN fino alla ricezione di RELEASE: non può concederlo nuovamente solo perché il client ha premuto «rilascia». Sono eventi su processi diversi, separati dal ritardo di rete.</p>
+      <p class="small">Riferimento per il ciclo centralizzato e i tre messaggi: <a href="https://www.cs.yale.edu/homes/aspnes/pinewiki/DistributedSystems.html">Aspnes, Distributed mutual exclusion</a>. La politica causale con vettori è la variante didattica qui esplicitata e verificata; non è una proprietà automatica di ogni coordinatore centralizzato.</p>
     </div>
   </section>
 
@@ -236,9 +226,49 @@ sequenceDiagram
 
   <section id="s5" data-src="PCD-2026-05-15.html#s5">
     <h2>5. Simulatore: algoritmo centralizzato</h2>
-    <p>Aziona il simulatore per vedere come il coordinatore gestisce le richieste concorrenti di due processi. Clicca "Passo P1" o "Passo P2" per far avanzare ogni processo, oppure "Reset" per ricominciare. Il coordinatore decide automaticamente se assegnare il token.</p>
+    <p>Puoi creare richieste, inviare APP tra i client, consegnare messaggi in un ordine scelto e restituire il token dal suo possessore. P0 decide automaticamente alla ricezione di REQUEST o RELEASE, senza permessi inventati né una preferenza fissa per P1. Una richiesta eligible può comunque aspettare il token. Le tracce sotto mostrano due esecuzioni riproducibili.</p>
 
-    <div id="step-centralized"></div>
+    <div id="step-centralized"><p>Il simulatore richiede JavaScript. Diagrammi e tracce statiche restano disponibili senza script.</p></div>
+<!-- BEGIN CENTRAL TRACES -->
+<details data-central-trace="causal">
+<summary>Traccia: La richiesta successiva arriva prima</summary>
+<p>Ogni riga è un'azione del client o la consegna di un messaggio. Le concessioni possono avvenire automaticamente durante una consegna a P0. I vettori hanno componenti P1, P2. Su mobile scorri la tabella orizzontalmente; con il focus nella tabella puoi usare le frecce.</p>
+<div role="region" tabindex="0" aria-label="Traccia del coordinatore scorribile" style="max-width:100%;overflow-x:auto">
+<table style="width:100%;min-width:820px;table-layout:fixed"><caption>La richiesta successiva arriva prima</caption>
+<colgroup><col style="width:60px"><col style="width:290px"><col style="width:170px"><col style="width:140px"><col></colgroup>
+<thead><tr><th scope="col">#</th><th scope="col">Azione</th><th scope="col">Token</th><th scope="col">Concesse / completate</th><th scope="col">Coda a P0</th></tr></thead>
+<tbody><tr><th scope="row">1</th><td>P1 invia REQUEST [1,0], che resta in rete.</td><td>a P0</td><td>[0,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">2</th><td>P1 invia a P2 un messaggio APP con [1,0].</td><td>a P0</td><td>[0,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">3</th><td>P2 apprende la richiesta di P1 dal messaggio APP.</td><td>a P0</td><td>[0,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">4</th><td>P2 invia REQUEST [1,1], causalmente successiva.</td><td>a P0</td><td>[0,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">5</th><td>P0 riceve prima [1,1]: dipendenza da P1 non soddisfatta, token ancora a P0.</td><td>a P0</td><td>[0,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">6</th><td>Arriva [1,0]: P0 concede P1 e invia TOKEN; non è ancora un ingresso in CS.</td><td>in viaggio P0 → P1</td><td>[1,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">7</th><td>P1 riceve TOKEN ed entra in CS.</td><td>a P1 (in CS)</td><td>[1,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">8</th><td>P1 esce e invia RELEASE. Il token è in viaggio verso P0.</td><td>in viaggio P1 → P0</td><td>[1,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">9</th><td>P0 riceve RELEASE: completa P1 e concede P2, inviando TOKEN.</td><td>in viaggio P0 → P2</td><td>[1,1] / [1,0]</td><td>vuota</td></tr>
+<tr><th scope="row">10</th><td>P2 riceve TOKEN ed entra in CS.</td><td>a P2 (in CS)</td><td>[1,1] / [1,0]</td><td>vuota</td></tr>
+<tr><th scope="row">11</th><td>P2 esce e restituisce il token.</td><td>in viaggio P2 → P0</td><td>[1,1] / [1,0]</td><td>vuota</td></tr>
+<tr><th scope="row">12</th><td>P0 riceve RELEASE: entrambe le richieste sono completate.</td><td>a P0</td><td>[1,1] / [1,1]</td><td>vuota</td></tr></tbody></table>
+</div></details>
+<details data-central-trace="concurrent">
+<summary>Traccia: Richieste concorrenti: perché serve ≤</summary>
+<p>Ogni riga è un'azione del client o la consegna di un messaggio. Le concessioni possono avvenire automaticamente durante una consegna a P0. I vettori hanno componenti P1, P2. Su mobile scorri la tabella orizzontalmente; con il focus nella tabella puoi usare le frecce.</p>
+<div role="region" tabindex="0" aria-label="Traccia del coordinatore scorribile" style="max-width:100%;overflow-x:auto">
+<table style="width:100%;min-width:820px;table-layout:fixed"><caption>Richieste concorrenti: perché serve ≤</caption>
+<colgroup><col style="width:60px"><col style="width:290px"><col style="width:170px"><col style="width:140px"><col></colgroup>
+<thead><tr><th scope="col">#</th><th scope="col">Azione</th><th scope="col">Token</th><th scope="col">Concesse / completate</th><th scope="col">Coda a P0</th></tr></thead>
+<tbody><tr><th scope="row">1</th><td>P1 invia REQUEST [1,0].</td><td>a P0</td><td>[0,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">2</th><td>P2 invia REQUEST [0,1] senza conoscere P1.</td><td>a P0</td><td>[0,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">3</th><td>P0 concede P1 e invia TOKEN.</td><td>in viaggio P0 → P1</td><td>[1,0] / [0,0]</td><td>vuota</td></tr>
+<tr><th scope="row">4</th><td>P0 accoda [0,1]: è eligible, ma il token è già in viaggio verso P1.</td><td>in viaggio P0 → P1</td><td>[1,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">5</th><td>P1 riceve TOKEN ed entra in CS.</td><td>a P1 (in CS)</td><td>[1,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">6</th><td>P1 esce e invia RELEASE.</td><td>in viaggio P1 → P0</td><td>[1,0] / [0,0]</td><td>P2#1</td></tr>
+<tr><th scope="row">7</th><td>P0 riacquisisce il token: 0 ≤ 1 permette di concedere P2; 0 == 1 lo bloccherebbe.</td><td>in viaggio P0 → P2</td><td>[1,1] / [1,0]</td><td>vuota</td></tr>
+<tr><th scope="row">8</th><td>P2 riceve TOKEN ed entra in CS.</td><td>a P2 (in CS)</td><td>[1,1] / [1,0]</td><td>vuota</td></tr>
+<tr><th scope="row">9</th><td>P2 esce e invia RELEASE.</td><td>in viaggio P2 → P0</td><td>[1,1] / [1,0]</td><td>vuota</td></tr>
+<tr><th scope="row">10</th><td>Il token torna a P0: due cicli completi, sei messaggi di controllo.</td><td>a P0</td><td>[1,1] / [1,1]</td><td>vuota</td></tr></tbody></table>
+</div></details>
+<!-- END CENTRAL TRACES -->
   </section>
 
   <section id="s6">
@@ -990,7 +1020,7 @@ flowchart TD
 
       <details>
         <summary>Come fa il coordinatore nell'algoritmo centralizzato a garantire la fairness anche se le richieste arrivano in ordine diverso da quello causale?</summary>
-        <p>Usando i vector clock trasportati dalle richieste (piggyback vector). Il coordinatore valuta l'eligibility di una richiesta w confrontando w.v con il proprio reqDone: una richiesta e eligible solo se non ci sono richieste accadute prima di w che non sono state ancora soddisfatte. Se una richiesta arriva in ritardo, il coordinatore la ritarda fintanto che non arrivano tutte quelle che la precedono causalmente.</p>
+        <p>Con vettori di richieste propagati tramite i messaggi effettivi. P0 ritarda una richiesta arrivata troppo presto rispetto alle sue dipendenze, non necessariamente una richiesta «in ritardo». Può concedere soltanto quando le dipendenze sono soddisfatte e il token è tornato a P0. Le richieste concorrenti non hanno un ordine causale reciproco obbligatorio.</p>
       </details>
 
       <details>
@@ -1040,7 +1070,7 @@ flowchart TD
 
       <details>
         <summary>Nell'algoritmo di mutua esclusione centralizzato, quando una richiesta w e considerata "eligible"?</summary>
-        <p>w e eleggibile se w.v e "al massimo" uguale a reqDone: per ogni j diverso da w.p si ha w.v[j] == reqDone[j], e per j == w.p si ha w.v[j] == reqDone[j] + 1. Questo significa che non esistono richieste accadute prima di w che non sono ancora state soddisfatte.</p>
+        <p>Per il richiedente i: w.v[i] == granted[i] + 1. Per ogni j ≠ i: w.v[j] ≤ granted[j]. Il coordinatore deve inoltre avere il token per concedere. granted conta i TOKEN inviati; completed conta i RELEASE ricevuti. Non usare l'uguaglianza per le componenti degli altri client.</p>
       </details>
 
       <details>
@@ -1085,6 +1115,7 @@ flowchart TD
   <script src="assets/ricart-agrawala.js"></script>
   <script src="assets/chang-roberts.js"></script>
   <script src="assets/causal-order.js"></script>
+  <script src="assets/centralized-mutex.js"></script>
   <script>
     // ---- Highlight.js ----
     hljs.highlightAll();
@@ -1092,38 +1123,31 @@ flowchart TD
     // ---- Mermaid ----
     mermaid.initialize({ theme: 'neutral', fontFamily: 'Inter,sans-serif' });
 
-    /* --- Annotated Code: Centralized Mutual Exclusion (slide 10-11) --- */
-    LessonKit.annotatedCode('#ac-centralized', { lang:'java', lines:[
-      ['P[i]::', 'Processo client Pi, i = 1..N. Ogni client ha un vector clock v e un flag inCS.'],
-      ['  var v: array[1..N] of integer := [0]', 'Vector clock locale: v[j] = richieste di Pj note a Pi.'],
-      ['  var inCS: boolean := false', 'Indica se il processo e attualmente in sezione critica.'],
-      ['  To request:', 'Fase di richiesta: incrementa la propria componente del vettore.'],
-      ['    v[i] := v[i] + 1', 'Aggiunge 1 al conteggio delle proprie richieste.'],
-      ['    send (req, v) to P[0]', 'Invia richiesta + vector clock al coordinatore P0.'],
-      ['  Upon receive(token) from P[0]:', 'Il coordinatore concede il permesso.'],
-      ['    inCS := true', 'Ora Pu entrare in CS.'],
-      ['  To release:', 'Fase di rilascio: restituisce il token al coordinatore.'],
-      ['    send token to P[0]', 'Rimanda indietro il token (non il vettore, il coordinatore lo ha gia).'],
-      ['    inCS := false', 'Esce dalla sezione critica.'],
-      ['  Upon receive(u):', 'Aggiornamento del vector clock alla ricezione di un messaggio.'],
-      ['    v:= max(v, u.v)', 'Component-wise max tra il vettore locale e quello ricevuto.'],
-      ['', ''],
-      ['P[0]::', 'Processo coordinatore: gestisce il token.'],
-      ['  var reqDone: array[1..N] of integer := [0]', 'reqDone[i] = numero richieste di Pi gia soddisfatte.'],
-      ['  var reqList: list of (pid, reqvector) := empty', 'Richieste ricevute ma non ancora soddisfatte.'],
-      ['  var haveToken: boolean := true', 'Allinizio il coordinatore ha il token.'],
-      ['  Upon receive(u,req):', 'Arriva una richiesta da un client.'],
-      ['    append(reqList, u)', 'Aggiunge la richiesta in coda.'],
-      ['    if (haveToken) checkReq()', 'Se ha il token, verifica subito le richieste eligible.'],
-      ['  Upon receive(u,token):', 'Il token viene restituito dopo il rilascio.'],
-      ['    haveToken := true; checkReq()', 'Riacquisisce il token e verifica le richieste pendenti.'],
-      ['  checkReq:', 'Funzione di eligibility: decide a chi assegnare il token.'],
-      ['    eligible := { w in reqList |', 'Seleziona le richieste w per cui non ci sono request pendenti che le precedono causalmente.'],
-      ['      for each j: w.v[j] == reqDone[j] (+1 se j==w.p) }', 'Condizione: w.v <= reqDone (con +1 per la richiesta corrente di w).'],
-      ['    if (eligible != {})', 'Se ci sono richieste pronte.'],
-      ['      w := first(eligible); delete(reqList, w)', 'Prende la prima richiesta eligible e la rimuove dalla lista.'],
-      ['      reqDone[w.p]++; send token to P[w.p]', 'Aggiorna reqDone e invia il token.'],
-      ['      haveToken := false', 'Il coordinatore non ha piu il token.'],
+    /* --- Centralized mutex: same grant/completion convention as the model --- */
+    LessonKit.annotatedCode('#ac-centralized', { lang:'plaintext', lines:[
+      ['At every process: v := zeros(N)', 'Client e coordinatore conservano conoscenza delle richieste.'],
+      ['Every send attaches copy(v)', 'APP e controllo propagano il vettore, senza modificarlo retroattivamente.'],
+      ['On every delivery: v := max(v, message.v)', 'Prima di trattare il messaggio; massimo componente per componente.'],
+      ['Client Pi initially: state := IDLE', 'Nessuna acquisizione pendente.'],
+      ['requestCS, only in IDLE:', 'Un solo tentativo pendente per client.'],
+      ['  v[i]++; r := (i, v[i], copy(v)); state := WAITING', 'Identificatore (client, numero) e timestamp fissi.'],
+      ['  send REQUEST(r) to P0', 'Invio reale: P0 non la vede prima della consegna.'],
+      ['receive TOKEN(r) for current request:', 'Verifica richiesta e provenienza dal coordinatore.'],
+      ['  state := HELD; enter CS', 'Solo ricevere il permesso consente di entrare.'],
+      ['releaseCS, only in HELD:', 'Il client deve possedere il token.'],
+      ['  leave CS; state := IDLE; send RELEASE(r) to P0', 'Esce prima di mettere il token in rete.'],
+      ['Coordinator: granted := zeros(N); completed := zeros(N)', 'Concessioni inviate e restituzioni ricevute sono distinti.'],
+      ['reqList := []; haveToken := true', 'All’inizio il solo token è a P0.'],
+      ['receive REQUEST(r): append(reqList, r); checkReq()', 'Conserva ordine di arrivo senza bloccare su una testa non eligible.'],
+      ['receive matching RELEASE(r):', 'Deve restituire il token attualmente assegnato.'],
+      ['  completed[r.i]++; haveToken := true; checkReq()', 'Ora il token è di nuovo disponibile.'],
+      ['eligible(r): r.v[r.i] == granted[r.i] + 1', 'Esattamente la prossima richiesta del suo client.'],
+      ['  and for all j != r.i: r.v[j] <= granted[j]', 'Le dipendenze note dagli altri client sono soddisfatte.'],
+      ['checkReq(): if !haveToken: return', 'Nessuna concessione mentre TOKEN o RELEASE è in viaggio.'],
+      ['  r := first eligible request in reqList', 'Politica di coda tra richieste già pronte.'],
+      ['  if none: return', 'Attende un nuovo evento, non inventa richieste.'],
+      ['  remove r; granted[r.i]++; haveToken := false', 'Riserva il permesso come parte del passo locale di concessione.'],
+      ['  send TOKEN(r) to Pi', 'Il completamento verrà contato solo al ritorno di RELEASE.'],
     ]});
 
     /* --- Annotated Code: Ricart-Agrawala (slide 13) --- */
@@ -1223,41 +1247,8 @@ flowchart TD
       ['// decide() = stesso criterio per tutti i processi corretti', 'Importante: tutti usano la stessa funzione di decisione.'],
     ]});
 
-    /* --- Step Simulator: Centralized Mutual Exclusion --- */
-    LessonKit.stepper('#step-centralized', {
-      title:'Mutua esclusione centralizzata',
-      sub:'Avanza P1 o P2 per simulare richieste e rilascio del token. Il coordinatore P0 decide automaticamente.',
-      shared:{ tokenAt:0, inCS:0, reqP1:0, reqP2:0, servedP1:0, servedP2:0 },
-      watch:['tokenAt','inCS','servedP1','servedP2'],
-      threads:{
-        P1:{ name:'P1', steps:[
-          { label:'Inizia richiesta CS', run:function(s){ s.reqP1++; } },
-          { label:'Invia req(v=[1,0]) a P0', run:function(s){ } },
-          { label:'Attende token...', run:function(s){ if(s.tokenAt!=1) return 'block'; } },
-          { label:'IN SEZIONE CRITICA', run:function(s){ s.inCS++; } },
-          { label:'Rilascia token a P0', run:function(s){ s.inCS--; s.tokenAt=0; s.servedP1++; } }
-        ]},
-        P2:{ name:'P2', steps:[
-          { label:'Inizia richiesta CS', run:function(s){ s.reqP2++; } },
-          { label:'Invia req(v=[0,1]) a P0', run:function(s){ } },
-          { label:'Attende token...', run:function(s){ if(s.tokenAt!=2) return 'block'; } },
-          { label:'IN SEZIONE CRITICA', run:function(s){ s.inCS++; } },
-          { label:'Rilascia token a P0', run:function(s){ s.inCS--; s.tokenAt=0; s.servedP2++; } }
-        ]},
-        P0:{ name:'Coordinatore', steps:[
-          { label:'Riceve richiesta dal client', run:function(s,l){ } },
-          { label:'Verifica eligibility', run:function(s,l){ } },
-          { label:'Assegna token a P1', run:function(s){ if(s.tokenAt===0 && s.reqP1>s.servedP1){ s.tokenAt=1; } } },
-          { label:'Token di P1 torna', run:function(s){ } },
-          { label:'Assegna token a P2', run:function(s){ if(s.tokenAt===0 && s.reqP2>s.servedP2){ s.tokenAt=2; } } },
-          { label:'Token di P2 torna', run:function(s){ } }
-        ]}
-      },
-      verdict:function(s,done){
-        if(s.inCS>1) return {status:'bad', text:'Mutua esclusione violata: due processi in CS!'};
-        return done ? {status:'ok', text:'Tutte le richieste servite correttamente. Mutua esclusione rispettata.'} : {status:'', text:'Avanza un processo per proseguire.'};
-      }
-    });
+    /* --- Real messages, request dependencies and conserved token --- */
+    CentralizedMutex.mount('#step-centralized');
 
     // ---- State Explorer: Chandy-Lamport (lezione 11 maggio) ----
     LessonKit.stateExplorer('#se-cl', {

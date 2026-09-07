@@ -2,7 +2,57 @@
 
 Preview only. Production remains at `f0f4bde`.
 
-## Latest addition: causal ordering and matrix eligibility
+## Latest addition: centralized mutex and token conservation
+
+Preview: [PCD16, sections 3–5](../../pcd/cap-16-algoritmi-distribuiti.html#s3).
+Two diagrams now show the missing application-message causal bridge, the request
+that waits for its predecessor, and the full token lifecycle. The second client
+is not granted an unsolicited permission. The selected client is not implicitly
+the most recent requester. Sources remain coordinate-free and use native SVG.
+
+The old simulator's no-op sends and fixed P1/P2 schedule are replaced with actual
+REQUEST/TOKEN/RELEASE/APP messages. The model distinguishes token at coordinator,
+outbound, held by a client and returning. Clients leave before sending RELEASE;
+P0 cannot grant again until it receives that return. Concessions and completions
+have distinct counters. Eligibility uses `≤` for other clients, not `==`, with
+an explicit independent-request counterexample. Matching prose and pseudocode
+also correct the two-vs-three-message full-cycle count and fairness assumptions.
+
+Tests cover 500 executions, 50,000 actions plus drains, 92,129 events and 5,973
+completed requests. The independent oracle reconstructs request causal histories
+and token movement, checks send-time vectors, predecessor completion, queue
+contents, mutual exclusion and conserved ownership. Additional cases cover
+reverse request arrival, immediate reacquisition while RELEASE travels, invalid
+actions and three control messages per completed request. Desktop/mobile actual
+controls reproduce both 22-row traces and check states, vectors and queue size;
+keyboard scrolling/focus and JavaScript-disabled traces also pass.
+
+Manual native-SVG and desktop/mobile widget inspection confirms readable labels,
+the waiting/eligible distinction and in-transit token state. Evidence is in
+`central-test.json`, `static-test.json`, `browser-http-test.json`, `font-test.json`
+and `central-*` / `pcd-central-*` PNGs under
+`/home/ybc/notes-legacy-review-artifacts/`. Random schedules are not a formal proof.
+Snapshots, global cuts and other remaining PCD16 claims still need review. The
+full-site goal remains open; production and preexisting review edits are untouched.
+
+The original local module-4.2 slide text, slides 8–11, was inspected directly.
+Slide 10 contains the equality/“at most” discrepancy and updates reqDone on grant;
+the chapter now identifies that source discrepancy explicitly. One broad audit
+attempt stopped with `ERR_ABORTED` navigating the unmodified `ds/DS-CX.html`,
+after nine completed visits; it is not counted as a successful run. Its partial
+record is retained as `audit-after-central-partial.json`.
+
+The completed retry (`audit-after-central-retry.json`) passes 103 Mermaid blocks
+in 32 pages at 1280/390 px: all 64 visits, including DS-CX at both widths, have no
+renderer errors, invalid geometry, page overflow or JavaScript exceptions. The
+sixteen-flowchart geometry suite checks all eight example edges and nine token
+lifecycle edges; twelve HTTP page visits and seventeen embedded-font assets pass.
+Causal-order, Chang–Roberts and Ricart–Agrawala regressions also pass, as does the
+20-case DL preset suite with four byte-identical approved SVGs. Inventory now
+counts 315 pages and 980 figure elements; original scope remains 208 chapters and
+882 figures. Neither inventory nor rendering success certifies all content.
+
+## Previous addition (3a40677): causal ordering and matrix eligibility
 
 Preview: [PCD16, sections 11–13](../../pcd/cap-16-algoritmi-distribuiti.html#s11).
 Two new static SVGs show the actual event-dependency graph and receiving buffer.

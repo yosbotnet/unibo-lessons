@@ -8,6 +8,9 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    const counts={'pcd-interleavings':[5,4],'pcd-exchange-central':[4,3],'pcd-exchange-all':[4,6],'pcd-exchange-ring':[4,4],'pcd-ricart-request':[6,5],'pcd-consensus-rounds':[9,6],'pcd-smr-order':[8,7],'pcd-raft-replication':[7,8],'ds-threat-chain':[4,3],'ds-independent-contexts':[2,1]};
    Object.assign(counts,{'pcd-chang-ring':[4,4],'pcd-chang-phases':[3,2]});
    Object.assign(counts,{'pcd-causal-dependencies':[6,6],'pcd-causal-buffer':[4,3]});
+   Object.assign(counts,{'pcd-central-causal':[8,8],'pcd-central-token':[8,9]});
+   if(e.id==='pcd-central-token')for(const pair of ['R_Q','Q_D','D_W','W_D','D_T','T_C','C_L','L_B','B_D'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Token lifecycle edge '+pair);
+   if(e.id==='pcd-central-causal')for(const pair of ['A_B','B_C','C_D','D_E','E_F','F_G','G_H','A_E'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Causal request edge '+pair);
    assert.deepEqual([a.nodes,a.edges.length],counts[e.id],'Complete graph '+e.id);
    if(e.id==='pcd-causal-dependencies'){
     for(const pair of ['S1_S2','S2_D2','D2_S3','S1_D1','S3_D3','D1_D3'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Exactly one edge '+pair);

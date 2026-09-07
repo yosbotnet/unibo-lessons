@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Fourteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Sixteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -31,6 +31,8 @@ node chang-test.cjs
 node chang-trace.cjs --check
 node causal-test.cjs
 node causal-traces.cjs --check
+node central-test.cjs
+node central-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -170,6 +172,68 @@ horizontal static-table scrolling and JavaScript-disabled fallbacks. Random
 executions are not an exhaustive proof. Centralized mutex eligibility, snapshots
 and other findings below remain separate work.
 
+### Centralized mutex: the token also exists while in transit
+
+PCD16 sections 3–5 now use a real message-driven coordinator/client model instead
+of a stepper with no-op sends and hardcoded P1-then-P2 grants. REQUEST, TOKEN and
+RELEASE are queued messages; an APP message can propagate the causal knowledge
+that makes a later request depend on an earlier one. The diagrams show that bridge
+explicitly, the waiting request and token lifecycle, with no unrequested P2 grant.
+They use the same generic coordinate-free flowchart adapter. The selected client
+need not be the most recent requester.
+
+`pcd/assets/centralized-mutex.js` supports 2–6 clients (the UI shows two) with fixed
+membership, no failures, reliable exactly-once channels and arbitrary delivery
+order. Clients have one pending acquisition at a time and can send/receive APP
+while waiting. Every control/application message carries a copied request-counter
+vector; the coordinator also maintains knowledge distinct from its grant counters.
+Eligibility uses exact next request for the requester and `≤` for other clients.
+The first eligible queued request is granted only when the token is at P0.
+
+`granted` counts TOKEN sends; `completed` counts RELEASE deliveries to P0. The
+chapter's former `reqDone` name conflated them. The conserved token has four
+locations: coordinator, outbound message, client, returning message. Clients
+enter only on TOKEN delivery and leave before sending RELEASE. They may request
+again while their previous RELEASE travels, but cannot receive a second grant
+until P0 receives that return. P0 is not automatically safe against failures,
+and this model has no timeout-based token regeneration.
+
+Both the chapter and matching annotated pseudocode distinguish causal precedence
+from starvation freedom and the pure coordinator's arrival-order queue. The full
+cycle uses three control messages, not two; request-vector piggyback changes size,
+not transmission count. [Aspnes, Distributed mutual exclusion](https://www.cs.yale.edu/homes/aspnes/pinewiki/DistributedSystems.html)
+supports the central request/grant/release cycle. The exact causal queue policy
+here is the chapter's explicit variant, checked against independent histories,
+not attributed as a verbatim algorithm from that reference. The introductory
+Ricart–Agrawala comparison now also preserves the HELD guard and 2(N − 1) count.
+
+The original local slide extraction was checked directly: `slides-text/[module-4.2]
+Distributed Algorithms - An Overview.txt` under
+`/home/ybc/content/exams/Programmazione Concorrente e Distribuita (PCD)/`, slides
+8–11 (especially 10). It really does print `==` for the other clients beside an
+“at most” explanation, increments `reqDone` when sending the token, and places
+the release send before clearing `inCS`. The chapter explicitly flags the
+eligibility correction and renamed count instead of silently claiming literal
+agreement with the slides. The exit-before-send order is safe even when those
+actions can interleave with remote message deliveries.
+
+Two examples cover a causal successor arriving first and independent requests
+that an equality test would block. `central-traces.cjs` prints an apply_patch
+patch for their 22 static rows; `--check` detects model/chapter drift. Real
+desktop/mobile controls reproduce every action and compare vectors, queues,
+token location, grant/completion counts and network size. The static traces and
+both SVGs are available without JavaScript; tables scroll using the keyboard.
+
+`central-test.cjs` runs 500 seeded random executions, 50,000 mixed actions plus
+fair drains, 92,129 events and 5,973 completed requests. A separate oracle tracks
+request-event causal histories and token movement, never the eligibility test.
+It checks actual send-time knowledge, grants after completed causal predecessors,
+single entry, queue contents and conservation of the token. Additional cases
+cover reverse arrival priority, immutable request stamps, reacquisition with a
+RELEASE still in transit, invalid operations and exactly three control messages
+per completed request. These are scoped regression tests, not an exhaustive
+schedule proof or a certification of the rest of the distributed algorithms.
+
 Mermaid theme configuration and linear curves follow the
 [official configuration](https://mermaid.js.org/config/theming.html) and
 [flowchart options](https://mermaid.js.org/config/schema-docs/config-defs-flowchart-diagram-config.html).
@@ -219,8 +283,8 @@ some of the original mistakes and are not independent proof. Primary references:
 
 These are concrete next checks, not claims that whole chapters are repaired:
 
-- PCD 16: review the centralized mutex eligibility equality, associated diagrams
-  and toy simulator; Chandy–Lamport explorers and the stated resilience of the two-phase
+- PCD 16: review Chandy–Lamport explorers, the global-state/consistent-cut
+  definitions and the stated resilience of the two-phase
   king variant. The chapter contains additional interactive material not covered
   by the Ricart–Agrawala tests.
 - DS C4: qualify CAP, FLP, hash-chain immutability and BFT threshold/termination

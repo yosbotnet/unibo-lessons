@@ -1,6 +1,39 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'pcd-central-causal',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:0,
+ title:'Coordinatore: ordine causale, non semplice ordine di arrivo',
+ caption:'P1 invia la richiesta [1,0], poi un messaggio applicativo APP a P2. Solo dopo aver ricevuto APP, P2 può inviare [1,1]. La rete consegna a P0 prima la richiesta di P2, che resta in coda; [1,0] arriva dopo ed è servita per prima. Gli archi seguono questo esempio, non durate misurate. Il TOKEN di P2 parte soltanto dopo il ritorno del RELEASE di P1; anche P2 deve riceverlo prima di entrare in CS.',
+ overrides:{rankSpacing:30,nodeSpacing:30},
+ source:`flowchart TD
+ A["P1 invia REQUEST [1,0]"]
+ B["P2 riceve APP [1,0]"]
+ C["P2 invia REQUEST [1,1]"]
+ D["P0 riceve prima [1,1]<br/>Dipendenza non soddisfatta<br/>La richiesta attende"]
+ E["P0 riceve poi [1,0]<br/>La richiesta di P1 è eligible"]
+ F["P0 invia TOKEN a P1<br/>P1 entra alla ricezione"]
+ G["P1 esce dalla CS<br/>Invia RELEASE a P0"]
+ H["P0 riceve RELEASE<br/>Ora invia TOKEN a P2"]
+ A -->|"APP [1,0]"| B
+ B --> C --> D --> E --> F --> G --> H
+ A -->|"REQUEST ritardata"| E
+ style D stroke:#B83D2D`},
+ {id:'pcd-central-token',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:1,
+ title:'Un solo token: richiesta, concessione, ingresso e ritorno',
+ caption:'TOKEN è il permesso di P0; RELEASE è il suo ritorno. Una richiesta eligible non basta: il coordinatore deve anche possedere il token. Il client scelto può differire dall’ultimo richiedente. Quando invia TOKEN, P0 lo marca subito assente e incrementa le concessioni, non i completamenti. Il client entra solo alla ricezione, esce prima di inviare RELEASE, e P0 registra il completamento quando RELEASE arriva. Senza una richiesta eligible o il token, P0 conserva la coda e ricontrolla ai successivi arrivi; non esegue attesa attiva.',
+ overrides:{rankSpacing:30,nodeSpacing:28},
+ source:`flowchart TD
+ R["Un client invia REQUEST"] --> Q["P0 riceve e accoda"]
+ Q --> D{"Token a P0<br/>e richiesta eligible?"}
+ D -->|"no"| W["Attendi un nuovo evento<br/>Accoda REQUEST<br/>o ricevi RELEASE"]
+ W -->|"ricontrolla"| D
+ D -->|"sì"| T["P0 marca token assente<br/>Concesse++<br/>Invia TOKEN"]
+ T --> C["Client scelto<br/>Riceve TOKEN; entra in CS"]
+ C --> L["Client esce dalla CS<br/>Invia RELEASE"]
+ L --> B["P0 riceve RELEASE<br/>Completate++<br/>Token di nuovo a P0"]
+ B --> D
+ style T stroke:#B83D2D
+ style L stroke:#B83D2D`},
  {id:'pcd-causal-dependencies',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:5,
  title:'Causalità: m2 collega i due invii destinati a P3',
  caption:'Ogni nodo è un evento applicativo, non un processo intero. Gli archi m1, m2 e m3 collegano ciascun invio alla relativa consegna; gli altri archi continui indicano ordine locale. La catena send(m1) → send(m2) → deliver₂(m2) → send(m3) impone deliver₃(m1) prima di deliver₃(m3). L’arco tratteggiato è questo vincolo, non un quarto messaggio. Non sono rappresentati i tempi di arrivo al middleware.',
