@@ -2,6 +2,39 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD16 Raft commit and conflicting log prefixes
+
+Preview: [section 20](../../pcd/cap-16-algoritmi-distribuiti.html#s20).
+
+Replaced the last raw Mermaid block in the chapter with a seven-node/seven-edge
+native SVG from the shared angular renderer. The current-term commit guard is
+explicit. Figure-8-style log examples are generated as actual HTML tables from
+bounded executable rules; the overwrite and safe-commit outcomes are alternatives,
+not a single animation. The chapter distinguishes commit, application and reply,
+corrects Paxos/Raft scope and historical claims, and removes the now-obsolete
+Mermaid initialization so subsequent widgets keep running.
+
+Verified 181,066 commit states against an independent quorum-order-statistic
+oracle, 25 freshness comparisons, heartbeat/conflict/stale-term/idempotence cases
+and invalid inputs. The chapter passes HTML5 parsing, unique-ID and stray-SVG
+checks at 1280/390 px with JavaScript on and off. Exact results, detail controls,
+all five section-20 tabs, native image loading and keyboard scrolling pass.
+Native and chapter/table screenshots were inspected against the paper's Figure 8.
+These bounded checks are not a complete protocol implementation or formal proof.
+
+Shared regressions: 27 diagrams pass XML, geometry, text and deterministic-render
+checks; 29 SVGs retain the actual original font/license; seven pages pass at both
+widths, with tab/widget checks and no-JS image loading. Build and generated tables
+have no drift. [Sources and detailed limits](../../dev/legacy-diagrams/RAFT-COMMIT.md).
+Consistent-cut and Phase-King model/browser regressions also pass. The 20-case DL
+preset suite retains all four approved SVGs byte-for-byte.
+
+The source inventory is now 315 HTML pages/991 figure elements; the original
+fifteen-course scope remains 208 chapters/882 figures. A current source count
+finds 99 remaining raw Mermaid blocks across 30 pages. That count is not a new
+visual audit or a claim that every remaining block is defective. Other graphs,
+runtime widgets and scientific content remain in scope. Production was not changed.
+
 ## Latest addition: DS-C4 foundations and actual hash-chain evidence
 
 Preview: [platform/architecture qualifications](../../ds/DS-C4.html#s2),

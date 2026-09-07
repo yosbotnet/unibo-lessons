@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-six reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-seven reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -45,6 +45,8 @@ node ledger-test.cjs
 node ledger-traces.cjs --check
 node hash-chain-test.cjs
 node hash-chain-traces.cjs --check
+node raft-commit-test.cjs
+node raft-commit-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -57,6 +59,14 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Raft: commit requires more than a majority of old entries
+
+PCD16 section 20 now uses a native commit-rule diagram, generated HTML log tables
+and bounded executable leader/follower rule examples. Current-term commitment,
+conflicting suffixes, heartbeat bounds, freshness filtering, application and client
+reply are distinguished. The chapter no longer loads or initializes Mermaid.
+See [Raft evidence, scope and tests](RAFT-COMMIT.md); this is not a full Raft engine.
 
 ### CAP: operation histories, not a triangle of switches
 

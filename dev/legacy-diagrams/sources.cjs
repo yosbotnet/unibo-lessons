@@ -1,6 +1,18 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'pcd-raft-commit',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:null,title:'Raft: quando il leader può avanzare commitIndex',overrides:{rankSpacing:30,nodeSpacing:28},
+ requiredText:['k > commitIndex','log[k].term = currentTerm','commitIndex ← k'],
+ caption:'Regola locale del leader per una configurazione fissa, non traccia dei messaggi. Si contano server distinti, compreso il leader, con matchIndex almeno k. Fra gli indici ammissibili si sceglie il massimo. Una voce corrente così impegnata rende impegnato anche il prefisso precedente; le voci vecchie non vengono rinumerate. Applicazione in ordine e risposta al client sono passi successivi. Elezione, persistenza, riconfigurazione, deduplicazione delle richieste e letture richiedono le altre regole del protocollo.',
+ source:`flowchart TD
+ A["Cerca k > commitIndex"] --> B{"Maggioranza di server<br/>con matchIndex ≥ k?"}
+ B -->|"sì"| C{"log[k].term = currentTerm?"}
+ B -->|"no"| W["Questo k non è ammissibile"]
+ C -->|"no"| W
+ C -->|"sì"| D["Scegli il massimo k ammissibile<br/>commitIndex ← k"]
+ D --> E["Applica il prefisso in ordine"]
+ E --> F["Rispondi al client dopo<br/>l’applicazione del suo comando"]
+ style C stroke:#B83D2D`},
  require('./hash-chain-source.cjs'),
  {id:'ds-contract-outcomes',file:'ds/DS-C4.html',slot:null,title:'Included EVM transaction: execution and settlement',
  overrides:{rankSpacing:30,nodeSpacing:24},
