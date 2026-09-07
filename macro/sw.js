@@ -4,7 +4,7 @@
    Google Fonts are cached first-hit and kept (they never change).
    When adding files to macro/, add them to FILES and bump CACHE. */
 'use strict';
-var CACHE = 'macro-v1';
+var CACHE = 'macro-v2-content-layout';
 var FILES = [
   './',
   'index.html',
@@ -55,7 +55,7 @@ self.addEventListener('activate', function (e) {
   e.waitUntil(
     caches.keys()
       .then(function (keys) {
-        return Promise.all(keys.filter(function (k) { return k !== CACHE && k.indexOf('politics-') !== 0; })
+        return Promise.all(keys.filter(function (k) { return k !== CACHE && k.indexOf('macro-') === 0; })
           .map(function (k) { return caches.delete(k); }));
       })
       .then(function () { return self.clients.claim(); })

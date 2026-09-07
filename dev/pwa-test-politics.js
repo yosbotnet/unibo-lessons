@@ -35,7 +35,7 @@ function check(name, ok) {
     await page.goto(`http://localhost:${PORT}/index.html`);
     await page.evaluate(() => navigator.serviceWorker.ready);
     const cached = await page.waitForFunction(async () => {
-      const c = await caches.open('politics-v1');
+      const c = await caches.open('politics-v2-content-layout');
       return (await c.keys()).length;
     }, null, { timeout: 20000 }).then(h => h.jsonValue());
     check(`precache filled (${cached} files)`, cached >= 39);

@@ -14,7 +14,7 @@ This is a source inventory, **not proof that the content or figures are correct*
 | cybersecurity | 8 | 0 | 0 | 0 | 0 |
 | cybersecurity-reworked | 7 | 0 | 0 | 0 | 0 |
 | dl | 13 | 68 | 79 | 0 | 15 |
-| dm | 12 | 45 | 57 | 0 | 0 |
+| dm | 12 | 45 | 57 | 0 | 1 |
 | docs | 1 | 1 | 1 | 0 | 0 |
 | ds | 18 | 0 | 1 | 0 | 0 |
 | irs | 17 | 48 | 86 | 1 | 2 |

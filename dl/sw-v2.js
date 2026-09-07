@@ -1,6 +1,6 @@
 /* Deep Learning course PWA. Network-first for course files, cache fallback offline. */
 'use strict';
-const CACHE = 'dl-v3-figures';
+const CACHE = 'dl-v4-content-layout';
 const FILES = [
   "../assets/course-figures.css",
   "./",

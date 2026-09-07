@@ -1,0 +1,20 @@
+const fs=require('node:fs'),path=require('node:path');
+const {chromium}=require('/home/ybc/hosted/unibo-lessons/dev/node_modules/playwright');
+const root=path.resolve(__dirname,'../..'),out=path.join(root,'review/content-layout');
+const cases=[
+ {id:'dl-table',file:'dl/cap-01-introduction.html',width:390,selector:'table',text:'Perception',title:'DL: application table, mobile'},
+ {id:'bigdata-table',file:'bigdata/cap-04-mapreduce.html',width:1280,selector:'#s3 table',title:'Big Data: source data table, desktop'},
+ {id:'index',file:'asmd/index.html',width:390,selector:'.idx-list',title:'Course navigation, mobile'},
+ {id:'pm-matching',file:'pm/cap-13-regole-operative.html',width:1280,selector:'#w-fasi',title:'PM: full descriptions and concise matching controls'},
+ {id:'dm-space',file:'dm/cap-10-hyperparameter-optimization.html',width:390,selector:'#w-space',title:'DM: labeled parameter grid, mobile'},
+ {id:'dm-plot',file:'dm/cap-10-hyperparameter-optimization.html',width:1280,selector:'figure',text:'Plate 10.2',title:'DM 10.2: exact 190-point search space'}
+];
+(async()=>{fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch(),page=await browser.newPage();await page.route(/^https?:/,r=>/highlight\.min\.js$/.test(r.request().url())?r.fulfill({path:root+'/dl/assets/highlight.min.js',contentType:'application/javascript'}):r.abort());
+try{for(const c of cases){await page.setViewportSize({width:c.width,height:1000});for(const [label,base] of [['before','/home/ybc/hosted/unibo-lessons'],['after',root]]){await page.goto('file://'+path.join(base,c.file));await page.evaluate(()=>window.NotesContentLayout?.refresh());let loc=page.locator(c.selector);if(c.text)loc=loc.filter({hasText:c.text});loc=loc.first();if(c.id==='dm-plot')await loc.screenshot({path:path.join(out,c.id+'-'+label+'.png')});else{await loc.evaluate(e=>(e.closest('.lk-content-scroll')||e).scrollIntoView({block:'start'}));await page.screenshot({path:path.join(out,c.id+'-'+label+'.png')});}}}}
+finally{await browser.close()}
+const before=require('/home/ybc/notes-content-review-artifacts/baseline.json'),after=require('/home/ybc/notes-content-review-artifacts/final.json');
+const report={pages:after.pages,visits:after.visits,beforeOverflow:before.overflow,afterOverflow:after.overflow,remainingRuntimeErrors:after.records.filter(p=>p.width===1280&&p.errors.length).map(p=>({file:p.file,errors:p.errors})),note:'HTML reflow audit blocks nonessential external requests. Legacy Mermaid depends on a blocked CDN and is not certified by these zero-overflow results.'};
+fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(report,null,2));
+fs.writeFileSync(path.join(out,'index.html'),`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Notes: content layout repairs</title><link rel="stylesheet" href="../../dl/assets/lesson-kit.css"><style>body{margin:24px;background:var(--lk-paper);color:var(--lk-ink);font:18px/1.6 var(--lk-font)}main{max-width:1400px;margin:auto}h1,h2{font-family:var(--lk-display)}.compare{display:grid;grid-template-columns:1fr 1fr;gap:24px}img{max-width:100%;height:auto;border:1px solid var(--lk-rule-soft)}section{margin:40px 0}figure{margin:0}a{color:var(--lk-cobalt)}@media(max-width:700px){.compare{grid-template-columns:1fr}}</style><main><h1>CONTENT LAYOUT · VERIFIED PREVIEW</h1><p>${report.pages} pages / ${report.visits} desktop-mobile visits: ${report.beforeOverflow} page-overflow cases before, ${report.afterOverflow} after. This is a reflow result, not a full scientific or legacy-diagram certification. <a href="verification.md">Verification and remaining work</a>.</p>${cases.map(c=>`<section><h2>${c.title}</h2><p><a href="../../${c.file}">Open current chapter</a></p><div class="compare"><figure><figcaption>Before</figcaption><img src="${c.id}-before.png" alt="Previous ${c.title}"></figure><figure><figcaption>After</figcaption><img src="${c.id}-after.png" alt="Repaired ${c.title}"></figure></div></section>`).join('')}</main></html>`);
+console.log(JSON.stringify(report,null,2));
+})().catch(e=>{console.error(e);process.exitCode=1});

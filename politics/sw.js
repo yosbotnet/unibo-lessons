@@ -4,7 +4,7 @@
    Google Fonts are cached first-hit and kept (they never change).
    When adding files to politics/, add them to FILES and bump CACHE. */
 'use strict';
-var CACHE = 'politics-v1';
+var CACHE = 'politics-v2-content-layout';
 var FILES = [
   './',
   'index.html',

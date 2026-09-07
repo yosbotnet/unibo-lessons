@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const crypto = require('node:crypto');
+const reviewedScripts = require('./content-layout/script-changes.json');
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const root = path.resolve(__dirname, '..');
 const baseline = process.argv[2] || '/home/ybc/hosted/unibo-lessons';
@@ -12,9 +14,12 @@ const courses = 'dl irs asmd asw bi bigdata dm ise netprog oa pm reti-lm sap spe
   const failures = [], report = [];
   for (const course of courses) for (const file of fs.readdirSync(path.join(root,course)).filter(f=>/^cap-.*\.html$/.test(f))) {
     const rel=course+'/'+file, source=fs.readFileSync(path.join(root,rel),'utf8'), old=fs.readFileSync(path.join(baseline,rel),'utf8');
-    const scripts = s => [...s.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m=>m[1]);
+    const scripts = s => [...s.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m=>m[1]).filter(s=>s.trim());
     const bodies=scripts(source), oldBodies=scripts(old);
-    if(JSON.stringify(bodies)!==JSON.stringify(oldBodies.map(s=>s.replaceAll('&thetas;','&theta;'))))failures.push(rel+': inline scripts changed');
+    if(JSON.stringify(bodies)!==JSON.stringify(oldBodies.map(s=>s.replaceAll('&thetas;','&theta;')))){
+      const hash=s=>crypto.createHash('sha256').update(JSON.stringify(s)).digest('hex'),review=reviewedScripts[rel];
+      if(!review||review.before!==hash(oldBodies)||review.after!==hash(bodies))failures.push(rel+': unreviewed inline script change');
+    }
     bodies.forEach((body,i)=>{try{new vm.Script(body)}catch(e){failures.push(rel+': script '+i+' '+e.message)}});
     const errors=[];const onerror=e=>errors.push(e.message);page.on('pageerror',onerror);
     await page.goto('file://'+path.join(root,rel));
