@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-four reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-five reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -231,10 +231,18 @@ rules. Source evidence: [Bitcoin developer guide](https://developer.bitcoin.org/
 validity and mining/forks (particularly 113–118). The site no longer presents
 the slide timing shorthand as a complete Bitcoin validity test.
 
-Remaining DS-C4 review: address/permissioned-identity generalizations, the informal
-generation taxonomy and smart-contract properties (gas, upgradeability, privacy,
-randomness and concurrency). The broader site still requires visual and semantic
-review; generated asset counts are not approval counts.
+The next checkpoint corrects the informal generation taxonomy and smart-contract
+properties in sections 12–15, including gas, failure scope, upgradeability, privacy,
+randomness and concurrency. `ds-contract-outcomes` adds a native eight-node,
+nine-edge flow using this renderer. Counter and nested-call examples are compiled
+and actually executed in a local EVM; their HTML table comes from those results.
+See [contract verification](../contracts/README.md) for exact scope, source evidence,
+reproduction and limitations. No live-chain activity or paid generation occurs.
+
+Remaining DS-C4 review: address/permissioned-identity generalizations, earlier
+hash-chain/timestamp explanations and runtime diagram, current platform examples
+and quiz 1–2. The broader site still requires visual and semantic review; generated
+asset counts are not approval counts.
 
 ### Font fidelity in image contexts
 

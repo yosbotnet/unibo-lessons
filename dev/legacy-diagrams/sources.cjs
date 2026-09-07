@@ -1,6 +1,22 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'ds-contract-outcomes',file:'ds/DS-C4.html',slot:null,title:'Included EVM transaction: execution and settlement',
+ overrides:{rankSpacing:30,nodeSpacing:24},
+ requiredText:['Success','Top-level REVERT','Top-level out of gas','Nonce + fee remain'],
+ caption:'Alternative outcomes of an already admitted, included transaction. Success preserves the execution effects; top-level failure rolls them back, including event logs. REVERT normally leaves unused gas; out-of-gas exhausts the current frame’s gas. All three outcomes consume the sender nonce and charge for gas. Invalid transactions rejected before inclusion are outside this diagram. A caught child-call failure is not necessarily a top-level failure; see the executable examples below.',
+ source:`flowchart TD
+ A["Included transaction"] --> B["Metered EVM execution"]
+ B --> S["Success"]
+ B --> R["Top-level REVERT"]
+ B --> O["Top-level out of gas"]
+ S --> K["Keep storage + logs"]
+ R --> X["Roll back storage + logs"]
+ O --> X
+ K --> F["Nonce + fee remain"]
+ X --> F
+ style R stroke:#B83D2D
+ style O stroke:#B83D2D`},
  require('./ledger-source.cjs'),
  {id:'ds-pow-trial',file:'ds/DS-C4.html',slot:null,title:'A proof-of-work trial has no percentage progress',overrides:{rankSpacing:30},
  caption:'The lesson computes one SHA-256 of a domain-separated JSON input containing height, parent digest, miner, nonce and toy difficulty. A failed trial changes a nonce, not a progress percentage. A valid digest links the next toy block. This is not Bitcoin’s binary header, double SHA-256, network consensus, difficulty adjustment or rewards. The uniform-hash model predicts an average trial count, never a completion deadline.',

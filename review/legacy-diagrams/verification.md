@@ -2,6 +2,55 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: DS-C4 smart-contract execution and failure scope
+
+Preview: [outcome diagram](../../ds/DS-C4.html#s13),
+[compiled example and actual results](../../ds/DS-C4.html#s14),
+[corrected constraints](../../ds/DS-C4.html#s15).
+
+One shared-generator SVG separates success, top-level REVERT and out-of-gas,
+storage/log retention or rollback, and the nonce/fee effects that remain. All
+eight nodes and nine connections are checked, with original embedded font and
+ivory/cobalt/vermilion palette. Native and chapter screenshots were inspected.
+Measured values remain in a real HTML table, not tiny SVG labels.
+
+The exact downloadable Counter source compiles on pinned Solidity 0.8.36/Cancun.
+Five signed transactions execute in an offline EthereumJS VM: zero increments,
+three increments from another caller, partial work followed by out-of-gas, child
+REVERT propagated, and child REVERT caught. Checks cover state, event contents,
+caller identity, nonce, charged gas, fee recipient component and rollback. A
+wrong-nonce transaction is rejected without a fee or execution. Observational
+getter probes leave no state changes. This is not a security audit or live-chain
+deployment. Compiler dependency audit: zero reported vulnerabilities after the
+documented tmp override.
+
+Additional verified evidence:
+
+- HTML5 parsing without errors; no duplicate IDs or escaped SVG shape elements.
+- Exact rendered source, downloaded source bytes and five EVM-derived table rows.
+- Four HTTP views: 1280/390 px, with and without JS; code, figure and table remain
+  readable and keyboard-scrollable; all nine relevant tabs switch correctly.
+- Shared renderer: 25 diagrams pass XML, text bounds/collisions, determinism and
+  edge completeness; 27 SVG assets carry the exact original font and license.
+- General HTTP smoke: 14 desktop/mobile visits across seven pages plus no-JS
+  image loading; chapter widgets and tabs continue to work.
+- Ledger/PoW regression: 8,586 independent SHA-256 comparisons, fork transitions,
+  stop/reset/difficulty handling and no-JS traces. PBFT regression: 1,000 reordered
+  schedules/74,000 messages, quorum checks and both desktop/mobile widgets.
+- DL regression: 20 preset cases, four approved SVGs still byte-identical.
+- Source/asset drift checks and `git diff --check` pass.
+
+The generation taxonomy is explicitly informal; broad claims about immutable
+behavior, impossible privacy/randomness, universal sequential implementation and
+trustworthy sensor data have been replaced with scoped explanations. The code
+and gas sections distinguish historical slide notation from the tested fixture.
+[Detailed sources and limits](../../dev/contracts/README.md).
+
+Open: DS-C4 earlier identity/membership and hash/timestamp claims, platform examples,
+quiz 1–2 and the remaining runtime hash-chain diagram. The full site is still not
+certified; inventory is 315 HTML pages and 989 figure elements, excluding runtime
+figures from that static count. Original fifteen-course scope remains 208/882.
+
 ## Latest addition: DS-C4 fork structure and actual toy hash trials
 
 Preview: [fork diagram and arrivals](../../ds/DS-C4.html#s7),

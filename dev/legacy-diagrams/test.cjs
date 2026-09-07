@@ -14,6 +14,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'ds-cap-policy':[6,5],'ds-cap-proof':[7,7]});
    Object.assign(counts,{'ds-pbft-normal':[8,7]});
    Object.assign(counts,{'ds-ledger-fork':[6,5],'ds-pow-trial':[5,5]});
+   Object.assign(counts,{'ds-contract-outcomes':[8,9]});
+   if(e.id==='ds-contract-outcomes')for(const pair of ['A_B','B_S','B_R','B_O','S_K','R_X','O_X','K_F','X_F'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'EVM outcome connection '+pair);
    if(e.id==='ds-ledger-fork')for(const pair of ['g_b1','b1_b2','b2_b3a','b2_b3b','b3b_b4'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Parent-child connection '+pair);
    if(e.id==='ds-pbft-normal')for(const pair of ['A_B','B_C','C_D','D_E','E_F','F_G','G_H'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'PBFT evidence transition '+pair);
    if(e.id==='ds-cap-policy')for(const pair of ['W_R','R_A','R_C','A_X','C_Y'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Read-policy consequence '+pair);
