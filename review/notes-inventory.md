@@ -2,7 +2,7 @@
 
 This is a source inventory, **not proof that the content or figures are correct**. Generated SVG counts likewise do not establish approval. Per-figure source hashes are recorded in [notes-inventory.json](notes-inventory.json) so subsequent reviews can be tied to an exact version. Runtime widget graphics and externally linked SVG assets need separate review.
 
-315 tracked HTML pages; 1001 figure elements. The original fifteen-course scope remains 208 chapters and 882 figures. No course is excluded from the broader active goal by the original audit boundary.
+315 tracked HTML pages; 1003 figure elements. The original fifteen-course scope remains 208 chapters and 882 figures. No course is excluded from the broader active goal by the original audit boundary.
 
 | Directory | HTML pages | Figures | Inline SVG | img tags | Generated figures |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -11,8 +11,8 @@ This is a source inventory, **not proof that the content or figures are correct*
 | asw | 16 | 38 | 39 | 1 | 0 |
 | bi | 17 | 94 | 93 | 0 | 2 |
 | bigdata | 11 | 44 | 43 | 0 | 0 |
-| cybersecurity | 8 | 0 | 0 | 0 | 0 |
-| cybersecurity-reworked | 7 | 0 | 0 | 0 | 0 |
+| cybersecurity | 8 | 1 | 0 | 1 | 1 |
+| cybersecurity-reworked | 7 | 1 | 0 | 1 | 1 |
 | dl | 13 | 68 | 79 | 0 | 15 |
 | dm | 12 | 45 | 57 | 0 | 1 |
 | docs | 1 | 1 | 1 | 0 | 0 |

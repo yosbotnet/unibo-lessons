@@ -7,6 +7,7 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
   for(const e of entries){const a=await r.render(e),b=await r.render(e);assert.equal(a.svg,b.svg,'Determinism '+e.id);
    const counts={'pcd-interleavings':[5,4],'pcd-exchange-central':[4,3],'pcd-exchange-all':[4,6],'pcd-exchange-ring':[4,4],'pcd-ricart-request':[6,5],'pcd-consensus-rounds':[9,6],'pcd-smr-order':[8,7],'pcd-raft-replication':[7,8],'ds-threat-chain':[4,3],'ds-independent-contexts':[2,1]};
    Object.assign(counts,{'pcd-chang-ring':[4,4],'pcd-chang-phases':[3,2]});
+   Object.assign(counts,{'cyber-transfer':[7,6],'cyber-reworked-transfer':[7,6]});
    Object.assign(counts,{'pcd-causal-dependencies':[6,6],'pcd-causal-buffer':[4,3]});
    Object.assign(counts,{'pcd-central-causal':[8,8],'pcd-central-token':[8,9]});
    Object.assign(counts,{'pcd-cut-events':[6,5],'pcd-snapshot-fifo':[7,7]});
