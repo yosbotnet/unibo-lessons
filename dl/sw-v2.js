@@ -1,7 +1,8 @@
 /* Deep Learning course PWA. Network-first for course files, cache fallback offline. */
 'use strict';
-const CACHE = 'dl-v2';
+const CACHE = 'dl-v3-figures';
 const FILES = [
+  "../assets/course-figures.css",
   "./",
   "cap-01-introduction.html",
   "cap-02-math-autodiff.html",
@@ -35,7 +36,8 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || !url.pathname.startsWith(new URL('./', self.location).pathname)) return;
+  const sharedFigures = new URL('../assets/course-figures.css', self.location).pathname;
+  if (url.origin !== self.location.origin || (!url.pathname.startsWith(new URL('./', self.location).pathname) && url.pathname !== sharedFigures)) return;
   event.respondWith(fetch(request).then(response => {
     if (response && response.ok) caches.open(CACHE).then(cache => cache.put(request, response.clone()));
     return response;

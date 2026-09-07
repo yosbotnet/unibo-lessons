@@ -3,8 +3,8 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const cases = [
-  ['sap/cap-08-eventstorming.html', 'assets/img/eventstorming-workshop.webp', 'illustrative reconstruction'],
-  ['irs/cap-02-history-of-robotics.html', 'assets/img/grey-walter-tortoises.webp', 'artistic reconstruction'],
+  ['sap/cap-08-eventstorming.html', 'assets/img/eventstorming-workshop.webp?v=2', 'illustrative reconstruction', 682],
+  ['irs/cap-02-history-of-robotics.html', 'assets/img/grey-walter-tortoises.webp', 'artistic reconstruction', 576],
 ];
 
 (async () => {
@@ -16,7 +16,7 @@ const cases = [
     const errors = [];
     page.on('pageerror', e => errors.push(`pageerror: ${e.message}`));
     page.on('console', m => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
-    for (const [file, src, disclosure] of cases) {
+    for (const [file, src, disclosure, expectedHeight] of cases) {
       await page.goto('file://' + path.join(ROOT, file), { waitUntil: 'load' });
       const img = page.locator(`img[src="${src}"]`);
       const count = await img.count();
@@ -38,7 +38,7 @@ const cases = [
           };
         });
         const checks = [
-          [state.complete && state.naturalWidth === 1024 && state.naturalHeight === 576, 'decode/intrinsic size'],
+          [state.complete && state.naturalWidth === 1024 && state.naturalHeight === expectedHeight, 'decode/intrinsic size'],
           [state.width > 0 && state.width <= state.viewport, 'responsive bounds'],
           [state.alt.trim().length >= 40, 'descriptive alt'],
           [state.caption.toLowerCase().includes(disclosure), 'reconstruction disclosure'],
