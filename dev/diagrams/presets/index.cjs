@@ -1,5 +1,6 @@
 const {assert}=require('./common.cjs');
 const presets={neuron:require('./neuron.cjs'),inception:require('./inception.cjs'),autodiff:require('./autodiff.cjs'),gru:require('./gru.cjs')};
+Object.assign(presets,{'behavior-tree':require('./behavior-tree.cjs'),'relational-schema':require('./relational-schema.cjs'),sequence:require('./sequence.cjs')});
 function renderPreset(spec){
   assert(spec&&typeof spec==='object'&&!Array.isArray(spec),'Preset specification must be an object');
   assert(Object.hasOwn(presets,spec.preset),'Unknown preset '+spec.preset);

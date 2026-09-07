@@ -9,6 +9,11 @@ The four course definitions live in `../sources/editorial.json`. They contain no
 positions or waypoints. The four original SVGs are preserved byte-for-byte and
 protected by `approved-svg-hashes.json` (update only after visual approval).
 
+Three additional non-DL families now use the same renderer: `behavior-tree`,
+`relational-schema` and `sequence`. See [cross-course documentation](../CROSS-COURSE.md)
+for their APIs, limits, slide evidence and actual IRS/BI/Reti chapter examples.
+The four-family test gallery described below remains the DL regression suite.
+
 ## Use
 
 ```js
