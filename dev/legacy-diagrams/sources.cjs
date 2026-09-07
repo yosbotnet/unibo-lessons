@@ -1,6 +1,7 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ require('./dining-source.cjs'),
  {id:'pcd-raft-commit',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:null,title:'Raft: quando il leader può avanzare commitIndex',overrides:{rankSpacing:30,nodeSpacing:28},
  requiredText:['k > commitIndex','log[k].term = currentTerm','commitIndex ← k'],
  caption:'Regola locale del leader per una configurazione fissa, non traccia dei messaggi. Si contano server distinti, compreso il leader, con matchIndex almeno k. Fra gli indici ammissibili si sceglie il massimo. Una voce corrente così impegnata rende impegnato anche il prefisso precedente; le voci vecchie non vengono rinumerate. Applicazione in ordine e risposta al client sono passi successivi. Elezione, persistenza, riconfigurazione, deduplicazione delle richieste e letture richiedono le altre regole del protocollo.',

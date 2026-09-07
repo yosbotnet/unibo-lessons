@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-seven reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-eight reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -47,6 +47,8 @@ node hash-chain-test.cjs
 node hash-chain-traces.cjs --check
 node raft-commit-test.cjs
 node raft-commit-traces.cjs --check
+node dining-test.cjs
+node dining-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -59,6 +61,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Dining philosophers: derive waits from actual ownership
+
+PCD6's inconsistent steppers and local-state deadlock shortcut are replaced by
+one executable model of naive, ticket and ordered acquisition. Its wait-for graph
+uses the shared angular renderer; four complete traces also remain in static HTML.
+See [Dining model, evidence and tests](DINING.md). The table illustration retains
+its useful structure with larger mono labels. No resource-occupancy heuristic is
+used to claim deadlock or starvation freedom.
 
 ### Raft: commit requires more than a majority of old entries
 

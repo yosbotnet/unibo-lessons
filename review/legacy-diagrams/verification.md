@@ -2,6 +2,40 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD6 dining philosophers and deadlock scope
+
+Preview: [executable model](../../pcd/cap-06-deadlock.html#s2),
+[native wait-for graph and four traces](../../pcd/cap-06-deadlock.html#s3).
+
+The original table illustration keeps its structure with larger mono labels off
+the rim. The generated five-node/five-edge graph now uses consistent 0–4 indices
+and actual resource-holder dependencies. The three-philosopher/five-fork stepper,
+the falsely naive stepper with an already-reversed F4, and the local-state shortcut
+to global deadlock have been replaced by one executable shared-state model.
+All-forks-occupied is demonstrated both with and without deadlock.
+
+Verified 22,348 reachable control/resource states and 93,332 transitions over
+three protocols with N=2–5. Independent program-counter ownership/enablement and
+transitive-closure cycle checks agree with the model. Each naive configuration
+has a deadlock state; neither ticket nor ordered configuration does. No fairness
+guarantee is inferred: a repeatable unfair schedule can starve a philosopher.
+
+Four HTTP desktop/mobile/JS/no-JS views pass exact fixture-state, controls, tabs,
+details, keyboard-scroll, parser, unique-ID, stray-SVG and overflow checks.
+Native and chapter/widget/table screenshots were visually reviewed. Shared
+regressions pass: 28 graphs, 30 original-font assets, 16 desktop/mobile page visits
+and eight no-JS image-loading visits. [Evidence and limits](../../dev/legacy-diagrams/DINING.md).
+
+Text now distinguishes ticket admission from simultaneous meals, potential from
+actual circular waits, deadlock from starvation, and JVM live detection from
+automatic recovery. The static Java examples remain readable without JavaScript.
+The broad site review remains open; production and preexisting report edits are
+untouched by this checkpoint.
+
+Current source counts: 315 HTML pages and 992 figure elements. Separately, 98 raw
+Mermaid blocks remain across 29 pages. The original fifteen-course scope still has
+208 chapters/882 figures. Counts do not establish visual or scientific approval.
+
 ## Latest addition: PCD16 Raft commit and conflicting log prefixes
 
 Preview: [section 20](../../pcd/cap-16-algoritmi-distribuiti.html#s20).

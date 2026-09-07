@@ -17,6 +17,9 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'ds-contract-outcomes':[8,9]});
    Object.assign(counts,{'ds-hash-checkpoint':[6,6]});
    Object.assign(counts,{'pcd-raft-commit':[7,7]});
+   Object.assign(counts,{'pcd-dining-wait':[5,5]});
+   if(e.id==='pcd-dining-wait')for(let i=0;i<5;i++)assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_F${i}_F${(i+1)%5}_`)&&x.end).length,1,'Dining wait dependency');
+   if(e.id==='pcd-dining-wait')for(let i=0;i<5;i++)for(const label of ['F'+i,'f'+i])assert.equal(a.text.filter(t=>t===label).length,1,'Every philosopher/request label appears exactly once');
    if(e.id==='pcd-raft-commit')for(const pair of ['A_B','B_C','B_W','C_W','C_D','D_E','E_F'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Raft commit dependency '+pair);
    if(e.id==='ds-hash-checkpoint')for(const pair of ['B0_B1','B1_B2','B0_R1','R1_R2','B2_C','R2_C'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Hash history connection '+pair);
    if(e.id==='ds-contract-outcomes')for(const pair of ['A_B','B_S','B_R','B_O','S_K','R_X','O_X','K_F','X_F'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'EVM outcome connection '+pair);
