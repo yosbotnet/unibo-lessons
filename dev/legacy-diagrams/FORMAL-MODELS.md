@@ -146,7 +146,8 @@ real HTML tables and the two existing native figures remain intact.
 ## Remaining work
 
 This does not certify PCD9 or the whole site. Fault/error/failure terminology,
-historical NASA/Intel claims, combinatorial examples and a more concrete inductive
-proof still need review. The full-site visual/content goal remains open. Production
+historical NASA/Intel claims, combinatorial examples and a concrete inductive
+proof were subsequently handled in [PROOF-COUNTS.md](PROOF-COUNTS.md).
+The full-site visual/content goal remains open. Production
 and the two preexisting root review files are untouched; no paid generation,
 deployment or unrelated service restart occurred.

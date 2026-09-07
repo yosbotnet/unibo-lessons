@@ -84,6 +84,9 @@ node ltl-browser-test.cjs
 NOTES_SPIN=/path/to/spin651 NOTES_TLA_JAR=/path/to/tla2tools.jar NOTES_JAVA=/path/to/java11 node formal-model-test.cjs
 node formal-content.cjs --check
 node formal-browser-test.cjs
+NOTES_Z3=/path/to/z3-4.13.3 node proof-count-test.cjs
+node proof-content.cjs --check
+node proof-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -96,6 +99,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Concrete induction, interleaving counts and corrected terminology
+
+PCD9 now includes a symbolic-integer example with three actual Z3 obligations,
+two distinct negative witnesses and finite independent controls. Schedule counts
+are enumerated and distinguished from states; fault/error/failure, historical
+application claims and quiz contracts are corrected against primary sources.
+Native tables and source disclosures work at 320px without JavaScript too.
+See [proof/count evidence, reproducibility and limits](PROOF-COUNTS.md).
 
 ### Complete PROMELA/PlusCal examples executed by SPIN and TLC
 

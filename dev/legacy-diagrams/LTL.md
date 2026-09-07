@@ -97,6 +97,7 @@ Shared font tests now cover 41 assets with the exact original font/license.
 This completes this temporal-definitions/illustrative-trace checkpoint, not PCD9
 or the full site. PROMELA/PlusCal models and their actual state counts were
 subsequently corrected and executed in the [formal-model checkpoint](FORMAL-MODELS.md).
-Fault/error/failure terminology, combinatorial counts, inductive-proof
-examples and historical application claims remain open. No paid generation or
+Fault/error/failure terminology, combinatorial counts, a concrete inductive proof
+and historical application claims were subsequently handled in
+[PROOF-COUNTS.md](PROOF-COUNTS.md). No paid generation or
 production publication; preexisting root review/index/report edits are preserved.

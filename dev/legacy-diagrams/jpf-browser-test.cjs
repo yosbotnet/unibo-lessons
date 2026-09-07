@@ -40,7 +40,7 @@ const root=path.resolve(__dirname,'../..'),base='http://127.0.0.1:8787/',out='/h
    }
   }
   const quiz=page.locator('.lk-quiz details');assert.equal(await quiz.count(),8);
-  for(let i=0;i<await quiz.count();i++){await quiz.nth(i).locator('summary').click();assert(await quiz.nth(i).locator('p').isVisible());}
+  for(let i=0;i<await quiz.count();i++){await quiz.nth(i).locator('summary').click();for(const paragraph of await quiz.nth(i).locator('p').all())assert(await paragraph.isVisible());}
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
   await page.locator('#s1 h2').scrollIntoViewIfNeeded();await page.screenshot({path:out+'/jpf-definitions-'+width+'-'+js+'.png'});
   results.push({width,js,sources:names.length,cases:observed.cases.length,tabs:4,quiz:8,errors});await page.close();

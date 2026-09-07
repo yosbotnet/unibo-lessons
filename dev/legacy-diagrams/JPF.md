@@ -112,9 +112,10 @@ not installed/run on the VPS. The course-specific labactivity03 repository was
 not found in the inspected content tree, so its paths are not presented as tested.
 
 Safety/liveness/fairness, LTL formulas and the old state diagram were subsequently
-reviewed in the [temporal-semantics checkpoint](LTL.md). Remaining PCD9 review
-includes fault/error/failure terminology, combinatorial counts and historical
-claims. PROMELA/PlusCal and the Peterson state count were subsequently handled
+reviewed in the [temporal-semantics checkpoint](LTL.md). Fault/error/failure,
+combinatorial counts, a concrete inductive proof and historical claims were
+subsequently handled in [PROOF-COUNTS.md](PROOF-COUNTS.md).
+PROMELA/PlusCal and the Peterson state count were subsequently handled
 in the [formal-model checkpoint](FORMAL-MODELS.md). This checkpoint does not
 certify the whole chapter or site. No paid image generation, production deployment,
 or edits to the preexisting root review/index and review/report changes.
