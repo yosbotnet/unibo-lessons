@@ -1,6 +1,26 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'ds-cap-policy',file:'ds/DS-C1.html',slot:null,title:'A partition: two concrete read policies',
+ caption:'Both nodes are alive; G1 completed write(1) before the read at G2 begins. The arrows describe alternative policies and their consequences, not messages crossing the broken link. In this particular example, local reads finish with stale 0; authority reads wait for a reply. A finite wait alone is not a liveness violation: the availability failure follows if the required communication is prevented forever.',
+ source:`flowchart TD
+ W["G1: write 1 completes"] --> R["G2: read begins later<br/>No communication with G1"]
+ R -->|"local copy"| A["Return 0 now"]
+ R -->|"authority at G1"| C["Wait for the reply"]
+ A --> X["Read completes<br/>History is not linearizable"]
+ C --> Y["No stale result returned<br/>Read can remain pending forever"]
+ style X stroke:#B83D2D`},
+ {id:'ds-cap-proof',file:'ds/DS-C1.html',slot:null,title:'The CAP contradiction needs two indistinguishable executions',
+ caption:'Reasoning diagram, not a network-message trace. E0 forces a read of the initial value 0. In E1, the write completes before the read begins, but G2 receives no information about it and has the same local observations as in E0. The availability assumption forces a response in both executions; the identical 0 response in E1 violates real-time ordering. The numeric example uses one register and no other writes.',
+ source:`flowchart TD
+ P["G1 and G2 separated<br/>No cross-partition delivery"] --> A["E0: no write anywhere"]
+ P --> B["E1: G1 completes write 1<br/>Then G2 starts its read"]
+ A --> C["E0: G2 must return 0"]
+ B --> D["G2 sees the same local inputs<br/>and messages as in E0"]
+ C --> E["E1: G2 also returns 0"]
+ D --> E
+ E --> F["Write 1 finished before read 0<br/>Contradicts linearizability"]
+ style F stroke:#B83D2D`},
  {id:'pcd-phase-king',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:null,
  title:'Phase king binario: una fase contiene due round',
  requiredText:['copie > N/2 + f?','k = f + 1?','k ← k + 1'],

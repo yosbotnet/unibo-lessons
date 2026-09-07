@@ -2,7 +2,71 @@
 
 Preview only. Production remains at `f0f4bde`.
 
-## Latest addition: phase king, consensus assumptions and literal formulas
+## Latest addition: CAP operation histories and proof diagrams
+
+Preview: [DS-C1, interactive example](../../ds/DS-C1.html#s8),
+[proof](../../ds/DS-C1.html#s12), [six traces](../../ds/DS-C1.html#s13).
+
+Two native SVGs replace the triangle/old proof presentation: a read-policy
+comparison and the indistinguishable-executions argument. They retain the shared
+ivory/cobalt/vermilion style and embedded IBM Plex Mono. Labels, arrows and full
+native canvases were visually inspected; mobile views scroll without shrinking
+type. The original DS page skin is unchanged outside the figures.
+
+The read/write simulator now judges operation histories, not cached-value
+equality. Its six traces show no-write, stale-after-write, blocked authority read,
+read-before-write and two overlapping-read cases. Healing cannot make an earlier
+bad read disappear; an old value can be valid when the read overlaps the write.
+The finite trace is not presented as a universal availability proof. The recovery
+state explorer is explicitly a conceptual map, not an executable merge protocol
+or an oracle that detects partitions.
+
+Definitions, quiz, ACID/BASE discussion and unsupported product classifications
+were corrected together. Official AWS sources were checked for the S3 and
+DynamoDB examples. PCD16's CAP answer and DS-C4's CAP introduction now use the same
+definitions and link to the model. Primary paper, slide evidence and implementation
+limits are recorded in the [adapter README](../../dev/legacy-diagrams/README.md).
+
+Verified in this checkpoint:
+
+- 6,720 interval/value cases in both operation input orders, checked against an
+  independent single-write temporal oracle; 688 exhaustive bounded action prefixes
+  with up to four network changes. All authority histories are linearizable;
+  73 local-policy prefixes violate it. Same G2 observations in the no-write and
+  hidden-write traces are checked explicitly.
+- Six exact interactive traces at 1280 and 390 px: every operation-table row,
+  computed verdict, blocked delivery, policy reset, keyboard activation and focus.
+  All ten traversed policy-map transitions work; all targets exist. All 24 static
+  trace rows and both images remain available with JavaScript disabled.
+- 21 SVGs pass XML, geometry, text-bounds/collision and deterministic-output tests;
+  the two CAP diagrams have every expected directed edge. Seven invalid renderer
+  inputs are rejected. Chapter/asset and trace-generation drift checks pass.
+- 23 native assets contain the exact original font and license; Chromium glyph
+  checks confirm the font, with no font-network dependency.
+- 14 HTTP desktop/mobile page visits pass, including existing tab/widget checks;
+  six figure-bearing pages load native images without JavaScript.
+- All 20 specialized DL preset cases pass; the four approved original SVGs remain
+  byte-identical.
+- Native diagrams, desktop/mobile widget states (including the pending read),
+  and static trace screenshots were inspected. A long table instruction was
+  moved outside its horizontal scroll region after mobile inspection.
+
+The first CAP browser-test attempt used an incomplete accessible button name for
+the existing state-explorer control (which also includes its arrow and target).
+That test timed out; its corrected selector and the full rerun passed. This was
+not evidence of a broken transition. No failed test run is counted as passing.
+
+Evidence: `cap-test.json`, `static-test.json`, `font-test.json`,
+`browser-http-test.json` and `cap-*.png` / `ds-cap-*.png` in
+`/home/ybc/notes-legacy-review-artifacts/`. Browser suites use pinned local copies
+of external script dependencies and block unrelated remote requests.
+
+The inventory now records 315 pages and 985 figure elements, not 985 approved
+figures. The original 15-course scope remains 208 chapters / 882 figures. Broad
+scientific and visual review remains open; DS-C4 still needs correction of its
+BFT/FLP, finality and PoW-related claims. No production deployment was performed.
+
+## Previous addition: phase king, consensus assumptions and literal formulas
 
 Preview: [PCD16, section 19](../../pcd/cap-16-algoritmi-distribuiti.html#s19).
 The new native flowchart separates the two communication rounds, candidate count,

@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Nineteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-one reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -37,6 +37,8 @@ node cut-test.cjs
 node cut-timeline.cjs --check
 node king-test.cjs
 node king-traces.cjs --check
+node cap-test.cjs
+node cap-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -49,6 +51,59 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### CAP: operation histories, not a triangle of switches
+
+DS-C1 now uses two native reasoning diagrams: alternative read policies, and the
+two-execution indistinguishability argument. Edges mean logical dependencies or
+policy consequences, not network messages. Both use the existing static Mermaid
+adapter and embedded original font. The unsupported CAP triangle and old proof
+stepper are replaced; no image generation is involved.
+
+`ds/assets/cap-register.js` models two live nodes, one completed write at G1 and
+one read at G2. The local-copy policy returns the cached value; the authority
+policy sends a query and waits for a reply containing the value at query handling.
+Partition/heal and actual queued-message delivery are separate actions. Messages
+remain available for retry/delivery after healing; this is not an irreversible
+packet-loss or multi-writer merge simulator. Fixed authority is not quorum voting.
+
+The checker enumerates legal sequential orders of completed operations, preserves
+response-before-invocation precedence and applies the register specification.
+Pending reads are omitted from the finite safety check. The limited model has no
+pending writes. Event numbers belong to an observer, not node clocks. A pending
+read proves no finite-time liveness failure; an execution that prevents its
+required communication forever does. Replica equality after healing cannot erase
+an earlier completed stale response. A read overlapping a write may legitimately
+return either value, depending on its serialization position.
+
+Six model-derived static trace tables remain usable without JavaScript. Tests
+compare both input orders in 6,720 interval/value cases with an independent
+single-write temporal oracle, then enumerate all 688 action prefixes with at most
+four network changes, one write/read and deliverable messages. All authority
+histories pass; 73 local-policy prefixes violate linearizability. Tests also
+compare G2's observations in the no-write and hidden-write executions, reject
+invalid operations, and check delayed reply capture and immutable return copies.
+These bounded tests are not a general database verification or a proof of CAP.
+
+Chapter definitions, quiz and conceptual recovery-map descriptions match the
+operation model. ACID/BASE are no longer treated as formal CAP categories; product
+names do not establish universal CP/AP behavior. The AWS discussion cites current
+official S3 and DynamoDB documentation, including read-mode and index distinctions.
+PCD16's CAP answer and DS-C4's CAP introduction now link to the same model.
+
+Primary evidence: [Gilbert and Lynch 2002, §§2–3](https://www.cs.princeton.edu/courses/archive/spring21/cos418/papers/cap.pdf),
+[Brewer's 2012 retrospective](https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/),
+[S3 consistency](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html),
+[DynamoDB read consistency](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html).
+The local DS C1 slide text was checked, including slides 26–32: availability is
+not guaranteed inter-server message delivery, and the proof needs an explicit
+no-write comparison. The location-game diagram is framed as a historical slide
+example, not a verified current deployment or an established cause of an outage.
+
+Remaining DS-C4 work includes the unconditional BFT/FLP statements, probabilistic
+finality assumptions, PoW/Ethereum historical labeling, and the associated quiz.
+Only its CAP introduction is corrected in this checkpoint; this does not certify
+the rest of that chapter or the entire site.
 
 ### Font fidelity in image contexts
 
