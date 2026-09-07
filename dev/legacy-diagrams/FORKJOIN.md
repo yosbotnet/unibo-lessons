@@ -66,5 +66,6 @@ This is not a general structured-concurrency implementation: an exception in
 right.compute can skip left.join. The main requests shutdown in finally but its
 subsequent awaitTermination is reached only on the normal path. The diagram
 represents successful data dependencies, not guaranteed worker scheduling.
-StructuredTaskScope version/API accuracy, physics and the rest of the site's
-visual and scientific review remain open.
+The later [structured-concurrency revision](STRUCTURED.md) verifies the historical
+JDK20 API and lifecycle example. Physics and the rest of the site's visual and
+scientific review remain open.

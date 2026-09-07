@@ -2,6 +2,36 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: historical structured concurrency and real close wait
+
+Preview: [version and lifecycle](../../pcd/cap-08-java.html#structured-concurrency).
+
+PCD8 now pins the slide example to JDK20's incubator API, distinguishes JDK19
+introduction and JDK21's changed API, and supplies the complete canonical source
+with module/preview commands. Corrected join, shutdown, close, cooperative
+cancellation, timeout and scope-ownership explanations. The task/thread quiz no
+longer equates a Java thread with a physical OS thread. One native SVG follows
+an actual seven-event controlled lifecycle trace, with the close-wait point
+highlighted in vermilion. [Evidence and limits](../../dev/legacy-diagrams/STRUCTURED.md).
+
+Ten repetitions / 70 scenarios / 290 assertions passed on portable JDK20.0.2:
+success, both failure directions, owner interruption, slow cleanup, shutdown
+versus cancelled-Future/thread exit, deadline and interruption during close.
+Expected incubator/preview diagnostics are explicitly checked; missing module
+and missing runtime preview are rejected. No system Java installation was changed.
+
+Four desktop/mobile, JS/no-JS views check markup, downloads, exact canonical code,
+command flags, native diagram labels against the Java trace and keyboard controls.
+Native SVG, source and responsive chapter screenshots were visually inspected;
+long inline qualification and code comments were reflowed without smaller text.
+Existing widgets pass. Shared suites pass for 36 diagrams, 38 original-font assets,
+twenty desktop/mobile visits and ten no-JS image checks.
+
+Current inventory: 315 pages / 999 figure elements. The original 15-course scope
+remains 208 chapters / 882 figures. Physics and the broader full-site review remain
+open. No production publication or paid generation; preexisting root review/report
+changes remain preserved and unstaged.
+
 ## Latest addition: PCD8 Fork-Join algorithms and dependencies
 
 Preview: [section 16](../../pcd/cap-08-java.html#s16).

@@ -1830,39 +1830,85 @@ public final class ForkJoinExamples {
 
     <p>Riferimenti: <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/ForkJoinPool.html">ForkJoinPool, Java 17</a> e <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/ForkJoinTask.html">ForkJoinTask, Java 17</a>. Gli esempi editoriali completano il tema delle slide «Task-Oriented Programming in Java»; non sono un benchmark né una trascrizione integrale delle slide.</p>
 
-    <h3>Structured concurrency: API distinta e dipendente dalla versione</h3>
+    <h3 id="structured-concurrency">Structured concurrency: leggere la versione delle slide</h3>
 
-    <p>Pi&ugrave; recentemente, Java ha introdotto la <strong>Structured Concurrency</strong> (JEP 437, JDK 20+), che estende il modello fork-join con un approccio strutturato: se un task si divide in sottotask concorrenti, questi devono tornare tutti allo stesso blocco di codice (<code>scope</code>) del task padre.</p>
-
-    <p>Il codice d'esempio con <code>StructuredTaskScope</code>, identico nelle due lezioni, e riportato una sola volta qui sotto.</p>
-
-    <div class="callout idea"><span class="callout-label">Idea chiave</span>
-      <p>La Structured Concurrency risolve un problema di visibilit&agrave;: con i thread tradizionali, un task avviato ma non completato pu&ograve; "fuggire" e rimanere in esecuzione anche dopo che il metodo chiamante &egrave; terminato. Con <code>StructuredTaskScope</code>, la durata dei sottotask &egrave; lessicalmente delimitata dal blocco <code>try-with-resources</code>.</p>
-    </div>
-
-  
+    <p>Le slide 38–40 di «Task-Oriented Programming in Java» presentano <strong>JDK 20 / JEP 437</strong>. È la seconda incubazione di un’API comparsa in JDK 19, non una funzionalità introdotta per la prima volta in 20 né una firma stabile per ogni versione successiva.</p>
+    <p>Qui conserviamo esplicitamente la variante delle slide: classe <code>StructuredTaskScope</code> nel package <code>jdk.incubator.concurrent</code>, con <code>fork</code> che restituisce un <code>Future</code> e risultati letti tramite <code>resultNow()</code>. Già in JDK 21 la classe è nel package <code>java.util.concurrent</code>, in preview, e fork restituisce un <code>Subtask</code>: non basta cambiare l’import del codice sottostante. Questo esempio non compila su Java 17 e non è una raccomandazione di adottare JDK 20 per nuove applicazioni.</p>
     </div>
     <div data-src="PCD-2026-03-20.html#s9">
-    <p>Il professore accenna, nelle slide, al concetto di <strong>Structured Concurrency</strong> introdotto in JDK 20 (incubating). L'idea e semplice ma potente: se un task si divide in subtask concorrenti, <em>tutti</em> i subtask devono tornare allo stesso punto — il blocco di codice del task padre.</p>
+    <h3>Due operazioni, un solo ciclo di vita</h3>
+    <p><code>ShutdownOnFailure</code> serve quando occorrono entrambi i risultati. Il primo fallimento attiva lo shutdown e richiede l’interruzione dei task incompleti. Il costruttore senza argomenti usato qui crea virtual thread; non usa il <code>ForkJoinPool</code> della sezione precedente. Le operazioni rimangono concorrenti, senza promettere esecuzione simultanea su core diversi.</p>
 
-    <p>La classe <code>StructuredTaskScope</code> permette di strutturare un task come una famiglia di subtask concorrenti, coordinati come unita:</p>
+    <ol>
+      <li>L’owner crea lo scope e avvia i due task con <code>fork</code>.</li>
+      <li><code>join()</code> attende tutti i thread oppure lo shutdown dello scope; può anche sollevare <code>InterruptedException</code>.</li>
+      <li><code>throwIfFailed()</code> propaga il fallimento attraverso <code>ExecutionException</code>. Soltanto sul percorso riuscito si leggono i due risultati e si costruisce la risposta.</li>
+      <li>Il try-with-resources chiama <code>close()</code> anche durante l’uscita per eccezione: la chiusura attende i thread ancora attivi prima di consentire il ritorno al chiamante.</li>
+    </ol>
 
-    <pre><code class="language-java">// Esempio: fetch parallelo di due sorgenti
-Response handle() throws ExecutionException, InterruptedException {
-    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-        Future&lt;String&gt; user = scope.fork(() -&gt; findUser());
-        Future&lt;Integer&gt; order = scope.fork(() -&gt; fetchOrder());
+<!-- BEGIN STATIC DIAGRAM pcd-structured-close -->
+<figure data-static-diagram="pcd-structured-close" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Structured concurrency: join non equivale a uscita di tutti i thread — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-structured-close.svg" width="320" height="526" alt="Structured concurrency: join non equivale a uscita di tutti i thread" style="display:block;width:320px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Traccia controllata sull’API incubator JDK 20. Un task fallisce mentre l’altro rimane trattenuto dal test e ignora temporaneamente gli interrupt. join ritorna dopo lo shutdown; close resta in attesa. Il rilascio esterno permette al task lento di uscire e solo allora close ritorna. Le frecce indicano l’ordine osservato in questo test, non durate o un ordine universale. Ignorare gli interrupt serve qui a dimostrare il limite, non è una pratica consigliata.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-structured-close -->
 
-        scope.join();            // attendi entrambi i fork
-        scope.throwIfFailed();   // propaga errori
+    <div class="callout idea"><span class="callout-label">Cancellare non significa terminare forzatamente</span><p>Un Future già cancellato può rappresentare codice ancora in esecuzione. Se un task ignora gli interrupt o resta bloccato in un’operazione non interrompibile, <code>close()</code> può attendere indefinitamente. Neppure interrompere l’owner durante close lo fa uscire subito: la chiusura continua ad attendere e ripristina lo stato di interruzione al ritorno. La struttura delimita i thread gestiti dallo scope; non cattura automaticamente thread o lavori avviati separatamente su altri executor.</p></div>
 
-        // Entrambi completati con successo
-        return new Response(user.resultNow(), order.resultNow());
-    }  // scope si chiude: tutti i fork sono completati
-}</code></pre>
+    <p>Analogamente, una scadenza passata a <code>joinUntil</code> limita quell’attesa, non garantisce una scadenza rigida per l’intero metodo: l’uscita dal try deve ancora completare close. I task devono cooperare alla cancellazione e gestire le proprie risorse. Lo scope non rende automaticamente thread-safe gli oggetti condivisi e non annulla effetti esterni già prodotti.</p>
 
-    <p>Il vantaggio: il ciclo di vita dei subtask e confinato al blocco <code>try-with-resources</code>. Non ci sono thread o task "orfani" che continuano dopo che il parent e terminato. La leggibilita e la manutenibilita sono simili al codice sequenziale.</p>
-  
+    <h3>Esempio storico completo e riproducibile</h3>
+    <p><code>StructuredFetch20</code> riceve due <code>Callable</code>: nel main restituiscono dati locali, nei test simulano anche errori e attese. Include import, record della risposta e punto d’ingresso; non richiede servizi esterni. Con <strong>JDK 20</strong>, salva il file e usa:</p>
+    <pre tabindex="0" role="region" aria-label="Comandi per JDK 20"><code>javac --enable-preview --release 20 \
+  --add-modules jdk.incubator.concurrent StructuredFetch20.java
+java --enable-preview --add-modules jdk.incubator.concurrent \
+  StructuredFetch20</code></pre>
+    <p>Il risultato della demo è <code>Response[user=Ada, order=17]</code>. L’avviso sul modulo incubator è atteso. L’esecuzione richiede <code>--enable-preview</code> perché il costruttore predefinito usa i virtual thread, ancora in preview in JDK 20.</p>
+
+<!-- BEGIN STRUCTURED CONTENT -->
+<p><a href="assets/examples/StructuredFetch20.java" download>Scarica StructuredFetch20.java</a> · esempio storico completo, solo JDK 20 con modulo incubator.</p>
+<details data-structured-example="StructuredFetch20"><summary>StructuredFetch20: codice completo</summary>
+<pre data-structured-source tabindex="0" role="region" aria-label="Codice Java StructuredFetch20"><code class="language-java">import java.util.Objects;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import jdk.incubator.concurrent.StructuredTaskScope;
+
+/** Historical JDK 20 incubator example; not a Java 17 or generic 20+ API. */
+public final class StructuredFetch20 {
+    private StructuredFetch20() { }
+
+    public record Response(String user, int order) { }
+
+    public static Response handle(
+            Callable&lt;String&gt; findUser, Callable&lt;Integer&gt; fetchOrder)
+            throws ExecutionException, InterruptedException {
+        Objects.requireNonNull(findUser);
+        Objects.requireNonNull(fetchOrder);
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            Future&lt;String&gt; user = scope.fork(findUser);
+            Future&lt;Integer&gt; order = scope.fork(fetchOrder);
+            // All finished OR scope shutdown, not always both exited.
+            scope.join();
+            scope.throwIfFailed();
+            // These two results are available only on the successful path.
+            return new Response(user.resultNow(), order.resultNow());
+        } // close waits for remaining threads, even on exceptional exit.
+    }
+
+    public static void main(String[] args)
+            throws ExecutionException, InterruptedException {
+        // Local stand-ins: no network or external service needed.
+        System.out.println(handle(() -&gt; &quot;Ada&quot;, () -&gt; 17));
+    }
+}
+</code></pre>
+</details>
+<!-- END STRUCTURED CONTENT -->
+
+    <p>Fonti di versione: <a href="https://docs.oracle.com/en/java/javase/20/docs/api/jdk.incubator.concurrent/jdk/incubator/concurrent/StructuredTaskScope.html">StructuredTaskScope, JDK 20</a>, <a href="https://docs.oracle.com/en/java/javase/20/docs/api/jdk.incubator.concurrent/jdk/incubator/concurrent/StructuredTaskScope.ShutdownOnFailure.html">ShutdownOnFailure, JDK 20</a> e <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/StructuredTaskScope.html">API preview di JDK 21</a>. La traccia illustrata è verificata con task reali e rilascio controllato, non è una promessa sui tempi di scheduling.</p>
     </div>
   </section>
 
@@ -1870,7 +1916,7 @@ Response handle() throws ExecutionException, InterruptedException {
         <h2>Verifica le tue conoscenze</h2>
     <div class="lk-quiz">
       <details><summary>Qual e la differenza tra un task e un thread?</summary>
-      <p>Un task e un'unita di lavoro logica, astratta, con inizio e fine. Un thread e il veicolo fisico che esegue il task. Il task-oriented programming separa i due concetti: il programmatore definisce i task; l'executor decide come e quando eseguirli su thread.</p></details>
+      <p>Un task è un’unità di lavoro; un thread è un flusso di esecuzione che può svolgerla. Un thread Java non coincide necessariamente con un thread del sistema operativo: è il caso dei virtual thread. Nel modello executor il programmatore descrive i task e li affida a una politica di esecuzione; task, thread Java e core fisico non sono sinonimi.</p></details>
 
       <details><summary>Perche il CronometroMVCNotReactivePlusRace non funziona?</summary>
       <p>Il listener trattiene l’EDT nel loop: altri eventi e le normali richieste di ridisegno non vengono serviti. setText può aver già modificato lo stato del componente senza che i nuovi pixel vengano dipinti. Non è un invokeLater dell’intera operazione; aggiungere sleep al loop non risolve il blocco.</p></details>

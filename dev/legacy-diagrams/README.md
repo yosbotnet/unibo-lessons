@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Thirty-five reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Thirty-six reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing, rankSpacing and
 wrappingWidth (120–600 px, to keep long identifiers on a line without smaller text).
 Unknown overrides fail; fonts are never made smaller to accommodate content.
@@ -68,6 +68,9 @@ node barrier-browser-test.cjs
 NOTES_JDK=/path/to/jdk node forkjoin-java-test.cjs
 node forkjoin-content.cjs --check
 node forkjoin-browser-test.cjs
+NOTES_JDK20=/path/to/jdk20 node structured-java-test.cjs
+node structured-content.cjs --check
+node structured-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -80,6 +83,13 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Historical structured concurrency and actual close completion
+
+PCD8 now pins the slide example to JDK 20's incubator API, with a complete canonical
+program and explicit module/preview commands. Real virtual-thread tests distinguish
+join return and Future cancellation from actual child exit. A native diagram follows
+the recorded close-wait trace. See [Structured concurrency evidence](STRUCTURED.md).
 
 ### Fork-Join algorithms and successful dependencies
 
