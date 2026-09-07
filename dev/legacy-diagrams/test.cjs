@@ -20,6 +20,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'pcd-dining-wait':[5,5]});
    Object.assign(counts,{'pcd-monitor-components':[5,4],'pcd-monitor-reentry':[7,7]});
    Object.assign(counts,{'pcd-executor-types':[4,3]});
+   Object.assign(counts,{'pcd-swing-refresh':[7,6]});
+   if(e.id==='pcd-swing-refresh')for(const pair of ['W_M','M_S','S_Q','Q_E','E_V','E_D'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Swing snapshot transition '+pair);
    if(e.id==='pcd-executor-types')for(const pair of ['S_E','E_B','F_E'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Executor relation '+pair);
    if(e.id==='pcd-monitor-reentry')for(const pair of ['E_A','A_P','P_U','P_W','W_N','N_E','U_X'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Monitor ownership transition '+pair);
    if(e.id==='pcd-dining-wait')for(let i=0;i<5;i++)assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_F${i}_F${(i+1)%5}_`)&&x.end).length,1,'Dining wait dependency');

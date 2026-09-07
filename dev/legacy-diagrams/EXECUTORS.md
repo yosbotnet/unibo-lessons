@@ -106,9 +106,11 @@ authoritative executable code. API evidence checked against Java 17:
 [Future](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/Future.html),
 [Thread](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/lang/Thread.html).
 
-PCD8 still needs substantive review of its Swing/EDT claims and partial GUI code,
-physics example, version-specific structured-concurrency example, thread/lock
+The subsequent [Swing revision](SWING.md) handles sections 12–14, including their
+EDT claims, partial GUI examples, annotations and related quiz answer.
+PCD8 still needs substantive review of its physics example,
+version-specific structured-concurrency example, thread/lock
 introduction (including the claimed automatic resource management for locks),
 and absolute claims in quizzes. These are not covered by a passing widget click
-test. The full-site inventory is 315 pages/994 figure elements, with 96 raw Mermaid
+test. At this executor checkpoint the inventory was 315 pages/994 figure elements, with 96 raw Mermaid
 blocks remaining across 27 pages; neither count establishes content correctness.

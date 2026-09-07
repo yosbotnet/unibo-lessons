@@ -2,6 +2,33 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD8 Swing ownership and complete GUI examples
+
+Preview: [EDT bug](../../pcd/cap-08-java.html#s12),
+[snapshot publication](../../pcd/cap-08-java.html#s13),
+[timer and keyboard](../../pcd/cap-08-java.html#s14).
+
+One native shared-renderer diagram explains versioned snapshot publication.
+Three canonical downloadable Java files replace partial stopwatch/keyboard
+examples; short EDT work, long worker work, shared-model protection and confinement
+are distinguished. The incorrect setText explanation is fixed in prose, visible
+code, annotations and quiz. Examples are labelled editorial, not original lab code.
+
+Java 17 compilation treats warnings as errors. Headless and actual-window tests
+each perform over 30,000 assertions, including an independent clock oracle,
+real EDT queue observations, coalescing, stale-reset rejection, timer delivery,
+button/key actions and close cleanup. Four desktop/mobile/JS/no-JS page views pass
+source/download equality, annotation consistency, markup, scrolling and SVG checks.
+The existing executor/widget suite passes too. The diagram, page screenshots and
+native Java windows were visually inspected. Shared regressions pass for 32 native
+graphs, 34 original-font assets, twenty desktop/mobile page visits and ten no-JS
+image-loading visits. [Evidence and limits](../../dev/legacy-diagrams/SWING.md).
+
+The remaining physics, structured-concurrency and introductory Java material is
+not certified by this checkpoint. Current inventory: 315 pages/995 figure elements;
+96 raw Mermaid blocks in 27 pages. Production and preexisting review/report edits
+remain untouched; the full-site goal stays open.
+
 ## Latest addition: PCD8 executor types and observable cancellation
 
 Preview: [types and producer](../../pcd/cap-08-java.html#s10),

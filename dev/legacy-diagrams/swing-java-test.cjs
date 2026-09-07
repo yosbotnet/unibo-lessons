@@ -1,0 +1,10 @@
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process');
+const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-artifacts';
+const tool=name=>process.env.NOTES_JDK?path.join(process.env.NOTES_JDK,'bin',name):name;
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'notes-swing-classes-')),options={encoding:'utf8',timeout:60000};
+const sources=['StopwatchModel','ConcurrentStopwatch','SketchCounter'].map(n=>root+'/pcd/assets/examples/'+n+'.java');
+execFileSync(tool('javac'),['-Xlint:all','-Werror','-d',dir,...sources,__dirname+'/SwingExamplesTest.java'],options);
+const headless=execFileSync(tool('java'),['-Djava.awt.headless=true','-ea','-cp',dir,'SwingExamplesTest'],options).trim();
+const windows=execFileSync('xvfb-run',['-a',tool('java'),'-ea','-cp',dir,'SwingExamplesTest',out],options).trim();
+fs.writeFileSync(out+'/swing-java-test.json',JSON.stringify({compiler:execFileSync(tool('javac'),['-version'],options).trim(),headless,windows,classDirectory:dir},null,2)+'\n');
+console.log(headless+'\n'+windows);

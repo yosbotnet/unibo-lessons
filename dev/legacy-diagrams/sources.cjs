@@ -1,6 +1,7 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ ...require('./swing-sources.cjs'),
  ...require('./executor-sources.cjs'),
  ...require('./monitor-sources.cjs'),
  require('./dining-source.cjs'),

@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Thirty-one reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Thirty-two reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -55,6 +55,9 @@ node monitor-browser-test.cjs
 NOTES_JDK=/path/to/jdk node executor-java-test.cjs
 NOTES_JDK=/path/to/jdk node executor-content.cjs --check
 node executor-browser-test.cjs
+NOTES_JDK=/path/to/jdk node swing-java-test.cjs
+node swing-content.cjs --check
+node swing-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -67,6 +70,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Swing: short EDT work, protected state and stale refreshes
+
+PCD8 sections 12–14 now distinguish component-state mutation from painting, EDT
+confinement from shared-model synchronization, and background work from lightweight
+timer callbacks. One shared-renderer SVG explains safe snapshot publication; three
+canonical Java sources provide a complete worker-refresh stopwatch and an explicitly
+different EDT-confined counter. Real AWT/Swing, keyboard and window-close tests
+supplement desktop/mobile source and widget checks. See [Swing evidence](SWING.md).
 
 ### Executors: type relationships, cancellation and actual task exit
 

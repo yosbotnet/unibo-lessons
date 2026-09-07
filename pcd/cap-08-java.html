@@ -898,75 +898,278 @@ public final class ExecutorLifecycleDemo {
   </section>
   <section id="s12" data-src="PCD-2026-03-20.html#s4">
     <h2>12. Cronometro MVC: il bug della reattivita</h2>
-        <p>Il professor Ricci passa a un esempio pratico e doloroso: un cronometro implementato con pattern Model-View-Controller, ma con due bug classici della programmazione concorrente in GUI Java.</p>
+    <p>La lezione usa un cronometro MVC per distinguere due problemi: reattività della GUI e accesso concorrente allo stato. Sono proprietà diverse: proteggere il modello con un lock non rende reattivo un listener che non ritorna.</p>
 
     <p>Il programma si chiama <em>CronoMVCNotReactivePlusRace</em> ed e l'esempio di <strong>come NON si fa</strong>. L'idea e semplice: un cronometro con pulsanti Start, Stop e Reset che conta i secondi in un text field.</p>
 
-    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Questa versione ha due problemi fondamentali:<br>
-    1. <strong>Non e reattiva (non responsive)</strong> — premere Start blocca completamente l'interfaccia<br>
-    2. <strong>Race condition</strong> — viola la mutua esclusione sullo stato del modello</p></div>
+    <div class="callout warn"><span class="callout-label">Attenzione</span><p>Il frammento seguente mostra il blocco dell’EDT. Da solo non dimostra una data race: questa richiede accessi concorrenti incompatibili senza adeguata sincronizzazione. Se tutto lo stato fosse confinato all’EDT, la GUI potrebbe comunque bloccarsi pur senza quella race.</p></div>
 
     <p>Il bug principale e nel controller: l'azione di start viene eseguita direttamente sull'<strong>Event Dispatch Thread (EDT)</strong>, il thread di Swing che gestisce tutti gli eventi della GUI. Cosa succede?</p>
 
-    <pre><code class="language-java">// VERSIONE BUGGY: il controller esegue il loop sull'EDT!
+    <pre id="code-cronobug" tabindex="0" role="region" aria-label="Frammento intenzionalmente errato: loop nel listener"><code class="language-java">// Frammento intenzionalmente errato: non eseguirlo nella GUI.
 buttonStart.addActionListener(e -&gt; {
     started = true;
     while (started) {
         model.updateState();
         display.setText(String.valueOf(model.getValue()));
-        // ^^^^^ setText accoda un task all'EDT...
-        // ma l'EDT e gia occupato qui nel loop!
-        Thread.sleep(100);  // blocca tutto
     }
 });</code></pre>
 
-    <p>Il problema e duplice:</p>
+    <p>Occorre distinguere la modifica dello stato del componente dalla pittura sullo schermo:</p>
     <ul>
-      <li><code>setText()</code> su un componente Swing non aggiorna immediatamente il display: accoda un task nella coda eventi dell'EDT.</li>
-      <li>Ma l'EDT e gia in esecuzione! Sta eseguendo il <code>while(started)</code> del controller. Quindi non puo servire la coda eventi. Il display non si aggiorna mai e l'interfaccia e completamente bloccata.</li>
+      <li>Chiamata sull’EDT, <code>setText()</code> modifica lo stato testuale del componente durante la chiamata: non equivale a un invokeLater dell’intera operazione. Repaint e layout possono essere differiti.</li>
+      <li>Il listener trattiene l’EDT nel while: gli eventi Stop e le normali richieste di ridisegno restano in attesa. Se solo il listener Stop può azzerare started, non avrà occasione di farlo. Aggiungere sleep rallenta il loop ma non libera l’EDT per altri eventi.</li>
     </ul>
 
     <div id="ac-cronobug"></div>
 
-    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>L'EDT e un thread a event loop: deve stare sempre in attesa sulla coda eventi, eseguire rapidamente un handler, e tornare ad aspettare. Se lo "imbragliamo" in un loop che non compete a lui, il sistema si blocca.</p></div>
+    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Un handler sull’EDT deve finire rapidamente. Può chiamare controller e modello per operazioni brevi, ma non deve contenere un ciclo lungo, sleep, attese su Future o join di worker. La separazione MVC non assegna automaticamente un thread a ogni ruolo.</p></div>
   
   </section>
   <section id="s13" data-src="PCD-2026-03-20.html#s5">
     <h2>13. Cronometro MVC: la soluzione</h2>
-        <p>La versione corretta si chiama <em>CronoMVCReactiveNonRaces</em>. La regola fondamentale e: <strong>l'EDT si occupa solo della business logic che riguarda la view</strong>, non il model, non il controller.</p>
+    <p>La lezione chiama la versione corretta <em>CronoMVCReactiveNonRaces</em>. Il principio è separare il comportamento prolungato dall’handler GUI e definire chi può accedere allo stato. Le slide ammettono esplicitamente task brevi sull’EDT, compresi accessi ai modelli Swing; non impongono che qualsiasi metodo del controller o del modello venga eseguito su un altro thread.</p>
 
-    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Separare il flusso di controllo: la reazione agli eventi (notifyStarted, notifyStopped) appartiene al controller, ma l'esecuzione del loop di conteggio deve avvenire su un thread separato, non sull'EDT.</p></div>
+    <div class="callout idea"><span class="callout-label">Due scelte valide</span><p>Un agente separato è utile per comportamento prolungato o lavoro costoso, con pubblicazione dei risultati sull’EDT. Per un semplice contatore, un <code>javax.swing.Timer</code> può invece invocare brevi aggiornamenti sull’EDT: non serve un worker soltanto perché l’attività è periodica. I due esempi sotto mostrano entrambe le scelte.</p></div>
 
-    <pre><code class="language-java">// VERSIONE CORRETTA: il controller delega a un thread separato
-class Controller {
-    private final Model model;
-    private final View view;
-    private Thread countingThread;  // thread separato per il conteggio
+    <h3>Un cronometro completo con modello protetto e worker di refresh</h3>
+    <p>Questa è una ricostruzione editoriale compilabile in Java 17, non il sorgente originale del laboratorio. Il tempo trascorso deriva da differenze di <code>System.nanoTime()</code>, non dal numero di tick: un refresh ritardato non perde secondi. Start ripetuto non riparte da zero; Stop conserva il tempo; Reset azzera mantenendo lo stato fermo/in esecuzione.</p>
 
-    public void notifyStarted() {
-        countingThread = new Thread(() -&gt; {
-            while (isRunning()) {
-                model.updateState();       // aggiorno il modello
-                SwingUtilities.invokeLater(() -&gt; {
-                    view.updateDisplay(    // aggiorno la view sull'EDT
-                        model.getValue());
-                });
-                Thread.sleep(100);
+<!-- BEGIN STATIC DIAGRAM pcd-swing-refresh -->
+<figure data-static-diagram="pcd-swing-refresh" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Dal worker alla vista: pubblicare uno snapshot valido — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-swing-refresh.svg" width="500" height="715" alt="Dal worker alla vista: pubblicare uno snapshot valido" style="display:block;width:500px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Percorso di un refresh nel cronometro editoriale, non diagramma delle classi. Il monitor viene rilasciato prima di invokeLater; la callback legge una copia immutabile. Start, Stop e Reset cambiano la versione nel modello e aggiornano subito la vista sull’EDT: un vecchio campione non può annullarli. La chiusura invalida anche le callback già accodate. I refresh vengono accorpati: al massimo una callback di refresh è in attesa, non una coda crescente di campioni.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-swing-refresh -->
+
+    <p>Il controller riceve i comandi sull’EDT e usa brevi metodi synchronized del modello. Un solo worker campiona uno snapshot immutabile e ne accoda la pubblicazione. Le sezioni critiche non includono chiamate Swing o attese; ogni comando cambia la versione, quindi un refresh precedente a Reset/Stop non può sovrascrivere la nuova vista. Accorpare i refresh evita l’accumulo di una callback per ogni tick quando l’EDT è occupato.</p>
+
+<!-- BEGIN SWING CONTENT StopwatchModel -->
+<p><a href="assets/examples/StopwatchModel.java" download>Scarica StopwatchModel.java</a> · Java 17.</p>
+<details data-swing-example="StopwatchModel"><summary>StopwatchModel: sorgente completo verificato</summary>
+<pre data-swing-source="StopwatchModel" tabindex="0" role="region" aria-label="Sorgente Java StopwatchModel"><code class="language-java">import java.util.Objects;
+import java.util.function.LongSupplier;
+
+/** Short monitor operations; no GUI calls, sleeping, I/O or callbacks to the EDT. */
+public final class StopwatchModel {
+    public record Snapshot(long millis, boolean running, long revision) { }
+
+    private final LongSupplier nanoClock;
+    private long accumulated;
+    private long startedAt;
+    private long revision;
+    private boolean running;
+
+    public StopwatchModel() {
+        this(System::nanoTime);
+    }
+
+    public StopwatchModel(LongSupplier nanoClock) {
+        this.nanoClock = Objects.requireNonNull(nanoClock);
+    }
+
+    public synchronized void start() {
+        if (!running) {
+            startedAt = nanoClock.getAsLong();
+            running = true;
+        }
+        revision++;
+    }
+
+    public synchronized void stop() {
+        if (running) {
+            accumulated += nanoClock.getAsLong() - startedAt;
+            running = false;
+        }
+        revision++;
+    }
+
+    /** Reset to zero; preserve whether the stopwatch is running. */
+    public synchronized void reset() {
+        accumulated = 0;
+        if (running) startedAt = nanoClock.getAsLong();
+        revision++;
+    }
+
+    public synchronized Snapshot snapshot() {
+        long elapsed = accumulated + (running ? nanoClock.getAsLong() - startedAt : 0);
+        return new Snapshot(elapsed / 1_000_000, running, revision);
+    }
+}
+</code></pre>
+</details>
+<!-- END SWING CONTENT StopwatchModel -->
+<!-- BEGIN SWING CONTENT ConcurrentStopwatch -->
+<p><a href="assets/examples/ConcurrentStopwatch.java" download>Scarica ConcurrentStopwatch.java</a> · Java 17.</p>
+<details data-swing-example="ConcurrentStopwatch"><summary>ConcurrentStopwatch: sorgente completo verificato</summary>
+<pre data-swing-source="ConcurrentStopwatch" tabindex="0" role="region" aria-label="Sorgente Java ConcurrentStopwatch"><code class="language-java">import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
+
+/** Java 17 editorial MVC example: one sampler, not a new thread per Start. */
+public final class ConcurrentStopwatch {
+    private ConcurrentStopwatch() { }
+
+    static void requireEdt() {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException(&quot;This operation belongs to the EDT&quot;);
+        }
+    }
+
+    static final class Controller {
+        private final StopwatchModel model;
+        private final Consumer&lt;StopwatchModel.Snapshot&gt; view;
+        private final ScheduledThreadPoolExecutor sampler;
+        private final AtomicBoolean refreshPending = new AtomicBoolean();
+        private boolean closed; // Accessed only by the EDT.
+
+        Controller(StopwatchModel model, Consumer&lt;StopwatchModel.Snapshot&gt; view,
+                long refreshMillis) {
+            requireEdt();
+            if (refreshMillis &lt;= 0) throw new IllegalArgumentException(&quot;Positive refresh period required&quot;);
+            this.model = Objects.requireNonNull(model);
+            this.view = Objects.requireNonNull(view);
+            view.accept(model.snapshot());
+            sampler = new ScheduledThreadPoolExecutor(1,
+                    job -&gt; new Thread(job, &quot;stopwatch-sampler&quot;));
+            sampler.scheduleWithFixedDelay(this::sample, refreshMillis,
+                    refreshMillis, TimeUnit.MILLISECONDS);
+        }
+
+        void start() {
+            requireEdt();
+            if (!closed) { model.start(); view.accept(model.snapshot()); }
+        }
+
+        void stop() {
+            requireEdt();
+            if (!closed) { model.stop(); view.accept(model.snapshot()); }
+        }
+
+        void reset() {
+            requireEdt();
+            if (!closed) { model.reset(); view.accept(model.snapshot()); }
+        }
+
+        void sample() {
+            // Coalesce refreshes: at most one queued refresh callback.
+            if (!refreshPending.compareAndSet(false, true)) return;
+            final StopwatchModel.Snapshot value = model.snapshot();
+            SwingUtilities.invokeLater(() -&gt; {
+                requireEdt();
+                refreshPending.set(false);
+                // A queued old sample must not undo Stop/Reset/Start or close.
+                if (!closed &amp;&amp; value.revision() == model.snapshot().revision()) {
+                    view.accept(value);
+                }
+            });
+        }
+
+        void close() {
+            requireEdt();
+            if (!closed) {
+                closed = true;
+                model.stop();
+                sampler.shutdownNow();
             }
+        }
+
+        boolean awaitClosed(long timeout, TimeUnit unit) throws InterruptedException {
+            if (SwingUtilities.isEventDispatchThread()) {
+                throw new IllegalStateException(&quot;Never await worker termination on the EDT&quot;);
+            }
+            return sampler.awaitTermination(timeout, unit);
+        }
+    }
+
+    static final class View {
+        final JPanel panel = new JPanel(new BorderLayout(12, 12));
+        final JLabel display = new JLabel(&quot;0.000 s&quot;, SwingConstants.CENTER);
+        final JLabel state = new JLabel(&quot;Fermo&quot;, SwingConstants.CENTER);
+        final JButton start = new JButton(&quot;Start&quot;);
+        final JButton stop = new JButton(&quot;Stop&quot;);
+        final JButton reset = new JButton(&quot;Reset&quot;);
+
+        View() {
+            requireEdt();
+            Color ivory = new Color(0xF3EFE3);
+            panel.setBackground(ivory);
+            panel.setBorder(BorderFactory.createEmptyBorder(24, 24, 24, 24));
+            display.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 32));
+            display.setForeground(new Color(0x1546B8));
+            JPanel buttons = new JPanel();
+            buttons.setBackground(ivory);
+            buttons.add(start); buttons.add(stop); buttons.add(reset);
+            panel.add(state, BorderLayout.NORTH);
+            panel.add(display, BorderLayout.CENTER);
+            panel.add(buttons, BorderLayout.SOUTH);
+        }
+
+        void show(StopwatchModel.Snapshot value) {
+            requireEdt();
+            display.setText(String.format(Locale.ROOT, &quot;%d.%03d s&quot;,
+                    value.millis() / 1000, value.millis() % 1000));
+            state.setText(value.running() ? &quot;In esecuzione&quot; : &quot;Fermo&quot;);
+            start.setEnabled(!value.running());
+            stop.setEnabled(value.running());
+        }
+
+        void bind(Controller controller) {
+            requireEdt();
+            start.addActionListener(event -&gt; controller.start());
+            stop.addActionListener(event -&gt; controller.stop());
+            reset.addActionListener(event -&gt; controller.reset());
+        }
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -&gt; {
+            View view = new View();
+            Controller controller = new Controller(new StopwatchModel(), view::show, 100);
+            view.bind(controller);
+            JFrame frame = new JFrame(&quot;Cronometro MVC · esempio editoriale&quot;);
+            frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+            frame.setContentPane(view.panel);
+            frame.addWindowListener(new WindowAdapter() {
+                @Override public void windowClosing(WindowEvent event) { controller.close(); }
+                @Override public void windowClosed(WindowEvent event) { controller.close(); }
+            });
+            frame.pack();
+            frame.setLocationByPlatform(true);
+            frame.setVisible(true);
         });
-        countingThread.start();
     }
+}
+</code></pre>
+</details>
+<!-- END SWING CONTENT ConcurrentStopwatch -->
 
-    public void notifyStopped() {
-        stopRunning();  // flag per fermare il loop
-    }
-}</code></pre>
+    <p>Scarica entrambi i file nella stessa cartella: <code>javac StopwatchModel.java ConcurrentStopwatch.java</code>, poi <code>java ConcurrentStopwatch</code> in un ambiente grafico. Chiudere la finestra invalida i refresh pendenti e arresta il sampler. L’EDT non attende la terminazione del worker; un test o un coordinatore esterno può usare awaitClosed fuori dall’EDT. Non si creano nuovi thread a ogni pressione di Start.</p>
 
-    <p><code>SwingUtilities.invokeLater()</code> accoda un task nella coda dell'EDT e torna immediatamente. Il thread di conteggio puo continuare a eseguire senza bloccare l'interfaccia. In questo modo l'EDT rimane libero di servire eventi (pulsanti, aggiornamenti) e il cronometro funziona correttamente.</p>
+    <p><code>invokeLater()</code> programma la callback sull’EDT senza aspettarne l’esecuzione, anche quando è chiamato dall’EDT stesso. Questo trasferisce l’esecuzione del callback, non rende thread-safe qualunque modello condiviso: lo snapshot deve essere acquisito e pubblicato correttamente. Una callback costosa bloccherebbe comunque la GUI.</p>
 
-    <p>Il docente sottolinea che <code>invokeAndWait()</code> e un'alternativa sincrona: il chiamante si blocca finche l'EDT non ha completato il task. Utile per sincronizzarsi, ma per l'aggiornamento del display e preferibile <code>invokeLater()</code>.</p>
+    <p><code>invokeAndWait()</code> attende la fine della callback e non va chiamato dall’EDT. Anche un worker può causare deadlock se lo chiama mentre trattiene un lock di cui l’EDT ha bisogno. Nel cronometro non è necessario: si pubblica dopo aver rilasciato il monitor.</p>
 
-    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Ricorda: <code>invokeLater</code> e <code>invokeAndWait</code> — entrambi accodano un task nella Event Queue dell'EDT. La differenza e che <code>invokeAndWait</code> e sincrono: il chiamante attende il completamento. <code>invokeLater</code> e asincrono: accoda e ritorna immediatamente.</p></div>
+    <div class="callout exam"><span class="callout-label">Per l’esame</span><p>Tre domande separate: dove viene eseguito il codice, come è protetto lo stato, e quanto a lungo può occupare quel thread? invokeLater risponde alla prima, non automaticamente alle altre due.</p></div>
+
+    <p>Riferimenti: <a href="https://docs.oracle.com/javase/tutorial/uiswing/concurrency/dispatch.html">EDT e task brevi</a>, <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.desktop/javax/swing/SwingUtilities.html">SwingUtilities, Java 17</a>. Le verifiche dell’esempio includono una vera coda EDT: setText è osservabile prima che il task ritorni, mentre un invokeLater resta accodato finché quel task non finisce. Non si tratta di una simulazione del browser.</p>
   
   </section>
   <section id="s14" data-src="PCD-2026-03-20.html#s6">
@@ -977,29 +1180,120 @@ class Controller {
 
     <p>La sfida: la tastiera genera eventi in modo <strong>asincrono</strong>, indipendentemente dal ciclo di vita del programma. Come li integriamo nel MVC?</p>
 
-    <pre><code class="language-java">// Gestione dell'input da tastiera in Java con MVC
-public class Sketch2 {
-    public static void main(String[] args) {
-        Model model = new Model();
-        View view = new View(model);
-        Controller controller = new Controller(model, view);
+    <p>Nella variante editoriale <strong>SketchCounter</strong>, creazione della GUI, pulsanti, timer e azioni da tastiera sono tutti confinati all’EDT. Incrementare un long e aggiornare una label sono operazioni brevi: non richiedono un thread distinto né lock, purché nessun altro thread acceda a quel modello. Il timer conta callback eseguite, non secondi reali; se l’EDT è occupato, le notifiche possono essere ritardate e accorpate.</p>
 
-        // Il controller registra listener per gli eventi di tastiera
-        view.addKeyListener(new KeyAdapter() {
-            public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_I) {
-                    controller.notifyIncrementRequest();
-                } else if (e.getKeyCode() == KeyEvent.VK_R) {
-                    controller.notifyResetRequest();
-                }
-            }
+<!-- BEGIN SWING CONTENT SketchCounter -->
+<p><a href="assets/examples/SketchCounter.java" download>Scarica SketchCounter.java</a> · Java 17.</p>
+<details data-swing-example="SketchCounter"><summary>SketchCounter: sorgente completo verificato</summary>
+<pre data-swing-source="SketchCounter" tabindex="0" role="region" aria-label="Sorgente Java SketchCounter"><code class="language-java">import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import javax.swing.AbstractAction;
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JComponent;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.KeyStroke;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
+
+/** Small alternative to the active-agent example: everything is EDT-confined. */
+public final class SketchCounter {
+    private SketchCounter() { }
+
+    static final class Controller {
+        private long count; // No other thread reads or writes this model.
+        private boolean closed;
+        final JPanel panel = new JPanel(new BorderLayout(12, 12));
+        final JLabel display = new JLabel(&quot;0&quot;, SwingConstants.CENTER);
+        final JButton increment = new JButton(&quot;+1 (I)&quot;);
+        final JButton reset = new JButton(&quot;Reset (R)&quot;);
+        final Timer timer;
+
+        Controller(int delayMillis) {
+            requireEdt();
+            if (delayMillis &lt;= 0) throw new IllegalArgumentException(&quot;Positive timer delay required&quot;);
+            panel.setBackground(new Color(0xF3EFE3));
+            panel.setBorder(BorderFactory.createEmptyBorder(24, 24, 24, 24));
+            display.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 32));
+            display.setForeground(new Color(0x1546B8));
+            JPanel buttons = new JPanel();
+            buttons.setBackground(panel.getBackground());
+            buttons.add(increment); buttons.add(reset);
+            panel.add(display, BorderLayout.CENTER);
+            panel.add(buttons, BorderLayout.SOUTH);
+            increment.addActionListener(event -&gt; increment());
+            reset.addActionListener(event -&gt; reset());
+            bind(KeyEvent.VK_I, &quot;increment&quot;, this::increment);
+            bind(KeyEvent.VK_R, &quot;reset&quot;, this::reset);
+            timer = new Timer(delayMillis, event -&gt; increment());
+            timer.start();
+        }
+
+        private void bind(int key, String name, Runnable action) {
+            panel.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                    .put(KeyStroke.getKeyStroke(key, 0), name);
+            panel.getActionMap().put(name, new AbstractAction() {
+                private static final long serialVersionUID = 1L;
+                @Override public void actionPerformed(ActionEvent event) { action.run(); }
+            });
+        }
+
+        void increment() {
+            requireEdt();
+            if (!closed) { count++; display.setText(Long.toString(count)); }
+        }
+
+        void reset() {
+            requireEdt();
+            if (!closed) { count = 0; display.setText(&quot;0&quot;); }
+        }
+
+        void close() {
+            requireEdt();
+            closed = true;
+            timer.stop();
+        }
+    }
+
+    static void requireEdt() {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException(&quot;This model and view belong to the EDT&quot;);
+        }
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -&gt; {
+            Controller controller = new Controller(1000);
+            JFrame frame = new JFrame(&quot;Input e timer · esempio editoriale&quot;);
+            frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+            frame.setContentPane(controller.panel);
+            frame.addWindowListener(new WindowAdapter() {
+                @Override public void windowClosing(WindowEvent event) { controller.close(); }
+                @Override public void windowClosed(WindowEvent event) { controller.close(); }
+            });
+            frame.pack();
+            frame.setLocationByPlatform(true);
+            frame.setVisible(true);
         });
     }
-}</code></pre>
+}
+</code></pre>
+</details>
+<!-- END SWING CONTENT SketchCounter -->
 
-    <p>Il professore spiega che la gestione e concettualmente identica a quella del cronometro: il controller reagisce agli eventi, modifica il modello su un thread separato (non l'EDT), e usa <code>SwingUtilities.invokeLater()</code> per aggiornare la vista. In questo modo l'interfaccia rimane reattiva anche durante computazioni lunghe.</p>
+    <p>Esegui <code>javac SketchCounter.java</code> e <code>java SketchCounter</code> in un ambiente grafico. I tasti I e R usano <code>InputMap</code>/<code>ActionMap</code> con <code>WHEN_IN_FOCUSED_WINDOW</code>: funzionano anche quando il focus è su un pulsante della finestra, senza affidarsi a un KeyListener sul JFrame. Le azioni sono disponibili anche tramite pulsanti. Alla chiusura il timer viene fermato e il controller ignora eventuali azioni già accodate.</p>
 
-    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>Sketch2 rappresenta un pattern generale per la gestione di input asincrono in GUI concorrenti: gli eventi esterni (tastiera, mouse, rete) vengono catturati da listener che notificano il controller, il quale orchestra le modifiche al modello su thread separati.</p></div>
+    <p>Se l’incremento diventasse una computazione lunga, andrebbe delegata a un worker con una politica esplicita per stato, cancellazione e risultati, come nel percorso di pubblicazione sopra. Non basta spostare solo la chiamata che ridisegna la vista.</p>
+
+    <div class="callout note"><span class="callout-label">Nota del redattore</span><p>Questa variante non pretende di riprodurre l’architettura dell’agente attivo mostrata a lezione: illustra la diversa scelta del confinamento completo per lavoro breve. Fonti: <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.desktop/javax/swing/Timer.html">Swing Timer</a> e <a href="https://docs.oracle.com/javase/tutorial/uiswing/misc/keybinding.html">key bindings</a>.</p></div>
   
   </section>
   <section id="s15" data-src="PCD-2026-03-20.html#s7">
@@ -1159,7 +1453,7 @@ Response handle() throws ExecutionException, InterruptedException {
       <p>Un task e un'unita di lavoro logica, astratta, con inizio e fine. Un thread e il veicolo fisico che esegue il task. Il task-oriented programming separa i due concetti: il programmatore definisce i task; l'executor decide come e quando eseguirli su thread.</p></details>
 
       <details><summary>Perche il CronometroMVCNotReactivePlusRace non funziona?</summary>
-      <p>Perche il loop di conteggio viene eseguito direttamente sull'Event Dispatch Thread (EDT). L'EDT rimane bloccato nel loop, non puo servire altri eventi (pulsanti, aggiornamenti), e setText() sulla GUI accoda un task nella coda eventi che non viene mai eseguito. Risultato: interfaccia bloccata e display non aggiornato.</p></details>
+      <p>Il listener trattiene l’EDT nel loop: altri eventi e le normali richieste di ridisegno non vengono serviti. setText può aver già modificato lo stato del componente senza che i nuovi pixel vengano dipinti. Non è un invokeLater dell’intera operazione; aggiungere sleep al loop non risolve il blocco.</p></details>
 
       <details><summary>Cosa fa SwingUtilities.invokeLater(Runnable)?</summary>
       <p>Accoda un task nella coda degli eventi dell'EDT e ritorna immediatamente (asincrono). Il task verra eseguito dall'EDT quando sara il suo turno. E il meccanismo standard per aggiornare la GUI da un thread diverso dall'EDT.</p></details>
@@ -1306,10 +1600,9 @@ Response handle() throws ExecutionException, InterruptedException {
     LessonKit.annotatedCode('#ac-cronobug', { lang:'java', lines:[
       ['buttonStart.addActionListener(e -> {', 'Listener collegato all\'EDT: qui inizia il problema.'],
       ['    started = true;', 'Flag booleano per il loop.'],
-      ['    while (started) {', 'LOOP INFINITO sull\'EDT! Blocca l\'intero thread della GUI.'],
-      ['        model.updateState();', 'Aggiorna il modello (ok, ma sull\'EDT sbagliato).'],
-      ['        display.setText(String.valueOf(model.getValue()));', 'setText() accoda un task all\'EDT... che e bloccato qui!'],
-      ['        Thread.sleep(100);', 'sleep blocca ulteriormente l\'EDT; nessun evento Swing viene servito.'],
+      ['    while (started) {', 'Il listener non ritorna: se solo Stop cambia il flag, quel listener non può essere servito.'],
+      ['        model.updateState();', 'Un accesso breve al modello può essere lecito sull’EDT; il problema qui è il loop prolungato. Una race richiede ulteriori accessi concorrenti.'],
+      ['        display.setText(String.valueOf(model.getValue()));', 'Modifica lo stato testuale durante la chiamata, ma l’EDT occupato non serve le normali richieste di repaint. Non equivale a invokeLater.'],
       ['    }', 'L\'EDT non esce mai da questo loop.'],
       ['});', 'Fine listener: l\'interfaccia e congelata e non responsive.']
     ]});
