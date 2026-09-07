@@ -78,6 +78,9 @@ node physics-browser-test.cjs
 NOTES_JPF_CORE=/path/to/pinned/jpf-core NOTES_JDK11=/path/to/jdk11 node jpf-java-test.cjs
 node jpf-content.cjs --check
 node jpf-browser-test.cjs
+node ltl-test.cjs
+node ltl-content.cjs --check
+node ltl-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -90,6 +93,14 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Temporal logic: finite violations, infinite cycles and exact trace semantics
+
+PCD9 now distinguishes general safety/liveness, weak/strong action fairness,
+until endpoints and interval-bounded overtaking. A native two-panel SVG and four
+HTML tables follow explicit finite-prefix/cycle traces, with an exact lasso
+evaluator and independent enumeration/counting oracles. These are illustrative
+trace checks, not certification of a concurrent algorithm. See [LTL evidence](LTL.md).
 
 ### JPF: counterexample, complete search and inconclusive search
 

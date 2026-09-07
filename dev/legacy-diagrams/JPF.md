@@ -111,8 +111,9 @@ now states this accurately and uses `docker compose run --rm jpf-dev`; Docker wa
 not installed/run on the VPS. The course-specific labactivity03 repository was
 not found in the inspected content tree, so its paths are not presented as tested.
 
-Remaining PCD9 review includes general safety/liveness/fairness definitions, LTL
-formulas and the existing state diagram, PROMELA/PlusCal snippets, counts of states,
-fault/error/failure terminology and historical claims. This checkpoint does not
+Safety/liveness/fairness, LTL formulas and the old state diagram were subsequently
+reviewed in the [temporal-semantics checkpoint](LTL.md). Remaining PCD9 review
+includes PROMELA/PlusCal snippets, counts of states, fault/error/failure terminology
+and historical claims. This checkpoint does not
 certify the whole chapter or site. No paid image generation, production deployment,
 or edits to the preexisting root review/index and review/report changes.

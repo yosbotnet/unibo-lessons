@@ -2,6 +2,41 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD9 temporal logic and explicit counterexample traces
+
+Preview: [definitions](../../pcd/cap-09-verifica.html#s2),
+[four trace tables](../../pcd/cap-09-verifica.html#ltl-traces), and
+[replacement state figure](../../pcd/cap-09-verifica.html#s4).
+
+Corrected general safety/liveness definitions, single-position LTL semantics,
+current-state inclusion in G/F, the exclusive P endpoint of U, weak/strong action
+fairness, and global request scope/interval counting for bounded overtaking.
+Summary and quiz text match the changes. Original module-1.2 slides and primary
+formal-methods references were checked. The claim that JPF uses no abstraction
+and a repeated claim that concurrent programs cannot be debugged were removed.
+
+The old anonymous state sketch is replaced by a native, original-font SVG with
+six named states/five complete angular arrows: a finite safety violation and an
+explicit infinite liveness counterexample. Its 332px-wide canvas fits the mobile
+column without text reduction. Four genuine HTML tables contain 14 illustrative
+lassos, generated with the figure from downloadable canonical trace definitions.
+They are not represented as traces of Dekker/Peterson or a proof of any program.
+[Evidence, sources and scope](../../dev/legacy-diagrams/LTL.md).
+
+Exact trace evaluation passed independent future-position and interval-counting
+oracles: 1,252 temporal lassos, 18,056 overtaking lassos, 1,641 enabled/taken
+lassos, 117,808 position comparisons, finite-prefix extension controls through
+length 32 and nine invalid inputs. Four desktop/mobile JS/no-JS views verify
+displayed values, cycles, downloads, SVG XML/geometry and keyboard scrolling.
+Actual diagrams, tables and definition panels were visually inspected. Existing
+four tab groups/eight quizzes pass; shared checks cover 37 flowcharts, 41 exact
+embedded-font assets, 22 desktop/mobile visits and 11 no-JS image checks.
+
+Inventory remains 315 pages / 1,001 figures. PCD9 PROMELA/PlusCal code, proof and
+count examples, fault/error/failure terminology and historical claims remain
+open, as does the broader site review. No deployment, service restart or paid
+generation; preexisting root review/index/report changes remain unstaged.
+
 ## Latest addition: PCD9 JPF outcomes and executable evidence
 
 Preview: [JPF diagram](../../pcd/cap-09-verifica.html#s6), with runnable sources

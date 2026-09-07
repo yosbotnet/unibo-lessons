@@ -22,7 +22,7 @@ This is a source inventory, **not proof that the content or figures are correct*
 | macro | 10 | 8 | 9 | 18 | 0 |
 | netprog | 15 | 61 | 61 | 0 | 0 |
 | oa | 11 | 44 | 44 | 0 | 0 |
-| pcd | 22 | 44 | 9 | 35 | 30 |
+| pcd | 22 | 44 | 8 | 36 | 31 |
 | pm | 20 | 82 | 83 | 0 | 0 |
 | politics | 16 | 0 | 5 | 16 | 0 |
 | pps | 9 | 0 | 0 | 0 | 0 |
