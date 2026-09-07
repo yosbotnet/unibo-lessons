@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-two reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-four reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -41,6 +41,8 @@ node cap-test.cjs
 node cap-traces.cjs --check
 node pbft-test.cjs
 node pbft-traces.cjs --check
+node ledger-test.cjs
+node ledger-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -167,13 +169,72 @@ Local DS C4 slide text sections on BFT (slides 69–74) and PBFT (109–111) wer
 checked. The slide shorthand about unconditional impossibility and all protocols
 using periodic rounds needs the qualifications now present in the chapter.
 
-Still open in DS-C4: the mining animation uses additive progress rather than hash
-trials and has unreliable timer/reset semantics; it is visibly marked pending
-replacement. The chain visualizer has fictitious hash labels, an invalid transfer
-that affects subsequent displayed balances, missing explicit branch connections,
-and non-keyboard block selection. Block-format/timing generalizations and several
-smart-contract limitations also need review. These are confirmed next targets,
-not certified correct by the PBFT tests.
+The following checkpoint repairs the confirmed mining/chain issues. Several
+smart-contract and platform generalizations remain open; the PBFT tests do not
+certify those sections.
+
+### Hash trials and a ledger fork derived from data
+
+DS-C4 sections 7 and 10 now have two native SVGs using the same angular adapter.
+`ledger-source.cjs` derives every parent-child edge and the selected branch from
+`ds/assets/ledger-fork.js`; source definitions contain no coordinates. All six
+blocks keep their actual parent, including the two competing height-3 blocks.
+The figure uses explicit schematic IDs, not fake truncated hash strings. Arrows
+point parent to child; the parent reference goes the other way. Caption and trace
+make this distinction explicit. Both images keep the embedded original font.
+
+The toy account ledger uses integer half-units, no rewards or fees and assumed
+authentication. Proposed transfers are validated before inclusion: Eve's rejected
+transfer no longer credits Alice or makes Eve negative. Each branch derives state
+from its own parent. At equal accumulated work, this example retains the first-seen
+tip; B4 later switches the active path from B3A to B3B → B4. The UI shows detached
+and attached blocks and preserves separate inspected-block versus active-tip
+balances. All six arrivals and each known-block button are keyboard accessible.
+The final balances are Alice=15, Bob=7, Carol=4, Eve=1.5, total 27.5. The six-row
+arrival table and six block details work without JavaScript. Work values are
+assumed, not mined or proof-validated by this separate ledger experiment.
+
+`ds/assets/pow-trials.js` replaces additive percentage bars with real SHA-256
+trials over exact UTF-8 JSON inputs. It is intentionally a toy hash experiment,
+not Bitcoin's binary header, double SHA-256, retargeting, network or rewards.
+Difficulty is 4/8/12 zero bits; an interleaved 20-trial schedule allocates A/B/C/D
+7/6/5/2 attempts. It models work shares, not measured parallel hardware timing or
+guaranteed winner proportions. Every failed candidate changes a nonce; every
+successful one supplies the next toy parent's digest. Counts and complete input /
+digest values are visible, with no progress percentage or forced win.
+
+One-trial, next-block and five-block controls compute only on user activation.
+Batches yield periodically and stop at 50,000 trials with an explicit incomplete
+message when appropriate. Stop snapshots recorded state and discards an in-flight
+digest. Reset/difficulty changes create a new run. A generation token prevents
+retired promises from repainting or mutating the active run. Hash failures surface
+in the status instead of leaving disabled controls stuck. A precomputed 44-trial
+table reaches the first valid toy proof; it remains usable without Web Crypto or
+JavaScript. Both experiments are explicitly separate from the section 8 fixture.
+
+Tests independently replay every ledger branch, check rejection and supply
+conservation, exact reorganization membership and invalid fixture input. An abstract
+unequal-work fixture confirms work selection rather than raw height; it is not
+claimed to be a legal Bitcoin retargeting example. They check 8,586 real trials
+across all three toy difficulties against Node's independent SHA-256 API, exact
+target boundaries, unique input/nonce sequences, parent digests, counters and
+copy isolation. On desktop/mobile, five blocks are found after 101 trials in the
+default deterministic fixture. Stop/start and reset during an in-flight digest
+are exercised. A separate injected nonwinning digest tests the 50,000-trial cap;
+an injected crypto rejection tests recovery. Injected controls are not counted
+as real SHA-256 evidence.
+
+The block-format explanation now distinguishes Bitcoin's header/Merkle commitment
+from the slides' schematic tuple, and an expected block interval from validation
+rules. Source evidence: [Bitcoin developer guide](https://developer.bitcoin.org/devguide/block_chain.html),
+[Nakamoto 2008](https://bitcoin.org/bitcoin.pdf), local DS C4 slides on block
+validity and mining/forks (particularly 113–118). The site no longer presents
+the slide timing shorthand as a complete Bitcoin validity test.
+
+Remaining DS-C4 review: address/permissioned-identity generalizations, the informal
+generation taxonomy and smart-contract properties (gas, upgradeability, privacy,
+randomness and concurrency). The broader site still requires visual and semantic
+review; generated asset counts are not approval counts.
 
 ### Font fidelity in image contexts
 

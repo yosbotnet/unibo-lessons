@@ -2,7 +2,75 @@
 
 Preview only. Production remains at `f0f4bde`.
 
-## Latest addition: DS-C4 PBFT evidence and consensus explanations
+## Latest addition: DS-C4 fork structure and actual toy hash trials
+
+Preview: [fork diagram and arrivals](../../ds/DS-C4.html#s7),
+[hash-trial diagram and experiment](../../ds/DS-C4.html#s10).
+
+Two native SVGs replace the unconnected chain cards and misleading mining-progress
+presentation. The fork's edges and selected/stale branch are generated from the
+same parent-linked ledger used by the UI and static trace. The second diagram
+shows a hash trial, target check, retry and successful link without suggesting
+percentage progress. Both preserve the ivory/cobalt/vermilion style and original
+embedded font. Native and desktop/mobile images were visually inspected.
+
+The ledger excludes the invalid Eve transfer before constructing B2, then derives
+both fork states from B2 independently. Receiving B3B at equal work retains B3A
+in this example; receiving B4 detaches B3A and attaches B3B/B4. Final balances are
+15, 7, 4, 1.5, conserving 27.5 toy units. Block labels are no longer fake hashes.
+All discovered blocks have keyboard-operable inspection buttons with a visible
+selected state. The inspected block and active tip have separately labelled
+balances. The full final tree is distinguished from partial arrival states.
+
+The hashing experiment computes SHA-256 over each displayed UTF-8 JSON input.
+Four toy miners receive 7/6/5/2 of each 20 serial attempts; this is a work allocation,
+not parallel timing or a guarantee about the winners. Failed trials never fill
+a bar. Successful digests link the next toy block. Stop/Reset/difficulty changes
+retire pending work safely; a 50,000-trial cap and crypto errors are explicit.
+The section clearly separates this experiment from actual Bitcoin mining.
+
+Verified:
+
+- Every branch replay, rejected transfer, supply invariant, equal-work tie and
+  exact detach/attach set; an abstract unequal-work fixture selects work over
+  height. Invalid block/transfer input is rejected.
+- 8,586 real trials at 4/8/12 toy difficulty bits, checked with an independent
+  Node SHA-256 implementation: exact serialized inputs, unique nonce candidates,
+  target decisions, next-parent digests and per-miner counts. Target boundary
+  tests cover bits 1–12. Concurrent model steps are rejected and snapshots isolate
+  in-flight work.
+- Desktop/mobile: all six arrivals and all known-block controls, one-hash and
+  five-block operations, exact browser digests/counters, Stop→start and Reset
+  during in-flight work, difficulty changes, keyboard activation/focus/scroll.
+  The default five-block fixture takes 101 recorded trials.
+- A separate injected nonwinning digest reaches the exact 50,000-trial cap and
+  reports an unfinished batch. An injected crypto rejection releases controls
+  and reports its error. Neither injected test is counted as actual SHA-256 work.
+- Six arrival rows, six block details and 44 actual hash-trace rows remain available
+  without JavaScript. Native images are visible without JS, not merely downloaded.
+- 24 native diagrams pass XML, geometry, bounds, text collision, exact graph counts,
+  determinism and invalid-input checks; every fork parent edge is checked.
+  26 assets contain the original font and license. Generated chapter/assets and
+  both traces pass drift checks.
+- Fourteen HTTP desktop/mobile visits and seven no-JS figure pages pass. The PBFT
+  1,000-schedule suite and transfer fixture also pass after retiring the old scripts.
+- All 20 DL preset cases pass; the four approved original SVGs remain byte-identical.
+
+The initial trace-generator invocation caught a syntax typo before generation;
+it was corrected and the generator/rerun succeeded. No failed run is counted as
+passing. Source/slide evidence and limitations are in the
+[adapter README](../../dev/legacy-diagrams/README.md).
+Detailed evidence is `ledger-test.json`, `static-test.json`, `font-test.json`,
+`browser-http-test.json`, `pbft-test.json` and the corresponding `fork-*`, `pow-*`,
+`ledger-*`, `ds-ledger-fork*` and `ds-pow-trial*` screenshots in
+`/home/ybc/notes-legacy-review-artifacts/`.
+
+The inventory now counts 315 pages and 988 figure elements; counts do not establish
+approval. DS-C4's smart-contract/platform generalizations and the broader site's
+visual/semantic review remain open. Production and preexisting review-file edits
+are untouched.
+
+## Previous addition: DS-C4 PBFT evidence and consensus explanations
 
 Preview: [PBFT diagram and message model](../../ds/DS-C4.html#s9),
 [quorum assumptions](../../ds/DS-C4.html#s6),

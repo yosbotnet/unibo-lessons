@@ -1,6 +1,16 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ require('./ledger-source.cjs'),
+ {id:'ds-pow-trial',file:'ds/DS-C4.html',slot:null,title:'A proof-of-work trial has no percentage progress',overrides:{rankSpacing:30},
+ caption:'The lesson computes one SHA-256 of a domain-separated JSON input containing height, parent digest, miner, nonce and toy difficulty. A failed trial changes a nonce, not a progress percentage. A valid digest links the next toy block. This is not Bitcoin’s binary header, double SHA-256, network consensus, difficulty adjustment or rewards. The uniform-hash model predicts an average trial count, never a completion deadline.',
+ source:`flowchart TD
+ A["Candidate + nonce"] --> B["Compute SHA-256"]
+ B --> C{"Digest meets target?"}
+ C -->|"no"| D["Try a fresh candidate"]
+ D --> A
+ C -->|"yes"| E["Record toy proof<br/>Link next block"]
+ style C stroke:#B83D2D`},
  {id:'ds-pbft-normal',file:'ds/DS-C4.html',slot:null,title:'PBFT normal case: different evidence at each step',
  overrides:{rankSpacing:30},
  requiredText:['2f backup PREPAREs','2f + 1 COMMITs','f + 1 matching replies'],
