@@ -95,6 +95,9 @@ node fgsm-content.cjs --check
 node fgsm-browser-test.cjs
 NOTES_GOODFELLOW_PDF=/path/to/1412.6572v3.pdf node fgsm-results-test.cjs
 node fgsm-results.cjs --check
+node robustness-content.cjs --check
+NOTES_COHEN_PDF=/path/to/cohen.pdf NOTES_SMOOTHING_CORE=/path/to/core.py node smoothing-test.cjs
+node robustness-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -107,6 +110,12 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Adversarial training and finite-sample smoothing certificates
+
+The subsequent defense revision adds two shared native flowcharts, corrected
+training/smoothing explanations and a calculated certification/abstention table.
+See [robustness sources, limits and checks](ROBUSTNESS.md).
 
 ### FGSM: shared model, exact gradient and native interactive SVG
 

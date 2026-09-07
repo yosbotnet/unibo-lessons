@@ -115,10 +115,12 @@ replaced by a shared model and native SVG with gradient/budget/geometry checks;
 see [FGSM.md](FGSM.md). The old warning is no longer needed for the replaced widget.
 
 FGSM result tables and annotations were subsequently corrected with model/units
-and direct source checks; see [FGSM.md](FGSM.md). Also still open in these chapters:
+and direct source checks; see [FGSM.md](FGSM.md). Training/smoothing guarantees,
+algorithms and related quizzes are covered by [ROBUSTNESS.md](ROBUSTNESS.md).
+Also still open in these chapters:
 the generic neuron-feature claims, physical-world/vehicle-transfer assertions,
-adversarial-training and smoothing guarantees, the asserted OOD percentage, model
-inversion and the later LLM/privacy/agentic pipeline claims. The full-site goal
+the asserted OOD percentage, model inversion and the later LLM/privacy/agentic
+pipeline claims. The full-site goal
 remains open; this checkpoint is not approval of all chapter content. The existing
 audio narration was not regenerated and can still contain superseded statements.
 Production and the preexisting root review files are unchanged.

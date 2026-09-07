@@ -381,56 +381,62 @@ return x_T</code></pre>
 </div>
 </section>
 
-<section id="s9">
-<h2>9. Defenses: adversarial training and randomized smoothing</h2>
-
-<p><strong>Motivation.</strong> Two countermeasures sit at opposite ends of a trade-off both members share: they buy robustness by spending clean-data accuracy. Know both, and know why the first is necessary-but-insufficient.</p>
-
-<h3>Defense 1 - Adversarial training</h3>
-<p><strong>Idea / purpose:</strong> inject adversarial examples into the training loop <em>with correct labels</em> so the model generalises to perturbed inputs. CIA goal: restore <strong>Integrity</strong> of the decision under attack. The procedure, per training batch:</p>
-<ol>
-<li><strong>Generate</strong> an adversarial example x_adv from the clean batch (x, y) using an attack (e.g. FGSM or PGD), keeping the <em>correct</em> label y.</li>
-<li><strong>Update on the adversarial example</strong>: &theta; = &theta; - lr &middot; &nabla;<sub>&theta;</sub> J(&theta;, x_adv, y) so the model learns to classify the perturbed input correctly.</li>
-<li><strong>Update on the clean example</strong>: &theta; = &theta; - lr &middot; &nabla;<sub>&theta;</sub> J(&theta;, x, y) so clean accuracy is preserved (the double-loss step).</li>
-<li><strong>Repeat</strong> across all batches and epochs; robustness only reaches as far as the attack used in step 1.</li>
-</ol>
-<pre><code class="language-plaintext">// Standard training
-for batch in training:
-    &theta; = &theta; - lr &middot; &nabla;_&theta; J(&theta;, x, y)
-
-// Adversarial training
-for batch in training:
-    x_adv = GenerateAE(x, y)            // e.g. FGSM or PGD
-    &theta; = &theta; - lr &middot; &nabla;_&theta; J(&theta;, x_adv, y)   // train on adversarial example
-    &theta; = &theta; - lr &middot; &nabla;_&theta; J(&theta;, x, y)       // also train on clean example</code></pre>
-<div tabindex="0" role="region" aria-label="Reference table: scroll horizontally" style="max-width:100%;overflow-x:auto"><table>
-<tr><th>Trained against</th><th>Robust to FGSM</th><th>Robust to PGD</th><th>Benign accuracy</th></tr>
-<tr><td>FGSM</td><td>Yes</td><td>No</td><td>Minor decrease</td></tr>
-<tr><td>PGD</td><td>Yes</td><td>Yes</td><td>Significant decrease</td></tr>
-</table></div>
-<p>You only get robustness to attacks as strong as the one you trained against — hence "PGD-trained beats FGSM-trained." <strong>Trade-off:</strong> the stronger the training attack, the larger the clean-accuracy drop. It is the standard approach but <strong>insufficient alone</strong>, because it gives <em>no formal guarantee</em> and adaptive attacks can break it by exploiting "obfuscated gradients."</p>
-
-<h3>Defense 2 - Randomized smoothing</h3>
-<p><strong>Problem it fixes:</strong> the missing guarantee. Instead of defending the base classifier <em>f</em>, wrap it in a <strong>smoothed classifier g</strong> that votes under Gaussian noise:</p>
-<pre><code class="language-plaintext">g(x) = argmax_c  P_{&delta; ~ N(0, &sigma;&sup2;I)}( f(x + &delta;) = c )</code></pre>
-<p><strong>Why it works:</strong> if f is locally robust, averaging many noisy predictions cancels the adversarial direction. <strong>Procedure (ordered):</strong></p>
-<ol>
-<li><strong>Sample</strong> Gaussian noise &delta; ~ N(0, &sigma;&sup2;I) and add it to the input.</li>
-<li><strong>Train with noise</strong>: train the base classifier f on the noised inputs x+&delta; &mdash; <strong>key constraint:</strong> use the <em>same</em> &sigma; at training time that you will use at test time.</li>
-<li><strong>Vote at inference</strong>: for each test input, draw many noisy samples (100-1000), run f on each, and take the majority vote as g(x); the margin yields the certified radius R.</li>
-</ol>
-<div tabindex="0" role="region" aria-label="Reference table: scroll horizontally" style="max-width:100%;overflow-x:auto"><table>
-<tr><th>Pros</th><th>Cons</th></tr>
-<tr><td>Formal guarantee — provably robust within a radius R</td><td>Many forward passes (100&ndash;1000) at inference</td></tr>
-<tr><td>Works against adaptive attacks</td><td>Significant accuracy drop</td></tr>
-<tr><td>No architecture assumptions</td><td>Certification radius often modest</td></tr>
-<tr><td>Practical for inference</td><td>Requires retraining with noise augmentation</td></tr>
-</table></div>
-
-<div class="callout idea">
-<span class="callout-label">Contrast and when-to-use</span>
-<p><em>Shared problem:</em> both raise robustness at the cost of clean accuracy. <em>Difference:</em> adversarial training is empirical (no guarantee, beatable by adaptive attacks); randomized smoothing is <em>certified</em> (provable radius R) but expensive at inference. <em>When-to-use:</em> adversarial training as a cheap baseline; smoothing when you need a guarantee and can pay 100&ndash;1000x inference. <strong>Punchline:</strong> consistent with the "many causes" consensus, no single defense closes the gap — robustness is engineered in layers, not bought once.</p>
-</div>
+<section id="s9"><h2>9. Defenses: adversarial training and randomized smoothing</h2>
+<h3>Adversarial training: optimize a declared objective</h3>
+<p><a href="https://arxiv.org/pdf/1706.06083v4">Madry et al., §2</a> formulate training as an outer minimization over parameters and an inner maximization over allowed input changes. Finite PGD approximates that inner problem; failing to find an attack does not prove that none exists.</p>
+<pre tabindex="0" role="region" aria-label="Robust training objective"><code>minimize over θ: E_(x,y) [ max_(δ in Δ(x)) J(θ, x + δ, y) ]
+Δ(x): declared norm budget and valid input domain
+y: unchanged under the intended threat model</code></pre>
+<figure data-static-diagram="cyber-adversarial-training" data-robustness-diagram="cyber-adversarial-training" style="max-width:100%;margin:1.6rem 0">
+<div role="region" tabindex="0" aria-label="Adversarial training: inner input search, outer parameter update: scroll horizontally" style="max-width:100%;overflow-x:auto;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="../cybersecurity/assets/diagrams/cyber-adversarial-training.svg" width="280" height="455" alt="Adversarial training: inner input search, outer parameter update" style="display:block;width:280px;max-width:none;height:auto;margin:auto"></div>
+<figcaption>One iteration of the stated training recipe. The inner search changes inputs; the outer step changes parameters. Neither arrow means that a finite attack found the worst case or that training certified the resulting network. An optional clean/adversarial loss mixture is evaluated at the same parameters before the single update.</figcaption></figure>
+<pre tabindex="0" role="region" aria-label="One adversarial training iteration"><code>for batch (x, y):
+    # Input search: hold parameters and labels fixed
+    x_candidate = constrained_attack(θ, x, y, Δ)
+    x_candidate = detach(x_candidate)
+    # Choose λ beforehand: 1 = adversarial-only, 0 = clean-only
+    L = mean(λ * J(θ, x_candidate, y)
+             + (1 - λ) * J(θ, x, y))
+    θ = θ - learning_rate * gradient_θ(L)</code></pre>
+<p>The optional mixture above is an explicit editorial recipe with 0 ≤ λ ≤ 1. Both losses use the same θ; two successive updates at different θ are not this single weighted-loss step. Clean-data training is not a mandatory second update and does not guarantee preserved clean accuracy.</p>
+<p>Report the dataset, model, threat set, optimizer and attack configuration together with clean accuracy and attacked accuracy. “FGSM-trained: yes/no” and “PGD-trained: yes/yes” are not universal outcomes. Neither training-attack strength nor clean-accuracy loss has a universal monotonic relationship.</p>
+<p><a href="https://arxiv.org/pdf/1802.00420">Athalye et al., §§5–6</a> distinguish misleading gradients from genuine resistance. Obfuscated gradients can make an attack fail; they are not a defining property of adversarial training. Evaluate the actual defense, including stochasticity or preprocessing, with suitable adaptive attacks. Empirical testing is not a certificate, but a trained model may separately admit certification—including through smoothing.</p>
+<h3>Randomized smoothing: specify what is certified</h3>
+<p>For a fixed classifier f defined on the noisy input space and σ &gt; 0, Gaussian smoothing defines:</p>
+<pre tabindex="0" role="region" aria-label="Gaussian smoothing and L2 certificate"><code>η ~ N(0, σ²I)
+g(x) = argmax_c Pr[f(x + η) = c]
+pLow ≤ Pr[f(x + η) = cA]
+pHigh ≥ max_(c ≠ cA) Pr[f(x + η) = c], with pLow ≥ pHigh
+R = (σ / 2) * (Φ⁻¹(pLow) - Φ⁻¹(pHigh))
+g(x + δ) = cA for ||δ||₂ &lt; R</code></pre>
+<p>This is <a href="https://proceedings.mlr.press/v97/cohen19c/cohen19c.pdf">Cohen et al., Theorem 1</a>. Φ is the standard-normal CDF. The claim is local L₂ prediction stability of g, not correctness against ground truth, stability of f, or an L∞ guarantee at the same radius. It does not depend on an attack’s ability to compute gradients.</p>
+<figure data-static-diagram="cyber-smoothing-certify" data-robustness-diagram="cyber-smoothing-certify" style="max-width:100%;margin:1.6rem 0">
+<div role="region" tabindex="0" aria-label="Randomized smoothing: select, estimate, bound, certify or abstain: scroll horizontally" style="max-width:100%;overflow-x:auto;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="../cybersecurity/assets/diagrams/cyber-smoothing-certify.svg" width="576" height="644" alt="Randomized smoothing: select, estimate, bound, certify or abstain" style="display:block;width:576px;max-width:none;height:auto;margin:auto"></div>
+<figcaption>The same fixed base classifier f, input x and Gaussian standard deviation σ are used in both sample batches. Selection and estimation use independent draws; do not select a new winner from the estimation batch. The radius concerns the smoothed classifier g, not f. Counts in the worked examples below are invented, not experimental image predictions.</figcaption></figure>
+<h4>Finite samples: a vote is not a probability bound</h4>
+<pre tabindex="0" role="region" aria-label="Finite-sample smoothing certification"><code>Fix f, x, σ, n0, n and failure budget α before sampling
+Select cA from n0 independent noisy evaluations
+Freeze cA; draw a fresh independent batch of n evaluations
+k = number of new evaluations predicting cA
+pLower = one_sided_binomial_lower_bound(k, n, α)
+if pLower ≤ 0.5: ABSTAIN
+else: return cA, R = σ * Φ⁻¹(pLower)</code></pre>
+<p>The bound used here is one-sided Clopper–Pearson, as in the <a href="https://github.com/locuslab/smoothing/blob/master/code/core.py">authors’ implementation</a>. For k &gt; 0 it solves Pr[Binomial(n, pLower) ≥ k] = α; for k = 0 it is zero. Taking pHigh = 1 − pLower gives the simpler radius above. Independent estimation prevents selecting a winner from the same counts used to certify it.</p>
+<p>With probability at least 1 − α over the certification draws, a returned certificate is valid for the fixed input. This is not a probability that the label is correct, nor a simultaneous guarantee for an unlimited number of inputs. An abstention is inconclusive, not proof that an adversarial example exists. The boundary ||δ||₂ = R is outside the strict guarantee.</p>
+<h4>Worked counts: the same selected class, different evidence</h4>
+<p>Invented two-class counts, not sampled network outputs: selection is [8,2], so cA = class 0 throughout. Use σ = 0.25, α = 0.001 and n = 100 fresh estimation draws. The same equations generate every cell below.</p>
+<div role="region" tabindex="0" aria-label="Smoothing worked counts: scroll horizontally" style="max-width:100%;overflow-x:auto"><table data-smoothing-examples style="min-width:620px"><caption>Illustrative floating-point calculations, rounded to four decimals</caption><thead><tr><th scope="col">Case</th><th scope="col">New counts [0,1]</th><th scope="col">k/n</th><th scope="col">pLower</th><th scope="col">Output</th></tr></thead><tbody>
+<tr><th scope="row">clear</th><td>[90, 10]</td><td>90/100</td><td>0.7753</td><td>class 0; R ≈ 0.1891</td></tr>
+<tr><th scope="row">weak-majority</th><td>[60, 40]</td><td>60/100</td><td>0.4410</td><td>ABSTAIN</td></tr>
+<tr><th scope="row">selection-miss</th><td>[10, 90]</td><td>10/100</td><td>0.0305</td><td>ABSTAIN</td></tr>
+<tr><th scope="row">unanimous</th><td>[100, 0]</td><td>100/100</td><td>0.9333</td><td>class 0; R ≈ 0.3751</td></tr>
+</tbody></table></div>
+<p>A 60% vote share still abstains at this confidence level. Even unanimity in 100 samples gives a finite bound, not p = 1 or infinite radius. When estimation favors class 1, the procedure still counts class 0; it does not silently reselect. <a href="../cybersecurity/assets/smoothing-model.cjs" download>Download the calculation and records</a>. This educational double-precision code is independently tested, not a formally verified numerical certifier or a rerun of ImageNet experiments.</p>
+<h4>Training, inference and cost are separate</h4>
+<p>The theorem imposes no training procedure. Gaussian augmentation with the chosen σ can help accuracy under noise; retraining and a matching training σ are not logical prerequisites for validity. Adversarial training and smoothing can be combined. For bounded image inputs, any clipping/normalization must be part of the fixed base classifier f; do not replace the Gaussian by truncated noise and assume the same theorem.</p>
+<p>Prediction and certification have different sampling budgets. The paper’s default certification experiment used n0 = 100, n = 100,000 and α = 0.001; “100–1000 forward passes” is not a universal certification cost. Larger σ alone does not guarantee a larger useful radius: the class probabilities change too. Report σ, sample counts, failure budget, abstentions and accuracy together.</p>
 </section>
 
 <section id="s10">
@@ -791,7 +797,7 @@ Model reasoning:
 
 <details>
 <summary>What is the difference between adversarial training and randomized smoothing as defense mechanisms?</summary>
-<p>Adversarial training injects adversarial examples into the training loop with correct labels, improving robustness against the attack used during training. However, it has no formal guarantees and adaptive attacks can break it by exploiting obfuscated gradients. Randomized smoothing creates a smoothed classifier g(x) = argmax P(f(x+&delta;)=c) with Gaussian noise, providing provable robustness within radius R. Pros of randomized smoothing: formal guarantees, works against adaptive attacks, no architecture assumptions. Cons: requires 100&ndash;1000 forward passes at inference, accuracy drop, modest certification radius.</p>
+<p>Adversarial training searches for high-loss allowed inputs and updates model parameters; finite attack evaluation alone is not a certificate. Gaussian smoothing certifies local L₂ stability of g, not f or semantic correctness. Finite-sample certification uses independent selection/estimation, a one-sided probability bound and possible abstention. Training with noise may improve utility but is not required by the theorem. See <a href="#s9">the defense section</a>.</p>
 </details>
 
 <details>

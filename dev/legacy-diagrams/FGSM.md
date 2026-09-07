@@ -147,7 +147,8 @@ source download and lower/upper bounds in both code-rendering modes.
 
 ## Still open
 
-Other feature/robustness, physical-world, smoothing, OOD, privacy and agentic
+The subsequent [defense revision](ROBUSTNESS.md) addresses training and smoothing.
+Other feature/robustness, physical-world, OOD, privacy and agentic
 claims remain subject to the review list in TRANSFER.md. The full-site objective
 is still active. Existing audio narration has not been regenerated. No paid image
 generation, production publication or unrelated service restart occurred, and
