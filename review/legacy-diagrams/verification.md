@@ -2,6 +2,53 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: DS-C4 foundations and actual hash-chain evidence
+
+Preview: [platform/architecture qualifications](../../ds/DS-C4.html#s2),
+[real string hashes](../../ds/DS-C4.html#s3),
+[native chain comparison and full traces](../../ds/DS-C4.html#s4).
+
+The six-node/six-edge diagram comes from the shared angular renderer and real
+SHA-256 results. It contrasts an original history with a coherent rewrite; HTML
+tables additionally expose an edit-only history whose final hash still matches
+but whose internal checks fail. All full JSON inputs and digests are downloadable.
+The trusted checkpoint is explicitly an assumption, not security provided by
+hosting two files on the same server. The former fabricated hash labels and
+unconditional “immutable sequence” claim are gone. DS-C4 no longer loads Mermaid.
+
+Verified:
+
+- 590 mutation/checkpoint cases across 1–16 records, plus invalid inputs and two
+  known SHA-256 vectors; 944 independent Chromium Web Crypto digest comparisons,
+  including the actual displayed examples. These do not prove cryptographic
+  hardness or constitute a consensus/security implementation.
+- Desktop/mobile with and without JavaScript: full tables and all three detail
+  controls, exact JSON download, image loading and keyboard scrolling. Narrow
+  digest columns and no-JS table overflow found during review were corrected.
+- Shared renderer: 26 figures, complete edges, XML, bounds, text collisions and
+  determinism; 28 assets carry the exact original IBM Plex Mono font/license.
+- General browser checks: seven pages at both widths plus no-JS image loading.
+  Existing PBFT/ledger/PoW regressions pass; contract example/results remain
+  synchronized and the complete chapter passes HTML5 parsing/duplicate-ID checks.
+
+Sections 1–4, 5, 7 and quiz 1–2 now scope middleware guarantees, identity and
+permissioned membership; distinguish timestamps from external event times;
+correct the ITU architecture order; and date the IOTA example while separating
+Hedera consensus from Block Streams. Local slide text and the actual architecture
+PDF figure were compared with primary sources. [Evidence, scripts and limits](../../dev/legacy-diagrams/HASH-CHAIN.md).
+
+The static inventory now counts 315 HTML pages and 990 figures; the original
+fifteen-course scope stays 208 chapters/882 figures. Counts do not certify review.
+Other courses, runtime diagrams and scientific content remain in scope.
+
+A fresh remaining-runtime scan (`REPORT_NAME=audit-after-hash node
+dev/legacy-diagrams/audit.cjs`) checked 100 Mermaid diagrams across 31 pages at
+1280/390 px: no parser/render errors, invalid geometry or page-overflow flags.
+These are in DS, PCD, PPS and the two cybersecurity versions. Passing this scan
+does not approve their notation, scientific content, text placement or styling;
+its screenshots are evidence for subsequent visual review, not automatic permission
+to convert all of them. DS-C4 is no longer among those runtime-rendered pages.
+
 ## Latest addition: DS-C4 smart-contract execution and failure scope
 
 Preview: [outcome diagram](../../ds/DS-C4.html#s13),

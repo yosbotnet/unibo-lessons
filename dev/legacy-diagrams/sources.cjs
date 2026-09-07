@@ -1,6 +1,7 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ require('./hash-chain-source.cjs'),
  {id:'ds-contract-outcomes',file:'ds/DS-C4.html',slot:null,title:'Included EVM transaction: execution and settlement',
  overrides:{rankSpacing:30,nodeSpacing:24},
  requiredText:['Success','Top-level REVERT','Top-level out of gas','Nonce + fee remain'],

@@ -91,7 +91,8 @@ Primary references:
 - The installed EthereumJS VM README/API and the actual pinned compiler/runtime
   are used for the local fixture rather than a hand-written EVM imitation.
 
-DS-C4 still needs review of earlier identity/membership claims, hash-chain and
-timestamp explanations, platform examples (including IOTA) and quiz answers 1–2.
-One earlier runtime Mermaid hash-chain remains. This checkpoint does not certify
-that chapter in full, let alone the entire notes site. Production is unchanged.
+The later [foundation/hash-chain checkpoint](../legacy-diagrams/HASH-CHAIN.md)
+addresses the earlier identity/membership, hash/timestamp, platform-example and
+quiz 1–2 follow-up. It also replaces the final runtime Mermaid hash-chain. Neither
+checkpoint certifies every possible protocol claim or the entire notes site.
+Production is unchanged.

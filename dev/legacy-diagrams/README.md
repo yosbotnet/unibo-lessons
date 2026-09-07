@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-five reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-six reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -43,6 +43,8 @@ node pbft-test.cjs
 node pbft-traces.cjs --check
 node ledger-test.cjs
 node ledger-traces.cjs --check
+node hash-chain-test.cjs
+node hash-chain-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -239,10 +241,12 @@ and actually executed in a local EVM; their HTML table comes from those results.
 See [contract verification](../contracts/README.md) for exact scope, source evidence,
 reproduction and limitations. No live-chain activity or paid generation occurs.
 
-Remaining DS-C4 review: address/permissioned-identity generalizations, earlier
-hash-chain/timestamp explanations and runtime diagram, current platform examples
-and quiz 1–2. The broader site still requires visual and semantic review; generated
-asset counts are not approval counts.
+The subsequent [hash-chain/foundations checkpoint](HASH-CHAIN.md) resolves the
+listed DS-C4 identity, architecture, hash/timestamp, platform-example and quiz 1–2
+follow-up. Real SHA-256 inputs and three histories replace invented hex values;
+the last runtime diagram becomes native SVG, and DS-C4 no longer loads Mermaid.
+The broader site still requires visual and semantic review; generated asset counts
+are not approval counts, and these fixtures are deliberately bounded models.
 
 ### Font fidelity in image contexts
 
