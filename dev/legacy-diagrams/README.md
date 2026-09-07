@@ -98,6 +98,9 @@ node fgsm-results.cjs --check
 node robustness-content.cjs --check
 NOTES_COHEN_PDF=/path/to/cohen.pdf NOTES_SMOOTHING_CORE=/path/to/core.py node smoothing-test.cjs
 node robustness-browser-test.cjs
+node feature-content.cjs --check
+NOTES_AMICH_PDF=/path/to/amich.pdf NOTES_ILYAS_PDF=/path/to/ilyas.pdf node feature-test.cjs
+node feature-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -110,6 +113,12 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Useful features and perturbation sensitivity
+
+The two cybersecurity chapters now share an exact two-point feature model and
+native equal-scale plot, revised introductions, five sourced perspective panels
+and a corrected quiz. See [feature geometry, evidence and limits](FEATURES.md).
 
 ### Adversarial training and finite-sample smoothing certificates
 

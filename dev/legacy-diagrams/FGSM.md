@@ -148,7 +148,8 @@ source download and lower/upper bounds in both code-rendering modes.
 ## Still open
 
 The subsequent [defense revision](ROBUSTNESS.md) addresses training and smoothing.
-Other feature/robustness, physical-world, OOD, privacy and agentic
+The [feature revision](FEATURES.md) addresses the five explanations, neuron
+interpretation and OOD percentage. Physical-world, privacy and agentic
 claims remain subject to the review list in TRANSFER.md. The full-site objective
 is still active. Existing audio narration has not been regenerated. No paid image
 generation, production publication or unrelated service restart occurred, and

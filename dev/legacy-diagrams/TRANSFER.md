@@ -117,9 +117,9 @@ see [FGSM.md](FGSM.md). The old warning is no longer needed for the replaced wid
 FGSM result tables and annotations were subsequently corrected with model/units
 and direct source checks; see [FGSM.md](FGSM.md). Training/smoothing guarantees,
 algorithms and related quizzes are covered by [ROBUSTNESS.md](ROBUSTNESS.md).
-Also still open in these chapters:
-the generic neuron-feature claims, physical-world/vehicle-transfer assertions,
-the asserted OOD percentage, model inversion and the later LLM/privacy/agentic
+The generic neuron-feature claims and asserted OOD percentage are addressed by
+the subsequent [feature revision](FEATURES.md). Also still open in these chapters:
+physical-world/vehicle-transfer assertions, model inversion and the later LLM/privacy/agentic
 pipeline claims. The full-site goal
 remains open; this checkpoint is not approval of all chapter content. The existing
 audio narration was not regenerated and can still contain superseded statements.

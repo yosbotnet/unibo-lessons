@@ -122,8 +122,9 @@ the original fifteen-course scope remains 208 chapters / 882 figures.
 
 ## Open scope
 
-The physical-attack claims, asserted OOD percentage, generic feature/neuron
-explanations, RL aside, privacy/memorization, LLM and agentic material still require
-review. Existing audio has not been regenerated. The full-site goal remains open;
+The subsequent [feature revision](FEATURES.md) addresses the asserted OOD
+percentage and generic feature/neuron explanations. Physical-attack claims,
+the RL aside, privacy/memorization, LLM and agentic material still require review.
+Existing audio has not been regenerated. The full-site goal remains open;
 these checks are not approval of every diagram or all scientific content.
 Production and preexisting root review/index/report edits remain untouched.
