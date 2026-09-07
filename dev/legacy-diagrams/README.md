@@ -93,6 +93,8 @@ node transfer-browser-test.cjs
 node fgsm-test.cjs
 node fgsm-content.cjs --check
 node fgsm-browser-test.cjs
+NOTES_GOODFELLOW_PDF=/path/to/1412.6572v3.pdf node fgsm-results-test.cjs
+node fgsm-results.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -111,7 +113,9 @@ Titles and explanatory HTML captions remain accessible without SVG support.
 Both cybersecurity chapter-05 canvas sketches are replaced by a common explicit
 classifier, sign-gradient step, clipped budget and SVG plot. The worked example
 remains an image without JavaScript; controls use the same renderer and embedded
-font. See [mathematical contract and verification](FGSM.md).
+font. Published FGSM results now identify the model and input units, separate the
+single panda illustration from aggregate rates, and have pinned-PDF transcription
+checks. See [mathematical contract and verification](FGSM.md).
 
 ### Cross-model transfer: generation is not successful evaluation
 

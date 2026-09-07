@@ -5,7 +5,14 @@ function equivalent(actual,expected){if(typeof expected==='number'){assert(Numbe
  const p=await b.newPage({viewport:{width,height:1000},javaScriptEnabled:js,hasTouch:true}),errors=[];p.on('pageerror',e=>errors.push(e.message));
  await p.route(/^https?:/,r=>r.request().url().startsWith(base)?r.continue():/mermaid.*\.js/.test(r.request().url())?r.fulfill({path:path.join(path.dirname(require.resolve('mermaid')),'mermaid.min.js')}):/highlight\.min\.js/.test(r.request().url())?r.fulfill({path:root+'/dl/assets/highlight.min.js'}):r.abort());
  await p.goto(base+e.file);const host=p.locator('[data-fgsm-widget]'),img=host.locator('img');
+ const literature=require('../../cybersecurity/assets/fgsm-evidence.cjs'),table=p.locator('[data-fgsm-literature]');assert.equal(await table.locator('tbody tr').count(),3);
+ for(const [i,r] of literature.rows.entries())assert.deepEqual(await table.locator('tbody tr').nth(i).locator('th,td').allTextContents(),[r.dataset+' / '+r.model,r.errorPercent+'%',r.meanScorePercent+'%',String(r.epsilon),r.units]);
+ const tableIssues=await table.evaluate(t=>{const issues=[];for(const c of t.querySelectorAll('th,td')){const box=c.getBoundingClientRect(),walker=document.createTreeWalker(c,NodeFilter.SHOW_TEXT);let n;while(n=walker.nextNode()){if(!n.textContent.trim())continue;const range=document.createRange();range.selectNodeContents(n);for(const r of range.getClientRects())if(r.width&&(r.left<box.left-1||r.right>box.right+1||r.top<box.top-1||r.bottom>box.bottom+1))issues.push(c.textContent);}}return issues;});assert.deepEqual(tableIssues,[]);
+ const tableRegion=table.locator('..');await tableRegion.screenshot({path:out+'/fgsm-results-'+e.id+'-'+width+'-'+js+'.png'});
+ if(await tableRegion.evaluate(e=>e.scrollWidth>e.clientWidth+1)){await tableRegion.focus();await p.keyboard.press('ArrowRight');await p.waitForTimeout(200);assert(await tableRegion.evaluate(e=>e.scrollLeft>0));}
+ assert.equal(await (await p.request.get(base+'cybersecurity/assets/fgsm-evidence.cjs')).text(),fs.readFileSync(root+'/cybersecurity/assets/fgsm-evidence.cjs','utf8'));
  if(js)await p.waitForFunction(()=>document.querySelector('[data-fgsm-widget]').dataset.state);
+ assert.match(await p.locator('#fgsm-code').textContent(),/lower, upper/);
  async function check(label){await img.evaluate(e=>e.decode());assert(await img.evaluate(e=>e.complete&&e.naturalWidth===332&&Math.abs(e.getBoundingClientRect().width-332)<1));
   const state=js?JSON.parse(await host.getAttribute('data-state')):{p:m.initial,epsilon:.08,shown:true},src=await img.getAttribute('src');
   const actual=src.startsWith('data:')?decodeURIComponent(src.slice(src.indexOf(',')+1)):await (await p.request.get(base+'cybersecurity/assets/diagrams/cyber-fgsm.svg')).text();

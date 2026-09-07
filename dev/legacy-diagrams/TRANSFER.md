@@ -114,8 +114,9 @@ step. Its class clouds did not follow the stated classifier. This was subsequent
 replaced by a shared model and native SVG with gradient/budget/geometry checks;
 see [FGSM.md](FGSM.md). The old warning is no longer needed for the replaced widget.
 
-Also still open in these chapters: the generic neuron-feature claims, other FGSM
-result tables and annotations, physical-world/vehicle-transfer assertions,
+FGSM result tables and annotations were subsequently corrected with model/units
+and direct source checks; see [FGSM.md](FGSM.md). Also still open in these chapters:
+the generic neuron-feature claims, physical-world/vehicle-transfer assertions,
 adversarial-training and smoothing guarantees, the asserted OOD percentage, model
 inversion and the later LLM/privacy/agentic pipeline claims. The full-site goal
 remains open; this checkpoint is not approval of all chapter content. The existing

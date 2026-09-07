@@ -83,6 +83,8 @@ The old canvas closure is removed from both chapters, not merely bypassed.
 node dev/legacy-diagrams/fgsm-test.cjs
 node dev/legacy-diagrams/fgsm-content.cjs --check
 node dev/legacy-diagrams/fgsm-browser-test.cjs
+NOTES_GOODFELLOW_PDF=/path/to/1412.6572v3.pdf node dev/legacy-diagrams/fgsm-results-test.cjs
+node dev/legacy-diagrams/fgsm-results.cjs --check
 node dev/legacy-diagrams/transfer-content.cjs --check
 node dev/legacy-diagrams/transfer-browser-test.cjs
 node dev/legacy-diagrams/font-test.cjs
@@ -117,10 +119,35 @@ source inventory is 315 tracked pages and 1,005 figure elements; two new figure
 instances now share the single FGSM SVG instead of empty canvases without JS.
 These inventory totals are not evidence that every page or figure is approved.
 
+## Historical results and input units
+
+`cybersecurity/assets/fgsm-evidence.cjs` now holds three model-specific rows, not
+dataset-only universal rates. The omitted MNIST maxout result is restored; CIFAR-10
+retains the published precision and preprocessing context. The panda figure is
+identified as one illustration, not aggregate ImageNet evidence. Error rates,
+reported class scores and clean-correct-conditioned attack success are distinguished.
+These are literature transcriptions, not new measurements or rerun attacks.
+
+`fgsm-results.cjs` owns the shared introduction, table and annotation corrections.
+The main `fgsm-content.cjs` generator calls it too, so regenerating the widget
+cannot restore the old benchmark labels or generic [0,1] fallback.
+The introductory ordered steps retain sign(0)=0 and require input bounds matching
+the representation. Generic fallback and enhanced code use lower/upper bounds;
+the explicitly normalized toy model correctly keeps [0,1].
+
+The source was inspected as a rendered page and extracted text: arXiv 1412.6572v3,
+printed page 3, including footnotes 1–2 and Figure 1. SHA-256:
+`7f6c0a50475149e11e3b7efc9c0a00383652b7cae62f80facd8ae2684ef251e7`.
+Local review copy: `/tmp/notes-fgsm-evidence-jI4WI9/goodfellow-v3.pdf`.
+The source test extracts the architecture-associated values, verifies units and
+illustration context, rejects five deliberately false transcriptions and checks
+both chapters and generator idempotence. Browser checks additionally compare
+every displayed table cell, verify text containment, keyboard scrolling, served
+source download and lower/upper bounds in both code-rendering modes.
+
 ## Still open
 
-The remaining historical FGSM rates require architecture/preprocessing labels;
-other feature/robustness, physical-world, smoothing, OOD, privacy and agentic
+Other feature/robustness, physical-world, smoothing, OOD, privacy and agentic
 claims remain subject to the review list in TRANSFER.md. The full-site objective
 is still active. Existing audio narration has not been regenerated. No paid image
 generation, production publication or unrelated service restart occurred, and
