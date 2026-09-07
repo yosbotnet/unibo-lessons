@@ -15,7 +15,7 @@ async function platformFonts(page){await page.evaluate(()=>document.fonts.ready)
   const a=await render(svg),b=await render(svg.replace(/<style data-embedded-font="[^"]+">[\s\S]*?<\/style>/,''));let changed=0;for(let i=0;i<a.data.length;i+=4)if(a.data[i]!==b.data[i]||a.data[i+1]!==b.data[i+1]||a.data[i+2]!==b.data[i+2])changed++;return {changed,width:a.width,height:a.height};
  },probe.svg);
  assert(pixels.changed>100,'Embedded font must affect actual <img> rasterization');assert.deepEqual(requests,[],'No external font requests');
- const assets=[...sources.map(e=>path.join(path.dirname(e.file),'assets/diagrams',e.id+'.svg')),'ds/assets/diagrams/ds-reliability-comparison.svg'];
+ const assets=[...sources.map(e=>path.join(path.dirname(e.file),'assets/diagrams',e.id+'.svg')),'ds/assets/diagrams/ds-reliability-comparison.svg','pcd/assets/diagrams/pcd-consistent-cuts.svg'];
  let files=0;for(const asset of assets){const svg=fs.readFileSync(path.join(root,asset),'utf8');const bytes=Buffer.from(svg.match(/data:font\/woff2;base64,([A-Za-z0-9+/=]+)/)[1],'base64');assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),font.sha256);assert(svg.includes('SIL OPEN FONT LICENSE Version 1.1'));files++}
  fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'font-test.json'),JSON.stringify({before,actual,pixels,externalRequests:requests.length,files,fontSha256:font.sha256,fontBytes:font.byteLength},null,2));console.log(`Actual IBM Plex Mono glyphs verified; ${pixels.changed} image pixels differ from fallback; ${files} SVGs contain the exact font and license; no font network requests`);
  await isolated.close();

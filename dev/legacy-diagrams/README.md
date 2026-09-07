@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Sixteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Eighteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -33,6 +33,8 @@ node causal-test.cjs
 node causal-traces.cjs --check
 node central-test.cjs
 node central-traces.cjs --check
+node cut-test.cjs
+node cut-timeline.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -62,6 +64,57 @@ control in an isolated document, verifies embedded-byte hashes and licenses, and
 asserts no external font requests. See [MDN's SVG image restrictions](https://developer.mozilla.org/en-US/docs/Web/SVG/Guides/SVG_as_an_image)
 and the [official IBM package](https://github.com/IBM/plex/tree/master/packages/plex-mono).
 The four previously approved native DL SVGs are deliberately unchanged.
+
+### Consistent cuts use event timelines, not neuron layouts
+
+PCD16 sections 14–16 now distinguish local prefixes, causal closure and channel
+state. G1 includes a receive without its send; G2 includes only the send; G3
+includes both. In all three panels the six events and the single message keep
+exactly the same positions. Included events are filled, excluded events open;
+the orthogonal dashed boundary is a cut, not another message. Text, captions,
+review answers and marker-recording rules agree with those examples.
+
+`pcd/assets/consistent-cuts.js` classifies prefix selections directly from local
+orders and named send/receive endpoints. The widget explores all 16 cuts of this
+example, with 12 consistent and 4 inconsistent choices. `cut-timeline.cjs` derives
+positions from causal ranks and renders native SVG with the same embedded font.
+It does not use Mermaid or AI image generation. The two surrounding event DAGs
+use the ordinary Mermaid adapter; the second fixes reversed receives that
+contradicted the assumed FIFO channel.
+
+The model accepts 2–6 sequential processes, each with 1–8 uniquely named events,
+and at most one send/receive role per event. IDs are bounded SVG-safe strings;
+cycles, unknown endpoints and reused message endpoints are rejected. The model
+does not assume FIFO for arbitrary input histories: cut consistency itself is
+causal closure. The chapter's snapshot algorithm separately requires FIFO.
+The timeline accepts 1–6 views and eventGap/rowGap overrides. Label widths expand
+the requested gap/canvas rather than shrink text. This is schematic time, not
+measured latency. Dense or multi-message layouts still require visual review;
+causal ranks alone do not guarantee collision-free arbitrary diagrams.
+
+`cut-test.cjs` independently enumerates all 720 event permutations, retains the
+10 legal executions, and tests all 64 event subsets against their prefixes.
+It checks exact channel classifications, the three event sets, invalid inputs,
+deterministic SVG, XML, label bounds/overlaps, paths crossing text, orthogonal
+cuts, unchanged panel coordinates and complete arrow endpoints. Desktop/mobile
+checks exercise every cut, preset button and all 19 conceptual-state transitions,
+including the previously undefined RED target. Native images/captions work with
+JavaScript disabled. Spacing variants and keyboard focus/scroll are tested.
+
+The two existing Chandy–Lamport state browsers remain **conceptual local-state
+diagrams**, explicitly not executable channel simulations. Completion there is
+local; it does not imply every process finished or that results were collected.
+The one-input first-marker path can complete without waiting for another marker.
+A full operational marker/channel simulator and trace remain future work.
+The original module-4.2 slides 26–31 were checked against
+[Chandy–Lamport §§2–4](https://lamport.azurewebsites.net/pubs/chandy.pdf).
+Their shorthand about concurrent states must not be applied to the final
+included events: in G3, e2 causally precedes e5 and the cut is still consistent.
+
+The build adapter also now emits chapter patch hunks in document order, even
+when source records are registered in reverse order. Source-order hunks previously
+caused apply_patch to reject a valid two-figure update. Generation still does not
+apply patches or deploy automatically.
 
 ### Quantitative figures are not flowcharts
 
@@ -283,10 +336,10 @@ some of the original mistakes and are not independent proof. Primary references:
 
 These are concrete next checks, not claims that whole chapters are repaired:
 
-- PCD 16: review Chandy–Lamport explorers, the global-state/consistent-cut
-  definitions and the stated resilience of the two-phase
-  king variant. The chapter contains additional interactive material not covered
-  by the Ricart–Agrawala tests.
+- PCD 16: consistent-cut definitions, marker explanations and both conceptual
+  state browsers have been corrected and tested. Still needed: an operational
+  marker/channel simulation, a concrete snapshot trace, and review of the stated
+  resilience of the two-phase king variant and remaining consensus material.
 - DS C4: qualify CAP, FLP, hash-chain immutability and BFT threshold/termination
   claims against their precise system models.
 - DS M1: numerical availability examples, reliability assumptions, nines thresholds

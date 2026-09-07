@@ -2,6 +2,73 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: consistent cuts and snapshot explanations
+
+Preview: [PCD16, sections 14–16](../../pcd/cap-16-algoritmi-distribuiti.html#s14).
+Three static figures now cover the event dependencies, a three-panel cut
+comparison and two FIFO messages. This replaces two runtime Mermaid blocks and
+one shrinking inline SVG, keeping the original embedded font and course palette.
+The timelines retain identical event positions and message endpoints in all
+panels; included/excluded events and the cut boundary have distinct notation.
+The SVG generator also fixes a label crossed by its own arrow and a long legend
+that escaped the original draft's viewBox. The new native SVG passes explicit
+path/text intersection checks, not just text/text bounds checks.
+
+The previous G1 paragraph both included and excluded e2 and did not describe
+local prefixes. G2 listed both send and receive yet called the message in transit.
+The new widget classifies the actual selected prefixes and records the exact
+message status. An independent enumeration of 720 event permutations gives
+10 legal executions; testing all 64 subsets yields 16 local-prefix cuts, of which
+12 are consistent and 4 inconsistent. The three published examples match this
+oracle. This is exhaustive for the six-event example, not all distributed systems.
+
+The snapshot program example previously reversed two receives on a FIFO channel.
+Its replacement preserves both send and receive order. Accompanying prose,
+annotated pseudocode and review answers now include channel state, causal closure,
+the open-channel recording interval, continued application processing and the
+distinction between local completion and collecting global results. Original
+module-4.2 slides 26–31 and [Chandy–Lamport §§2–4](https://lamport.azurewebsites.net/pubs/chandy.pdf)
+were checked; the source's shorthand about concurrent local states is qualified.
+
+Both existing snapshot state browsers are explicitly conceptual, not executable
+channel models. The dead-end transition to an undefined RED state is repaired,
+and open/closed-channel application receives are distinguished. A first marker
+on the only input can complete the local snapshot without an impossible second
+marker. All 19 actual
+transition buttons, all 16 cut selections, all three preset buttons, focus and
+horizontal keyboard scrolling pass at 1280 and 390 px. The figure and caption
+remain readable with JavaScript disabled. Native images, mobile cut selection and
+the state browser were visually inspected in the saved screenshots.
+
+The renderer's two spacing fixtures pass deterministic output, XML, text bounds,
+text overlap, path/text intersection, filled-event sets, matching coordinates,
+orthogonal cut paths and complete message endpoints. All 18 general flowcharts
+pass their structural/geometry tests. All 20 standalone SVG assets contain the
+exact official font with its license; actual browser glyphs and rasterization
+are verified. Existing centralized mutex, causal ordering, Chang–Roberts and
+Ricart–Agrawala model/UI regressions also pass.
+The 20-case native preset regression passes as well, preserving all four approved
+DL SVGs byte-for-byte. The mobile cut figure was also inspected at its rightmost
+scroll position to verify the receive events and boundary endpoints remain visible.
+
+Evidence: `cut-test.json`, `cuts-*.png`, `se-cl-*.png`, `se-snapshot-*.png`,
+`pcd-cut-events*.png`, `pcd-snapshot-fifo*.png`, `static-test.json` and
+`font-test.json` in `/home/ybc/notes-legacy-review-artifacts/`.
+One broader HTTP browser run terminated during an element screenshot with
+“Target page, context or browser has been closed”; that run is not a pass and
+its underlying cause is unconfirmed. Per-page diagnostics were added for retry;
+the retry passed all 12 desktop/mobile HTTP visits and 5 JavaScript-disabled
+pages, including all 18 static flowcharts and the existing tab/widget checks.
+The final broad runtime audit (`audit-after-cuts.json`) completed all 64 visits:
+101 remaining Mermaid diagrams in 32 pages, at both widths, with no render
+failures, invalid geometry, page overflow or JavaScript errors. That automated
+check does not establish scientific correctness or rule out all local overlaps.
+
+Remaining: a real marker/channel simulator and snapshot trace, remaining PCD16
+consensus claims and the full-site review. The refreshed inventory has 315 pages
+and 982 figure elements; these counts do not certify correctness. Production and
+the preexisting `review/index.html` / `review/report.md` modifications are untouched.
+
 ## Latest addition: centralized mutex and token conservation
 
 Preview: [PCD16, sections 3–5](../../pcd/cap-16-algoritmi-distribuiti.html#s3).

@@ -11,18 +11,21 @@ function chapter(e,r,s){
  let n=0;const next=s.replace(blocks,b=>{if(hash(b)!==hashes[e.id])return b;n++;return figure(e,r)});assert.equal(n,1,'Original block changed or absent: '+e.id);return next;
 }
 function patch(file,old,next){if(old===next)return '';let a=old.split('\n'),b=next.split('\n'),i=0,j=0;while(i<a.length&&a[i]===b[i])i++;while(j<a.length-i&&a.at(-j-1)===b.at(-j-1))j++;return `*** Update File: ${file}\n@@\n`+[...a.slice(Math.max(0,i-2),i).map(x=>' '+x),...a.slice(i,a.length-j).map(x=>'-'+x),...b.slice(i,b.length-j).map(x=>'+'+x),...a.slice(a.length-j,a.length-j+2).map(x=>' '+x)].join('\n')+'\n'}
+// apply_patch consumes hunks in document order, not in the source registry order.
+function originalOffset(e,s){const marked=s.indexOf(`<!-- BEGIN STATIC DIAGRAM ${e.id} -->`);if(marked>=0)return marked;const m=[...s.matchAll(blocks)].filter(m=>hash(m[0])===hashes[e.id]);assert.equal(m.length,1,'Unresolved patch target '+e.id);return m[0].index}
+function orderedHunks(hunks){return [...hunks].sort((a,b)=>a.offset-b.offset).map(h=>h.text).join('')}
 async function main(){
  const renderer=await createRenderer(),files=new Map(),patches=new Map(),records=[];let diff='',assetDrift=0;
- const addPatch=(file,old,next)=>{const h=patch(file,old,next).replace(`*** Update File: ${file}\n`,'');if(h)patches.set(file,(patches.get(file)||'')+h)};
+ const addPatch=(file,old,next,offset=Infinity)=>{const h=patch(file,old,next).replace(`*** Update File: ${file}\n`,'');if(h)patches.set(file,[...(patches.get(file)||[]),{offset,text:h}])};
  fs.mkdirSync(out,{recursive:true});
  try{for(const e of entries){const r=await renderer.render(e),asset=path.join(root,path.dirname(e.file),'assets/diagrams',e.id+'.svg');
   records.push({...e,...r,svg:undefined});
   if(process.argv.includes('--check')){if(!fs.existsSync(asset)||fs.readFileSync(asset,'utf8')!==r.svg+'\n')assetDrift++}
   else{fs.mkdirSync(path.dirname(asset),{recursive:true});fs.writeFileSync(asset,r.svg+'\n');fs.writeFileSync(path.join(out,e.id+'.svg'),r.svg+'\n')}
-  const file=path.join(root,e.file),old=files.get(file)||fs.readFileSync(file,'utf8'),next=chapter(e,r,old);addPatch(file,old,next);files.set(file,next);
+  const file=path.join(root,e.file),original=fs.readFileSync(file,'utf8'),old=files.get(file)||original,next=chapter(e,r,old);addPatch(file,old,next,originalOffset(e,original));files.set(file,next);
  }}finally{await renderer.close()}
  for(const [file,value]of files){let next=value;if(!/class="mermaid"/.test(next))next=next.replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/mermaid@[^\"]+"><\/script>/g,'');addPatch(file,value,next)}
- for(const [file,hunks]of patches)diff+=`*** Update File: ${file}\n`+hunks;
+ for(const [file,hunks]of patches)diff+=`*** Update File: ${file}\n`+orderedHunks(hunks);
  if(process.argv.includes('--patch'))process.stdout.write('*** Begin Patch\n'+diff+'*** End Patch\n');
  else{console.log(`${entries.length} figures; ${diff?'chapter changes pending':'chapters in sync'}; ${assetDrift} stale SVGs`);if(process.argv.includes('--check')&&(diff||assetDrift))process.exitCode=1}
  if(!process.argv.includes('--check')){
@@ -31,4 +34,4 @@ async function main(){
  }
 }
 if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1});
-module.exports={figure,chapter};
+module.exports={figure,chapter,originalOffset,orderedHunks};

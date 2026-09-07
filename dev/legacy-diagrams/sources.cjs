@@ -1,6 +1,21 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'pcd-snapshot-fifo',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:8,
+ title:'Due messaggi sullo stesso canale FIFO',
+ caption:'Gli archi continui collegano eventi dello stesso processo. Gli archi tratteggiati sono i due messaggi P → Q: m′ è inviato in e1 e ricevuto in f1; m è inviato dopo, in e2, e ricevuto dopo, in f2. La precedente figura invertiva le ricezioni e contraddiceva l’ipotesi FIFO. Questo è il programma osservato: non è una traccia dei marker, che non sono rappresentati.',
+ source:`flowchart LR
+ P0(("e0 · P")) --> P1(("e1 · send m′")) --> P2(("e2 · send m")) --> P3(("e3 · P"))
+ Q0(("f0 · Q")) --> Q1(("f1 · receive m′")) --> Q2(("f2 · receive m"))
+ P1 -.->|"m′"| Q1
+ P2 -.->|"m"| Q2`},
+ {id:'pcd-cut-events',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:7,
+ title:'Il programma: ordine locale e un messaggio da e2 a e5',
+ caption:'Due processi sequenziali: P1 esegue e1, e2, e3; P2 esegue e4, e5, e6. Solo e2 → e5 rappresenta un messaggio: e2 lo invia ed e5 lo riceve. Gli altri archi sono ordine locale. Un taglio sceglie un prefisso di ciascuna riga logica; il confronto successivo mantiene esattamente questi eventi e questa dipendenza.',
+ source:`flowchart LR
+ E1(("e1 · P1")) --> E2(("e2 · send")) --> E3(("e3 · P1"))
+ E4(("e4 · P2")) --> E5(("e5 · receive")) --> E6(("e6 · P2"))
+ E2 -->|"m"| E5`},
  {id:'pcd-central-causal',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:0,
  title:'Coordinatore: ordine causale, non semplice ordine di arrivo',
  caption:'P1 invia la richiesta [1,0], poi un messaggio applicativo APP a P2. Solo dopo aver ricevuto APP, P2 può inviare [1,1]. La rete consegna a P0 prima la richiesta di P2, che resta in coda; [1,0] arriva dopo ed è servita per prima. Gli archi seguono questo esempio, non durate misurate. Il TOKEN di P2 parte soltanto dopo il ritorno del RELEASE di P1; anche P2 deve riceverlo prima di entrare in CS.',
