@@ -1,8 +1,54 @@
-# Legacy diagram checkpoint — 7 September 2026
+# Legacy diagrams and dependability — 7 September 2026
 
 Preview only. Production remains at `f0f4bde`.
 
-## Delivered
+## Latest addition: actual fonts and quantitative correctness
+
+The font-loading question below is resolved. The original IBM Plex Mono Regular
+font is embedded, unmodified and with its complete OFL license, in all ten generated
+flowcharts and the new DS-M1 reliability plot. The renderer loads that same font
+before computing layout. Native labels remain text, not outlines or raster images.
+
+Chromium reports actual `IBM Plex Mono` custom-font glyphs; the earlier SVG control
+falls back to an installed monospace font. An isolated SVG-image rasterization test
+detects 1,472 changed pixels when removing the embedded font. All eleven asset
+font hashes match the pinned official binary, with no external font requests.
+This does not change the four previously approved native DL SVGs.
+
+DS-M1 now uses a shared, tested mathematical model for the calculator and a new
+[quantitative reliability plot](../../ds/DS-M1.html#s11). Corrections include:
+
+- 99.671% is approximately 2.48 nines, not three nines; historical economics
+  examples are explicitly labelled as historical, not current pricing evidence.
+- A 365-day year is used consistently. Default static nines/downtime values now
+  agree with the calculator (2.26 and 48.40 h).
+- Badges test actual availability thresholds, not rounded display values. A result
+  displayed as 3.00 nines may legitimately fail the three-nines threshold.
+- Long-run uptime fractions, transient availability, measured annual budgets and
+  stochastic guarantees are distinguished. The slides' MTBF convention is explicit.
+- Exponential lifetimes and constant hazard are assumptions, with λ = 1/MTTF.
+  The 10-minute-uptime example has R(30 min) ≈ 4.98%, not zero.
+- The graph compares two synthetic systems with equal 99% long-run availability
+  but different reliability curves. All 402 sampled coordinates are checked
+  against the model; this is not an empirical measurement.
+- Selected integrity, maintainability and heartbeat descriptions are qualified.
+- Slider labels are associated with inputs; without JavaScript the inputs remain
+  disabled with an explicit explanation and correct fixed values.
+
+Latest checks: the existing ten-flowchart geometry suite and 12 desktop/mobile
+HTTP page visits pass after regeneration; font tests pass for eleven assets; the
+new dependability suite passes twelve calculator cases, exact nines boundaries,
+all curve samples, native-size mobile scrolling and no-JavaScript fallback.
+The 500-scenario Ricart–Agrawala suite and 20-case DL preset suite also pass.
+Full-site inventory now counts 315 pages and 974 figure elements; the original
+15-course scope is still 208 chapters and 882 figures. No broader semantic
+completion is inferred from those counts.
+
+Evidence: `font-test.json`, `dependability-test.json`, refreshed native and chapter
+screenshots in `/home/ybc/notes-legacy-review-artifacts/`; implementation and source
+citations in the [adapter README](../../dev/legacy-diagrams/README.md).
+
+## Previous delivered checkpoint (d97c7f7)
 
 Ten native SVG replacements in PCD and Distributed Systems, generated from
 coordinate-free Mermaid sources using a pinned, build-time editorial adapter.
@@ -59,10 +105,9 @@ No full-site widget regression is claimed for this checkpoint: testing of new
 behavior targets the changed pages, while existing DL presets have a regression
 check. The earlier broad regression reports remain historical evidence.
 
-Browser tests block unrelated remote requests, including Google Fonts. The SVGs
-declare the original font stack; exact web-font availability in standalone SVG
-images needs an explicit font-loading check before deployment. No font-size
-reduction or hidden overflow was used to fit the figures.
+Browser tests block unrelated remote requests, including Google Fonts. The earlier
+standalone-font uncertainty is resolved by the embedded-font check documented
+above. No font-size reduction or hidden overflow was used to fit the figures.
 
 No paid generation, production publication, Caddy change or service restart.
 Preexisting edits in `review/index.html` and `review/report.md` are preserved and

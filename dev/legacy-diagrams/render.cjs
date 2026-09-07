@@ -2,11 +2,14 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const fixture=process.env.MERMAID_FIXTURE||path.join(path.dirname(require.resolve('mermaid')),'mermaid.min.js');
 const {chromium}=require(process.env.PLAYWRIGHT_PATH||'playwright');
+const font=require('./font.cjs');
 const palette={paper:'#F3EFE3',panel:'#FAF7EF',ink:'#171813',cobalt:'#1546B8',accent:'#B83D2D',rule:'#C9C3B6',mono:"'IBM Plex Mono',ui-monospace,SFMono-Regular,Consolas,monospace"};
 async function createRenderer(){
   assert.equal(JSON.parse(fs.readFileSync(path.resolve(fixture,'../../package.json'))).version,'11.17.2','Use the reviewed Mermaid version');
   const browser=await chromium.launch(),page=await browser.newPage({viewport:{width:1600,height:1200}});
   await page.setContent('<!doctype html><html><body></body></html>');
+  await page.addStyleTag({content:font.css});
+  await page.evaluate(()=>document.fonts.load('14px "IBM Plex Mono"'));
   await page.addScriptTag({path:fixture});
   return {close:()=>browser.close(),page,async render(spec){
     assert(/^[a-z][a-z0-9-]+$/.test(spec.id),'SVG-safe id required');
@@ -15,7 +18,7 @@ async function createRenderer(){
     for(const k of Object.keys(spec.overrides||{}))assert(['direction','nodeSpacing','rankSpacing'].includes(k),'Unknown override '+k);
     for(const k of ['nodeSpacing','rankSpacing'])if(spec.overrides?.[k]!==undefined)assert(Number.isFinite(spec.overrides[k])&&spec.overrides[k]>=20&&spec.overrides[k]<=300,'Invalid '+k);
     if(spec.overrides?.direction)assert(['LR','RL','TD','TB','BT'].includes(spec.overrides.direction),'Invalid direction');
-    return page.evaluate(async({spec,p})=>{
+    return page.evaluate(async({spec,p,font})=>{
       let source=spec.source;const o=spec.overrides||{};
       if(o.direction)source=source.replace(/^(flowchart|graph)\s+\w+/,`$1 ${o.direction}`);
       mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',htmlLabels:false,deterministicIds:true,deterministicIDSeed:spec.id,
@@ -28,6 +31,8 @@ async function createRenderer(){
       document.body.innerHTML=svg;
       const root=document.querySelector('svg');
       if(root.querySelector('foreignObject,.error-icon,.error-text'))throw Error('Invalid or non-native SVG');
+      const embedded=document.createElementNS(root.namespaceURI,'style');embedded.dataset.embeddedFont=font.sha256;embedded.textContent=font.css;root.prepend(embedded);
+      const license=document.createElementNS(root.namespaceURI,'metadata');license.setAttribute('id',spec.id+'-font-license');license.textContent=font.license;root.prepend(license);
       const vb=root.viewBox.baseVal;
       root.setAttribute('width',Math.ceil(vb.width));root.setAttribute('height',Math.ceil(vb.height));
       root.setAttribute('style',`background:${p.paper};font-family:${p.mono};font-size:14px`);
@@ -37,8 +42,8 @@ async function createRenderer(){
       const edges=[...root.querySelectorAll('.flowchart-link')].map(e=>({id:e.id,d:e.getAttribute('d'),start:e.getAttribute('marker-start'),end:e.getAttribute('marker-end')}));
       if(edges.some(e=>/[CQAST]/i.test(e.d)))throw Error('Unexpected curved flowchart route');
       const text=[...root.querySelectorAll('text')].map(e=>e.textContent);
-      return {svg:root.outerHTML,width:Math.ceil(vb.width),height:Math.ceil(vb.height),nodes:root.querySelectorAll('.node').length,edges,text};
-    },{spec,p:palette});
+      return {svg:root.outerHTML,width:Math.ceil(vb.width),height:Math.ceil(vb.height),nodes:root.querySelectorAll('.node').length,edges,text,font:{sha256:font.sha256,byteLength:font.byteLength}};
+    },{spec,p:palette,font});
   }};
 }
 module.exports={createRenderer,palette};

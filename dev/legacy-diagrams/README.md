@@ -23,12 +23,15 @@ node build.cjs                  # generates SVG assets and review gallery
 node build.cjs --patch          # prints a chapter patch for apply_patch
 node build.cjs --check          # fails on chapter/asset drift; no source writes
 node test.cjs
+node font-test.cjs
+node dependability-test.cjs
+node dependability-plot.cjs --check
 node ricart-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
 
-Mermaid 11.17.2 and Playwright 1.62.1 are pinned in package-lock.json. These are
+Mermaid 11.17.2, Playwright 1.62.1 and IBM Plex Mono 2.5.0 are pinned in package-lock.json. These are
 development dependencies, never sent to readers. There is no AI image generation,
 paid call, service restart or deployment in these commands. Rendering uses the
 locally installed browser and packages without network access. Original target
@@ -36,6 +39,42 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Font fidelity in image contexts
+
+`font.cjs` embeds the unmodified official IBM Plex Mono Regular WOFF2 (49,248
+bytes, about 66 KB as base64) in each standalone SVG, together with its copyright
+notice and full SIL Open Font License. The builder loads the same font before
+measuring labels; it does not depend on a workstation-installed or Google-hosted
+font. Package install scripts are disabled in the local `.npmrc`, including the
+font package's telemetry hook. No font binary is modified or renamed.
+
+This resolves a verified difference in the previous checkpoint: SVGs in `<img>`
+cannot inherit the parent page's web font. `font-test.cjs` checks the actual glyph
+font through Chromium, compares embedded-font image pixels against a stripped-font
+control in an isolated document, verifies embedded-byte hashes and licenses, and
+asserts no external font requests. See [MDN's SVG image restrictions](https://developer.mozilla.org/en-US/docs/Web/SVG/Guides/SVG_as_an_image)
+and the [official IBM package](https://github.com/IBM/plex/tree/master/packages/plex-mono).
+The four previously approved native DL SVGs are deliberately unchanged.
+
+### Quantitative figures are not flowcharts
+
+`dependability-plot.cjs` draws two exponential reliability curves directly from
+`ds/assets/dependability.js`, the same pure model used by the chapter calculator.
+It is a separate quantitative renderer: 402 sampled points, explicitly labelled
+axes and synthetic model assumptions, not a Mermaid approximation or AI image.
+Run `node dependability-plot.cjs` to generate the asset and print its chapter patch.
+The plot and font are available without JavaScript. Preview: `/ds/DS-M1.html#s11`.
+
+DS-M1 was compared with the original 55-slide M1 deck under
+`/home/ybc/content/exams/Distributed Systems/slides-text/`, especially slides 6–7
+and the metrics section. The slide numbers/elapsed-cycle convention are retained
+with qualifications; misleading nines labels, unsupported present-day economics
+claims, inconsistent year lengths and contradictory numerical examples are fixed.
+The exponential assumption follows the [NIST lifetime model](https://www.itl.nist.gov/div898/handbook/apr/section1/apr161.htm).
+Selected definitions also reference [Avizienis et al.](https://drum.lib.umd.edu/items/6b297ffc-373b-404f-be3a-70cc849e21fd)
+and [Chandra–Toueg failure detectors](https://www.cs.cornell.edu/info/people/sam/FDpapers.html).
+This does not certify every remaining claim in the chapter or the source slides.
 
 Mermaid theme configuration and linear curves follow the
 [official configuration](https://mermaid.js.org/config/theming.html) and
@@ -92,8 +131,10 @@ These are concrete next checks, not claims that whole chapters are repaired:
   by the Ricart–Agrawala tests.
 - DS C4: qualify CAP, FLP, hash-chain immutability and BFT threshold/termination
   claims against their precise system models.
-- DS M1: numerical availability examples and reliability distribution assumptions
-  need reconciliation beyond the preserved calculator.
+- DS M1: numerical availability examples, reliability assumptions, nines thresholds
+  and year length are now reconciled against the shared model. Selected integrity,
+  maintainability and heartbeat descriptions are corrected. The broader taxonomy,
+  recovery and failure-mode examples still need a complete semantic review.
 - Cybersecurity and cybersecurity-reworked, chapter 05: verify the attribution of
   VGG→ResNet transfer to a 2015 paper and the unsourced transfer-rate table before
   turning it into a new illustration.
