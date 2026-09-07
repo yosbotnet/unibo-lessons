@@ -113,7 +113,8 @@ not found in the inspected content tree, so its paths are not presented as teste
 
 Safety/liveness/fairness, LTL formulas and the old state diagram were subsequently
 reviewed in the [temporal-semantics checkpoint](LTL.md). Remaining PCD9 review
-includes PROMELA/PlusCal snippets, counts of states, fault/error/failure terminology
-and historical claims. This checkpoint does not
+includes fault/error/failure terminology, combinatorial counts and historical
+claims. PROMELA/PlusCal and the Peterson state count were subsequently handled
+in the [formal-model checkpoint](FORMAL-MODELS.md). This checkpoint does not
 certify the whole chapter or site. No paid image generation, production deployment,
 or edits to the preexisting root review/index and review/report changes.

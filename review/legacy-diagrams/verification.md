@@ -2,6 +2,41 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD9 executable Dekker and Peterson
+
+Preview: [Dekker/PROMELA](../../pcd/cap-09-verifica.html#dekker-model) and
+[Peterson/PlusCal](../../pcd/cap-09-verifica.html#peterson-model).
+
+Replaced three incomplete Dekker fragments and an unwrapped PlusCal snippet with
+five complete downloadable source/configuration files. Original PDF slides 77/84
+were rendered and inspected; process startup, turn initialization, symmetric
+participants, the seven Peterson labels and separate shared reads are explicit.
+Repeated JPF tab claims now match the earlier correction's model boundary.
+
+Real pinned SPIN 6.5.1 and TLC 2.19 runs cover eleven configured scenarios:
+invariants, fair/unfair progress, incorrect algorithm mutations, a depth-limited
+search and a missing operator. The old non-started Dekker is a separate rejection
+control. Both actual displayed command blocks also execute: three SPIN and three
+TLC checks, including the intentionally failing unfair-progress run. No success
+is inferred solely from an exit code or from zero observed violations.
+
+TLC's complete 58-state set matches an independent explicit BFS, replacing the
+unsupported universal 146-state claim. Ten actual mutant counterexample states
+and their transitions generate an HTML table; the mutation is prominently labeled
+incorrect. Full/partial counts, weak process fairness, SC assumptions and absence
+of a TLAPS proof are distinguished. [Sources and evidence](../../dev/legacy-diagrams/FORMAL-MODELS.md).
+
+Four desktop/mobile JS/no-JS views check exact sources/downloads, native disclosure
+controls, all result rows and trace states, markup and keyboard scrolling. Sources,
+tables and commands were visually inspected. JPF/LTL diagram regressions, four tab
+groups/eight quizzes, chapter drift, 22 shared desktop/mobile visits and 11 no-JS
+image checks pass. No additional figure or raster was needed for this checkpoint.
+
+Inventory remains 315 pages / 1,001 figures. Fault/error/failure definitions,
+historical application claims, combinatorial examples and inductive-proof detail
+remain open in PCD9, as does the full-site review. Production, unrelated services
+and preexisting root review modifications are untouched; no paid generation.
+
 ## Latest addition: PCD9 temporal logic and explicit counterexample traces
 
 Preview: [definitions](../../pcd/cap-09-verifica.html#s2),

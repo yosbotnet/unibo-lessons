@@ -81,6 +81,9 @@ node jpf-browser-test.cjs
 node ltl-test.cjs
 node ltl-content.cjs --check
 node ltl-browser-test.cjs
+NOTES_SPIN=/path/to/spin651 NOTES_TLA_JAR=/path/to/tla2tools.jar NOTES_JAVA=/path/to/java11 node formal-model-test.cjs
+node formal-content.cjs --check
+node formal-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -93,6 +96,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Complete PROMELA/PlusCal examples executed by SPIN and TLC
+
+PCD9 replaces three incomplete Dekker fragments and the unwrapped Peterson
+snippet with canonical downloadable models and configurations. Real pinned
+tools distinguish invariants, progress with/without fairness, incorrect mutations,
+startup/semantic failures and bounded search. An independent BFS matches TLC's
+entire 58-state set; actual counterexample states generate an HTML trace table.
+See [formal-model evidence and limits](FORMAL-MODELS.md).
 
 ### Temporal logic: finite violations, infinite cycles and exact trace semantics
 
