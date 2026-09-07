@@ -2,6 +2,36 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD9 JPF outcomes and executable evidence
+
+Preview: [JPF diagram](../../pcd/cap-09-verifica.html#s6), with runnable sources
+and observations in sections 7–9. Seven nodes and six angular edges distinguish
+a counterexample, complete search within a declared model, and an inconclusive
+search. Repeated completeness claims, verification/validation terminology and
+the pinned build/Docker instructions were corrected.
+[Evidence and remaining scope](../../dev/legacy-diagrams/JPF.md).
+
+An actual pinned JPF build on portable Java11 passed the three documented CLI
+experiments and five host-listener controls: unsafe/synchronized counters, a
+depth-limited run, an absent target and a reproduced upstream tool failure.
+The result table comes from recorded events, not process exit status. The upstream
+test suite was not run; its build emits warnings, while editorial sources compile
+with warnings treated as errors. No global JVM or Docker installation was changed.
+
+Four desktop/mobile, JS/no-JS views check exact downloadable sources/configuration,
+observed results, HTML5 parsing, keyboard access, four tab groups and eight quiz
+items. The final diagram and results table were visually inspected; desktop labels
+fit without shrinking text, and the mobile figure remains keyboard-scrollable.
+Shared checks cover 37 diagrams, 40 embedded-font assets, chapter drift and 22
+desktop/mobile page visits plus 11 no-JS image checks. A broad run overlapping
+asset regeneration failed its native-width check; the subsequent run on stable,
+synchronized HTML/assets completed without errors.
+
+Current inventory: 315 tracked pages / 1,001 figure elements, not a completion
+claim. PCD9 temporal logic, safety/liveness/fairness, PROMELA/PlusCal examples,
+state counts and historical references still need separate review. Production and
+the two preexisting root review changes remain untouched. No paid generation.
+
 ## Latest addition: PCD8 motion, wall geometry and immutable animation frames
 
 Preview: [physics section](../../pcd/cap-08-java.html#s15).

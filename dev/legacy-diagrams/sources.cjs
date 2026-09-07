@@ -1,6 +1,7 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ require('./jpf-source.cjs'),
  ...require('./structured-sources.cjs'),
  ...require('./forkjoin-sources.cjs'),
  ...require('./barrier-sources.cjs'),

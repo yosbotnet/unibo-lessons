@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Thirty-six reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Thirty-seven reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing, rankSpacing and
 wrappingWidth (120–600 px, to keep long identifiers on a line without smaller text).
 Unknown overrides fail; fonts are never made smaller to accommodate content.
@@ -75,6 +75,9 @@ NOTES_JDK=/path/to/jdk17 node physics-java-test.cjs
 node physics-content.cjs --check
 node physics-plot.cjs --check
 node physics-browser-test.cjs
+NOTES_JPF_CORE=/path/to/pinned/jpf-core NOTES_JDK11=/path/to/jdk11 node jpf-java-test.cjs
+node jpf-content.cjs --check
+node jpf-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -87,6 +90,14 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### JPF: counterexample, complete search and inconclusive search
+
+PCD9's JPF figure and repeated completeness claims now distinguish real outcomes
+inside a declared model. A pinned actual JPF build exercises unsafe/synchronized
+counter code, depth limits and failure controls; observed results generate the
+chapter's evidence table. Verification/validation terminology and setup guidance
+are corrected too. See [JPF evidence and remaining scope](JPF.md).
 
 ### Physical motion and geometric wall reflection
 
