@@ -1,6 +1,36 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'pcd-causal-dependencies',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:5,
+ title:'Causalità: m2 collega i due invii destinati a P3',
+ caption:'Ogni nodo è un evento applicativo, non un processo intero. Gli archi m1, m2 e m3 collegano ciascun invio alla relativa consegna; gli altri archi continui indicano ordine locale. La catena send(m1) → send(m2) → deliver₂(m2) → send(m3) impone deliver₃(m1) prima di deliver₃(m3). L’arco tratteggiato è questo vincolo, non un quarto messaggio. Non sono rappresentati i tempi di arrivo al middleware.',
+ overrides:{rankSpacing:36,nodeSpacing:28},
+ source:`flowchart TD
+ S1["P1 · send(m1) a P3"]
+ S2["P1 · send(m2) a P2"]
+ D2["P2 · deliver(m2)"]
+ S3["P2 · send(m3) a P3"]
+ D1["P3 · deliver(m1)"]
+ D3["P3 · deliver(m3)"]
+ S1 -->|"ordine locale"| S2
+ S2 -->|"m2"| D2
+ D2 -->|"ordine locale"| S3
+ S1 -->|"m1"| D1
+ S3 -->|"m3"| D3
+ D1 -.->|"vincolo di consegna"| D3
+ style D1 stroke:#B83D2D
+ style D3 stroke:#B83D2D`},
+ {id:'pcd-causal-buffer',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:6,
+ title:'P3: m3 arriva prima, ma viene consegnato dopo m1',
+ caption:'Stesso esempio della figura precedente: m1 va da P1 a P3; m2 da P1 a P2; dopo la consegna di m2, P2 invia m3 a P3. Qui le frecce seguono il lavoro del middleware di P3, non nuovi invii. Il vettore mostrato è la sola colonna destinata a P3, nelle righe P1, P2, P3; ogni messaggio trasporta l’intera matrice. m1 compare una sola volta come arrivo e sblocca m3 senza che m3 debba arrivare di nuovo.',
+ overrides:{rankSpacing:32},
+ source:`flowchart TD
+ A["Arriva m3 da P2<br/>T[*,3] = [1,1,0]"]
+ B["M₃[*,3] = [0,0,0]<br/>Manca m1 da P1<br/>m3 resta nel buffer"]
+ C["Arriva m1 da P1<br/>Consegna m1<br/>M₃[*,3] = [1,0,0]"]
+ D["Ricontrolla il buffer<br/>Consegna m3<br/>M₃[*,3] = [1,1,0]"]
+ A --> B --> C --> D
+ style B stroke:#B83D2D`},
  {id:'pcd-chang-ring',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:3,
  title:'Chang–Roberts: anello logico unidirezionale',
  caption:'Le frecce sono canali verso il successore: P1 → P2 → P3 → P4 → P1. Non sono una cronologia dei messaggi. Il PID massimo diventa leader soltanto quando riceve indietro la propria candidatura; poi avvia un giro distinto di annuncio.',

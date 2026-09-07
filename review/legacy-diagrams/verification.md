@@ -2,7 +2,46 @@
 
 Preview only. Production remains at `f0f4bde`.
 
-## Latest addition: Chang–Roberts diagrams, protocol and simulator
+## Latest addition: causal ordering and matrix eligibility
+
+Preview: [PCD16, sections 11–13](../../pcd/cap-16-algoritmi-distribuiti.html#s11).
+Two new static SVGs show the actual event-dependency graph and receiving buffer.
+Message edges are unique; the causal bridge follows the first send, and the
+delayed message arrives only once. Arrival and application delivery are no longer
+conflated. The common-recipient qualification is explicit throughout these
+sections and the corresponding review question.
+
+The matrix's eligibility test now uses `≤` for other senders, with an executable
+counterexample showing why equality can block an unrelated message forever.
+Annotated code, prose, four static traces and a new model-backed widget agree.
+The two intermediate P3 columns in the buffer figure are checked against actual
+delivery events. Total and causal ordering are explained as distinct, combinable
+properties; total order does not mean physical synchrony. Primary references and
+the exact matrix variant's assumptions are documented in the chapter.
+
+Checks: 1,050 randomized executions, 73,500 actions plus drains, 130,944 logged
+events, with an independent oracle based on causal histories rather than matrix
+comparisons. All four examples pass desktop/mobile controls, matrix and buffer
+checks, keyboard focus/reset/scrolling and no-JavaScript traces. Manual native-SVG
+and desktop/mobile widget inspection found readable labels and matrices; mobile
+panels stack instead of shrinking text. The fourteen-flowchart geometry suite
+also checks all six dependency edges and the three unique message labels.
+
+Evidence: `causal-test.json`, `static-test.json`, `browser-http-test.json`,
+`font-test.json`, and `pcd-causal-*` / `causal-*` screenshots in
+`/home/ybc/notes-legacy-review-artifacts/`. The remaining centralized mutex,
+snapshot and consensus claims in this chapter are not certified by these tests.
+The full-site goal remains open; production has not been changed.
+
+The remaining-runtime audit (`audit-after-causal.json`) passes 105 Mermaid blocks
+in 32 pages at 1280 and 390 px (64 visits), with no error SVGs, invalid geometry,
+page overflow or JavaScript exceptions. The 12-page HTTP regression, 15-asset font
+checks, Chang–Roberts scenarios, Ricart–Agrawala tests and 20-case DL preset suite
+also pass; the four approved DL SVGs remain byte-identical. Inventory: 315 pages,
+978 figure elements; the original fifteen-course scope is still 208 chapters and
+882 figures. Rendering counts do not establish scientific completion.
+
+## Previous addition (d8746bc): Chang–Roberts diagrams, protocol and simulator
 
 Preview: [PCD16, sections 9–10](../../pcd/cap-16-algoritmi-distribuiti.html#s9).
 The general flowchart renderer now has twelve reviewed sources. The two new

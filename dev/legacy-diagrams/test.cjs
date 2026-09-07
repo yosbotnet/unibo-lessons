@@ -7,7 +7,12 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
   for(const e of entries){const a=await r.render(e),b=await r.render(e);assert.equal(a.svg,b.svg,'Determinism '+e.id);
    const counts={'pcd-interleavings':[5,4],'pcd-exchange-central':[4,3],'pcd-exchange-all':[4,6],'pcd-exchange-ring':[4,4],'pcd-ricart-request':[6,5],'pcd-consensus-rounds':[9,6],'pcd-smr-order':[8,7],'pcd-raft-replication':[7,8],'ds-threat-chain':[4,3],'ds-independent-contexts':[2,1]};
    Object.assign(counts,{'pcd-chang-ring':[4,4],'pcd-chang-phases':[3,2]});
+   Object.assign(counts,{'pcd-causal-dependencies':[6,6],'pcd-causal-buffer':[4,3]});
    assert.deepEqual([a.nodes,a.edges.length],counts[e.id],'Complete graph '+e.id);
+   if(e.id==='pcd-causal-dependencies'){
+    for(const pair of ['S1_S2','S2_D2','D2_S3','S1_D1','S3_D3','D1_D3'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)).length,1,'Exactly one edge '+pair);
+    for(const label of ['m1','m2','m3'])assert.equal(a.text.filter(t=>t===label).length,1,'Exactly one message label '+label);
+   }
    if(e.id==='pcd-exchange-all')for(let i=0;i<4;i++)for(let j=i+1;j<4;j++){const edge=a.edges.find(x=>x.id.startsWith(`${e.id}-L_P${i}_P${j}_`));assert(edge?.start&&edge?.end,'Both directions for every pair')}
    const bounds=await r.page.evaluate(()=>{
     const svg=document.querySelector('svg'),v=svg.getBoundingClientRect();

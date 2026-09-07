@@ -421,56 +421,38 @@ sequenceDiagram
     <h2>11. Message ordering: ordinamento causale</h2>
 
     <div data-src="PCD-2026-05-15.html#s10">
-      <p>Nella computazione asincrona classica non ci sono restrizioni sull'ordine di ricezione dei messaggi. L'ordinamento causale e una restrizione utile: se <code>send(m1) &#8594; send(m2)</code> (l'invio di m1 precede causalmente l'invio di m2), allora vogliamo che <code>rec(m1) &#8594; rec(m2)</code> (la ricezione di m1 deve precedere la ricezione di m2). Nessun overtaking causale.</p>
+      <p>Asincrono non significa «senza causalità»: significa che non assumiamo limiti noti ai ritardi. Distinguiamo <strong>arrivo dalla rete</strong> al middleware e <strong>consegna</strong> all'applicazione. L'ordinamento causale richiede: se <code>send(m1) → send(m2)</code>, allora <code>deliverᵢ(m1) → deliverᵢ(m2)</code> presso <strong>ogni destinatario comune Pi</strong>. Il middleware può ritardare la consegna per rispettare il vincolo, senza cambiare l'ordine fisico degli arrivi.</p>
 
       <div class="callout exam">
         <span class="callout-label">Per l'esame</span>
-        <p>L'ordinamento FIFO e piu debole: garantisce solo che se lo stesso processo invia m1 prima di m2, allora m1 viene ricevuto prima di m2. L'ordinamento causale e piu forte: considera anche la causalita che attraversa processi diversi.</p>
+        <p>FIFO preserva l'ordine degli invii da uno stesso mittente a uno stesso destinatario. L'ordine causale comprende questo caso, ma considera anche catene di dipendenza attraverso processi diversi. Gli invii concorrenti non ricevono un ordine reciproco obbligatorio.</p>
       </div>
 
-      <p>Immaginiamo tre processi P1, P2, P3. P1 invia un messaggio a P3, poi P1 invia un messaggio a P2. P2, dopo aver ricevuto il messaggio da P1, invia un messaggio a P3. Senza ordinamento causale, P3 potrebbe ricevere prima il messaggio di P2 e poi quello di P1, violando la causalita: l'invio di P1 a P3 e avvenuto prima dell'invio di P2 a P3, quindi dovrebbe essere ricevuto prima.</p>
+      <p>P1 invia <strong>m1 a P3</strong>, poi <strong>m2 a P2</strong>. Dopo la consegna di m2, P2 invia <strong>m3 a P3</strong>. m1 e m3 hanno P3 come destinatario comune e i loro invii sono causalmente ordinati. m3 può comunque arrivare a P3 prima di m1: è la sua <em>consegna prematura all'applicazione</em>, non l'arrivo nel buffer, che violerebbe l'ordinamento causale.</p>
 
-<pre class="mermaid">flowchart LR
-    subgraph P1
-        a1[send m1 to P3] --> a2[send m2 to P2]
-    end
-    subgraph P2
-        a2 --> b1[rec m2 from P1]
-        b1 --> b2[send m3 to P3]
-    end
-    subgraph P3
-        a1 -.-> c1[rec m1]
-        b2 -.-> c2[rec m3]
-    end
-    a1 --> c1
-    b2 --> c2
-    a2 --> b1</pre>
+<!-- BEGIN STATIC DIAGRAM pcd-causal-dependencies -->
+<figure data-static-diagram="pcd-causal-dependencies" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Causalità: m2 collega i due invii destinati a P3 — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-causal-dependencies.svg" width="444" height="498" alt="Causalità: m2 collega i due invii destinati a P3" style="display:block;width:444px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Ogni nodo è un evento applicativo, non un processo intero. Gli archi m1, m2 e m3 collegano ciascun invio alla relativa consegna; gli altri archi continui indicano ordine locale. La catena send(m1) → send(m2) → deliver₂(m2) → send(m3) impone deliver₃(m1) prima di deliver₃(m3). L’arco tratteggiato è questo vincolo, non un quarto messaggio. Non sono rappresentati i tempi di arrivo al middleware.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-causal-dependencies -->
 
-      <p>Nell'esempio: send(m1) &#8594; send(m3) perche send(m1) &#8594; rec(m2) &#8594; send(m3). Quindi vogliamo rec(m1) &#8594; rec(m3).</p>
+      <p>La catena completa è <code>send(m1) → send(m2) → deliver₂(m2) → send(m3)</code>. Quindi P3 deve consegnare m1 prima di m3. P3 non deve ricevere m2, che è destinato a P2: è sufficiente che m3 trasporti la conoscenza della dipendenza.</p>
     </div>
 
     <div data-src="PCD-2026-05-18.html#s6">
-      <p>In un sistema completamente asincrono non ci sono restrizioni sull'ordinamento dei messaggi. Questo massimizza il nondeterminismo e la concorrenza, ma a volte e utile ridurre il nondeterminismo imponendo vincoli sull'ordinamento per semplificare la programmazione. Dal punto di vista del middleware, la verifica di eligibility avviene nel <em>sistema di comunicazione</em>: un messaggio non eligible viene messo in una coda di buffer e consegnato al processo solo quando lo diventa (perche altri messaggi sono arrivati e hanno aggiornato la matrice).</p>
+      <p>Il middleware accoda un messaggio non ancora eligible. La matrice locale incorpora il suo timestamp <strong>solo alla consegna applicativa</strong>, non all'arrivo: incorporarlo in anticipo farebbe apparire soddisfatte dipendenze ancora pendenti. Dopo ogni consegna si ricontrolla il buffer fino a quando non contiene più messaggi eligible.</p>
 
-      <pre class="mermaid">
-sequenceDiagram
-    participant A as P1
-    participant B as P2
-    participant C as P3
-
-    Note over A: m[1,2]++, send to P2
-    A->>B: msg1 (con matrice m)
-    Note over B: check eligibility:<br/>m'[1,2] == m[1,2]+1?<br/>se si: update, receive
-    Note over A: m[1,3]++, send to P3
-    A->>C: msg2 (con matrice m)
-    Note over B: P2 invia a P3
-    B->>C: msg3 (con matrice m')
-    Note over C: msg3 arriva prima di msg2?<br/>Se send(msg2) -> send(msg3)<br/>allora rec(msg2) -> rec(msg3)<br/>Se msg3 arriva prima, buffer
-    C->>C: buffer msg3<br/>aspetta msg2
-    A->>C: msg2 arriva (dopo)
-    Note over C: msg2 eligible? si<br/>aggiorna matrice<br/>controlla msg3 bufferizzato<br/>ora msg3 eligible
-    C->>C: deliver msg3
-    </pre>
+      <!-- BEGIN STATIC DIAGRAM pcd-causal-buffer -->
+<figure data-static-diagram="pcd-causal-buffer" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="P3: m3 arriva prima, ma viene consegnato dopo m1 — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-causal-buffer.svg" width="248" height="420" alt="P3: m3 arriva prima, ma viene consegnato dopo m1" style="display:block;width:248px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Stesso esempio della figura precedente: m1 va da P1 a P3; m2 da P1 a P2; dopo la consegna di m2, P2 invia m3 a P3. Qui le frecce seguono il lavoro del middleware di P3, non nuovi invii. Il vettore mostrato è la sola colonna destinata a P3, nelle righe P1, P2, P3; ogni messaggio trasporta l’intera matrice. m1 compare una sola volta come arrivo e sblocca m3 senza che m3 debba arrivare di nuovo.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-causal-buffer -->
     </div>
   </section>
 
@@ -478,7 +460,7 @@ sequenceDiagram
     <h2>12. Algoritmo con matrice di clock</h2>
 
     <div data-src="PCD-2026-05-15.html#s11">
-      <p>L'algoritmo per garantire l'ordinamento causale estende il vector clock in una <strong>matrice di clock</strong> <code>m</code> di dimensione N&#215;N, dove <code>m[j,k]</code> rappresenta il numero di messaggi inviati da <code>Pj</code> a <code>Pk</code> conosciuti da <code>Pi</code> nello stato corrente.</p>
+      <p>Consideriamo comunicazioni punto-punto tra processi distinti, con partecipanti fissi, nessun guasto e canali affidabili senza duplicati, ma non necessariamente FIFO. Ogni Pi conserva una <strong>matrice di contatori</strong> Mᵢ di dimensione N×N: Mᵢ[j,k] conta gli invii da Pj a Pk conosciuti attraverso gli eventi applicativi di Pi. Non è un orologio di tempo fisico. Nella notazione del codice <code>m</code> è Mᵢ e <code>m'</code> è il timestamp T del messaggio.</p>
 
       <p>Quando un processo <code>Pi</code> invia un messaggio a <code>Pj</code>:</p>
       <ul>
@@ -486,38 +468,97 @@ sequenceDiagram
         <li>Allega l'intera matrice <code>m</code> al messaggio (piggyback)</li>
       </ul>
 
-      <p>Quando un processo <code>Pi</code> riceve un messaggio da <code>Pj</code> con matrice <code>m'</code>:</p>
+      <p>Quando a <code>Pi</code> arriva un messaggio da <code>Pj</code> con matrice <code>m'</code>:</p>
       <ul>
-        <li>Il messaggio e <strong>eligible</strong> se per ogni k diverso da j: <code>m'[k,i] == m[k,i]</code> (nessun messaggio da altri processi a Pi che il mittente conosce ma Pi non ha ancora ricevuto) e per k = j: <code>m'[j,i] == m[j,i] + 1</code> (il messaggio corrente e l'unico atteso da Pj).</li>
+        <li>Il messaggio è <strong>eligible</strong> se per ogni k ≠ j: <code>m'[k,i] ≤ m[k,i]</code>, e per il mittente j: <code>m'[j,i] == m[j,i] + 1</code>. Le dipendenze dagli altri mittenti devono essere già soddisfatte; da j deve arrivare il prossimo numero atteso.</li>
         <li>Se non e eligible, il messaggio viene bufferizzato fino a quando non lo diventa.</li>
-        <li>Se e eligible, Pi aggiorna la propria matrice <code>m</code> con <code>m'</code> (component-wise max) e procede con la ricezione.</li>
+        <li>Se è eligible, Pi aggiorna <code>m</code> con il massimo componente per componente di <code>m</code> e <code>m'</code>, consegna il messaggio e ricontrolla il buffer. L'aggiornamento e la consegna sono un unico passo locale del modello.</li>
       </ul>
 
       <div class="callout note">
-        <span class="callout-label">Nota del redattore</span>
-        <p>Il professore osserva che, nonostante la complessita della matrice, il principio e semplice: ogni processo guarda solo la propria colonna nella matrice ricevuta per decidere se ci sono messaggi pendenti da altri processi che devono essere ricevuti prima.</p>
+        <span class="callout-label">Perché ≤, non ==</span>
+        <p>Il destinatario può avere già consegnato messaggi concorrenti che il mittente non conosce. Se P3 ha consegnato un messaggio da P1, M₃[1,3] = 1; un messaggio concorrente da P2 può avere T[1,3] = 0. La dipendenza è soddisfatta perché 0 ≤ 1. Pretendere 0 == 1 bloccherebbe quel messaggio per sempre, dato che i contatori non diminuiscono.</p>
       </div>
 
       <div id="ac-matrix"></div>
 
-      <p>Il professore nota anche che se non ci fosse stato lo scambio di messaggi tra P1 e P2, gli eventi sarebbero stati concorrenti e non si sarebbe potuta ricostruire la catena causale. Tutto dipende dagli scambi di messaggi effettivi tra i processi.</p>
+      <p>Attenzione alla posizione del collegamento P1→P2: se P1 lo invia <em>prima</em> del proprio messaggio a P3, esso non trasmette conoscenza di quell'invio successivo. Senza altre dipendenze, i due invii a P3 restano concorrenti. La semplice posizione delle frecce sulla pagina non crea causalità.</p>
+      <p class="small">Confronto: <a href="https://www.cs.uic.edu/~ajayk/Chapter6.pdf">Kshemkalyani e Singhal, slide 4–5 e 24</a>. La presentazione RST della slide 24 usa canali FIFO, contatori di consegna separati e timestamp prima dell'incremento. Qui l'incremento avviene prima dell'invio; il test «prossimo numero» gestisce anche arrivi non FIFO. Non mescolare le due convenzioni.</p>
     </div>
 
     <div data-src="PCD-2026-05-08.html#s19">
       <p>Riassumendo la condizione di eleggibilit&agrave; per un messaggio ricevuto da P<sub>i</sub> da P<sub>j</sub> con matrice m':</p>
       <ul>
-        <li>&forall; k &ne; j: m'[k,i] == m[k,i] (tutti i messaggi da altri processi a i, noti al mittente, sono gi&agrave; stati ricevuti)</li>
+        <li>∀ k ≠ j: m'[k,i] ≤ m[k,i] (le dipendenze verso Pi dagli altri mittenti sono già state consegnate; Pi può conoscere messaggi ulteriori)</li>
         <li>m'[j,i] == m[j,i] + 1 (questo &egrave; il prossimo messaggio atteso da j)</li>
       </ul>
-      <p>Non &egrave; consentito il &laquo;sorpasso causale&raquo;: se un messaggio &egrave; stato inviato prima (causalmente) di un altro, deve essere ricevuto prima.</p>
+      <p>La colonna i di Mᵢ conta i messaggi già consegnati a Pi, mentre le altre colonne conservano conoscenza su invii ad altri destinatari. Questa proprietà è mantenuta dal controllo prima del massimo componente per componente. Il vincolo di ordine riguarda i destinatari comuni, non tutti i processi indistintamente.</p>
     </div>
+    <h3>Esplora arrivo, buffer e consegna</h3>
+    <div id="causal-explorer"><p>Gli esempi interattivi richiedono JavaScript. Le tracce qui sotto restano disponibili senza script.</p></div>
+<!-- BEGIN CAUSAL TRACES -->
+<details data-causal-trace="overtake">
+<summary>Traccia: Sorpasso causale: m3 aspetta m1</summary>
+<p>Una riga per invio o arrivo dalla rete. Le consegne possono essere zero, una o più; il vettore è la colonna di P3 dopo il passo, nell'ordine dei mittenti P1, P2, P3. Su schermi stretti scorri orizzontalmente; usa le frecce dopo aver dato il focus alla tabella.</p>
+<div role="region" aria-label="Traccia causale scorribile" tabindex="0" style="max-width:100%;overflow-x:auto">
+<table style="width:100%;min-width:800px;table-layout:fixed"><caption>Sorpasso causale: m3 aspetta m1 · modello punto-punto senza guasti</caption>
+<colgroup><col style="width:60px"><col style="width:290px"><col style="width:170px"><col style="width:160px"><col></colgroup>
+<thead><tr><th scope="col">#</th><th scope="col">Azione</th><th scope="col">Consegne nel passo</th><th scope="col">M₃[*,3]</th><th scope="col">Buffer P3</th></tr></thead>
+<tbody><tr><th scope="row">1</th><td>P1 invia m1 a P3.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">2</th><td>P1 invia m2 a P2, dopo m1.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">3</th><td>m2 arriva a P2 e viene consegnato.</td><td>m2 → P2</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">4</th><td>P2 invia m3 a P3, dopo la consegna di m2.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">5</th><td>m3 arriva a P3: manca m1, quindi resta nel buffer.</td><td>nessuna</td><td>[0,0,0]</td><td>m3</td></tr>
+<tr><th scope="row">6</th><td>m1 arriva: P3 consegna m1, poi sblocca e consegna m3.</td><td>m1 → P3; m3 → P3</td><td>[1,1,0]</td><td>vuoto</td></tr></tbody></table>
+</div></details>
+<details data-causal-trace="concurrent">
+<summary>Traccia: Concorrenza: il confronto corretto</summary>
+<p>Una riga per invio o arrivo dalla rete. Le consegne possono essere zero, una o più; il vettore è la colonna di P3 dopo il passo, nell'ordine dei mittenti P1, P2, P3. Su schermi stretti scorri orizzontalmente; usa le frecce dopo aver dato il focus alla tabella.</p>
+<div role="region" aria-label="Traccia causale scorribile" tabindex="0" style="max-width:100%;overflow-x:auto">
+<table style="width:100%;min-width:800px;table-layout:fixed"><caption>Concorrenza: il confronto corretto · modello punto-punto senza guasti</caption>
+<colgroup><col style="width:60px"><col style="width:290px"><col style="width:170px"><col style="width:160px"><col></colgroup>
+<thead><tr><th scope="col">#</th><th scope="col">Azione</th><th scope="col">Consegne nel passo</th><th scope="col">M₃[*,3]</th><th scope="col">Buffer P3</th></tr></thead>
+<tbody><tr><th scope="row">1</th><td>P1 invia m1 a P3.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">2</th><td>P2 invia m2 a P3 senza conoscere m1: gli invii sono concorrenti.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">3</th><td>P3 consegna m1: la propria colonna è [1,0,0].</td><td>m1 → P3</td><td>[1,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">4</th><td>P3 consegna m2: 0 ≤ 1 per la riga P1. L’uguaglianza 0 == 1 lo bloccherebbe ingiustamente.</td><td>m2 → P3</td><td>[1,1,0]</td><td>vuoto</td></tr></tbody></table>
+</div></details>
+<details data-causal-trace="fifo">
+<summary>Traccia: Stesso mittente: ripristina FIFO</summary>
+<p>Una riga per invio o arrivo dalla rete. Le consegne possono essere zero, una o più; il vettore è la colonna di P3 dopo il passo, nell'ordine dei mittenti P1, P2, P3. Su schermi stretti scorri orizzontalmente; usa le frecce dopo aver dato il focus alla tabella.</p>
+<div role="region" aria-label="Traccia causale scorribile" tabindex="0" style="max-width:100%;overflow-x:auto">
+<table style="width:100%;min-width:800px;table-layout:fixed"><caption>Stesso mittente: ripristina FIFO · modello punto-punto senza guasti</caption>
+<colgroup><col style="width:60px"><col style="width:290px"><col style="width:170px"><col style="width:160px"><col></colgroup>
+<thead><tr><th scope="col">#</th><th scope="col">Azione</th><th scope="col">Consegne nel passo</th><th scope="col">M₃[*,3]</th><th scope="col">Buffer P3</th></tr></thead>
+<tbody><tr><th scope="row">1</th><td>P1 invia m1 a P3.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">2</th><td>P1 invia m2 a P3 dopo m1.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">3</th><td>m2 arriva per primo: numero 2, ma P3 attende 1.</td><td>nessuna</td><td>[0,0,0]</td><td>m2</td></tr>
+<tr><th scope="row">4</th><td>Arriva m1: P3 consegna m1 e poi m2.</td><td>m1 → P3; m2 → P3</td><td>[2,0,0]</td><td>vuoto</td></tr></tbody></table>
+</div></details>
+<details data-causal-trace="early-bridge">
+<summary>Traccia: Un collegamento troppo presto non crea causalità</summary>
+<p>Una riga per invio o arrivo dalla rete. Le consegne possono essere zero, una o più; il vettore è la colonna di P3 dopo il passo, nell'ordine dei mittenti P1, P2, P3. Su schermi stretti scorri orizzontalmente; usa le frecce dopo aver dato il focus alla tabella.</p>
+<div role="region" aria-label="Traccia causale scorribile" tabindex="0" style="max-width:100%;overflow-x:auto">
+<table style="width:100%;min-width:800px;table-layout:fixed"><caption>Un collegamento troppo presto non crea causalità · modello punto-punto senza guasti</caption>
+<colgroup><col style="width:60px"><col style="width:290px"><col style="width:170px"><col style="width:160px"><col></colgroup>
+<thead><tr><th scope="col">#</th><th scope="col">Azione</th><th scope="col">Consegne nel passo</th><th scope="col">M₃[*,3]</th><th scope="col">Buffer P3</th></tr></thead>
+<tbody><tr><th scope="row">1</th><td>P1 invia m1 a P2.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">2</th><td>P2 riceve e consegna m1.</td><td>m1 → P2</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">3</th><td>P1 invia m2 a P3 solo dopo questo collegamento.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">4</th><td>P2 invia m3 a P3 senza conoscere m2: m2 e m3 sono concorrenti.</td><td>nessuna</td><td>[0,0,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">5</th><td>P3 può consegnare m3 subito; non deve aspettare m2.</td><td>m3 → P3</td><td>[0,1,0]</td><td>vuoto</td></tr>
+<tr><th scope="row">6</th><td>P3 consegna m2. Nessun vincolo causale è violato.</td><td>m2 → P3</td><td>[1,1,0]</td><td>vuoto</td></tr></tbody></table>
+</div></details>
+<!-- END CAUSAL TRACES -->
   </section>
 
   <section id="s13">
     <h2>13. Ordinamento totale e sincronizzatori</h2>
 
     <div data-src="PCD-2026-05-15.html#s12">
-      <p>Oltre all'ordinamento causale, esistono forme piu forti. L'<strong>ordinamento totale</strong> (sincrono) e piu restrittivo dell'ordinamento causale: richiede che tutti i messaggi possano essere trattati come logicamente istantanei. Nel caso di messaggi multicast, significa che tutti i messaggi vengono consegnati nello stesso ordine a tutti i processi. Per ogni coppia di messaggi x, y e per ogni coppia di processi P, Q: se x viene ricevuto da P prima di y, allora y non viene ricevuto da Q prima di x.</p>
+      <p>L'<strong>ordinamento totale</strong> del multicast richiede che i destinatari che consegnano gli stessi messaggi concordino sul loro ordine: se P consegna x prima di y, Q non può consegnare y prima di x. Da solo non impone rispetto della causalità, simultaneità fisica né limiti ai ritardi. Ordine totale e causale sono proprietà distinte e combinabili: un <strong>ordine totale causale</strong> deve soddisfare entrambe.</p>
+      <p>Due messaggi concorrenti a e b possono essere consegnati come a,b da P e b,a da Q senza violare l'ordine causale, ma violando quello totale. Viceversa, se x precede causalmente y, destinatari comuni che consegnano tutti y,x concordano tra loro ma violano l'ordine causale. Questi esempi confrontano le proprietà di ordinamento, non definiscono da soli un protocollo completo di multicast affidabile.</p>
+      <p class="small">Riferimento: <a href="https://people.cs.rutgers.edu/~pxk/classes/417/notes/groups.html">Paul Krzyzanowski, Group Communication: Causal Ordering e Total Ordering</a>. Non confondere l'ordine totale del multicast con l'ordine sincrono/rendezvous delle comunicazioni.</p>
 
       <h3>Sincronizzatori</h3>
       <p>Progettare algoritmi distribuiti e piu facile assumendo una rete sincrona. I sincronizzatori permettono di simulare una rete sincrona su una asincrona, usando il meccanismo dei <strong>pulse</strong> (colpi): ogni processo ha un contatore pulse, e in ogni round i invia esattamente un messaggio a tutti i vicini con pulse = i, e attende un messaggio da ogni vicino con lo stesso pulse prima di avanzare al round successivo.</p>
@@ -536,7 +577,7 @@ round i:
     </div>
 
     <div data-src="PCD-2026-05-11.html#s17">
-      <p>Il quadro completo delle garanzie di ordinamento comprende tre livelli. L'ordinamento <strong>FIFO</strong> e la forma piu debole: i messaggi inviati da uno stesso mittente a uno stesso destinatario vengono ricevuti nell'ordine di invio; molti middleware di messaggistica lo garantiscono per default. L'ordine <strong>totale</strong> richiede un coordinamento aggiuntivo e si basa su algoritmi come ISIS o su un sequencer centralizzato: e la base per i sistemi di replicated state machine.</p>
+      <p>Il confronto non è una scala FIFO → causale → totale: causale implica FIFO presso il destinatario comune, mentre totale va considerato separatamente. Per la replica di macchine a stati servono inoltre accordo sulle operazioni, consegna affidabile e comportamento deterministico, non soltanto una grafica con messaggi ordinati.</p>
 
       <div class="lk-tabs" data-kit="tabs">
         <div class="lk-tablist">
@@ -545,18 +586,18 @@ round i:
           <button class="lk-tab">Totale</button>
         </div>
         <div class="lk-tabpanel">
-          <p><strong>Garanzia:</strong> i messaggi tra coppia (mittente, destinatario) arrivano in ordine di invio.</p>
-          <p><strong>Costo:</strong> basso, spesso fornito dal protocollo di trasporto (TCP).</p>
+          <p><strong>Garanzia:</strong> i messaggi della stessa coppia (mittente, destinatario) vengono consegnati nell'ordine di invio.</p>
+          <p><strong>Implementazione:</strong> numeri di sequenza e buffer su canali non FIFO. TCP ordina i byte di una singola connessione, non messaggi tra connessioni diverse.</p>
           <p><strong>Limitazione:</strong> non dice nulla su messaggi da mittenti diversi o a destinatari diversi.</p>
         </div>
         <div class="lk-tabpanel">
-          <p><strong>Garanzia:</strong> se invio di m1 precede causalmente invio di m2, allora m1 viene ricevuto prima di m2 ovunque.</p>
-          <p><strong>Costo:</strong> matrice <code>NxN</code> di interi per processo. Buffer per messaggi non ancora eligible.</p>
+          <p><strong>Garanzia:</strong> se send(m1) precede causalmente send(m2), ogni destinatario comune consegna m1 prima di m2. Nessun ordine reciproco obbligatorio per messaggi concorrenti.</p>
+          <p><strong>Costo del modello mostrato:</strong> matrice N×N per processo e per messaggio, più buffer. Non è il costo inevitabile di ogni protocollo causale: per broadcast a un gruppo fisso bastano anche vettori.</p>
           <p><strong>Utile per:</strong> applicazioni dove l'ordine causale e importante (es. aggiornamenti a un documento condiviso).</p>
         </div>
         <div class="lk-tabpanel">
-          <p><strong>Garanzia:</strong> tutti i processi vedono tutti i messaggi multicast nello stesso ordine globale.</p>
-          <p><strong>Costo:</strong> richiede un sequencer o un consenso distribuito.</p>
+          <p><strong>Garanzia:</strong> destinatari comuni concordano sull'ordine di consegna. Causalità e affidabilità richiedono garanzie ulteriori.</p>
+          <p><strong>Implementazione:</strong> per esempio un sequencer; tollerare il suo fallimento richiede ulteriore coordinamento. Il consenso è una base per protocolli affidabili di ordine totale.</p>
           <p><strong>Utile per:</strong> replicated state machine, database distribuiti, sistemi di consensus.</p>
         </div>
       </div>
@@ -1009,7 +1050,7 @@ flowchart TD
 
       <details>
         <summary>Cosa garantisce l'ordinamento causale dei messaggi rispetto al semplice FIFO?</summary>
-        <p>L'ordinamento causale e piu forte del FIFO: dati due messaggi m1, m2 tali che send(m1) → send(m2), allora rec(m1) → rec(m2). Il FIFO garantisce solo l'ordine all'interno dello stesso processo mittente, mentre l'ordinamento causale vieta i sorpassi (overtaking) anche tra processi diversi.</p>
+        <p>Se send(m1) → send(m2), ogni destinatario comune deve consegnare m1 prima di m2, anche quando i mittenti sono diversi. FIFO copre soltanto una stessa coppia mittente-destinatario. L'arrivo nel buffer può avvenire fuori ordine; è la consegna applicativa a essere vincolata. Gli invii concorrenti possono restare diversamente ordinati presso destinatari diversi.</p>
       </details>
 
       <details>
@@ -1043,6 +1084,7 @@ flowchart TD
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ricart-agrawala.js"></script>
   <script src="assets/chang-roberts.js"></script>
+  <script src="assets/causal-order.js"></script>
   <script>
     // ---- Highlight.js ----
     hljs.highlightAll();
@@ -1129,23 +1171,24 @@ flowchart TD
       ['  else: announcementReturned := true', 'Il leader arresta il giro; tutti sono stati informati.'],
     ]});
 
-    /* --- Annotated Code: Matrix clock for causal ordering (slide 21) --- */
-    LessonKit.annotatedCode('#ac-matrix', { lang:'java', lines:[
+    CausalOrder.mount('#causal-explorer');
+    /* --- Matrix send counters: increment-before-send, non-FIFO arrivals --- */
+    LessonKit.annotatedCode('#ac-matrix', { lang:'plaintext', lines:[
       ['Pi::', 'Ogni processo mantiene una matrice NxN di clock.'],
       ['  var m: array[1..N, 1..N] of integer := 0', 'm[j,k] = msgs inviati da Pj a Pk conosciuti da Pi.'],
       ['  For every msg sent (from Pi) to Pj:', 'Quando Pi invia un messaggio a Pj.'],
       ['    m[i,j] := m[i,j] + 1', 'Incrementa il contatore i->j nella propria matrice.'],
       ['    piggyback the matrix m along with the msg', 'Allega lintera matrice come timestamp.'],
-      ['  For every msg received (by Pi) from Pj, with matrix m\':', 'Quando Pi riceve un messaggio da Pj.'],
+      ['  On network arrival at Pi from Pj, with matrix m\':', 'Arrivo al middleware, non ancora consegna applicativa.'],
       ['    the msg is eligible if:', 'Il messaggio e eligible se non ci sono messaggi pendenti che lo precedono causalmente.'],
-      ['      for k != j: m\'[k,i] == m[k,i]', 'Nessun msg da Pk a Pi che il mittente conosce e Pi non ha ancora ricevuto.'],
+      ['      for k != j: m\'[k,i] <= m[k,i]', 'Dipendenze dagli altri mittenti già soddisfatte; Pi può conoscere messaggi concorrenti ulteriori.'],
       ['      for k == j: m\'[j,i] == m[j,i] + 1', 'Il messaggio corrente e quello atteso da Pj (contatore incrementato di 1).'],
       ['    if not eligible', 'Se non e ancora il momento di ricevere.'],
-      ['      delay the msg (put in a queue)', 'Bufferizza il messaggio, lo ricevera quando diventa eligible.'],
+      ['      buffer the msg; do not merge its matrix yet', 'Non anticipare la conoscenza di messaggi non consegnati.'],
       ['    else', 'Se e eligible.'],
       ['      update m with m\'', 'Aggiorna la matrice locale (component-wise max).'],
-      ['      receive the msg', 'Consegna il messaggio al processo.'],
-      ['      check for other possible eligible messages', 'Potrebbero esserci altri messaggi bufferizzati ora eligible.'],
+      ['      deliver the msg to the application', 'Aggiornamento e consegna sono un passo locale.'],
+      ['      repeat eligible buffer deliveries until none remain', 'La consegna può sbloccare altri messaggi già arrivati.'],
     ]});
 
     /* --- Annotated Code: Chandy-Lamport snapshot (slide 31) --- */

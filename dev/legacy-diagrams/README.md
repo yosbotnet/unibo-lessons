@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twelve reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Fourteen reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -29,6 +29,8 @@ node dependability-plot.cjs --check
 node ricart-test.cjs
 node chang-test.cjs
 node chang-trace.cjs --check
+node causal-test.cjs
+node causal-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -120,6 +122,54 @@ exercises real widget controls on desktop/mobile, concurrent starts, final keybo
 focus, horizontal trace scrolling and the JavaScript-disabled fallback. It does
 not certify the causal-order, snapshot or consensus widgets elsewhere in PCD16.
 
+### Causal delivery: dependencies and buffer, not fictitious arrivals
+
+PCD16 sections 11–13 now distinguish application delivery from arrival in the
+middleware and qualify the ordering relation by common recipients. The two new
+sources replace a graph with duplicated message edges and a sequence drawing
+that sent the causal bridge too early, then drew one message twice. One SVG
+expresses the actual send/deliver dependency DAG, with a separate dashed delivery
+constraint; the other follows the receiving middleware's buffer transitions.
+Both use the same generic flowchart adapter as the rest of this collection.
+
+`pcd/assets/causal-order.js` implements the chapter's increment-before-send matrix
+variant for fixed point-to-point membership, distinct sender/receiver, no failures,
+and reliable exactly-once channels that need not be FIFO. A receiver tests its
+column: exact next sequence number from the sender, `≤` for dependencies from
+other senders. It merges the matrix only when delivering and drains newly eligible
+buffered messages. The chapter's earlier `==` test on other senders permanently
+blocked a simple concurrent-message case after one recipient advanced further
+than another sender knew. Prose, summary and annotated code now agree.
+
+Four scenarios cover causal overtaking, unrelated messages and the equality
+counterexample, reordered messages from one sender, and a causal bridge sent
+before the event it cannot convey. `causal-traces.cjs` prints an apply_patch patch
+for four static HTML tables generated from those same executable scenarios.
+The widget displays all three matrices, pending messages and per-process buffers
+and deliveries, with real tables and responsive stacked panels. No script is
+needed to read the diagrams or the four generated traces.
+
+Source comparison: [Kshemkalyani–Singhal, slides 4–5 and 24](https://www.cs.uic.edu/~ajayk/Chapter6.pdf)
+defines common-destination delivery ordering and describes the related RST
+algorithm. Its FIFO, increment-after-send, separate-DELIV convention is not copied
+as if identical to this variant; the chapter states the differences. [Krzyzanowski's
+group communication notes](https://people.cs.rutgers.edu/~pxk/classes/417/notes/groups.html)
+support the distinction between causal and total order. The chapter no longer
+equates total multicast ordering with synchronous/rendezvous communication or
+claims the causal matrix is mandatory for every causal multicast protocol.
+
+`causal-test.cjs` checks 1,050 seeded random executions with 2–8 processes and
+73,500 actions plus fair network drains (130,944 logged events). Its independent
+oracle reconstructs send-event causal histories without using matrices, checks
+predecessors at each delivery, actual incoming-column counts, and that no safely
+deliverable message remains buffered. Exact checks cover all four examples,
+the two intermediate P3 columns in the SVG, immutable timestamp copies, rejected
+invalid actions and the order-only counterexamples. Browser tests exercise all
+four scenarios at 1280/390 px, matrix values, buffers, reset, keyboard focus,
+horizontal static-table scrolling and JavaScript-disabled fallbacks. Random
+executions are not an exhaustive proof. Centralized mutex eligibility, snapshots
+and other findings below remain separate work.
+
 Mermaid theme configuration and linear curves follow the
 [official configuration](https://mermaid.js.org/config/theming.html) and
 [flowchart options](https://mermaid.js.org/config/schema-docs/config-defs-flowchart-diagram-config.html).
@@ -169,7 +219,8 @@ some of the original mistakes and are not independent proof. Primary references:
 
 These are concrete next checks, not claims that whole chapters are repaired:
 
-- PCD 16: check the causal-order sequence example, Chandy–Lamport explorers and the stated resilience of the two-phase
+- PCD 16: review the centralized mutex eligibility equality, associated diagrams
+  and toy simulator; Chandy–Lamport explorers and the stated resilience of the two-phase
   king variant. The chapter contains additional interactive material not covered
   by the Ricart–Agrawala tests.
 - DS C4: qualify CAP, FLP, hash-chain immutability and BFT threshold/termination
