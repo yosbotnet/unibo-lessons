@@ -113,7 +113,8 @@ API references:
 [CyclicBarrier Java 17](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/CyclicBarrier.html),
 [CountDownLatch Java 17](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/CountDownLatch.html).
 
-Physics and Fork-Join/structured-concurrency examples in this chapter remain open.
+The later [Fork-Join revision](FORKJOIN.md) completes and tests the sum and merge
+sort examples. Physics and version-specific structured concurrency remain open.
 Site-wide inventory and earlier checkpoints do not prove all figures/content are
 correct. The original fifteen-course scope remains 208 chapters and 882 figures;
 the broader goal still covers all courses. Preexisting review/index and review/report

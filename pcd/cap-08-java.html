@@ -1653,79 +1653,184 @@ public final class SketchCounter {
   <section id="s16">
     <h2>16. Fork-Join, work-stealing e structured concurrency</h2>
     <div data-src="PCD-2026-03-20.html#s8">
-    <p>Il professor Ricci introduce il <strong>Fork-Join Framework</strong> (Java SE 7) come evoluzione del pattern Executor per algoritmi che non hanno una topologia dei dati conosciuta a priori (es. strutture a grafo o ad albero).</p>
+    <p>Il <strong>Fork-Join Framework</strong>, disponibile da Java SE 7, supporta task che si suddividono in sottotask. Il divide-et-impera su array è un caso tipico: la topologia dei dati può essere già nota. Il framework non è riservato ad alberi o grafi scoperti durante il calcolo.</p>
 
-    <p>Il problema: con un executor tradizionale, se un task Callable aspetta il risultato di un altro Callable, il thread che lo esegue rimane in attesa sprecando una risorsa. Fork-Join risolve questo con l'<strong>algoritmo di work-stealing</strong>.</p>
+    <p>I worker del <code>ForkJoinPool</code> cercano lavoro disponibile, anche nelle code di altri worker: questo è il <strong>work-stealing</strong>. Non avviene soltanto quando qualcuno chiama <code>join()</code> e non garantisce né piena occupazione né accelerazione. Granularità, dipendenze, costo di creazione dei task e core disponibili contano; I/O bloccante e sincronizzazione non gestita non vengono risolti automaticamente.</p>
 
-    <pre><code class="language-java">// Esempio: somma degli elementi di un array (divide &amp; conquer)
-class SumTask extends RecursiveTask&lt;Long&gt; {
-    static final int THRESHOLD = 1000;
+    <p><code>RecursiveTask</code> e <code>RecursiveAction</code> sono specializzazioni di <code>ForkJoinTask</code>: la prima produce un risultato, la seconda no. Il pool esegue i task; la sottoclasse definisce il calcolo nel metodo <code>compute()</code>.</p>
+
+    <h3>Somma: separare, calcolare, combinare</h3>
+    <p><code>SumTask</code> estende <code>RecursiveTask&lt;Long&gt;</code>: restituisce la somma dell’intervallo semiaperto <code>[lo, hi)</code>. Se la lunghezza non supera la soglia usa un ciclo; altrimenti divide l’intervallo in due metà disgiunte. L’accumulatore è <code>long</code>, così anche la somma di due <code>Integer.MAX_VALUE</code> non trabocca come un <code>int</code>. Durante il task il chiamante non deve modificare l’array.</p>
+
+    <ol>
+      <li><code>left.fork()</code> programma il ramo sinistro nel pool corrente: non crea necessariamente un thread e non promette esecuzione simultanea.</li>
+      <li><code>right.compute()</code> è una chiamata diretta: il worker corrente calcola il ramo destro, che può a sua volta suddividersi.</li>
+      <li><code>left.join()</code> ottiene il risultato sinistro dopo il suo completamento normale; poi si sommano i due risultati.</li>
+    </ol>
+
+<!-- BEGIN STATIC DIAGRAM pcd-forkjoin-dependencies -->
+<figure data-static-diagram="pcd-forkjoin-dependencies" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Fork-Join: dipendenze prima di combinare i risultati — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-forkjoin-dependencies.svg" width="508" height="448" alt="Fork-Join: dipendenze prima di combinare i risultati" style="display:block;width:508px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Passo ricorsivo con completamento normale. La linea tratteggiata indica la programmazione del sottotask sinistro; non garantisce un altro thread né simultaneità. Il chiamante calcola il ramo destro e poi chiama join: il risultato sinistro può essere già pronto oppure richiedere altro lavoro o attesa. La combinazione usa entrambi i risultati completati. Le frecce sono dipendenze, non una timeline dei worker; eccezioni e cancellazione richiedono una politica separata.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-forkjoin-dependencies -->
+
+<!-- BEGIN FORKJOIN CONTENT SumTask -->
+<p><a href="assets/examples/SumTask.java" download>Scarica SumTask.java</a> · esempio editoriale completo, Java 17.</p>
+<details data-forkjoin-example="SumTask"><summary>SumTask: codice completo</summary>
+<pre data-forkjoin-source="SumTask" tabindex="0" role="region" aria-label="Codice Java SumTask"><code class="language-java">import java.util.Objects;
+import java.util.concurrent.RecursiveTask;
+
+/** Sum [lo, hi). The caller must not mutate the array until the task completes. */
+public final class SumTask extends RecursiveTask&lt;Long&gt; {
+    private static final long serialVersionUID = 1L;
     private final int[] array;
-    private final int lo, hi;
+    private final int lo;
+    private final int hi;
+    private final int threshold;
 
-    SumTask(int[] a, int lo, int hi) { this.array = a; this.lo = lo; this.hi = hi; }
+    public SumTask(int[] array, int lo, int hi, int threshold) {
+        this.array = Objects.requireNonNull(array);
+        Objects.checkFromToIndex(lo, hi, array.length);
+        if (threshold &lt; 1) throw new IllegalArgumentException(&quot;Positive threshold required&quot;);
+        this.lo = lo;
+        this.hi = hi;
+        this.threshold = threshold;
+    }
 
+    @Override
     protected Long compute() {
-        if (hi - lo &lt; THRESHOLD) {
+        if (hi - lo &lt;= threshold) {
             long sum = 0;
             for (int i = lo; i &lt; hi; i++) sum += array[i];
             return sum;
         }
-        int mid = (lo + hi) / 2;
-        SumTask left = new SumTask(array, lo, mid);
-        SumTask right = new SumTask(array, mid, hi);
-        left.fork();                // fork: avvia il task in parallelo
-        long rightResult = right.compute();  // compute: esegui direttamente
-        long leftResult = left.join();       // join: attendi il risultato
-        return leftResult + rightResult;
+        int mid = lo + (hi - lo) / 2;
+        SumTask left = new SumTask(array, lo, mid, threshold);
+        SumTask right = new SumTask(array, mid, hi, threshold);
+        left.fork(); // Schedule work, not necessarily on a different worker.
+        long rightResult = right.compute();
+        return left.join() + rightResult;
     }
 }
+</code></pre>
+</details>
+<!-- END FORKJOIN CONTENT SumTask -->
 
-// Uso con ForkJoinPool
-ForkJoinPool pool = new ForkJoinPool();
-long total = pool.invoke(new SumTask(array, 0, array.length));</code></pre>
+    <div class="callout idea"><span class="callout-label">Dipendenze, non promesse di scheduling</span><p>Il calcolo funziona anche con parallelismo 1. <code>join()</code> non è una barriera globale del pool e, a differenza di <code>Future.get()</code>, non espone <code>InterruptedException</code>. Questo schema mostra il percorso di successo: se il ramo destro fallisce prima del join, il sinistro non viene automaticamente cancellato e atteso dal blocco. Non è una politica generale di structured concurrency.</p></div>
 
-    <div class="callout idea"><span class="callout-label">Idea chiave</span><p>Il <strong>work-stealing</strong> e il trucco: quando un thread si blocca in attesa del risultato di un fork, invece di rimanere idle, ruba (steal) un altro task dalla coda di un altro thread. Questo mantiene tutti i thread occupati e migliora il throughput complessivo.</p></div>
-
-    <h3>Mappa-Riduci con Fork-Join</h3>
-
-    <p>Fork-Join realizza il pattern <strong>Map-Reduce</strong> (o divide-et-impera):</p>
-    <ul>
-      <li><strong>Map phase</strong>: splitting del dominio in chunk indipendenti, processati in parallelo</li>
-      <li><strong>Reduce phase</strong>: collezionamento dei risultati parziali per formare il risultato finale</li>
-    </ul>
-
-    <p>Il Fork-Join Framework e particolarmente efficace per algoritmi su strutture ricorsive come alberi, grafi, e per elaborazione di grandi volumi di dati con pattern map/reduce.</p>
-  
+    <p>Divide-et-impera e MapReduce non sono sinonimi. Qui si divide ricorsivamente un problema e si combinano i risultati: una somma può essere espressa come riduzione, ma il framework non impone una fase map, uno shuffle o un’esecuzione distribuita.</p>
     </div>
     <div data-src="PCD-2026-03-30.html#s15">
-    <p>Il <strong>Fork-Join Framework</strong> (Java SE 7) estende il modello degli executor per gestire algoritmi <em>map/reduce</em> e <em>divide-et-impera</em> dove la topologia dei dati non &egrave; nota in anticipo. Le classi principali sono:</p>
+    <h3>Merge sort: scritture disgiunte e merge dopo il join</h3>
+    <p><code>MergeSortTask</code> estende <code>RecursiveAction</code>: ordina in-place <code>[lo, hi)</code> senza restituire un valore. Ogni coppia di figli lavora su intervalli disgiunti dell’array e del buffer ausiliario condiviso. Il padre esegue il merge soltanto dopo aver completato il destro e ottenuto il completamento del sinistro. Il chiamante non deve accedere all’intervallo fino alla conclusione.</p>
+    <p>Il sorgente include costruttori, controllo degli intervalli, soglia positiva e merge completo. Si alloca un solo buffer grande quanto l’array originale; la soglia limita la suddivisione e alle foglie si usa <code>Arrays.sort</code>. La soglia 2 della demo serve a rendere visibile la ricorsione su otto elementi, non è un consiglio di prestazioni.</p>
 
-    <ul>
-      <li><code>ForkJoinPool</code> — executor specializzato che supporta il <strong>work-stealing</strong>: quando un thread &egrave; in attesa (<code>join()</code>), ruba lavoro dalla coda di un altro thread;</li>
-      <li><code>ForkJoinTask</code> con le sottoclassi <code>RecursiveAction</code> (senza risultato) e <code>RecursiveTask</code> (con risultato);</li>
-      <li>I metodi <code>fork()</code> (lancia un subtask asincrono) e <code>join()</code> (attende il risultato).</li>
-    </ul>
+<!-- BEGIN FORKJOIN CONTENT MergeSortTask -->
+<p><a href="assets/examples/MergeSortTask.java" download>Scarica MergeSortTask.java</a> · esempio editoriale completo, Java 17.</p>
+<details data-forkjoin-example="MergeSortTask"><summary>MergeSortTask: codice completo</summary>
+<pre data-forkjoin-source="MergeSortTask" tabindex="0" role="region" aria-label="Codice Java MergeSortTask"><code class="language-java">import java.util.Arrays;
+import java.util.Objects;
+import java.util.concurrent.RecursiveAction;
 
-    <pre><code class="language-java">// Schema fork-join: merge sort parallelo (idea dalle slide)
-class MergeSortTask extends RecursiveAction {
-    private int[] array;
-    private int lo, hi;
+/** Sort [lo, hi); caller must not access this range until completion. */
+public final class MergeSortTask extends RecursiveAction {
+    private static final long serialVersionUID = 1L;
+    private final int[] array;
+    private final int[] scratch;
+    private final int lo;
+    private final int hi;
+    private final int threshold;
 
+    public MergeSortTask(int[] array, int lo, int hi, int threshold) {
+        this.array = Objects.requireNonNull(array);
+        Objects.checkFromToIndex(lo, hi, array.length);
+        if (threshold &lt; 1) throw new IllegalArgumentException(&quot;Positive threshold required&quot;);
+        this.scratch = new int[array.length]; // One buffer shared by disjoint tasks.
+        this.lo = lo;
+        this.hi = hi;
+        this.threshold = threshold;
+    }
+
+    private MergeSortTask(int[] array, int[] scratch, int lo, int hi, int threshold) {
+        this.array = array;
+        this.scratch = scratch;
+        this.lo = lo;
+        this.hi = hi;
+        this.threshold = threshold;
+    }
+
+    @Override
     protected void compute() {
-        if (hi - lo &lt; THRESHOLD) {
+        if (hi - lo &lt;= threshold) {
             Arrays.sort(array, lo, hi);
-        } else {
-            int mid = (lo + hi) / 2;
-            var left = new MergeSortTask(array, lo, mid);
-            var right = new MergeSortTask(array, mid, hi);
-            left.fork();   // fork asincrono
-            right.compute();
-            left.join();   // attendi il risultato
-            merge(array, lo, mid, hi);
+            return;
+        }
+        int mid = lo + (hi - lo) / 2;
+        MergeSortTask left = new MergeSortTask(array, scratch, lo, mid, threshold);
+        MergeSortTask right = new MergeSortTask(array, scratch, mid, hi, threshold);
+        left.fork();
+        right.compute();
+        left.join(); // Both child ranges are sorted before merging.
+        merge(mid);
+    }
+
+    private void merge(int mid) {
+        int left = lo;
+        int right = mid;
+        for (int out = lo; out &lt; hi; out++) {
+            if (right == hi || (left &lt; mid &amp;&amp; array[left] &lt;= array[right])) {
+                scratch[out] = array[left++];
+            } else {
+                scratch[out] = array[right++];
+            }
+        }
+        System.arraycopy(scratch, lo, array, lo, hi - lo);
+    }
+}
+</code></pre>
+</details>
+<!-- END FORKJOIN CONTENT MergeSortTask -->
+
+    <h3>Eseguire entrambi gli esempi</h3>
+    <p>Salva i tre file nella stessa directory, poi esegui <code>javac SumTask.java MergeSortTask.java ForkJoinExamples.java</code> e <code>java ForkJoinExamples</code> con JDK 17. Il main invoca le radici su un pool esplicito; richiede lo shutdown nel <code>finally</code> e, nel percorso normale, ne verifica la terminazione. Non chiude il common pool.</p>
+
+<!-- BEGIN FORKJOIN CONTENT ForkJoinExamples -->
+<p><a href="assets/examples/ForkJoinExamples.java" download>Scarica ForkJoinExamples.java</a> · esempio editoriale completo, Java 17.</p>
+<details data-forkjoin-example="ForkJoinExamples"><summary>ForkJoinExamples: codice completo</summary>
+<pre data-forkjoin-source="ForkJoinExamples" tabindex="0" role="region" aria-label="Codice Java ForkJoinExamples"><code class="language-java">import java.util.Arrays;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
+
+/** Java 17 entry point for the two canonical task classes. */
+public final class ForkJoinExamples {
+    private ForkJoinExamples() { }
+
+    public static void main(String[] args) throws InterruptedException {
+        int[] values = {8, 3, 7, 1, 9, 2, 6, 4};
+        ForkJoinPool pool = new ForkJoinPool(2);
+        try {
+            long sum = pool.invoke(new SumTask(values, 0, values.length, 2));
+            System.out.println(&quot;sum = &quot; + sum);
+            pool.invoke(new MergeSortTask(values, 0, values.length, 2));
+            System.out.println(&quot;sorted = &quot; + Arrays.toString(values));
+        } finally {
+            pool.shutdown(); // This method owns the pool, not the common pool.
+        }
+        if (!pool.awaitTermination(5, TimeUnit.SECONDS)) {
+            throw new IllegalStateException(&quot;Pool did not terminate within test deadline&quot;);
         }
     }
-}</code></pre>
+}
+</code></pre>
+</details>
+<!-- END FORKJOIN CONTENT ForkJoinExamples -->
+
+    <p>Riferimenti: <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/ForkJoinPool.html">ForkJoinPool, Java 17</a> e <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/ForkJoinTask.html">ForkJoinTask, Java 17</a>. Gli esempi editoriali completano il tema delle slide «Task-Oriented Programming in Java»; non sono un benchmark né una trascrizione integrale delle slide.</p>
+
+    <h3>Structured concurrency: API distinta e dipendente dalla versione</h3>
 
     <p>Pi&ugrave; recentemente, Java ha introdotto la <strong>Structured Concurrency</strong> (JEP 437, JDK 20+), che estende il modello fork-join con un approccio strutturato: se un task si divide in sottotask concorrenti, questi devono tornare tutti allo stesso blocco di codice (<code>scope</code>) del task padre.</p>
 

@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Thirty-four reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Thirty-five reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing, rankSpacing and
 wrappingWidth (120–600 px, to keep long identifiers on a line without smaller text).
 Unknown overrides fail; fonts are never made smaller to accommodate content.
@@ -65,6 +65,9 @@ node java-basics-browser-test.cjs
 NOTES_JDK=/path/to/jdk node barrier-java-test.cjs
 node barrier-content.cjs --check
 node barrier-browser-test.cjs
+NOTES_JDK=/path/to/jdk node forkjoin-java-test.cjs
+node forkjoin-content.cjs --check
+node forkjoin-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -77,6 +80,14 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Fork-Join algorithms and successful dependencies
+
+PCD8's sum and merge sort now have complete canonical Java sources, independent
+sequential oracles and real-pool tests. A shared-renderer diagram distinguishes
+scheduled work from local compute and combination after completion; prose no
+longer promises full worker utilization or equates divide-and-conquer with
+MapReduce. See [Fork-Join evidence and limits](FORKJOIN.md).
 
 ### Barrier generations and one-shot latches
 

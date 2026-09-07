@@ -2,6 +2,31 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD8 Fork-Join algorithms and dependencies
+
+Preview: [section 16](../../pcd/cap-08-java.html#s16).
+
+Complete canonical sum, merge sort and owned-pool entry-point sources replace
+partial snippets. Prose distinguishes scheduling from direct compute, successful
+completion from cancellation policy, work-stealing from guaranteed utilization,
+and divide-and-conquer from MapReduce. One native shared-renderer SVG represents
+the six-node/six-edge dependency graph; the left and right branches match their
+task names spatially. [Evidence and limits](../../dev/legacy-diagrams/FORKJOIN.md).
+
+Warning-free Java 17 compilation and 1,206 cases / 3,636 checks passed using
+parallelism 1, 2 and 4, sequential sum/sort oracles, invalid arguments, subranges,
+extreme values, independent roots and pool termination. Four desktop/mobile,
+JS/no-JS views verified exact sources/downloads, markup, image and keyboard
+interaction; the chapter's existing widgets passed. Native diagram, code and
+responsive chapter screenshots were visually inspected. Shared tests cover
+35 graphs and 37 original-font assets; twenty desktop/mobile page visits and ten
+no-JS image checks passed. No paid image generation or production publication.
+
+Current inventory: 315 pages / 998 figure elements; the original fifteen-course
+scope is still 208 chapters / 882 figures. Physics, version-specific structured
+concurrency and the rest of the full-site review remain open. Preexisting root
+review/report modifications remain untouched and unstaged.
+
 ## Latest addition: PCD8 cyclic barrier generations and one-shot latch
 
 Preview: [section 7](../../pcd/cap-08-java.html#s7).

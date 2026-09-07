@@ -23,6 +23,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'pcd-swing-refresh':[7,6]});
    Object.assign(counts,{'pcd-thread-start':[7,7]});
    Object.assign(counts,{'pcd-barrier-generations':[6,5]});
+   Object.assign(counts,{'pcd-forkjoin-dependencies':[6,6]});
+   if(e.id==='pcd-forkjoin-dependencies')for(const pair of ['P_F','F_C','F_L','C_J','L_J','J_M'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Fork-Join dependency '+pair);
    if(e.id==='pcd-barrier-generations')for(const pair of ['A_B','B_C','C_D','D_E','E_F'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Generation trace '+pair);
    if(e.id==='pcd-thread-start')for(const pair of ['T_D','D_C','T_S','C_S','S_W','W_E','E_X'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Thread launch relation '+pair);
    if(e.id==='pcd-swing-refresh')for(const pair of ['W_M','M_S','S_Q','Q_E','E_V','E_D'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Swing snapshot transition '+pair);
@@ -57,6 +59,12 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
     return {outside,collisions,xmlErrors:xml.querySelectorAll('parsererror').length,invalid};
    });
    assert.deepEqual(bounds,{outside:[],collisions:[],xmlErrors:0,invalid:0},e.id);
+   if(e.id==='pcd-forkjoin-dependencies')assert(await r.page.evaluate(()=>{
+    const nodes=[...document.querySelectorAll('.node')];
+    const left=nodes.find(n=>n.textContent.startsWith('Calcolo sinistro'));
+    const right=nodes.find(n=>n.textContent.startsWith('right.compute()'));
+    return left.getBoundingClientRect().right<right.getBoundingClientRect().left;
+   }),'Left/right task placement must match their labels');
    if(e.id==='pcd-thread-start')assert(await r.page.evaluate(()=>[...document.querySelectorAll('svg text')].some(t=>t.textContent.replace(/\s/g,'')==='IllegalThreadStateException'&&t.getBBox().height<22)),'Exception name must fit on one line');
    await r.page.locator('svg').screenshot({path:path.join(out,e.id+'.png')});
    results.push({id:e.id,nodes:a.nodes,edges:a.edges.length,width:a.width,height:a.height,...bounds});

@@ -1,0 +1,10 @@
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),{execFileSync}=require('node:child_process');
+const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-artifacts';
+const tool=name=>process.env.NOTES_JDK?path.join(process.env.NOTES_JDK,'bin',name):name;
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'notes-forkjoin-classes-')),options={encoding:'utf8',timeout:60000};
+execFileSync(tool('javac'),['-Xlint:all','-Werror','-d',dir,...['SumTask','MergeSortTask','ForkJoinExamples'].map(n=>root+'/pcd/assets/examples/'+n+'.java'),__dirname+'/ForkJoinExamplesTest.java'],options);
+const result=execFileSync(tool('java'),['-ea','-cp',dir,'ForkJoinExamplesTest'],options).trim();
+const example=execFileSync(tool('java'),['-ea','-cp',dir,'ForkJoinExamples'],options).trim();
+assert.equal(example,'sum = 40\nsorted = [1, 2, 3, 4, 6, 7, 8, 9]');
+fs.writeFileSync(out+'/forkjoin-java-test.json',JSON.stringify({compiler:execFileSync(tool('javac'),['-version'],options).trim(),result,example,classDirectory:dir},null,2)+'\n');
+console.log(result+'\n'+example);

@@ -110,8 +110,9 @@ The subsequent [Swing revision](SWING.md) handles sections 12–14, including th
 EDT claims, partial GUI examples, annotations and related quiz answer.
 The later [Java basics revision](JAVA-BASICS.md) corrects the thread/lock
 introduction, bounded counter and several quiz absolutes; the later
-[barrier/latch revision](BARRIERS.md) handles section 7. Physics and
-version-specific Fork-Join/structured-concurrency material remain outside these
+[barrier/latch revision](BARRIERS.md) handles section 7. The later
+[Fork-Join revision](FORKJOIN.md) completes sum and merge sort. Physics and
+version-specific structured-concurrency material remain outside these
 checkpoints; passing widget clicks do not certify them.
 At this executor checkpoint the inventory was 315 pages/994 figure elements, with 96 raw Mermaid
 blocks remaining across 27 pages; neither count establishes content correctness.
