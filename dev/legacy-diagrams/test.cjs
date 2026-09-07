@@ -19,6 +19,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'pcd-raft-commit':[7,7]});
    Object.assign(counts,{'pcd-dining-wait':[5,5]});
    Object.assign(counts,{'pcd-monitor-components':[5,4],'pcd-monitor-reentry':[7,7]});
+   Object.assign(counts,{'pcd-executor-types':[4,3]});
+   if(e.id==='pcd-executor-types')for(const pair of ['S_E','E_B','F_E'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Executor relation '+pair);
    if(e.id==='pcd-monitor-reentry')for(const pair of ['E_A','A_P','P_U','P_W','W_N','N_E','U_X'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Monitor ownership transition '+pair);
    if(e.id==='pcd-dining-wait')for(let i=0;i<5;i++)assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_F${i}_F${(i+1)%5}_`)&&x.end).length,1,'Dining wait dependency');
    if(e.id==='pcd-dining-wait')for(let i=0;i<5;i++)for(const label of ['F'+i,'f'+i])assert.equal(a.text.filter(t=>t===label).length,1,'Every philosopher/request label appears exactly once');

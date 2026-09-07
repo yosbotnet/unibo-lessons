@@ -2,6 +2,30 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD8 executor types and observable cancellation
+
+Preview: [types and producer](../../pcd/cap-08-java.html#s10),
+[executable cancellation comparison](../../pcd/cap-08-java.html#s11).
+
+One native SVG replaces the ambiguous hierarchy and restores generic type labels;
+no runtime Mermaid remains in this chapter. The prime producer now updates the
+prime instead of emitting 2 forever. Downloadable Java sources and the comparison
+table share canonical code/real execution, distinguishing cancelled Future,
+task-body exit and executor termination. Shutdown, interruption, visibility and
+poison-pill prose are corrected; three no-JS mobile table overflows are repaired.
+
+Verified warning-free Java 17 compilation, 40 controlled executor scenarios and
+20 producer/queue cancellation runs, four desktop/mobile/JS/no-JS chapter views,
+exact code/downloads/table, five annotation widgets, quiz, tabs and lost-update
+stepper. Native graph and chapter screenshots were visually inspected. Shared
+regressions pass for 31 diagrams, 33 font assets, 20 desktop/mobile page visits
+and ten no-JS image-loading visits. [Evidence and open issues](../../dev/legacy-diagrams/EXECUTORS.md).
+
+Current inventory: 315 pages/994 figure elements, separately 96 raw Mermaid blocks
+in 27 pages. The original 208-chapter/882-figure scope is unchanged. Further PCD8
+content review and the full-site review remain open. Production and preexisting
+root review/report edits are untouched.
+
 ## Latest addition: PCD7 monitors and compilable examples
 
 Preview: [figures](../../pcd/cap-07-monitor.html#s2),

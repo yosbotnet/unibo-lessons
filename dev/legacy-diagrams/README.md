@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Thirty reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Thirty-one reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -52,6 +52,9 @@ node dining-traces.cjs --check
 node monitor-code.cjs --check
 NOTES_JDK=/path/to/jdk node monitor-java-test.cjs
 node monitor-browser-test.cjs
+NOTES_JDK=/path/to/jdk node executor-java-test.cjs
+NOTES_JDK=/path/to/jdk node executor-content.cjs --check
+node executor-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -64,6 +67,15 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Executors: type relationships, cancellation and actual task exit
+
+PCD8's broken generic labels and ambiguous hierarchy arrows are replaced by one
+native shared-renderer SVG. A real Java 17 executor experiment distinguishes
+Future cancellation, task-body exit and pool termination; its observed table and
+two downloadable Java sources are generated into static HTML. PrimeProducer now
+advances the prime and terminates when interrupted on a full blocking queue.
+See [Executor evidence and remaining chapter issues](EXECUTORS.md).
 
 ### Monitors: wait, notify, ownership and real Java examples
 

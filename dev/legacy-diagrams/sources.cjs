@@ -1,6 +1,7 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ ...require('./executor-sources.cjs'),
  ...require('./monitor-sources.cjs'),
  require('./dining-source.cjs'),
  {id:'pcd-raft-commit',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:null,title:'Raft: quando il leader può avanzare commitIndex',overrides:{rankSpacing:30,nodeSpacing:28},
