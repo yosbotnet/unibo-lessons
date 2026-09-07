@@ -2,7 +2,68 @@
 
 Preview only. Production remains at `f0f4bde`.
 
-## Latest addition: CAP operation histories and proof diagrams
+## Latest addition: DS-C4 PBFT evidence and consensus explanations
+
+Preview: [PBFT diagram and message model](../../ds/DS-C4.html#s9),
+[quorum assumptions](../../ds/DS-C4.html#s6),
+[transfer fixture](../../ds/DS-C4.html#s8),
+[corrected confirmation calculation](../../ds/DS-C4.html#s11).
+
+The old PBFT widget advanced every replica through scripted phases and used the
+wrong PREPARE threshold. Its replacement delivers real queued messages and shows
+separate local proposal, prepare and commit evidence. The native SVG distinguishes
+the thresholds and execution prerequisites. Two conceptual state explorers, the
+quorum derivation and related quiz answers were corrected alongside the model.
+FLP is no longer an unconditional ban on successful asynchronous consensus.
+
+Verified in this checkpoint:
+
+- 1,000 reordered normal-case schedules across f=0–3 / N=3f+1, with 74,000 message
+  deliveries. An independent oracle reconstructs local evidence from deliveries
+  and checks prepared, execute and client-acceptance conditions after every step.
+  Faulty backup votes include duplicates and wrong digest/view/slot. The explicit
+  premature-commit case cannot execute without the required local evidence.
+- 126,489 certificate-subset pairs over 1–10 replica identities verify the exact
+  intersection lower bound. The N=5/f=1/Q=3 counterexample is distinguished from
+  the N=4/f=1/Q=3 PBFT configuration.
+- FIFO and reverse-queue UI schedules at 1280 and 390 px: exact local table cells,
+  client acceptance threshold, pending messages, reset, keyboard activation and
+  focus. Both conceptual maps' transitions and all chapter tabs are exercised.
+- 23 model-generated PBFT trace rows and the native image remain available without
+  JavaScript. Native and desktop/mobile screenshots were visually inspected,
+  including a mixed state where one correct replica is prepared and others wait.
+  Long labels and excessive initial vertical gaps were corrected without reducing
+  the font; the final flowchart fits mobile width at native size.
+- 22 static diagrams pass XML, geometry, text collision/bounds, expected nodes and
+  edges, determinism and invalid-input tests. Chapter/asset and PBFT-trace drift
+  checks pass. Font checks cover 24 native assets with the exact original font.
+- 14 desktop/mobile HTTP visits pass; seven figure-bearing pages load images with
+  JavaScript disabled. These broad checks exercise selected affected widgets,
+  not every scientific or interactive claim in every chapter.
+- The 20-case DL preset suite passes; its four approved SVGs remain byte-identical.
+- Nakamoto approximation: 150 finite-form versus positive-tail comparisons pass.
+  Printed z=6 values for q=.10 and q=.13 match the formula. The old ratio and
+  99.999% confidence claim were incorrect; model assumptions and counting
+  conventions are now explicit, with primary-source links.
+- The transfer widget now completes without its out-of-scope-variable error.
+  Two valid transfers and two rejected fixtures produce A=15, B=7, C=5, E=.5;
+  repeated validation/reset is deterministic and the four static rows conserve
+  the initial 27.5-unit total. The example no longer claims users may mint ETH.
+
+Evidence: `pbft-test.json`, `static-test.json`, `font-test.json`,
+`browser-http-test.json`, `pbft-*.png`, `ds-pbft-normal*.png` and
+`ds-transfer-*.png` under `/home/ybc/notes-legacy-review-artifacts/`.
+Implementation bounds, primary papers and original-slide comparisons are in the
+[adapter README](../../dev/legacy-diagrams/README.md).
+
+This does not complete DS-C4: its legacy mining animation is explicitly marked
+unrepaired; the chain visualization has inconsistent balances and lacks useful
+branch links; block-format assumptions and smart-contract claims remain to review.
+The new PBFT model covers the normal case, not faulty-primary/view-change recovery.
+The full-site inventory is now 315 pages / 986 figure elements, not a count of
+approved figures. Production and the two preexisting review-file edits are untouched.
+
+## Previous addition: CAP operation histories and proof diagrams
 
 Preview: [DS-C1, interactive example](../../ds/DS-C1.html#s8),
 [proof](../../ds/DS-C1.html#s12), [six traces](../../ds/DS-C1.html#s13).

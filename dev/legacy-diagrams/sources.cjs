@@ -1,6 +1,20 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'ds-pbft-normal',file:'ds/DS-C4.html',slot:null,title:'PBFT normal case: different evidence at each step',
+ overrides:{rankSpacing:30},
+ requiredText:['2f backup PREPAREs','2f + 1 COMMITs','f + 1 matching replies'],
+ caption:'Local evidence flow for one request, not a globally synchronized round. N = 3f + 1; at most f Byzantine replicas. The primary contributes PRE-PREPARE, not a PREPARE. Matching means the same view, slot and digest, from distinct authenticated senders. Commit counts can include the local vote. Execution also waits for lower slots. Timeouts and safe view-change evidence are described in the text; they are not implemented by these arrows.',
+ source:`flowchart TD
+ A["Client request"] --> B["Primary: PRE-PREPARE<br/>view / slot / digest"]
+ B --> C["Backups: PREPARE<br/>Broadcast + own log"]
+ C --> D["Prepared locally<br/>Proposal +<br/>2f backup PREPAREs"]
+ D --> E["Replica broadcasts COMMIT"]
+ E --> F["Prepared locally +<br/>2f + 1 COMMITs<br/>Committed locally"]
+ F --> G["Lower slots executed<br/>Execute and reply"]
+ G --> H["Client accepts<br/>f + 1 matching replies"]
+ style D stroke:#B83D2D
+ style F stroke:#B83D2D`},
  {id:'ds-cap-policy',file:'ds/DS-C1.html',slot:null,title:'A partition: two concrete read policies',
  caption:'Both nodes are alive; G1 completed write(1) before the read at G2 begins. The arrows describe alternative policies and their consequences, not messages crossing the broken link. In this particular example, local reads finish with stale 0; authority reads wait for a reply. A finite wait alone is not a liveness violation: the availability failure follows if the required communication is prevented forever.',
  source:`flowchart TD

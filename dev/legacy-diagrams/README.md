@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Twenty-one reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twenty-two reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -39,6 +39,8 @@ node king-test.cjs
 node king-traces.cjs --check
 node cap-test.cjs
 node cap-traces.cjs --check
+node pbft-test.cjs
+node pbft-traces.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -100,10 +102,78 @@ not guaranteed inter-server message delivery, and the proof needs an explicit
 no-write comparison. The location-game diagram is framed as a historical slide
 example, not a verified current deployment or an established cause of an outage.
 
-Remaining DS-C4 work includes the unconditional BFT/FLP statements, probabilistic
-finality assumptions, PoW/Ethereum historical labeling, and the associated quiz.
-Only its CAP introduction is corrected in this checkpoint; this does not certify
-the rest of that chapter or the entire site.
+The following PBFT checkpoint extends this review into DS-C4. Neither checkpoint
+certifies the rest of the chapter or the entire site.
+
+### PBFT: local evidence instead of a global phase animation
+
+DS-C4 sections 5–6 and 9 now distinguish asynchronous safety from conditional
+liveness, and PRE-PREPARE, backup PREPARE, replica COMMIT and client REPLY evidence.
+At N=3f+1, prepared requires the request/proposal plus 2f distinct backup prepares;
+committed-local requires prepared and 2f+1 distinct matching commits. The original
+primary does not send PREPARE. A correct replica executes only after the lower
+slots; f+1 matching authenticated replies complete the client's request.
+The native diagram uses the shared angular-flow adapter, with full captions and
+the original embedded font. A first layout had awkward label wrapping and excess
+vertical gaps; concise labels and supported rank spacing corrected it without
+shrinking text. The two conceptual state explorers now describe actual protocol
+obligations, including evidence-preserving view changes, without claiming to run
+them. The quiz uses the same definitions.
+
+`ds/assets/pbft-normal.js` replaces the predetermined phase animation with actual
+queued messages and per-replica evidence. The UI example has an honest primary R1,
+silent backup R4, N=4/f=1 and one authenticated request X in view 0/slot 1; lower
+slots are assumed complete. X increments a counter from 0 to 1. The normal-case
+model also supports f=0–3 with N=3f+1 and up to f faulty backups for tests. A test
+adversary may send its own prepare/commit votes with mismatching digest/view/slot;
+it cannot use the adversary API to impersonate a correct sender. Duplicates count
+once, out-of-order evidence is buffered, and executions/replies are not fabricated
+by advancing a global phase counter. Authentication is assumed, not cryptographically
+implemented. Faulty primaries, view changes, checkpoints and multiple slots remain
+outside this normal-case model; it is not a full PBFT implementation.
+
+The static 23-row trace comes from the same model. Its FIFO queue order is one
+example, not a protocol channel assumption. Tests run 1,000 seeded reordered
+schedules (74,000 deliveries), with an independent oracle reconstructing local
+proposals and vote sets from delivery events, not trusting the model's phase flags.
+They test premature commits, duplicate Byzantine votes, bad metadata, copied
+snapshots, invalid API input and one execution per correct replica. Another
+126,489 pairs of certificate subsets over 1–10 identities verify the intersection
+bound. N=5/f=1/Q=3 is explicitly unsafe threshold reuse; quorum arithmetic alone
+does not define a generalized PBFT protocol.
+
+The surrounding PoW explanation now distinguishes work from raw chain length,
+labels Ethereum mining historical, and removes universal throughput/security
+claims. Section 11 uses q/(1−q) and lambda=zq/(1−q), distinguishes a known deficit
+from hidden-progress averaging, and identifies Nakamoto's expected-time Poisson
+approximation rather than presenting it as a universal measured risk. The printed
+q=.10/.13, z=6 values are checked, as are 150 comparisons with an independent
+positive Poisson-weighted tail calculation. The old 99.999% confidence claim fails
+that calculation. These are teaching calculations, not payment recommendations.
+
+The transaction widget's final-balance display previously referenced `b` outside
+its callback scope, throwing a ReferenceError. It now uses the actual balances.
+Its fabricated mint-ETH operation is replaced with an invalid-signature transfer;
+all four examples are explicitly toy units and supplied authentication fixtures.
+Two transfers apply, two are rejected, and total supply remains 27.5. A four-row
+static table records the results. This is not real Ethereum validation.
+
+Primary evidence: [Castro and Liskov 1999, §§3–4](https://pdos.csail.mit.edu/6.824/papers/castro-practicalbft.pdf),
+[FLP 1985](https://groups.csail.mit.edu/tds/papers/Lynch/jacm85.pdf),
+[Nakamoto 2008, especially §11](https://bitcoin.org/bitcoin.pdf),
+[Ethereum's Merge](https://ethereum.org/en/roadmap/merge/),
+and [Bitcoin Core proof-of-work validation](https://github.com/bitcoin/bitcoin/blob/master/src/pow.cpp).
+Local DS C4 slide text sections on BFT (slides 69–74) and PBFT (109–111) were
+checked. The slide shorthand about unconditional impossibility and all protocols
+using periodic rounds needs the qualifications now present in the chapter.
+
+Still open in DS-C4: the mining animation uses additive progress rather than hash
+trials and has unreliable timer/reset semantics; it is visibly marked pending
+replacement. The chain visualizer has fictitious hash labels, an invalid transfer
+that affects subsequent displayed balances, missing explicit branch connections,
+and non-keyboard block selection. Block-format/timing generalizations and several
+smart-contract limitations also need review. These are confirmed next targets,
+not certified correct by the PBFT tests.
 
 ### Font fidelity in image contexts
 
