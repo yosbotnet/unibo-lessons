@@ -22,6 +22,8 @@ const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-ar
    Object.assign(counts,{'pcd-executor-types':[4,3]});
    Object.assign(counts,{'pcd-swing-refresh':[7,6]});
    Object.assign(counts,{'pcd-thread-start':[7,7]});
+   Object.assign(counts,{'pcd-barrier-generations':[6,5]});
+   if(e.id==='pcd-barrier-generations')for(const pair of ['A_B','B_C','C_D','D_E','E_F'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Generation trace '+pair);
    if(e.id==='pcd-thread-start')for(const pair of ['T_D','D_C','T_S','C_S','S_W','W_E','E_X'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Thread launch relation '+pair);
    if(e.id==='pcd-swing-refresh')for(const pair of ['W_M','M_S','S_Q','Q_E','E_V','E_D'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Swing snapshot transition '+pair);
    if(e.id==='pcd-executor-types')for(const pair of ['S_E','E_B','F_E'])assert.equal(a.edges.filter(x=>x.id.startsWith(`${e.id}-L_${pair}_`)&&x.end).length,1,'Executor relation '+pair);

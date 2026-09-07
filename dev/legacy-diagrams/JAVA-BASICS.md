@@ -108,8 +108,9 @@ Primary API references:
 [ReentrantLock Java 17](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/locks/ReentrantLock.html),
 [Collections synchronizedList](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/Collections.html#synchronizedList(java.util.List)).
 
-This checkpoint does not certify the untouched barrier/latch code, physics example,
-parallel algorithms, or version-specific StructuredTaskScope example. Those still
+The later [barrier/latch revision](BARRIERS.md) corrects section 7. This checkpoint
+does not certify the physics example, parallel algorithms, or version-specific
+StructuredTaskScope example. Those still
 need executable/semantic review. In particular, the chapter's broad JDK20+ label
 must not be treated as verified compatibility with all later APIs. Whole-site
 inventory is 315 pages/996 figure elements, with 96 raw Mermaid blocks on 27 pages;

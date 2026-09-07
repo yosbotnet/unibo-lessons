@@ -491,61 +491,155 @@ public final class BoundedCounter {
   </section>
   <section id="s7" data-src="PCD-2026-03-16.html#s15">
     <h2>7. Laboratorio: barriera e latch</h2>
-      <p>Il professore ha dedicato la parte finale della lezione a mostrare due componenti di coordinazione riutilizzabili implementati come monitor: la <strong>barriera</strong> e il <strong>latch</strong> (countdown).</p>
+    <p>La lezione confronta due strumenti di coordinazione: una barriera ciclica per fasi ripetute e un latch per un’apertura una tantum. Gli esempi editoriali sotto usano monitor intrinseci e sono compilabili in Java 17. Non implementano tutte le opzioni delle corrispondenti classi di libreria.</p>
 
   <h3>Barriera (Barrier)</h3>
-  <p>Una barriera e un punto di sincronizzazione in cui <var>N</var> thread si incontrano. Ogni thread chiama <code>await()</code> e rimane bloccato finche tutti gli <var>N</var> partecipanti non sono arrivati. L'ultimo thread che arriva sblocca tutti gli altri.</p>
+  <p>In ogni giro, N partecipanti chiamano await: l’ultimo arrivo completa quella generazione e rende possibile il ritorno normale degli altri. Non significa che i thread riprendano tutti simultaneamente. La barriera conta arrivi, non registra identità: il programma deve far partecipare correttamente il gruppo a ogni fase.</p>
 
-  <p><strong>Implementazione con synchronized:</strong></p>
+  <div class="callout warn"><span class="callout-label">Correzione del precedente esempio</span><p>Il vecchio CyclicBarrierMonitor incrementava nArrived senza azzerarlo: superato N, ogni chiamata successiva passava subito. Non era ciclico. Anche azzerare il contatore senza distinguere le generazioni è insufficiente: un thread veloce può entrare nel giro nuovo prima che un waiter del giro precedente riprenda.</p></div>
 
-  <pre><code class="language-java">public class CyclicBarrierMonitor {
-    private int nParticipants;
-    private int nArrived;
+<!-- BEGIN STATIC DIAGRAM pcd-barrier-generations -->
+<figure data-static-diagram="pcd-barrier-generations" style="margin:1.6rem 0;max-width:100%">
+<div role="region" aria-label="Barriera ciclica: un nuovo arrivo non cancella il giro precedente — scroll horizontally if needed" tabindex="0" style="overflow-x:auto;max-width:100%;background:#F3EFE3;border:1px solid #C9C3B6;padding:12px;box-sizing:border-box">
+<img src="assets/diagrams/pcd-barrier-generations.svg" width="240" height="462" alt="Barriera ciclica: un nuovo arrivo non cancella il giro precedente" style="display:block;width:240px;max-width:none;height:auto;margin:0 auto">
+</div>
+<figcaption style="margin-top:.6rem;font-size:1rem;line-height:1.6">Traccia verificata con due thread e due generazioni. Il test forza B a rientrare nel secondo await prima che A possa riacquisire il monitor. A riconosce che la propria generazione g è già finita, anche se il contatore di g+1 non è zero. Azzerare soltanto un contatore condiviso non basta: ogni waiter conserva l’identità della generazione a cui appartiene. Le frecce indicano l’ordine di questa esecuzione controllata, non messaggi fra thread; interruzione e reset sono casi separati.</figcaption>
+</figure>
+<!-- END STATIC DIAGRAM pcd-barrier-generations -->
 
-    public CyclicBarrierMonitor(int n) {
-        nParticipants = n;
-        nArrived = 0;
+  <p>Ogni await conserva un riferimento alla propria Generation. L’ultimo arrivo pubblica una generazione nuova e notifica i waiter; chi si risveglia distingue così completamento del proprio giro, generazione rotta e semplice notifica senza completamento. L’indice restituito va da N−1 per il primo arrivo a 0 per l’ultimo.</p>
+
+<!-- BEGIN BARRIER CONTENT CyclicBarrierMonitor -->
+<p><a href="assets/examples/CyclicBarrierMonitor.java" download>Scarica CyclicBarrierMonitor.java</a> · esempio editoriale Java 17.</p>
+<details data-barrier-example="CyclicBarrierMonitor"><summary>CyclicBarrierMonitor: implementazione completa</summary>
+<pre data-barrier-source="CyclicBarrierMonitor" tabindex="0" role="region" aria-label="Codice Java CyclicBarrierMonitor"><code class="language-java">import java.util.concurrent.BrokenBarrierException;
+
+/** Teaching subset: fixed parties, interruptible await and reset; no timeout/action. */
+public final class CyclicBarrierMonitor {
+    private static final class Generation {
+        boolean broken;
     }
 
-    public synchronized void await() throws InterruptedException {
-        nArrived++;
-        while (nArrived &lt; nParticipants) {
-            wait();        // aspetta che arrivino tutti
+    private final int parties;
+    private int remaining;
+    private Generation generation = new Generation();
+
+    public CyclicBarrierMonitor(int parties) {
+        if (parties &lt;= 0) {
+            throw new IllegalArgumentException(&quot;Positive parties required&quot;);
         }
-        notifyAll();       // sblocca tutti
+        this.parties = parties;
+        remaining = parties;
     }
-}</code></pre>
+
+    private void breakGeneration() {
+        generation.broken = true;
+        remaining = parties;
+        notifyAll(); // Called only while this monitor is owned.
+    }
+
+    public synchronized int await()
+            throws InterruptedException, BrokenBarrierException {
+        final Generation joined = generation;
+        if (joined.broken) throw new BrokenBarrierException();
+        if (Thread.interrupted()) {
+            breakGeneration();
+            throw new InterruptedException();
+        }
+        final int index = --remaining;
+        if (index == 0) {
+            remaining = parties;
+            generation = new Generation();
+            notifyAll();
+            return 0;
+        }
+        for (;;) {
+            try {
+                wait();
+            } catch (InterruptedException interrupted) {
+                if (joined == generation &amp;&amp; !joined.broken) {
+                    breakGeneration();
+                    throw interrupted;
+                }
+                // Completion or a previous break won the race. Preserve the flag.
+                Thread.currentThread().interrupt();
+            }
+            if (joined.broken) throw new BrokenBarrierException();
+            if (joined != generation) return index;
+            // Notification alone (including a spurious wake) is not completion.
+        }
+    }
+
+    public synchronized boolean isBroken() {
+        return generation.broken;
+    }
+
+    /** Existing waiters fail; coordinate participating threads before reuse. */
+    public synchronized void reset() {
+        breakGeneration();
+        generation = new Generation();
+        remaining = parties;
+    }
+}
+</code></pre>
+</details>
+<!-- END BARRIER CONTENT CyclicBarrierMonitor -->
+
+  <p>Se un partecipante viene interrotto mentre la sua generazione è ancora attiva, la rompe: lui riceve InterruptedException e i peer ricevono BrokenBarrierException. I nuovi arrivi falliscono finché un coordinatore non esegue reset o non fornisce una nuova barriera. Se il giro era già stato completato prima che l’interruzione venga gestita, il vecchio await può ritornare normalmente conservando lo stato di interruzione: non deve rompere il giro nuovo.</p>
+
+  <p>Reset rompe la vecchia generazione e ne crea una nuova; non sposta automaticamente i waiter nel giro nuovo e non ripara il lavoro applicativo. Occorre coordinare il gruppo prima del riuso. L’esempio non include timeout né barrier action; per queste opzioni si usa la classe di libreria. L’ingresso nel monitor synchronized non è interrompibile: il controllo dello stato di interruzione avviene dopo l’acquisizione.</p>
 
   <div class="callout exam">
     <span class="callout-label">Per l'esame</span>
-    <p>Esercizio del professore: pensate a come specificare la correttezza di una barriera in Java usando le proprieta di safety e liveness. La proprieta di safety e: "nessun thread procede oltre la barriera prima che tutti gli N thread siano arrivati". La liveness e: "se tutti gli N thread sono in attesa, qualcuno procede".</p>
+    <p>Safety: nessun await ritorna normalmente dal giro g prima di N arrivi in g. Liveness: se tutti arrivano, la generazione non si rompe e i thread continuano a essere schedulati, tutti gli await di quel giro possono completare. Se un partecipante non arriva mai, la barriera non promette progresso; l’ultimo arrivato non deve necessariamente sospendersi.</p>
   </div>
 
-  <p><strong>Versione con ReentrantLock + Condition:</strong> nella seconda implementazione, si usa una condition variable <var>allArrived</var> con <code>await()</code> e <code>signalAll()</code>. Attenzione: <code>notifyAll</code> chiamato sulla condition variable non equivale a <code>signalAll</code> — un errore subdolo che il professore ha mostrato in aula.</p>
+  <p><strong>Con ReentrantLock e Condition:</strong> restano necessari contatore, generazioni e politica di fallimento. Le attese usano Condition.await e le notifiche signalAll sotto il lock associato. Chiamare Object.notifyAll sulla Condition riguarda invece il suo monitor intrinseco: senza possederlo lancia IllegalMonitorStateException, e anche possedendolo non segnala la coda della Condition. Non è una sostituzione equivalente.</p>
 
   <h3>Latch (CountDown)</h3>
-  <p>Un latch permette a thread di attendere (<code>await()</code>) finche non viene raggiunto un conteggio zero tramite chiamate <code>countDown()</code>. A differenza della barriera, non e ciclico e il conteggio e monotono decrescente.</p>
+  <p>CountDownLatchMonitor attende che countDown porti il conteggio a zero. Il conteggio iniziale può essere zero, ma non negativo; dopo l’apertura resta zero e altri countDown non lo riducono ulteriormente. Await non consuma permessi e non decrementa il conteggio. Il numero dei waiter non deve coincidere con il conteggio iniziale.</p>
 
-  <pre><code class="language-java">public class CountDownLatchMonitor {
+<!-- BEGIN BARRIER CONTENT CountDownLatchMonitor -->
+<p><a href="assets/examples/CountDownLatchMonitor.java" download>Scarica CountDownLatchMonitor.java</a> · esempio editoriale Java 17.</p>
+<details data-barrier-example="CountDownLatchMonitor"><summary>CountDownLatchMonitor: implementazione completa</summary>
+<pre data-barrier-source="CountDownLatchMonitor" tabindex="0" role="region" aria-label="Codice Java CountDownLatchMonitor"><code class="language-java">/** Teaching subset: one-shot latch with untimed interruptible await. */
+public final class CountDownLatchMonitor {
     private int count;
 
-    public CountDownLatchMonitor(int count) { this.count = count; }
+    public CountDownLatchMonitor(int count) {
+        if (count &lt; 0) {
+            throw new IllegalArgumentException(&quot;Nonnegative count required&quot;);
+        }
+        this.count = count;
+    }
 
     public synchronized void await() throws InterruptedException {
-        while (count > 0) { wait(); }
+        if (Thread.interrupted()) throw new InterruptedException();
+        while (count &gt; 0) wait();
     }
 
     public synchronized void countDown() {
-        if (count > 0) {
+        if (count &gt; 0) {
             count--;
-            if (count == 0) { notifyAll(); }
+            if (count == 0) notifyAll();
         }
     }
-}</code></pre>
+
+    public synchronized int getCount() {
+        return count;
+    }
+}
+</code></pre>
+</details>
+<!-- END BARRIER CONTENT CountDownLatchMonitor -->
+
+  <p>Interrompere un waiter lo fa uscire con InterruptedException e stato azzerato, ma non decrementa né rompe il latch per gli altri. Il controllo iniziale dell’interruzione si applica anche al latch già aperto. La condizione resta in un ciclo: una notifica, da sola, non significa che count sia zero.</p>
+
+  <p>Compila i file con <code>javac CyclicBarrierMonitor.java CountDownLatchMonitor.java</code>. Sono componenti da usare nei propri worker, non applicazioni con main. Riferimenti Java 17: <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/CyclicBarrier.html">CyclicBarrier</a> e <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/CountDownLatch.html">CountDownLatch</a>. Le prove includono il difetto del vecchio sorgente, più giri della versione corretta, rientro veloce, interruzioni, reset e latch aperto.</p>
 
   <div class="callout idea">
     <span class="callout-label">Differenza chiave</span>
-    <p>Nella barriera, tutti i thread aspettano tutti gli altri — e simmetrica. Nel latch, un thread (o piu) aspettano che un contatore si azzeri — e asimmetrica. Usi tipici del latch: aspettare che un insieme di servizi sia pronto prima di procedere.</p>
+    <p>La barriera separa fasi ripetute di un gruppo; il latch attende un insieme di eventi conteggiati una volta sola. CountDown non prova da sé che un servizio sia partito correttamente: è il protocollo applicativo a stabilire quando decrementare e come comunicare eventuali errori.</p>
   </div>
   </section>
   <section id="s8" data-src="PCD-2026-03-20.html#s1">

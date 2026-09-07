@@ -2,6 +2,29 @@
 
 Preview only. Production remains at `f0f4bde`.
 
+## Latest addition: PCD8 cyclic barrier generations and one-shot latch
+
+Preview: [section 7](../../pcd/cap-08-java.html#s7).
+
+The previous barrier was not cyclic: after its first round every later caller
+could pass. Two canonical Java monitor classes now cover actual generations,
+interruption, reset, initial-count validation and latch opening semantics. One
+shared-renderer native diagram follows a forced two-thread/two-round execution;
+its labels are checked against the recorded Java trace.
+
+Verified original-bug reproduction, warning-free Java compilation and three runs
+of over 14,000 assertions each, including 2,400 normal generations, fast reentry,
+unique arrival indices, interruption/break/reset races and one-shot latch cases.
+Four desktop/mobile/JS/no-JS views verify exact code/downloads, native diagram,
+trace labels, markup and scrolling. Existing PCD8 widgets pass. The native diagram
+and responsive chapter were visually inspected. Shared tests pass for 34 graphs
+and 36 original-font assets; twenty shared desktop/mobile page visits and ten
+no-JS image-loading checks pass too. [Evidence and limits](../../dev/legacy-diagrams/BARRIERS.md).
+
+Current inventory: 315 pages/997 figure elements, with 96 raw Mermaid blocks on
+27 pages. Physics, Fork-Join/structured concurrency and the full-site review remain open.
+No production deployment or changes to preexisting root review/report edits.
+
 ## Latest addition: PCD8 thread launch, lock contracts and bounded actions
 
 Preview: [launch diagram](../../pcd/cap-08-java.html#s1),
