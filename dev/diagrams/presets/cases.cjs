@@ -1,0 +1,21 @@
+const base=require('../sources/editorial.json');
+const clone=x=>JSON.parse(JSON.stringify(x));
+const cases=clone(base);
+function variant(preset,id,change){const spec=clone(base.find(s=>s.preset===preset));Object.assign(spec,{id,plate:undefined},change);cases.push(spec);return spec}
+variant('neuron','neuron-five',{inputs:['x₁','x₂','x₃','x₄','x₅']});
+variant('neuron','neuron-eight',{inputs:['x₁','x₂','x₃','x₄','x₅','x₆','x₇','x₈']});
+variant('neuron','neuron-single',{inputs:['x'],bias:false});
+variant('neuron','neuron-single-large-activation',{inputs:['x'],bias:false,activation:'sigmoid(a + adjustment)',overrides:{activationShape:'circle'}});
+variant('neuron','neuron-no-bias',{inputs:['a','b'],bias:false});
+variant('neuron','neuron-labels',{inputs:['signal A','signal B','signal C'],activation:'ReLU(a)',output:'score'});
+variant('neuron','neuron-custom',{overrides:{inputOrder:['x0','x3','x2','x1'],activationShape:'circle',rowGap:40}});
+variant('autodiff','autodiff-zero',{values:{x:0,y:0,z:0}});
+variant('autodiff','autodiff-values',{values:{x:1.25,y:-0.5,z:4}});
+variant('autodiff','autodiff-renamed',{labels:{x:'alpha',y:'beta',z:'gamma',q:'sum',f:'result'}});
+variant('inception','inception-channels',{input:{height:14,width:14,channels:256},branches:[[{kind:'conv',kernel:1,channels:128}],[{kind:'conv',kernel:1,channels:64,reduction:true},{kind:'conv',kernel:3,channels:192}],[{kind:'pool',kernel:3},{kind:'conv',kernel:1,channels:64}]]});
+variant('inception','inception-deeper',{branches:[[{kind:'conv',kernel:1,channels:64}],[{kind:'conv',kernel:1,channels:32,reduction:true},{kind:'conv',kernel:3,channels:64},{kind:'conv',kernel:3,channels:128}],[{kind:'pool',kernel:3},{kind:'conv',kernel:1,channels:32}],[{kind:'conv',kernel:5,channels:16}],[{kind:'conv',kernel:7,channels:8}]]});
+variant('inception','inception-wide-labels',{input:{height:128,width:128,channels:4096},branches:[[{kind:'pool',kernel:11},{kind:'conv',kernel:1,channels:2048}],[{kind:'conv',kernel:1,channels:1024,reduction:true},{kind:'conv',kernel:11,channels:8192}]]});
+variant('gru','gru-stacked',{layout:'stacked'});
+variant('gru','gru-candidate-gate',{updateConvention:'candidate'});
+variant('gru','gru-renamed',{labels:{previous:'state_old',input:'input',reset:'reset',update:'update',candidate:'proposal',output:'state_new'}});
+module.exports=cases;
