@@ -2,7 +2,44 @@
 
 Preview only. Production remains at `f0f4bde`.
 
-## Latest addition: actual fonts and quantitative correctness
+## Latest addition: Chang–Roberts diagrams, protocol and simulator
+
+Preview: [PCD16, sections 9–10](../../pcd/cap-16-algoritmi-distribuiti.html#s9).
+The general flowchart renderer now has twelve reviewed sources. The two new
+diagrams distinguish physical/logical connections from execution phases, preserve
+the original embedded font and palette, and have straight/angular native arrows.
+The six-process example restores the missing candidate return to P7 and starts
+the announcement at P7, not P2: 7 election + 6 leader transmissions.
+
+The previous state explorer was replaced with a message-driven simulator. Its
+participant state, FIFO queues, announcement and counts agree with the updated
+pseudocode and static HTML trace generated from the same pure model. The single
+initiator's 3N − 1 bound is no longer presented as the general concurrent bound.
+Assumptions and source references are explicit in the chapter and adapter README.
+
+Verification: 49,488 ring/initiator combinations through N=6 with one seeded random
+channel interleaving each; 5,038 single-initiator bounds; 1,000 late-initiation cases;
+exact worst-case examples N=2…12; exact 13-message trace and rejected invalid
+actions. Actual desktop/mobile controls and no-JavaScript fallback pass. Manual
+screenshots prompted wider tables and cleaner phase-label line breaks; scrolling
+is explicit, not hidden overflow or smaller text. Geometry/markup tests cover
+all twelve generated flowcharts. The original four approved DL SVGs are untouched.
+
+Evidence: `chang-test.json`, `static-test.json`, `browser-http-test.json`,
+`font-test.json` and `chang-*` / `pcd-chang-*` PNGs under
+`/home/ybc/notes-legacy-review-artifacts/`. These are scoped tests, not an exhaustive
+schedule proof or a certification of all PCD16 content. Causal ordering, snapshot
+and other listed scientific-review findings remain open. Production is unchanged.
+
+The remaining-runtime audit (`audit-after-chang.json`) covers 107 Mermaid blocks
+in 32 pages at both 1280 and 390 px: 64 visits, no renderer errors, invalid geometry,
+page overflow or JavaScript exceptions. It checks rendering, not scientific truth.
+The twelve-page HTTP regression suite, 13-asset font checks, Ricart–Agrawala
+500-scenario/50,000-action tests and 20-case DL preset suite pass. The source
+inventory now has 315 pages and 976 figure elements; the original fifteen-course
+208-page / 882-figure boundary remains unchanged and is not a completion claim.
+
+## Previous addition (3198ca1): actual fonts and quantitative correctness
 
 The font-loading question below is resolved. The original IBM Plex Mono Regular
 font is embedded, unmodified and with its complete OFL license, in all ten generated

@@ -1,6 +1,24 @@
 // Semantic sources, without coordinates. Captions explain what arrows mean.
 // `slot` is the zero-based block position in e543a37; original hashes are separate.
 module.exports=[
+ {id:'pcd-chang-ring',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:3,
+ title:'Chang–Roberts: anello logico unidirezionale',
+ caption:'Le frecce sono canali verso il successore: P1 → P2 → P3 → P4 → P1. Non sono una cronologia dei messaggi. Il PID massimo diventa leader soltanto quando riceve indietro la propria candidatura; poi avvia un giro distinto di annuncio.',
+ source:`flowchart LR
+ P1(("P1")) --> P2(("P2"))
+ P2 --> P3(("P3"))
+ P3 --> P4(("P4"))
+ P4 --> P1`},
+ {id:'pcd-chang-phases',file:'pcd/cap-16-algoritmi-distribuiti.html',slot:4,
+ title:'Un solo iniziatore: candidatura, ritorno, annuncio',
+ caption:'Anello P2 → P7 → P3 → P1 → P5 → P4 → P2. Il primo invio è P2 → P7: election(2). P7 sostituisce 2 con 7; election(7) percorre P7 → P3 → P1 → P5 → P4 → P2 → P7. Solo dopo questo ritorno P7 invia leader(7) lungo lo stesso giro completo. Totale: 7 election + 6 leader = 13 trasmissioni. Le frecce tra i riquadri ordinano le fasi, non rappresentano collegamenti di rete.',
+ overrides:{rankSpacing:32},
+ source:`flowchart TD
+ A["1 · Avvio da P2<br/>P2 → P7: election(2)<br/>1 trasmissione"]
+ B["2 · Candidatura di P7<br/>Giro completo di election(7)<br/>6 trasmissioni<br/>Ritorno a P7"]
+ C["3 · Annuncio da P7<br/>Giro completo di leader(7)<br/>6 trasmissioni<br/>Ritorno a P7"]
+ A --> B --> C
+ style C stroke:#B83D2D`},
  {id:'pcd-interleavings',file:'pcd/cap-02-modellazione.html',slot:1,
  title:'Due assegnamenti atomici: tutti gli stati raggiungibili',
  caption:'k₁ = 1 e k₂ = 2 restano costanti. Ogni freccia esegue un solo assegnamento atomico; p₂ e q₂ indicano la fine. P poi Q termina con n = 2; Q poi P termina con n = 1.',

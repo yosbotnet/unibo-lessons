@@ -7,7 +7,7 @@ subgraphs, undirected/bidirectional links and dashed arrows. The adapter fixes t
 palette, 14px original monospace font stack, line weight and straight/angular
 routes; it preserves the engine's domain-specific arrowheads.
 
-Ten reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
+Twelve reviewed sources live in `sources.cjs`. No coordinates or bend points occur in
 these source records. Supported overrides: direction, nodeSpacing and rankSpacing.
 Unknown overrides fail; fonts are never made smaller to accommodate content.
 Only flowchart/graph input is supported here. Sequence/class diagrams remain with
@@ -27,6 +27,8 @@ node font-test.cjs
 node dependability-test.cjs
 node dependability-plot.cjs --check
 node ricart-test.cjs
+node chang-test.cjs
+node chang-trace.cjs --check
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -75,6 +77,48 @@ The exponential assumption follows the [NIST lifetime model](https://www.itl.nis
 Selected definitions also reference [Avizienis et al.](https://drum.lib.umd.edu/items/6b297ffc-373b-404f-be3a-70cc849e21fd)
 and [Chandra–Toueg failure detectors](https://www.cs.cornell.edu/info/people/sam/FDpapers.html).
 This does not certify every remaining claim in the chapter or the source slides.
+
+### Chang–Roberts: topology is not a message trace
+
+The two PCD16 replacements separate a directed ring topology (four processes and
+four links) from a three-stage execution overview. Both use the general Mermaid
+adapter, not a neural-network preset. The phase arrows represent succession of
+phases, not individual network messages; the caption enumerates the complete
+six-process ring and both complete tours. No coordinates occur in the sources.
+
+`pcd/assets/chang-roberts.js` is a pure executable single-election model plus its
+UI. It assumes fixed membership, unique IDs, no failures, and reliable, exactly-once
+FIFO channels with eventual delivery. Initiation and receiving a greater candidate
+both mark participation. Only the head message of each channel can be delivered;
+the user can interleave different channels. A received lower ID cannot cause an
+already-participating process to send another candidature. The maximum ID elects
+itself only on return of its own candidate and then originates the announcement.
+Reset creates a fresh epoch; this is not a failure detector or ring repair model.
+
+The previous explorer allowed clicking logically impossible transitions and the
+example omitted `P2 → P7: election(7)`, originating the announcement at P2 instead
+of P7. The replacement widget shows actual queued transmissions, process state,
+counts and a delivery trace. `chang-trace.cjs` prints an apply_patch patch for the
+static 13-row HTML table derived from that same model; `--check` detects drift.
+The table and two SVGs remain available without JavaScript. Tables retain readable
+widths and keyboard-accessible horizontal scrolling on mobile.
+
+The prose and annotated pseudocode now distinguish the single-initiator bound
+`(N − 1) + N + N = 3N − 1` from quadratic concurrent-election traffic. Reverse
+ordered IDs with every process initiating attain `N(N + 1)/2` election messages
+plus N announcements in this model. This is message complexity, not an elapsed
+time bound for asynchronous links. References: [Schindelhauer, slides 16–17](https://archive.cone.informatik.uni-freiburg.de/teaching/lecture/distributed-systems-s14/DS-04-Coordination-Agreement-c2.pdf)
+for assumptions/single initiator; [Aspnes, §1.1.2](https://www.cs.yale.edu/homes/aspnes/pinewiki/LeaderElection.html)
+for the decreasing-ID quadratic example. They describe related presentations;
+the exact participant-flag variant and single-epoch scope here are explicit.
+
+`chang-test.cjs` covers 49,488 ring/initiator combinations through N=6 with seeded
+random FIFO channel interleavings (not exhaustive schedules), including 5,038
+single-initiator bounds; 1,000 late-initiation cases; exact upper-bound examples
+N=2…12; invalid inputs/actions; and the exact 13-message chapter trace. It also
+exercises real widget controls on desktop/mobile, concurrent starts, final keyboard
+focus, horizontal trace scrolling and the JavaScript-disabled fallback. It does
+not certify the causal-order, snapshot or consensus widgets elsewhere in PCD16.
 
 Mermaid theme configuration and linear curves follow the
 [official configuration](https://mermaid.js.org/config/theming.html) and
@@ -125,8 +169,7 @@ some of the original mistakes and are not independent proof. Primary references:
 
 These are concrete next checks, not claims that whole chapters are repaired:
 
-- PCD 16: check Chang–Roberts worst-case message count, causal-order sequence
-  example, Chandy–Lamport explorers and the stated resilience of the two-phase
+- PCD 16: check the causal-order sequence example, Chandy–Lamport explorers and the stated resilience of the two-phase
   king variant. The chapter contains additional interactive material not covered
   by the Ricart–Agrawala tests.
 - DS C4: qualify CAP, FLP, hash-chain immutability and BFT threshold/termination
