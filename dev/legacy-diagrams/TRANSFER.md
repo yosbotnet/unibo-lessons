@@ -108,12 +108,11 @@ Screenshots and machine-readable evidence are in
 
 ## Remaining work, explicitly not approved
 
-The existing canvas explorer moves only toward its quadratic boundary, with
+At this checkpoint, the canvas explorer moved only toward its quadratic boundary, with
 displacement up to 2.4 times the slider epsilon rather than a loss-gradient sign
-step. Its class clouds are not derived from the stated classifier. A visible note
-now labels it schematic instead of presenting it as verified FGSM; replacing
-this model/drawing and testing its geometry/gradient/budget is the next concrete
-task. Click/reset smoke tests do not certify its mathematical correctness.
+step. Its class clouds did not follow the stated classifier. This was subsequently
+replaced by a shared model and native SVG with gradient/budget/geometry checks;
+see [FGSM.md](FGSM.md). The old warning is no longer needed for the replaced widget.
 
 Also still open in these chapters: the generic neuron-feature claims, other FGSM
 result tables and annotations, physical-world/vehicle-transfer assertions,

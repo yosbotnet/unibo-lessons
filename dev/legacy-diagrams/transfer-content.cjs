@@ -68,4 +68,4 @@ function hunks(old,next){
 }
 if(require.main===module){let patch='*** Begin Patch\n';for(const e of entries){const file=root+'/'+e.file,html=fs.readFileSync(file,'utf8'),s=next(e,html);if(process.argv.includes('--check'))assert.equal(html,s,e.file+' content drift');else if(s!==html)patch+='*** Update File: '+file+'\n'+hunks(html,s);}
  if(process.argv.includes('--check'))console.log('Both transfer chapters, literature values, computed example and comparison are in sync');else process.stdout.write(patch+'*** End Patch\n');}
-module.exports={section,comparison,next,definition,model,rate};
+module.exports={section,comparison,next,definition,model,rate,hunks};

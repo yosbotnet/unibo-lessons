@@ -90,6 +90,9 @@ node proof-browser-test.cjs
 NOTES_LIU_PDF=/path/to/1611.02770v3.pdf node transfer-test.cjs
 node transfer-content.cjs --check
 node transfer-browser-test.cjs
+node fgsm-test.cjs
+node fgsm-content.cjs --check
+node fgsm-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -102,6 +105,13 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### FGSM: shared model, exact gradient and native interactive SVG
+
+Both cybersecurity chapter-05 canvas sketches are replaced by a common explicit
+classifier, sign-gradient step, clipped budget and SVG plot. The worked example
+remains an image without JavaScript; controls use the same renderer and embedded
+font. See [mathematical contract and verification](FGSM.md).
 
 ### Cross-model transfer: generation is not successful evaluation
 
@@ -791,8 +801,8 @@ These are concrete next checks, not claims that whole chapters are repaired:
   recovery and failure-mode examples still need a complete semantic review.
 - Cybersecurity and cybersecurity-reworked, chapter 05: the VGG→ResNet attribution
   and unsupported transfer table are now corrected ([evidence](TRANSFER.md)).
-  The existing canvas uses a schematic displacement, not true FGSM; replace its
-  model, gradients, budget handling and class clouds. Remaining physical-world,
+  The schematic canvas was subsequently replaced by an explicit, tested model
+  and shared native SVG ([FGSM evidence](FGSM.md)). Remaining physical-world,
   robustness/defense, privacy and agentic claims need their own source review.
 - The other runtime Mermaid figures and the rest of the full-site inventory still
   need current visual and semantic review. An SVG existing is not proof of that.
