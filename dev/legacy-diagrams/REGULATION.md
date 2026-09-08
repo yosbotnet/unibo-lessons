@@ -36,10 +36,10 @@ relationship or treating every attempted leak as an observed confidentiality los
   privileges and actual data paths rather than tool count as a risk score.
   Model capabilities and attempted attacks are not automatically actual breaches.
 
-The original chapter's bibliography remains available, but its first four
-clinical papers are explicitly unreviewed reading leads. Unsupported deployment
-endorsements (“sufficient performance”) are removed, retaining the author/year and
-slide-listed topic. This is not a completed clinical-literature review.
+At this checkpoint the original chapter's first four clinical papers were retained
+as explicitly unreviewed reading leads, with unsupported deployment endorsements
+removed. The subsequent scoped review is in [CLINICAL-READING.md](CLINICAL-READING.md),
+including the remaining Magnini full-text access limitation.
 
 ## Official sources actually consulted
 
@@ -151,8 +151,9 @@ image generated, production file modified or unrelated service restarted.
 ## Open scope
 
 This does not certify the whole AI Security course or site. Security-resource
-descriptions are addressed in [SECURITY-TOOLS.md](SECURITY-TOOLS.md). Clinical
-bibliography and the remaining overview claims need their own evidence review;
+descriptions are addressed in [SECURITY-TOOLS.md](SECURITY-TOOLS.md). The clinical
+reading list is addressed in [CLINICAL-READING.md](CLINICAL-READING.md), with source
+access limits explicit. Remaining overview claims need their own evidence review;
 narration/audio has not been regenerated. The healthcare
 paper's full-text/raw-data/uncertainty limitations remain unresolved. Preexisting
 `review/index.html` and `review/report.md` edits are excluded from this checkpoint.

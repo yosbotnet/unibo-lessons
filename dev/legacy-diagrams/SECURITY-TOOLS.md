@@ -3,8 +3,9 @@
 Both AI Security chapters now expose `#security-resources` through their TOCs.
 In the original chapter this replaces the two unsourced security/tool lists in
 section 18. In the reworked chapter it supplies the missing resource guide before
-the quiz. The clinical reading list and its explicit unreviewed status are retained
-unchanged; this is not a clinical-literature review.
+the quiz. At this checkpoint the clinical reading list and its explicit unreviewed
+status were retained unchanged. Its subsequent review and access limits are in
+[CLINICAL-READING.md](CLINICAL-READING.md).
 
 ## Corrections and primary evidence
 
@@ -98,8 +99,9 @@ Preview through the existing SSH tunnel:
 
 ## Remaining work
 
-Clinical reading leads, unresolved healthcare full-text/raw-data questions, other
-overview claims, narration and the rest of notes remain in scope. No package is
+Clinical reading leads are now addressed in [CLINICAL-READING.md](CLINICAL-READING.md),
+including the unresolved Magnini full-text access. Healthcare full-text/raw-data
+questions, other overview claims, narration and the rest of notes remain in scope. No package is
 installed, benchmark executed, hosted model called, paid image generated, external
 message sent or production service restarted by this checkpoint. Production remains
 separate. Preexisting `review/index.html` and `review/report.md` changes are excluded.

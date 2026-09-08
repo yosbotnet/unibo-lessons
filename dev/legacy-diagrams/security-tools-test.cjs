@@ -35,7 +35,7 @@ const pins={
  for(const entry of require('./transfer-sources.cjs')){
   const html=fs.readFileSync(root+'/'+entry.file,'utf8'),before=execFileSync('git',['show','22049f9:'+entry.file],{cwd:root,encoding:'utf8'}),errors=[];
   parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);
-  assert.equal(c.next(entry,before),html,'Only intended resource section and TOC may change');assert.equal(c.next(entry,html),html);
+  assert.equal(require('./clinical-reading-content.cjs').next(entry,c.next(entry,before)),html,'Only reviewed resource/clinical sections and TOC may change');assert.equal(c.next(entry,html),html);
   assert.deepEqual(scripts(html),scripts(before));
   assert.equal(require('./regulation-content.cjs').next(entry,html,require('./regulation-content.cjs').dimensions()),html,'Regulation generator preserves resources');
   for(const token of ['data-kit="tabs"','data-fgsm','data-agent-case=','<figure'])assert.equal(html.split(token).length,before.split(token).length,token);
@@ -43,7 +43,7 @@ const pins={
   for(const r of [...c.models,...c.agents])assert.equal(html.split('data-tool="'+r.id+'"').length,2);
   for(const url of Object.values(c.sources))assert(html.includes('href="'+url+'"'));
   for(const bad of ['TensorFlow library for adversarial attacks and defenses',"Google's CaMeL: defeating prompt injections by design"])assert(!html.includes(bad));
-  if(!entry.file.startsWith('cybersecurity-reworked/'))assert.equal(html.match(/<h4>SLMs in Clinical Deployments[\s\S]*?<\/ul>/)[0],before.match(/<h4>SLMs in Clinical Deployments[\s\S]*?<\/ul>/)[0]);
+  assert.equal(html.match(/<div id="clinical-evidence"[\s\S]*?<!-- END CLINICAL EVIDENCE -->/)[0],require('./clinical-reading-content.cjs').content());
  }
  assert.equal(c.models.length,4);assert.equal(c.agents.length,4);
  fs.writeFileSync('/home/ybc/notes-legacy-review-artifacts/security-tools-test.json',JSON.stringify({pins,chapters:2,resourceRows:8,markup:true,unchangedScripts:true,idempotence:true,scope:'Source traceability and content integrity, not execution of external libraries or benchmark reproduction'},null,2)+'\n');

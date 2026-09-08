@@ -140,7 +140,8 @@ Production HEAD was checked at `f0f4bde` and not changed. Preexisting edits to
 This is not a complete review of every AI Security claim or all notes. Regulatory
 summaries and final generalizations are addressed in [REGULATION.md](REGULATION.md),
 with their legal scope limits explicit. Security-resource descriptions are addressed
-in [SECURITY-TOOLS.md](SECURITY-TOOLS.md); clinical reading leads remain open.
+in [SECURITY-TOOLS.md](SECURITY-TOOLS.md); the clinical reading review and its access
+limits are documented in [CLINICAL-READING.md](CLINICAL-READING.md).
 The healthcare checkpoint's full-text/raw-data/uncertainty limits remain open;
 this work does not fill them. Narration/audio has not been regenerated.
 Production remains separate and unchanged.
