@@ -154,10 +154,10 @@ node dev/legacy-diagrams/oa-density-browser-test.cjs
 
 ## Remaining work and preview
 
-Sections 8–9 still require correction of sampling/CLT claims and the distinction
-between population probability bands, confidence intervals and prediction
-intervals, including the legacy CI widget. The forecast alignment/CD limitations
-remain explicit in section 14. Broader course/site review is still unfinished.
+The subsequent [inference checkpoint](OA-INFERENCE.md) corrects sections 8–9:
+sampling/CLT, population probability bands, confidence/prediction intervals and
+the legacy CI widget. Forecast alignment/CD limitations remain explicit in
+section 14. Broader course/site review is still unfinished.
 
 Preview: `http://localhost:8787/oa/cap-08-statistics.html#s7`, through the existing
 SSH tunnel. Production remains at `f0f4bde`, pending approval for this revision.

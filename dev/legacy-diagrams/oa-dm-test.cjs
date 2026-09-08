@@ -1,6 +1,7 @@
 'use strict';
+const inference=require('./oa-inference-content.cjs');
 const center=require('./oa-center-content.cjs'),density=require('./oa-density-content.cjs');
-const afterCenter=html=>density.next(center.next(html));
+const afterCenter=html=>inference.next(density.next(center.next(html)));
 const box=require('./oa-box-content.cjs');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process'),c=require('./oa-dm-content.cjs');
 const root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_DM_EVIDENCE,python=process.env.NOTES_OA_DM_PYTHON;assert(dir&&python,'Set NOTES_OA_DM_EVIDENCE and pinned NumPy/SciPy/pandas Python');

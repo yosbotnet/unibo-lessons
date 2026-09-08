@@ -15,6 +15,7 @@ OA forecast alignment, modified DM arithmetic and evidence limits: [OA-FORECAST-
 OA box-plot geometry, quartile conventions, outlier handling and paired scatter: [OA-BOX-SCATTER.md](OA-BOX-SCATTER.md).
 OA center, symmetry counterexamples, sample quantiles and dispersion defaults: [OA-CENTER-SPREAD.md](OA-CENTER-SPREAD.md).
 OA PDF/PMF/CDF distinction, calculated probability geometry and reproducible fitting: [OA-DENSITY.md](OA-DENSITY.md).
+OA sampling/CLT, calculated coverage and conditional z/t/prediction intervals: [OA-INFERENCE.md](OA-INFERENCE.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.

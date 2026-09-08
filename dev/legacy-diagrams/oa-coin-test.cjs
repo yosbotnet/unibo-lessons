@@ -1,6 +1,7 @@
 'use strict';
+const inference=require('./oa-inference-content.cjs');
 const center=require('./oa-center-content.cjs'),density=require('./oa-density-content.cjs');
-const afterCenter=html=>density.next(center.next(html));
+const afterCenter=html=>inference.next(density.next(center.next(html)));
 const box=require('./oa-box-content.cjs');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process');
 const c=require('./oa-coin-content.cjs'),m=require('../../oa/assets/coin-test.js'),root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_COIN_EVIDENCE;
@@ -29,7 +30,7 @@ print(json.dumps(rows))`],{encoding:'utf8',maxBuffer:2e6}));
  const before=execFileSync('git',['show','0de08d7:'+c.file],{cwd:root,encoding:'utf8'}),html=fs.readFileSync(root+'/'+c.file,'utf8'),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);
  assert.equal(afterCenter(box.next(require('./oa-dm-content.cjs').next(require('./oa-selection-content.cjs').next(require('./oa-qq-content.cjs').next(c.next(before)))))),html,'Only the reviewed coin, Q–Q, selection, DM and box/scatter transformations change the chapter');assert.equal(c.next(html),html);assert.equal(require('./oa-frequency-content.cjs').next(html),html);
  for(const i of [1,2,3,4,5,6,7,8,9]){const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],afterCenter(box.next(before)).match(re)[0]);}
- const adjacent=s=>{const pos=s.indexOf("/* ---- Bespoke widget: confidence intervals on the z-scale ---- */");assert(pos>=0);return s.slice(pos).split("/* ---- Bespoke widget: is the coin rigged? ---- */")[0].split("</script>")[0];};assert.equal(adjacent(html),adjacent(before));
+ const oldCI=before.match(/\/\* ---- Bespoke widget: confidence intervals on the z-scale ---- \*\/[\s\S]*?\n\}\)\(\);\n?/)[0];assert(oldCI.includes('ci-canvas'));assert.equal(inference.stripOldWidget(oldCI),'');assert(!html.includes('ci-canvas'));assert(html.includes('src="assets/inference-widget.js"'));
  assert(!html.includes('cn-canvas'));assert(!html.includes('coin looks rigged'));assert(!html.includes('C(10,k)/2&#8310;'));
  fs.writeFileSync('/home/ybc/notes-legacy-review-artifacts/oa-coin-test.json',JSON.stringify({pins,oracleCases:oracle.length,enumeratedTossSequences:1024,rates:m.rates(),markup:true,scope:'Exact fair-binomial inference, source traceability and preservation; not a validation of all OA inference content'},null,2)+'\n');console.log(oracle.length+' exact oracle cases, 1024 sequences, Type I/power arithmetic, markup and preserved adjacent content passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

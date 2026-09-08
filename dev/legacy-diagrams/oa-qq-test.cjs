@@ -1,6 +1,7 @@
 'use strict';
+const inference=require('./oa-inference-content.cjs');
 const center=require('./oa-center-content.cjs'),density=require('./oa-density-content.cjs');
-const afterCenter=html=>density.next(center.next(html));
+const afterCenter=html=>inference.next(density.next(center.next(html)));
 const box=require('./oa-box-content.cjs');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process'),c=require('./oa-qq-content.cjs');
 const root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_QQ_EVIDENCE,python=process.env.NOTES_OA_QQ_PYTHON;
@@ -49,7 +50,7 @@ print(json.dumps(dict(datasets=len(cases),points=count,numpy=np.__version__,scip
  parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(afterCenter(box.next(require('./oa-dm-content.cjs').next(require('./oa-selection-content.cjs').next(c.next(before))))),html);assert.equal(c.next(html),html);
  for(const previous of ['oa-coin-content','oa-frequency-content'])assert.equal(require('./'+previous+'.cjs').next(html),html);
  for(let i=1;i<=11;i++){const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],afterCenter(box.next(before)).match(re)[0]);}
- const tail=s=>{const pos=s.indexOf("/* ---- Bespoke widget: confidence intervals on the z-scale ---- */");assert(pos>=0);return s.slice(pos);};assert.equal(tail(html),tail(before));
+ const oldCI=before.match(/\/\* ---- Bespoke widget: confidence intervals on the z-scale ---- \*\/[\s\S]*?\n\}\)\(\);\n?/)[0];assert(oldCI.includes('ci-canvas'));assert.equal(inference.stripOldWidget(oldCI),'');assert(!html.includes('ci-canvas'));assert(html.includes('src="assets/inference-widget.js"'));
  const section=html.match(/<section id="s13"[^>]*>[\s\S]*?<\/section>/)[0];assert(!section.includes('p88t'));assert(!section.includes('points hug'));assert(!section.includes('font-size="10'));
  const fragment=parseFragment(section),codes=[];function walk(n){if(n.tagName==='code')codes.push(n.childNodes.map(x=>x.value||'').join(''));for(const ch of n.childNodes||[])walk(ch);}walk(fragment);assert.equal(codes.length,3); // reproduction, inline line='q', runnable test example
  const coordinates=execFileSync('python3',['-c',codes[0]],{encoding:'utf8'}).trim().split('\n').map(x=>x.split(' ').map(Number));assert.deepEqual(coordinates,m.rows.map(r=>[r.i,r.observed,r.p,r.z,r.fitted]));

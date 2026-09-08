@@ -136,9 +136,9 @@ node dev/legacy-diagrams/oa-center-browser-test.cjs
 ## Remaining scope and preview
 
 The subsequent [density checkpoint](OA-DENSITY.md) reviews section 7: PDF vs
-point probabilities, CDF naming and distribution fitting/selection. Sections 8–9
-still need review of inference assumptions and confidence intervals, including
-their canvas widget. The forecast-alignment/CD source limitations in
+point probabilities, CDF naming and distribution fitting/selection. The later
+[inference checkpoint](OA-INFERENCE.md) corrects sections 8–9 and replaces the
+CI canvas with a conditional interval comparison. The forecast-alignment/CD source limitations in
 section 14 remain explicit. No real statistical inference was performed on an
 assumed i.i.d. traffic series, and no general symmetry/normality test was invented.
 

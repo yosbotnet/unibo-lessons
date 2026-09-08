@@ -1,6 +1,7 @@
 'use strict';
+const inference=require('./oa-inference-content.cjs');
 const center=require('./oa-center-content.cjs'),density=require('./oa-density-content.cjs');
-const afterCenter=html=>density.next(center.next(html));
+const afterCenter=html=>inference.next(density.next(center.next(html)));
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process'),c=require('./oa-box-content.cjs'),m=require('../../oa/assets/boxplot.js');
 const root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_BOX_EVIDENCE,python=process.env.NOTES_OA_BOX_PYTHON;assert(dir&&python,'Set NOTES_OA_BOX_EVIDENCE and NOTES_OA_BOX_PYTHON');
 const pins={'boxplot.html':'8bac0a76a9fc3547aff6f661d53efbbb5087bbe73c48df63522854465bf64278','nist-scatter.html':'e5513bb13f6210b4e0a8085aa03c47000ebf5746e6d026c87be4aeb30fc650df','outliers.html':'1c7c3357e3f67b47b66efc63e884296c3f667b350feed6cd40b539c641825ba9','quantile.html':'17760a8178ca318cb564736bb29ca60b0468812695eb676ce1823784ad282923','scatter.html':'64aa66a6ce2c73d80604530c6bf1a3b19464c284b9ed8984d3a4fc36d102e54b'};
