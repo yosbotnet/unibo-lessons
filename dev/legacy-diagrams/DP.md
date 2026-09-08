@@ -134,8 +134,9 @@ visits plus 13 no-JS pages, on the final chapter/asset state.
 ## Open work
 
 This is not certification of the complete chapters or site. Regulatory definitions,
-alignment/jailbreak claims and healthcare-study attribution and metrics still
-require review, as does the large/small-model comparison table (including residency).
+alignment/jailbreak claims still require review. Healthcare-study evidence,
+metrics and the model/deployment comparison are addressed separately in
+[HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md), with unresolved full-text/raw-data limits.
 The tool-boundary diagram, ReAct explanatory assumptions and on-device
 confidentiality paragraphs are addressed in the separate agent checkpoint.
 Audio/narration has not been regenerated. Production

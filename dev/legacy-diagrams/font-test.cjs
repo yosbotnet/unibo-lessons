@@ -20,6 +20,7 @@ async function platformFonts(page){await page.evaluate(()=>document.fonts.ready)
  assets.push('cybersecurity/assets/diagrams/cyber-privacy-provenance.svg');
  assets.push('cybersecurity/assets/diagrams/cyber-dp-scope.svg','cybersecurity/assets/diagrams/cyber-dp-distributions.svg');
  assets.push('cybersecurity/assets/diagrams/cyber-agent-enforcement.svg');
+ assets.push('cybersecurity/assets/diagrams/cyber-leakage-aggregation.svg');
  let files=0;for(const asset of assets){const svg=fs.readFileSync(path.join(root,asset),'utf8');const bytes=Buffer.from(svg.match(/data:font\/woff2;base64,([A-Za-z0-9+/=]+)/)[1],'base64');assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),font.sha256);assert(svg.includes('SIL OPEN FONT LICENSE Version 1.1'));files++}
  fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'font-test.json'),JSON.stringify({before,actual,pixels,externalRequests:requests.length,files,fontSha256:font.sha256,fontBytes:font.byteLength},null,2));console.log(`Actual IBM Plex Mono glyphs verified; ${pixels.changed} image pixels differ from fallback; ${files} SVGs contain the exact font and license; no font network requests`);
  await isolated.close();

@@ -1,17 +1,24 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),{chromium}=require('playwright');
 const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-artifacts',base='http://127.0.0.1:8787/',entries=require('./transfer-sources.cjs'),m=require('../../cybersecurity/assets/fgsm-model.js'),view=require('../../cybersecurity/assets/fgsm-view.js'),font=require('./font.cjs');
 function equivalent(actual,expected){if(typeof expected==='number'){assert(Number.isFinite(actual)&&Math.abs(actual-expected)<1e-12,`${actual} != ${expected}`);}else if(expected&&typeof expected==='object'){assert.deepEqual(Object.keys(actual),Object.keys(expected));for(const k of Object.keys(expected))equivalent(actual[k],expected[k]);}else assert.equal(actual,expected);}
-async function noJsScreenshot(page,host,file){
- // Avoid the failing no-JS requestAnimationFrame-based locator wait, not the
- // stability requirement: compare document geometry before AND after capture.
+async function stableWidgetScreenshot(page,host,file){
+ // Tall JS and no-JS widget locator screenshots can time out in the browser's
+ // animation-frame wait. Keep an explicit geometry AND state stability contract
+ // before/after compositor capture, without resizing or changing course CSS.
  await host.evaluate(e=>e.scrollIntoView({block:'start',behavior:'instant'}));
- const geometry=()=>host.evaluate(e=>{const b=e.getBoundingClientRect();return {x:b.x+scrollX,y:b.y+scrollY,width:b.width,height:b.height,viewport:innerWidth};});
+ const geometry=()=>host.evaluate(e=>{const b=e.getBoundingClientRect();return {x:b.x+scrollX,y:b.y+scrollY,width:b.width,height:b.height,viewport:innerWidth,state:e.getAttribute('data-state')};});
  const box=await geometry();assert(box.width>0&&box.height>0);
- for(let i=0;i<3;i++){await page.waitForTimeout(100);assert.deepEqual(await geometry(),box,'No-JS widget must be stable');}
+ for(let i=0;i<3;i++){await page.waitForTimeout(100);assert.deepEqual(await geometry(),box,'Widget geometry and interactive state must be stable');}
  const clip={x:Math.floor(box.x),y:Math.floor(box.y),width:Math.ceil(box.x+box.width)-Math.floor(box.x),height:Math.ceil(box.y+box.height)-Math.floor(box.y),scale:1};
  const cdp=await page.context().newCDPSession(page);try{const {data}=await cdp.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true,fromSurface:true,clip});const bytes=Buffer.from(data,'base64');assert.equal(bytes.subarray(1,4).toString(),'PNG');assert.equal(bytes.readUInt32BE(16),clip.width);assert.equal(bytes.readUInt32BE(20),clip.height);assert.deepEqual(await geometry(),box,'Capture must not resize or reflow the widget');fs.writeFileSync(file,bytes);}finally{await cdp.detach();}
 }
-(async()=>{const b=await chromium.launch(),results=[];try{const inspector=await b.newPage();for(const e of entries)for(const js of [true,false])for(const width of [1280,390,320]){
+async function widgetScreenshot(page,host,file,js){
+ await page.bringToFront();
+ if(js){try{await host.screenshot({path:file,timeout:5000});return;}catch(error){if(error.name!=='TimeoutError')throw error;console.log('Measured screenshot fallback:',path.basename(file));}}
+ await stableWidgetScreenshot(page,host,file);
+}
+(async()=>{let b;const results=[];try{for(const e of entries)for(const js of [true,false])for(const width of [1280,390,320]){
+ b=await chromium.launch();const inspector=await b.newPage();console.log('FGSM view',e.id,width,js);
  const p=await b.newPage({viewport:{width,height:1000},javaScriptEnabled:js,hasTouch:true}),errors=[];p.on('pageerror',e=>errors.push(e.message));
  await p.route(/^https?:/,r=>r.request().url().startsWith(base)?r.continue():/mermaid.*\.js/.test(r.request().url())?r.fulfill({path:path.join(path.dirname(require.resolve('mermaid')),'mermaid.min.js')}):/highlight\.min\.js/.test(r.request().url())?r.fulfill({path:root+'/dl/assets/highlight.min.js'}):r.abort());
  await p.goto(base+e.file);const host=p.locator('[data-fgsm-widget]'),img=host.locator('img');
@@ -32,7 +39,7 @@ async function noJsScreenshot(page,host,file){
   const bounds=await inspector.evaluate(async svg=>{const host=document.createElement('div');host.innerHTML=svg;document.body.replaceChildren(host);await document.fonts.ready;const labels=[...host.querySelectorAll('text')].map(t=>({text:t.textContent,b:t.getBBox()})),outside=labels.filter(x=>x.b.x<0||x.b.y<0||x.b.x+x.b.width>332||x.b.y+x.b.height>426).map(x=>x.text),overlaps=[];for(let i=0;i<labels.length;i++)for(let j=i+1;j<labels.length;j++){const a=labels[i].b,b=labels[j].b;if(Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x)>1&&Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y)>1)overlaps.push([labels[i].text,labels[j].text]);}return {outside,overlaps};},actual);assert.deepEqual(bounds,{outside:[],overlaps:[]});
   const xml=await p.evaluate(svg=>{const d=new DOMParser().parseFromString(svg,'image/svg+xml');return {errors:d.querySelectorAll('parsererror').length,clean:d.querySelectorAll('[data-clean]').length,candidate:d.querySelectorAll('[data-candidate]').length,budget:d.querySelectorAll('[data-budget]').length};},actual);assert.deepEqual(xml,{errors:0,clean:1,candidate:state.shown?1:0,budget:1});
   const screenshot=out+'/fgsm-'+e.id+'-'+width+'-'+js+'-'+label+'.png';
-  if(js)await host.screenshot({path:screenshot});else await noJsScreenshot(p,host,screenshot);
+  await widgetScreenshot(p,host,screenshot,js);
   assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Page overflow '+e.file+' '+width+' JS='+js);
  }
  await check('initial');
@@ -50,8 +57,8 @@ async function noJsScreenshot(page,host,file){
   await img.scrollIntoViewIfNeeded();rect=await img.boundingBox();await p.mouse.move(rect.x+view.px(.5),rect.y+view.py(.5));await p.mouse.down();await p.mouse.move(rect.x+view.px(.8),rect.y+view.py(.7),{steps:4});await p.mouse.up();const drag=JSON.parse(await host.getAttribute('data-state')).p;assert(Math.abs(drag.u-.8)<.005&&Math.abs(drag.v-.7)<.005);await check('drag');
  }else {assert(await host.locator('fieldset').evaluate(e=>e.disabled));for(const control of await host.locator('input,button').all())assert(await control.isDisabled());}
  const region=img.locator('..');if(await region.evaluate(e=>e.scrollWidth>e.clientWidth+1)){await region.focus();await p.keyboard.press('ArrowRight');await p.waitForTimeout(200);assert(await region.evaluate(e=>e.scrollLeft>0));}
- assert.deepEqual(errors,[]);results.push({file:e.file,width,js,errors});await p.close();
+ assert.deepEqual(errors,[]);results.push({file:e.file,width,js,errors});await p.close();await b.close();b=null;
  }
- for(const e of entries){const p=await b.newPage({viewport:{width:390,height:1000}});await p.route(/^https?:/,r=>r.request().resourceType()==='fetch'&&r.request().url().endsWith('/cyber-fgsm.svg')?r.abort():r.request().url().startsWith(base)?r.continue():/mermaid.*\.js/.test(r.request().url())?r.fulfill({path:path.join(path.dirname(require.resolve('mermaid')),'mermaid.min.js')}):/highlight\.min\.js/.test(r.request().url())?r.fulfill({path:root+'/dl/assets/highlight.min.js'}):r.abort());await p.goto(base+e.file);const h=p.locator('[data-fgsm-widget]');await p.waitForFunction(()=>document.querySelector('[data-fgsm-widget] [role=status]').textContent.includes('Interactive controls unavailable'));assert(await h.locator('#aeAttackBtn').isDisabled());await h.locator('img').evaluate(e=>e.decode());assert(await h.locator('img').evaluate(e=>e.naturalWidth===332));results.push({file:e.file,width:390,js:true,blockedInitialization:true,staticImagePreserved:true});await p.close();}
+ for(const e of entries){b=await chromium.launch();const p=await b.newPage({viewport:{width:390,height:1000}});await p.route(/^https?:/,r=>r.request().resourceType()==='fetch'&&r.request().url().endsWith('/cyber-fgsm.svg')?r.abort():r.request().url().startsWith(base)?r.continue():/mermaid.*\.js/.test(r.request().url())?r.fulfill({path:path.join(path.dirname(require.resolve('mermaid')),'mermaid.min.js')}):/highlight\.min\.js/.test(r.request().url())?r.fulfill({path:root+'/dl/assets/highlight.min.js'}):r.abort());await p.goto(base+e.file);const h=p.locator('[data-fgsm-widget]');await p.waitForFunction(()=>document.querySelector('[data-fgsm-widget] [role=status]').textContent.includes('Interactive controls unavailable'));assert(await h.locator('#aeAttackBtn').isDisabled());await h.locator('img').evaluate(e=>e.decode());assert(await h.locator('img').evaluate(e=>e.naturalWidth===332));results.push({file:e.file,width:390,js:true,blockedInitialization:true,staticImagePreserved:true});await p.close();await b.close();b=null;}
  fs.writeFileSync(out+'/fgsm-browser-test.json',JSON.stringify(results,null,2)+'\n');console.log('12 FGSM desktop/mobile JS/no-JS views plus two failed-initialization fallbacks: native SVG, exact model, numeric/keyboard/touch/drag input, zero/clipped/non-flipping steps and reset passed');
- }finally{await b.close();}})().catch(e=>{console.error(e);process.exitCode=1});
+ }finally{if(b)await b.close();}})().catch(e=>{console.error(e);process.exitCode=1});

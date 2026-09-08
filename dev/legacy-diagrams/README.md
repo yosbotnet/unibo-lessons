@@ -1,6 +1,7 @@
 # Static editorial flowcharts from Mermaid
 
 Agent-policy example, sources and limitations: [AGENT-ARCHITECTURE.md](AGENT-ARCHITECTURE.md).
+Healthcare denominators, deployment and evidence: [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
@@ -113,6 +114,9 @@ node privacy-content.cjs --check
 NOTES_AGENT_EVIDENCE=/path/to/reviewed-agent-pdfs node agent-test.cjs
 node agent-content.cjs --check
 node agent-browser-test.cjs
+NOTES_HEALTHCARE_EVIDENCE=/path/to/reviewed-healthcare-evidence node leakage-test.cjs
+node leakage-content.cjs --check
+node leakage-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check

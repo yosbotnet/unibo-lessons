@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict'),model=require('../../cybersecurity/assets/leakage-metrics.cjs'),font=require('./font.cjs'),{palette:p}=require('./render.cjs');
+const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+function render(rows=model.example()){const data=model.analyze(rows);assert(data.equalRuns&&data.rows[0].n===5&&data.rows.length===3,'This teaching plate supports three scenarios with five runs each');const width=750,height=380,x=i=>184+66*i,y=i=>142+64*i;
+ const text=(x,y,s,color=p.ink,anchor='start')=>`<text x="${x}" y="${y}" fill="${color}" text-anchor="${anchor}">${esc(s)}</text>`;
+ let svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" style="background:${p.paper};font-family:'IBM Plex Mono',monospace;font-size:14px"><title>Repeated trials: per-run leakage and any-of-five differ</title><metadata>${esc(font.license)}</metadata><style data-embedded-font="${font.sha256}">${font.css}</style>`;
+ svg+=text(18,25,'Invented judge labels · not results from the healthcare study')+text(18,53,'0 = not flagged',p.cobalt)+text(250,53,'1 = flagged',p.accent);
+ svg+=text(18,94,'Scenario')+text(561,94,'Per run',p.ink,'middle')+text(678,94,'Any of 5',p.ink,'middle');for(let i=0;i<5;i++)svg+=text(x(i),94,'Run '+(i+1),p.ink,'middle');
+ data.rows.forEach((r,i)=>{svg+=`<g data-scenario="${r.id}">`+text(35,y(i)+5,r.id);r.runs.forEach((v,j)=>{svg+=`<g data-run="${j}" data-label="${v}"><circle cx="${x(j)}" cy="${y(i)}" r="17" fill="${v?p.accent:p.panel}" stroke="${v?p.accent:p.cobalt}" stroke-width="1.5"/>`+text(x(j),y(i)+5,v,v?p.paper:p.cobalt,'middle')+'</g>';});svg+=text(561,y(i)+5,r.c+'/5',p.ink,'middle')+text(678,y(i)+5,r.any?'yes':'no',r.any?p.accent:p.cobalt,'middle')+'</g>';});
+ svg+=`<path d="M18 307H732" stroke="${p.rule}"/>`+text(18,335,'Across all scenarios:')+text(18,364,'Flagged runs: '+data.leaks+'/'+data.total+' = '+(100*data.perRun).toFixed(1)+'%',p.cobalt)+text(392,364,'Any flagged: '+data.any+'/'+data.scenarios+' = '+(100*data.anyScenario).toFixed(1)+'%',p.accent);
+ return {svg:svg+'</svg>\n',width,height,data,x,y};}
+module.exports={render,model};

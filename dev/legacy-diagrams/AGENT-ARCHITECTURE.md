@@ -109,7 +109,8 @@ through the existing SSH tunnel. Production was checked at `f0f4bde` and not cha
 ## Open scope
 
 This is an agent-architecture checkpoint, not certification of all AI Security or
-notes. Healthcare study attribution, Attack@1 denominators/conclusions, SLM/model
-tables, regulatory material, alignment/jailbreak claims and narration still need
-review. Production remains separate; this workflow neither deploys nor restarts
+notes. Deployment tables, Attack@1 and slide-reported healthcare evidence are
+addressed in [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md), including its
+explicit full-text/raw-data limitations. Regulatory material, alignment/jailbreak
+claims and narration still need review. Production remains separate; this workflow neither deploys nor restarts
 services.
