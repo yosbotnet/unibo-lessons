@@ -12,6 +12,7 @@ OA exact coin tests, calibrated decisions and power: [OA-HYPOTHESIS.md](OA-HYPOT
 OA calculated Q–Q geometry, normality assumptions and tests: [OA-NORMALITY.md](OA-NORMALITY.md).
 OA test-selection targets, pairing and ordered designs: [OA-TEST-SELECTION.md](OA-TEST-SELECTION.md).
 OA forecast alignment, modified DM arithmetic and evidence limits: [OA-FORECAST-COMPARISON.md](OA-FORECAST-COMPARISON.md).
+OA box-plot geometry, quartile conventions, outlier handling and paired scatter: [OA-BOX-SCATTER.md](OA-BOX-SCATTER.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
