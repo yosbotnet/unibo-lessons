@@ -133,8 +133,9 @@ visits plus 13 no-JS pages, on the final chapter/asset state.
 
 ## Open work
 
-This is not certification of the complete chapters or site. Regulatory definitions,
-alignment/jailbreak claims still require review. Healthcare-study evidence,
+This is not certification of the complete chapters or site. Regulatory definitions
+still require review; alignment and injection claims are addressed in
+[INJECTION.md](INJECTION.md). Healthcare-study evidence,
 metrics and the model/deployment comparison are addressed separately in
 [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md), with unresolved full-text/raw-data limits.
 The tool-boundary diagram, ReAct explanatory assumptions and on-device

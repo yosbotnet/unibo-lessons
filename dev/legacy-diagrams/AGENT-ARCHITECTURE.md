@@ -111,6 +111,7 @@ through the existing SSH tunnel. Production was checked at `f0f4bde` and not cha
 This is an agent-architecture checkpoint, not certification of all AI Security or
 notes. Deployment tables, Attack@1 and slide-reported healthcare evidence are
 addressed in [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md), including its
-explicit full-text/raw-data limitations. Regulatory material, alignment/jailbreak
-claims and narration still need review. Production remains separate; this workflow neither deploys nor restarts
-services.
+explicit full-text/raw-data limitations. Alignment and injection claims are
+addressed in [INJECTION.md](INJECTION.md). Regulatory material and narration still
+need review. Production remains separate; this workflow neither deploys nor
+restarts services.

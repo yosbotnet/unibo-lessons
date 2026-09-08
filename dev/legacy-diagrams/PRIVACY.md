@@ -104,7 +104,8 @@ The ReAct explorer, authorization assumptions and on-device confidentiality
 paragraphs are addressed separately in [AGENT-ARCHITECTURE.md](AGENT-ARCHITECTURE.md).
 The large/small-model comparison and Attack@1 material are addressed separately
 in [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md); full-text/raw-data limits remain explicit.
-Later privacy material still needs primary-source review: legal terminology and
-regulatory summaries and zero-shot/alignment claims. Narration/audio has not been regenerated.
+Zero-shot/alignment and injection claims are addressed in [INJECTION.md](INJECTION.md).
+Later legal terminology and regulatory summaries still need primary-source review.
+Narration/audio has not been regenerated.
 Production is separate; no deployment, paid image generation or service restart
 is performed by this workflow.
