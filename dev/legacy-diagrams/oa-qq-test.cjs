@@ -43,9 +43,9 @@ assert abs(r['scale']**2 - float(Fraction(36231,2450))) < 1e-12
 print(json.dumps(dict(datasets=len(cases),points=count,numpy=np.__version__,scipy=scipy.__version__,example=r)))`],{cwd:root,encoding:'utf8'}));
  const m=c.model();assert.deepEqual(m,oracle.example);assert.equal(m.rows.length,7);assert(Math.abs(m.sampleSD-4.1536558767978295)<1e-14);
  const {parse,parseFragment}=await import('../contracts/node_modules/parse5/dist/index.js'),before=execFileSync('git',['show','dba7547:'+c.file],{cwd:root,encoding:'utf8'}),html=fs.readFileSync(root+'/'+c.file,'utf8'),errors=[];
- parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(require('./oa-selection-content.cjs').next(c.next(before)),html);assert.equal(c.next(html),html);
+ parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(require('./oa-dm-content.cjs').next(require('./oa-selection-content.cjs').next(c.next(before))),html);assert.equal(c.next(html),html);
  for(const previous of ['oa-coin-content','oa-frequency-content'])assert.equal(require('./'+previous+'.cjs').next(html),html);
- for(let i=1;i<=14;i++){if([12,13].includes(i))continue;const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],before.match(re)[0]);}
+ for(let i=1;i<=11;i++){const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],before.match(re)[0]);}
  const tail=s=>s.slice(s.indexOf('/* ---- Bespoke widget: mean vs median under skewness ---- */'));assert.equal(tail(html),tail(before));
  const section=html.match(/<section id="s13"[^>]*>[\s\S]*?<\/section>/)[0];assert(!section.includes('p88t'));assert(!section.includes('points hug'));assert(!section.includes('font-size="10'));
  const fragment=parseFragment(section),codes=[];function walk(n){if(n.tagName==='code')codes.push(n.childNodes.map(x=>x.value||'').join(''));for(const ch of n.childNodes||[])walk(ch);}walk(fragment);assert.equal(codes.length,3); // reproduction, inline line='q', runnable test example

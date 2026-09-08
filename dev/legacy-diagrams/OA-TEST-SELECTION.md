@@ -110,6 +110,10 @@ rechecked at `f0f4bde`; this revision remains on the dedicated preview branch.
 
 ## Remaining scope
 
+Subsequent checkpoint: [OA-FORECAST-COMPARISON.md](OA-FORECAST-COMPARISON.md)
+corrects section 14's arithmetic/interpretation and exposes its source-alignment
+ambiguity. The list below records the original selection checkpoint.
+
 Section 14's Diebold–Mariano example still needs a numerical/methodological review,
 as do descriptive summaries, the scatter widget, distribution/CLT assumptions and
 confidence intervals elsewhere in this chapter. The original 15-course and wider
