@@ -10,6 +10,7 @@ Threat models, objectives and experiment constraints: [THREAT-MODELS.md](THREAT-
 OA variable types, histogram data and binning conventions: [OA-FREQUENCY.md](OA-FREQUENCY.md).
 OA exact coin tests, calibrated decisions and power: [OA-HYPOTHESIS.md](OA-HYPOTHESIS.md).
 OA calculated Q–Q geometry, normality assumptions and tests: [OA-NORMALITY.md](OA-NORMALITY.md).
+OA test-selection targets, pairing and ordered designs: [OA-TEST-SELECTION.md](OA-TEST-SELECTION.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
@@ -149,6 +150,9 @@ node oa-coin-browser-test.cjs
 node oa-qq-content.cjs --check
 NOTES_OA_QQ_EVIDENCE=/path/to/reviewed-qq-sources NOTES_OA_QQ_PYTHON=/path/to/pinned/python node oa-qq-test.cjs
 node oa-qq-browser-test.cjs
+node oa-selection-content.cjs --check
+NOTES_OA_SELECTION_EVIDENCE=/path/to/reviewed-sources NOTES_OA_SELECTION_PYTHON=/path/to/pinned/python node oa-selection-test.cjs
+node oa-selection-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check

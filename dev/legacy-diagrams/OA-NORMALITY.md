@@ -128,6 +128,9 @@ Production HEAD remains `f0f4bde`. The branch is `feat/editorial-diagram-presets
 
 ## Remaining scope
 
+Subsequent review: [OA-TEST-SELECTION.md](OA-TEST-SELECTION.md) covers section 12
+and its two quiz answers. The list below records the original Q–Q checkpoint.
+
 This does not certify the chapter or whole site. Descriptive statistics, the
 scatter widget, distribution/CLT/confidence-interval assumptions, section 12's
 test-selection classifications and section 14's Diebold–Mariano numbers remain
