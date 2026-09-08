@@ -25,7 +25,7 @@ const pins={
  for(const entry of require('./transfer-sources.cjs')){
   const html=fs.readFileSync(root+'/'+entry.file,'utf8'),before=execFileSync('git',['show','e03e336:'+entry.file],{cwd:root,encoding:'utf8'}),errors=[];
   parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);
-  assert.equal(c.next(entry,before),html,'Only clinical entries and TOC may change');assert.equal(c.next(entry,html),html);
+  assert.equal(require('./threat-content.cjs').next(entry,c.next(entry,before)),html,'Only reviewed clinical and threat/navigation content may change');assert.equal(c.next(entry,html),html);
   assert.deepEqual(scripts(html),scripts(before));
   assert.equal(require('./security-tools-content.cjs').next(entry,html),html);
   const regulation=require('./regulation-content.cjs');assert.equal(regulation.next(entry,html,regulation.dimensions()),html);

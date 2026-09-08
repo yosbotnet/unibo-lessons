@@ -1,5 +1,9 @@
 # Security references: implementation, measurement and enforcement
 
+Subsequent threat-model/overview changes are documented in
+[THREAT-MODELS.md](THREAT-MODELS.md); the regression test composes that explicit
+transform with the resource and clinical transforms, preserving their owned blocks.
+
 Both AI Security chapters now expose `#security-resources` through their TOCs.
 In the original chapter this replaces the two unsourced security/tool lists in
 section 18. In the reworked chapter it supplies the missing resource guide before

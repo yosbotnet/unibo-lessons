@@ -6,6 +6,7 @@ Alignment, input channels and observed outcomes: [INJECTION.md](INJECTION.md).
 Privacy-law scope, selected duties and conclusions: [REGULATION.md](REGULATION.md).
 Security libraries, benchmarks and policy mechanisms: [SECURITY-TOOLS.md](SECURITY-TOOLS.md).
 Medical-model reading list and source-access limits: [CLINICAL-READING.md](CLINICAL-READING.md).
+Threat models, objectives and experiment constraints: [THREAT-MODELS.md](THREAT-MODELS.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
@@ -133,6 +134,9 @@ node security-tools-browser-test.cjs
 node clinical-reading-content.cjs --check
 NOTES_CLINICAL_READING_EVIDENCE=/path/to/reviewed-medical-papers node clinical-reading-test.cjs
 node clinical-reading-browser-test.cjs
+node threat-content.cjs --check
+NOTES_THREAT_EVIDENCE=/path/to/reviewed-threat-pdfs node threat-test.cjs
+node threat-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check

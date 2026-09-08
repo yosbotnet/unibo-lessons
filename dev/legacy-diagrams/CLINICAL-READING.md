@@ -1,5 +1,9 @@
 # Medical-model reading list: evidence and limits
 
+Subsequent threat-model/overview changes are documented in
+[THREAT-MODELS.md](THREAT-MODELS.md); the regression test composes that explicit
+transform with this one and still checks the clinical entries independently.
+
 Both AI Security chapters now expose `#clinical-evidence`, linked from their TOCs.
 The original chapter's “SLMs in Clinical Deployments” list is replaced by four
 scoped reading entries; the reworked chapter gets the same guide before its
