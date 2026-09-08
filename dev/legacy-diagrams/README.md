@@ -7,6 +7,7 @@ Privacy-law scope, selected duties and conclusions: [REGULATION.md](REGULATION.m
 Security libraries, benchmarks and policy mechanisms: [SECURITY-TOOLS.md](SECURITY-TOOLS.md).
 Medical-model reading list and source-access limits: [CLINICAL-READING.md](CLINICAL-READING.md).
 Threat models, objectives and experiment constraints: [THREAT-MODELS.md](THREAT-MODELS.md).
+OA variable types, histogram data and binning conventions: [OA-FREQUENCY.md](OA-FREQUENCY.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
@@ -137,6 +138,9 @@ node clinical-reading-browser-test.cjs
 node threat-content.cjs --check
 NOTES_THREAT_EVIDENCE=/path/to/reviewed-threat-pdfs node threat-test.cjs
 node threat-browser-test.cjs
+node oa-frequency-content.cjs --check
+NOTES_OA_FREQUENCY_EVIDENCE=/path/to/reviewed-oa-docs node oa-frequency-test.cjs
+node oa-frequency-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check
