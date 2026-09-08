@@ -3,7 +3,8 @@
 Shared content in both AI Security chapters, anchor `#dp-protection`:
 replaces reworked section 15 and its recap answer; restores the omitted topic
 in original section 16 without renumbering existing sections. The latter section's
-older agent/trust-boundary discussion is not certified by this change.
+agent/trust-boundary discussion is addressed separately in
+[AGENT-ARCHITECTURE.md](AGENT-ARCHITECTURE.md), not certified by the DP tests.
 
 ## Source corrections
 
@@ -133,8 +134,10 @@ visits plus 13 no-JS pages, on the final chapter/asset state.
 ## Open work
 
 This is not certification of the complete chapters or site. Regulatory definitions,
-alignment/jailbreak claims, the earlier tool-boundary diagram, ReAct explanatory
-assumptions, on-device confidentiality claims and healthcare-study attribution and
-metrics still require review. Audio/narration has not been regenerated. Production
+alignment/jailbreak claims and healthcare-study attribution and metrics still
+require review, as does the large/small-model comparison table (including residency).
+The tool-boundary diagram, ReAct explanatory assumptions and on-device
+confidentiality paragraphs are addressed in the separate agent checkpoint.
+Audio/narration has not been regenerated. Production
 remains separate and unchanged; generation here is local native SVG, not paid AI
 image generation.

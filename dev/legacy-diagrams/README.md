@@ -1,5 +1,7 @@
 # Static editorial flowcharts from Mermaid
 
+Agent-policy example, sources and limitations: [AGENT-ARCHITECTURE.md](AGENT-ARCHITECTURE.md).
+
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
 The existing Mermaid text notation provides named connections, native shapes,
@@ -108,6 +110,9 @@ node policy-content.cjs --check
 NOTES_HUANG_PDF=/path/to/1702.02284v1.pdf node policy-test.cjs
 node policy-browser-test.cjs
 node privacy-content.cjs --check
+NOTES_AGENT_EVIDENCE=/path/to/reviewed-agent-pdfs node agent-test.cjs
+node agent-content.cjs --check
+node agent-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check

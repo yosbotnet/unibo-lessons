@@ -100,9 +100,11 @@ both desktop tables and the primary paper's Figure 1.
 This resolves the memorization/taxonomy portion, not all of AI Security or notes.
 The differential-privacy subsection has since been corrected separately; see
 [DP.md](DP.md) for its model, source evidence and verification scope.
+The ReAct explorer, authorization assumptions and on-device confidentiality
+paragraphs are addressed separately in [AGENT-ARCHITECTURE.md](AGENT-ARCHITECTURE.md).
+The large/small-model comparison table still needs review, including residency.
 Later privacy material still needs primary-source review: legal terminology and
-regulatory summaries; zero-shot/alignment claims; on-device privacy guarantees;
-agentic experiment attribution, Attack@1 denominators and conclusions; and the
-ReAct explorer's authorization assumptions. Narration/audio has not been regenerated.
+regulatory summaries; zero-shot/alignment claims; agentic experiment attribution,
+Attack@1 denominators and conclusions. Narration/audio has not been regenerated.
 Production is separate; no deployment, paid image generation or service restart
 is performed by this workflow.

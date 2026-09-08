@@ -1,0 +1,6 @@
+(function(){'use strict';const host=document.getElementById('react-flow');if(!host)return;const model=globalThis.AgentPolicyModel,controls=host.querySelector('fieldset'),status=host.querySelector('[data-agent-status]'),live=host.querySelector('[data-agent-live]');if(!model){status.textContent='Interactive trace unavailable; all worked traces remain below.';return;}
+ const select=host.querySelector('select'),next=host.querySelector('[data-agent-next]'),reset=host.querySelector('[data-agent-reset]');let run,index=0;
+ function render(){const step=run.trace[index];host.dataset.scenario=run.id;host.dataset.step=String(index);live.querySelector('h4').textContent=step.state;live.querySelector('p').textContent=step.detail;status.textContent='Step '+(index+1)+' of '+run.trace.length+' · '+step.state;next.disabled=index===run.trace.length-1;}
+ function start(){run=model.run(select.value);index=0;render();}
+ try{start();select.addEventListener('change',start);next.addEventListener('click',()=>{index=Math.min(index+1,run.trace.length-1);render();});reset.addEventListener('click',()=>{index=0;render();});controls.disabled=false;live.hidden=false;}catch(error){controls.disabled=true;live.hidden=true;status.textContent='Interactive trace unavailable; all worked traces remain below.';}
+})();
