@@ -1,0 +1,9 @@
+const model=require('../../cybersecurity/assets/dp-model.cjs'),font=require('./font.cjs'),{palette:p}=require('./render.cjs');
+const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+function render(options){const rows=model.examples(options),width=820,height=565,scale=60,x=j=>255+150*j,y=i=>142+120*i;
+ const text=(x,y,s,color=p.ink,anchor='start')=>`<text x="${x}" y="${y}" fill="${color}" text-anchor="${anchor}">${esc(s)}</text>`;
+ let svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" style="background:${p.paper};font-family:'IBM Plex Mono',monospace;font-size:14px"><title>Randomized response: reuse, repeated access and raw-data bypass</title><metadata>${esc(font.license)}</metadata><style data-embedded-font="${font.sha256}">${font.css}</style>`;
+ svg+=text(16,25,'Exact distributions · truthful probability p='+rows[0].p)+text(16,51,'Blue: input x=0',p.cobalt)+text(305,51,'Vermilion: input x=1',p.accent);
+ rows.forEach((r,i)=>{const cy=y(i);svg+=`<g data-mechanism="${r.id}">`+text(16,cy-30,r.label)+text(16,cy-6,Number.isFinite(r.epsilon)?'ε = '+r.epsilon.toFixed(4):'No finite ε');r.outcomes.forEach((out,j)=>{const cx=x(j);svg+=`<path d="M${cx-59} ${cy-scale}V${cy}H${cx+59}" fill="none" stroke="${p.rule}"/>`;for(const [input,prob,color,offset] of [[0,r.zero[j],p.cobalt,-52],[1,r.one[j],p.accent,16]]){const bx=cx+offset;svg+=`<rect data-input="${input}" data-output="${esc(out)}" data-probability="${prob}" x="${bx}" y="${cy-scale*prob}" width="32" height="${scale*prob}" fill="${color}"/>`+text(bx+16,cy-scale*prob-8,prob.toFixed(4),color,'middle');}svg+=text(cx,cy+22,out,p.ink,'middle');});svg+='</g>';});
+ svg+=text(16,553,'Each mini-axis: probability 0–1 · labels rounded to 4 decimals');return {svg:svg+'</svg>\n',width,height,rows,scale,x,y};}
+module.exports={render,model};

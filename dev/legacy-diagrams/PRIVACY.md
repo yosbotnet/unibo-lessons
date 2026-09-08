@@ -98,9 +98,10 @@ both desktop tables and the primary paper's Figure 1.
 ## Still open
 
 This resolves the memorization/taxonomy portion, not all of AI Security or notes.
+The differential-privacy subsection has since been corrected separately; see
+[DP.md](DP.md) for its model, source evidence and verification scope.
 Later privacy material still needs primary-source review: legal terminology and
-regulatory summaries; zero-shot/alignment claims; differential privacy (especially
-the assertion that it cannot apply to free text); on-device privacy guarantees;
+regulatory summaries; zero-shot/alignment claims; on-device privacy guarantees;
 agentic experiment attribution, Attack@1 denominators and conclusions; and the
 ReAct explorer's authorization assumptions. Narration/audio has not been regenerated.
 Production is separate; no deployment, paid image generation or service restart

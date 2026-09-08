@@ -1,7 +1,17 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),{chromium}=require('playwright');
 const root=path.resolve(__dirname,'../..'),out='/home/ybc/notes-legacy-review-artifacts',base='http://127.0.0.1:8787/',entries=require('./transfer-sources.cjs'),m=require('../../cybersecurity/assets/fgsm-model.js'),view=require('../../cybersecurity/assets/fgsm-view.js'),font=require('./font.cjs');
 function equivalent(actual,expected){if(typeof expected==='number'){assert(Number.isFinite(actual)&&Math.abs(actual-expected)<1e-12,`${actual} != ${expected}`);}else if(expected&&typeof expected==='object'){assert.deepEqual(Object.keys(actual),Object.keys(expected));for(const k of Object.keys(expected))equivalent(actual[k],expected[k]);}else assert.equal(actual,expected);}
-(async()=>{const b=await chromium.launch(),results=[];try{for(const e of entries)for(const js of [true,false])for(const width of [1280,390,320]){
+async function noJsScreenshot(page,host,file){
+ // Avoid the failing no-JS requestAnimationFrame-based locator wait, not the
+ // stability requirement: compare document geometry before AND after capture.
+ await host.evaluate(e=>e.scrollIntoView({block:'start',behavior:'instant'}));
+ const geometry=()=>host.evaluate(e=>{const b=e.getBoundingClientRect();return {x:b.x+scrollX,y:b.y+scrollY,width:b.width,height:b.height,viewport:innerWidth};});
+ const box=await geometry();assert(box.width>0&&box.height>0);
+ for(let i=0;i<3;i++){await page.waitForTimeout(100);assert.deepEqual(await geometry(),box,'No-JS widget must be stable');}
+ const clip={x:Math.floor(box.x),y:Math.floor(box.y),width:Math.ceil(box.x+box.width)-Math.floor(box.x),height:Math.ceil(box.y+box.height)-Math.floor(box.y),scale:1};
+ const cdp=await page.context().newCDPSession(page);try{const {data}=await cdp.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true,fromSurface:true,clip});const bytes=Buffer.from(data,'base64');assert.equal(bytes.subarray(1,4).toString(),'PNG');assert.equal(bytes.readUInt32BE(16),clip.width);assert.equal(bytes.readUInt32BE(20),clip.height);assert.deepEqual(await geometry(),box,'Capture must not resize or reflow the widget');fs.writeFileSync(file,bytes);}finally{await cdp.detach();}
+}
+(async()=>{const b=await chromium.launch(),results=[];try{const inspector=await b.newPage();for(const e of entries)for(const js of [true,false])for(const width of [1280,390,320]){
  const p=await b.newPage({viewport:{width,height:1000},javaScriptEnabled:js,hasTouch:true}),errors=[];p.on('pageerror',e=>errors.push(e.message));
  await p.route(/^https?:/,r=>r.request().url().startsWith(base)?r.continue():/mermaid.*\.js/.test(r.request().url())?r.fulfill({path:path.join(path.dirname(require.resolve('mermaid')),'mermaid.min.js')}):/highlight\.min\.js/.test(r.request().url())?r.fulfill({path:root+'/dl/assets/highlight.min.js'}):r.abort());
  await p.goto(base+e.file);const host=p.locator('[data-fgsm-widget]'),img=host.locator('img');
@@ -17,9 +27,13 @@ function equivalent(actual,expected){if(typeof expected==='number'){assert(Numbe
   const state=js?JSON.parse(await host.getAttribute('data-state')):{p:m.initial,epsilon:.08,shown:true},src=await img.getAttribute('src');
   const actual=src.startsWith('data:')?decodeURIComponent(src.slice(src.indexOf(',')+1)):await (await p.request.get(base+'cybersecurity/assets/diagrams/cyber-fgsm.svg')).text();
   assert.equal(actual,view.render(state.p,state.epsilon,state.shown,font));if(state.shown&&js)equivalent(state.attack,m.attack(state.p,state.epsilon));
-  const bounds=await p.evaluate(async svg=>{const host=document.createElement('div');host.style.cssText='position:fixed;left:0;top:0;opacity:0;pointer-events:none';host.innerHTML=svg;document.body.append(host);await document.fonts.ready;const labels=[...host.querySelectorAll('text')].map(t=>({text:t.textContent,b:t.getBBox()})),outside=labels.filter(x=>x.b.x<0||x.b.y<0||x.b.x+x.b.width>332||x.b.y+x.b.height>426).map(x=>x.text),overlaps=[];for(let i=0;i<labels.length;i++)for(let j=i+1;j<labels.length;j++){const a=labels[i].b,b=labels[j].b;if(Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x)>1&&Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y)>1)overlaps.push([labels[i].text,labels[j].text]);}host.remove();return {outside,overlaps};},actual);assert.deepEqual(bounds,{outside:[],overlaps:[]});
+  // Inspect SVG geometry separately: do not inject/remove font-bearing SVG DOM
+  // into the no-JS course page whose unmodified rendering is being tested.
+  const bounds=await inspector.evaluate(async svg=>{const host=document.createElement('div');host.innerHTML=svg;document.body.replaceChildren(host);await document.fonts.ready;const labels=[...host.querySelectorAll('text')].map(t=>({text:t.textContent,b:t.getBBox()})),outside=labels.filter(x=>x.b.x<0||x.b.y<0||x.b.x+x.b.width>332||x.b.y+x.b.height>426).map(x=>x.text),overlaps=[];for(let i=0;i<labels.length;i++)for(let j=i+1;j<labels.length;j++){const a=labels[i].b,b=labels[j].b;if(Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x)>1&&Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y)>1)overlaps.push([labels[i].text,labels[j].text]);}return {outside,overlaps};},actual);assert.deepEqual(bounds,{outside:[],overlaps:[]});
   const xml=await p.evaluate(svg=>{const d=new DOMParser().parseFromString(svg,'image/svg+xml');return {errors:d.querySelectorAll('parsererror').length,clean:d.querySelectorAll('[data-clean]').length,candidate:d.querySelectorAll('[data-candidate]').length,budget:d.querySelectorAll('[data-budget]').length};},actual);assert.deepEqual(xml,{errors:0,clean:1,candidate:state.shown?1:0,budget:1});
-  await host.screenshot({path:out+'/fgsm-'+e.id+'-'+width+'-'+js+'-'+label+'.png'});assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Page overflow '+e.file+' '+width+' JS='+js);
+  const screenshot=out+'/fgsm-'+e.id+'-'+width+'-'+js+'-'+label+'.png';
+  if(js)await host.screenshot({path:screenshot});else await noJsScreenshot(p,host,screenshot);
+  assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Page overflow '+e.file+' '+width+' JS='+js);
  }
  await check('initial');
  if(js){

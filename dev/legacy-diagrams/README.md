@@ -110,6 +110,9 @@ node policy-browser-test.cjs
 node privacy-content.cjs --check
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
+node dp-content.cjs --check
+NOTES_DP_EVIDENCE=/path/to/reviewed-pdfs node dp-test.cjs
+node dp-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -122,6 +125,13 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Differential privacy: text, post-processing and fresh data access
+
+Both AI Security chapters now include the DP definition, a protection-scope SVG
+and a calculated probability plot. An exact one-bit example distinguishes text
+output, reuse, independent releases and raw-data copying. See
+[DP sources, model, diagrams and tests](DP.md).
 
 ### Privacy: training data is not the live context
 
