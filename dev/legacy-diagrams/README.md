@@ -104,6 +104,9 @@ node feature-browser-test.cjs
 node impact-content.cjs --check
 NOTES_IMPACT_EVIDENCE=/path/to/reviewed-evidence node impact-test.cjs
 node impact-browser-test.cjs
+node policy-content.cjs --check
+NOTES_HUANG_PDF=/path/to/1702.02284v1.pdf node policy-test.cjs
+node policy-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -116,6 +119,13 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Observation attacks: action changes are not return changes
+
+The two cybersecurity chapters replace the RL aside with a sourced explanation,
+downloadable corridor model and native trajectory plot. State transitions,
+rewards and time-limit versus terminal outcomes are calculated and tested.
+See [policy model, evidence and limits](POLICIES.md).
 
 ### Model errors, physical channels and actual system impact
 

@@ -122,7 +122,8 @@ through the existing SSH tunnel; the reworked chapter uses the same anchor.
 
 ## Remaining scope
 
-RL, model inversion/memorization, the later privacy taxonomy, LLM and agentic
+The [policy revision](POLICIES.md) addresses the RL aside. Model
+inversion/memorization, the later privacy taxonomy, LLM and agentic
 claims still need review. The reworked CIA quiz now distinguishes goals from
 outcomes but does not certify the later privacy discussion. The full-site
 inventory has 315 pages and 1,013 figure elements; the original fifteen-course
