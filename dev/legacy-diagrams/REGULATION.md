@@ -150,8 +150,9 @@ image generated, production file modified or unrelated service restarted.
 
 ## Open scope
 
-This does not certify the whole AI Security course or site. Clinical bibliography,
-security-tool/library descriptions and the remaining overview claims need their
-own evidence review; narration/audio has not been regenerated. The healthcare
+This does not certify the whole AI Security course or site. Security-resource
+descriptions are addressed in [SECURITY-TOOLS.md](SECURITY-TOOLS.md). Clinical
+bibliography and the remaining overview claims need their own evidence review;
+narration/audio has not been regenerated. The healthcare
 paper's full-text/raw-data/uncertainty limitations remain unresolved. Preexisting
 `review/index.html` and `review/report.md` edits are excluded from this checkpoint.

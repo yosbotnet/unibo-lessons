@@ -4,6 +4,7 @@ Agent-policy example, sources and limitations: [AGENT-ARCHITECTURE.md](AGENT-ARC
 Healthcare denominators, deployment and evidence: [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md).
 Alignment, input channels and observed outcomes: [INJECTION.md](INJECTION.md).
 Privacy-law scope, selected duties and conclusions: [REGULATION.md](REGULATION.md).
+Security libraries, benchmarks and policy mechanisms: [SECURITY-TOOLS.md](SECURITY-TOOLS.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
@@ -125,6 +126,9 @@ node injection-browser-test.cjs
 NOTES_REGULATION_EVIDENCE=/path/to/reviewed-official-sources node regulation-test.cjs
 node regulation-content.cjs --check
 node regulation-browser-test.cjs
+node security-tools-content.cjs --check
+NOTES_SECURITY_TOOLS_EVIDENCE=/path/to/reviewed-project-sources node security-tools-test.cjs
+node security-tools-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check
