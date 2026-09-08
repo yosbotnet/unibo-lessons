@@ -1,5 +1,9 @@
 # OA statistics: variables and reproducible frequency plots
 
+Subsequent review of sections 10–11 and Plates 8.6–8.7 is documented in
+[OA-HYPOTHESIS.md](OA-HYPOTHESIS.md). Regression tests compose that explicit
+transform with this checkpoint; the histogram and sections 1–2 stay unchanged.
+
 The reviewed scope is sections 1–2 of `oa/cap-08-statistics.html`, their related
 quiz answers and the histogram widget. Plate 8.1's geometry was already repaired
 and visually complete; its SVG stays byte-identical. Its caption now correctly
@@ -139,8 +143,8 @@ Further concrete candidates found while reading the rest of the chapter:
 - Median/symmetry equivalence, quantile conventions, variance denominators and
   automatic outlier-removal advice in sections 3–6 and their quiz answers.
 - Independently sorting the two scatter-plot columns destroys observational pairs.
-- Confidence-interval assumptions, exact coin probabilities versus tail p-values,
-  acceptance/rejection wording and the Type I/II discussion in sections 9–11.
+- Confidence-interval assumptions in section 9. The coin calculation and Type I/II
+  discussion in sections 10–11 have since been reviewed in OA-HYPOTHESIS.md.
 - Test-selection classifications in section 12, the plotted coordinates/axes and
   normality claims in Plate 8.8, and the DM statistic/p-value/convention in section 14.
 

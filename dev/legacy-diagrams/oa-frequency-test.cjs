@@ -41,12 +41,12 @@ print(json.dumps(result))`],{input:JSON.stringify(m.data),encoding:'utf8'}));
  for(const args of [[m.data,1,'numpy'],[m.data,10,'other'],[[1,1],10,'numpy']])assert.throws(()=>m.edgesFor(...args));
  const before=execFileSync('git',['show','a80f149:'+c.file],{cwd:root,encoding:'utf8'}),html=fs.readFileSync(root+'/'+c.file,'utf8'),errors=[];
  const previousTable=before.match(/<section id="s2"[^>]*>[\s\S]*?<\/section>/)[0];assert.equal([...previousTable.matchAll(/<tr><td>[^<]+<\/td><td>(\d+)<\/td>/g)].reduce((sum,r)=>sum+Number(r[1]),0),32);
- parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(c.next(before),html);assert.equal(c.next(html),html);
- const svg=s=>[...s.matchAll(/<svg\b[\s\S]*?<\/svg>/g)].map(x=>x[0]);const existing=svg(before),now=svg(html);assert.equal(existing.length,8);assert.deepEqual(now.filter(x=>!x.includes('data-frequency-chart')),existing);
- const tail=s=>s.slice(s.indexOf('/* ---- Bespoke widget: mean vs median under skewness ---- */'));assert.equal(tail(html),tail(before),'All adjacent widget code remains byte-identical');
- for(let i=3;i<=14;i++){const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>'),old=before.match(re)[0];assert.equal(html.match(re)[0],[10,11,12].includes(i)?c.wrapLegacyTables(old,'s'+i):old);}
+ parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(require('./oa-coin-content.cjs').next(c.next(before)),html);assert.equal(c.next(html),html);
+ const svg=s=>[...s.matchAll(/<svg\b[\s\S]*?<\/svg>/g)].map(x=>x[0]);const existing=svg(before),now=svg(html);assert.equal(existing.length,8);assert.deepEqual(now.filter(x=>!x.includes('data-frequency-chart')&&!x.includes('oa-coin-exact')),existing.filter(x=>!x.includes('p86t')&&!x.includes('p87t')));
+ const tail=s=>s.slice(s.indexOf('/* ---- Bespoke widget: mean vs median under skewness ---- */')).split('/* ---- Bespoke widget: is the coin rigged? ---- */')[0].split('</script>')[0];assert.equal(tail(html),tail(before),'Unrevised adjacent widget code remains byte-identical');
+ for(let i=3;i<=14;i++){if([10,11].includes(i))continue;const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>'),old=before.match(re)[0];assert.equal(html.match(re)[0],i===12?c.wrapLegacyTables(old,'s'+i):old);}
  assert.equal((html.match(/data-frequency-chart/g)||[]).length,1);assert.equal((html.match(/data-frequency-table/g)||[]).length,1);
  assert.equal((html.match(/class="oa-w"/g)||[]).length,5);assert(html.includes('<span>5 interactive widgets</span>'));
- fs.writeFileSync('/home/ybc/notes-legacy-review-artifacts/oa-frequency-test.json',JSON.stringify({pins,slideSha256:crypto.createHash('sha256').update(source).digest('hex'),oracleCases:oracle.length,expected,markup:true,existingSVGsUnchanged:8,adjacentWidgetCodeUnchanged:true,scope:'Exact arithmetic and documented bin conventions; no NumPy/SciPy runtime was installed or executed'},null,2)+'\n');
- console.log('31 source observations, 24 exact-rational oracle cases, boundary/invalid tests, eight preserved SVGs and unchanged adjacent widgets passed');
+ fs.writeFileSync('/home/ybc/notes-legacy-review-artifacts/oa-frequency-test.json',JSON.stringify({pins,slideSha256:crypto.createHash('sha256').update(source).digest('hex'),oracleCases:oracle.length,expected,markup:true,existingSVGsUnchanged:6,coinRevision:'oa-coin-content.cjs',scope:'Exact arithmetic and documented bin conventions; no NumPy/SciPy runtime was installed or executed'},null,2)+'\n');
+ console.log('31 source observations, 24 rational cases, boundary/invalid tests, six unchanged SVGs and explicit coin-revision compatibility passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

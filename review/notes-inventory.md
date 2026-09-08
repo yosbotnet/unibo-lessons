@@ -21,7 +21,7 @@ This is a source inventory, **not proof that the content or figures are correct*
 | ise | 17 | 67 | 67 | 0 | 0 |
 | macro | 10 | 8 | 9 | 18 | 0 |
 | netprog | 15 | 61 | 61 | 0 | 0 |
-| oa | 11 | 45 | 45 | 0 | 1 |
+| oa | 11 | 45 | 44 | 1 | 3 |
 | pcd | 22 | 44 | 8 | 36 | 31 |
 | pm | 20 | 82 | 83 | 0 | 0 |
 | politics | 16 | 0 | 5 | 16 | 0 |
