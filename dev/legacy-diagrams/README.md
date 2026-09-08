@@ -9,6 +9,7 @@ Medical-model reading list and source-access limits: [CLINICAL-READING.md](CLINI
 Threat models, objectives and experiment constraints: [THREAT-MODELS.md](THREAT-MODELS.md).
 OA variable types, histogram data and binning conventions: [OA-FREQUENCY.md](OA-FREQUENCY.md).
 OA exact coin tests, calibrated decisions and power: [OA-HYPOTHESIS.md](OA-HYPOTHESIS.md).
+OA calculated Q–Q geometry, normality assumptions and tests: [OA-NORMALITY.md](OA-NORMALITY.md).
 
 This is a build-time adapter, not a Mermaid fork, replacement parser or universal
 diagram engine. It complements the specialized native presets in `../diagrams`.
@@ -145,6 +146,9 @@ node oa-frequency-browser-test.cjs
 node oa-coin-content.cjs --check
 NOTES_OA_COIN_EVIDENCE=/path/to/reviewed-coin-sources node oa-coin-test.cjs
 node oa-coin-browser-test.cjs
+node oa-qq-content.cjs --check
+NOTES_OA_QQ_EVIDENCE=/path/to/reviewed-qq-sources NOTES_OA_QQ_PYTHON=/path/to/pinned/python node oa-qq-test.cjs
+node oa-qq-browser-test.cjs
 NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
 node privacy-browser-test.cjs
 node dp-content.cjs --check

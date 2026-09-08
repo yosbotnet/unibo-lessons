@@ -145,6 +145,10 @@ Production HEAD was checked at `f0f4bde`; this checkpoint is preview-only.
 
 ## Remaining work
 
+Subsequent checkpoint: [OA-NORMALITY.md](OA-NORMALITY.md) now documents section 13,
+the calculated Q–Q plot and its quiz. The remaining-work list below records what
+was open at the original coin checkpoint, not an instruction to undo that review.
+
 This does not certify the entire chapter. Still open: descriptive summaries and
 quantile conventions, variance/CV and outlier advice, paired scatter data,
 distribution/CLT/interval assumptions in sections 7–9, the test-selection table,
