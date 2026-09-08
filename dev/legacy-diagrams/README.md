@@ -107,6 +107,9 @@ node impact-browser-test.cjs
 node policy-content.cjs --check
 NOTES_HUANG_PDF=/path/to/1702.02284v1.pdf node policy-test.cjs
 node policy-browser-test.cjs
+node privacy-content.cjs --check
+NOTES_PRIVACY_EVIDENCE=/path/to/reviewed-pdfs node privacy-test.cjs
+node privacy-browser-test.cjs
 node browser-test.cjs
 REPORT_NAME=audit-final node audit.cjs
 ```
@@ -119,6 +122,13 @@ blocks are protected by `original-hashes.json`; later updates use explicit marke
 The renderer generates standalone `.svg` files under course `assets/diagrams/`;
 chapters load them as images at their native size, in keyboard-scrollable regions.
 Titles and explanatory HTML captions remain accessible without SVG support.
+
+### Privacy: training data is not the live context
+
+Both AI Security chapters now separate the target of a privacy attack from its
+execution time, remove the unsupported memorization table, and explain provenance
+with a shared native diagram and four qualitative evidence checks. See
+[sources, diagram contract, verification and remaining scope](PRIVACY.md).
 
 ### Observation attacks: action changes are not return changes
 
