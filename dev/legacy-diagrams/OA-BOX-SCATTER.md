@@ -114,8 +114,9 @@ SSH tunnel. No paid image generation, deployment or service restart.
 
 ## Remaining work
 
-OA sections 3–5 still need review of center/skewness heuristics, quartile
-definitions and variance/CV conventions. Sections 7–9 still contain unreviewed
+OA sections 3–5 were subsequently revised with explicit center/skewness,
+quartile and variance/CV conventions; see [OA-CENTER-SPREAD.md](OA-CENTER-SPREAD.md).
+Sections 7–9 still contain unreviewed
 PDF/CDF, distribution-selection, inference and interval claims/widgets. Section 14
 retains an explicit unresolved forecast-alignment issue and missing CD score
 matrix. Neither this checkpoint nor inventory counts close the full-site goal.

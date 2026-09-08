@@ -1,0 +1,34 @@
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./frequency.js'),require('./boxplot.js'));else root.NotesCenter=factory(root.NotesFrequency,root.NotesBox);})(typeof globalThis!=='undefined'?globalThis:this,function(frequency,box){
+  'use strict';
+  const speeds=Object.freeze([151,124,132,170,146,124,113]),hotels=Object.freeze([366,327,274,292,274,230]);
+  const asymmetric=Object.freeze([-4,-1,0,0,0,2,3]),bimodal=Object.freeze([-2,-2,-1,1,2,2]);
+  const fmt=x=>Number(x.toFixed(2)).toString();
+  function summarize(values){
+    const r=box.summarize(values),sum=values.reduce((s,x)=>s+x,0),deviations=values.map(x=>x-r.mean),squares=deviations.map(x=>x*x),ss=squares.reduce((a,b)=>a+b,0),variance0=ss/r.n,variance1=ss/(r.n-1),sd0=Math.sqrt(variance0),sd1=Math.sqrt(variance1);
+    const counts=new Map();for(const x of values)counts.set(x,(counts.get(x)||0)+1);const maxCount=Math.max(...counts.values()),modes=[...counts].filter(([,n])=>n===maxCount).map(([x])=>x).sort((a,b)=>a-b);
+    return {...r,sum,deviations,squares,ss,variance0,variance1,sd0,sd1,cv0:r.mean>0?sd0/r.mean*100:null,cv1:r.mean>0?sd1/r.mean*100:null,modes,maxCount};
+  }
+  function synthetic(setting=0){
+    if(!Number.isInteger(setting)||setting< -250||setting>250||setting%5!==0)throw Error('Expected slider setting −250…250 in steps of 5');
+    const a=setting/100,values=Array.from({length:121},(_,i)=>{const u=(i-60)/60;return a===0?100+60*u:100+60*Math.expm1(a*u)/a;});
+    const r=summarize(values),hist=frequency.histogram(values,frequency.edgesFor(values,14,'numpy')),peak=Math.max(...hist.counts),modalBins=hist.counts.flatMap((v,i)=>v===peak?[i+1]:[]);
+    return {...r,setting,a,hist,modalBins};
+  }
+  function summary(r){return `Transformation a = ${r.a.toFixed(2)}; mean = ${fmt(r.mean)}; median = ${fmt(r.median)}. All 121 observed values are distinct: there is no unique sample mode. Highest-count bins: ${r.modalBins.join(', ')} (count ${Math.max(...r.hist.counts)} each). ${r.a===0?'At a = 0, the evenly spaced sample is symmetric, not Gaussian.':'The median stays at 100 because this monotone construction fixes its middle observation.'}`;}
+  function table(r){return `<table data-center-bins><caption>Fourteen equal-width bins for this setting</caption><thead><tr><th scope="col">Bin</th><th scope="col">Numeric interval</th><th scope="col">Count</th><th scope="col">Highest count?</th></tr></thead><tbody>${r.hist.rows.map((row,i)=>`<tr data-center-bin="${i}"><th scope="row">${i+1}</th><td>[${fmt(row.lo)}, ${fmt(row.hi)}${i===13?']':')'}</td><td>${row.count}</td><td>${r.modalBins.includes(i+1)?'Yes':'No'}</td></tr>`).join('')}</tbody><tfoot><tr><th scope="row">Total</th><td>All generated observations</td><td>121</td><td>None discarded</td></tr></tfoot></table>`;}
+  function svg(r){
+    const left=60,right=660,top=58,bottom=248,lo=r.min,hi=r.max,x=v=>left+(v-lo)/(hi-lo)*600,max=Math.max(...r.hist.counts),y=c=>bottom-c/max*(bottom-top),ticks=[0,Math.ceil(max/2),max];
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" style="width:700px" role="img" aria-labelledby="oa-center-title" font-family="var(--lk-mono)" font-size="14" fill="var(--lk-ink)" data-generated-plot="oa-center"><title id="oa-center-title">Histogram of 121 deterministic transformed observations, a = ${r.a}. Mean ${fmt(r.mean)}, median ${fmt(r.median)}. Fourteen bins, changing numeric range. All tied highest bins are reported in the table, not mislabelled as a unique sample mode.</title><rect width="700" height="400" fill="var(--lk-paper)"/><text x="24" y="26">Count · 121 deterministic observations</text><text x="660" y="26" text-anchor="end">a = ${r.a.toFixed(2)}</text>
+${ticks.map(v=>`<path d="M${left} ${y(v)}H${right}" stroke="var(--lk-rule-soft)"/><text x="48" y="${y(v)+5}" text-anchor="end">${v}</text>`).join('')}
+${r.hist.rows.map((row,i)=>`<rect data-center-bar="${i}" x="${x(row.lo)}" y="${y(row.count)}" width="${x(row.hi)-x(row.lo)}" height="${bottom-y(row.count)}" fill="var(--lk-cobalt)" fill-opacity=".18" stroke="var(--lk-cobalt)"/><text x="${(x(row.lo)+x(row.hi))/2}" y="${y(row.count)-9}" text-anchor="middle">${row.count}</text>`).join('')}
+<path d="M${left} ${top}V${bottom}H${right}" fill="none" stroke="var(--lk-ink)"/>
+<path data-center-mean="" d="M${x(r.mean)} ${top}V${bottom}" stroke="var(--lk-cobalt)" stroke-width="2.8"/>
+<path data-center-median="" d="M${x(r.median)} ${top}V${bottom}" stroke="var(--lk-vermilion)" stroke-width="1.5" stroke-dasharray="5 4"/>
+${[lo,(lo+hi)/2,hi].map(v=>`<path d="M${x(v)} ${bottom}v6" stroke="var(--lk-ink)"/><text x="${x(v)}" y="278" text-anchor="middle">${fmt(v)}</text>`).join('')}
+<text x="350" y="304" text-anchor="middle">Synthetic value · range changes with a</text>
+<path d="M24 334h30" stroke="var(--lk-cobalt)" stroke-width="2.8"/><text x="65" y="339" fill="var(--lk-cobalt)">Mean ${fmt(r.mean)}</text>
+<path d="M24 362h30" stroke="var(--lk-vermilion)" stroke-width="1.5" stroke-dasharray="5 4"/><text x="65" y="367" fill="var(--lk-vermilion)">Median ${fmt(r.median)}${r.a===0?' · lines coincide at a = 0':''}</text></svg>`;
+  }
+  function symmetrySvg(){return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 240" style="width:680px" role="img" aria-labelledby="oa-symmetry-title" font-family="var(--lk-mono)" font-size="14" fill="var(--lk-ink)" data-generated-plot="oa-symmetry"><title id="oa-symmetry-title">Two synthetic finite samples. Equal mean, median and mode need not imply symmetry. A symmetric sample can have two modes away from its center. Every observation is shown.</title><rect width="680" height="240" fill="var(--lk-paper)"/>${[asymmetric,bimodal].map((values,k)=>{const left=40+350*k,x=v=>left+(v+4)/8*260,seen=new Map();return `<g data-symmetry-panel="${k}"><text x="${left}" y="24" fill="var(--lk-cobalt)">${k?'SYMMETRIC SAMPLE':'EQUAL CENTERS'}</text><text x="${left}" y="48">${k?'Modes: −2 and 2':'Not symmetric'}</text><path d="M${x(0)} 66V130" stroke="var(--lk-vermilion)" stroke-dasharray="4 3"/><path d="M${left} 135h260" stroke="var(--lk-ink)"/>${[-4,-3,-2,-1,0,1,2,3,4].map(v=>`<path d="M${x(v)} 135v5" stroke="var(--lk-ink)"/><text x="${x(v)}" y="159" text-anchor="middle">${v}</text>`).join('')}${values.map((v,i)=>{const n=seen.get(v)||0;seen.set(v,n+1);return `<circle data-symmetry-point="${k}-${i}" cx="${x(v)}" cy="${112-n*14}" r="5" fill="var(--lk-cobalt)"><title>Observation ${i+1}: ${v}</title></circle>`;}).join('')}<text x="${left}" y="191">${k?'Mean = median = 0':'Mean = median = mode = 0'}</text></g>`;}).join('')}<text x="340" y="224" text-anchor="middle">Synthetic samples · one dot per observation</text></svg>`;}
+  return {speeds,hotels,asymmetric,bimodal,summarize,synthetic,summary,table,svg,symmetrySvg,fmt};
+});

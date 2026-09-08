@@ -1,4 +1,5 @@
 'use strict';
+const center=require('./oa-center-content.cjs');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process'),c=require('./oa-box-content.cjs'),m=require('../../oa/assets/boxplot.js');
 const root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_BOX_EVIDENCE,python=process.env.NOTES_OA_BOX_PYTHON;assert(dir&&python,'Set NOTES_OA_BOX_EVIDENCE and NOTES_OA_BOX_PYTHON');
 const pins={'boxplot.html':'8bac0a76a9fc3547aff6f661d53efbbb5087bbe73c48df63522854465bf64278','nist-scatter.html':'e5513bb13f6210b4e0a8085aa03c47000ebf5746e6d026c87be4aeb30fc650df','outliers.html':'1c7c3357e3f67b47b66efc63e884296c3f667b350feed6cd40b539c641825ba9','quantile.html':'17760a8178ca318cb564736bb29ca60b0468812695eb676ce1823784ad282923','scatter.html':'64aa66a6ce2c73d80604530c6bf1a3b19464c284b9ed8984d3a4fc36d102e54b'};
@@ -61,11 +62,11 @@ print('RESULT '+json.dumps(dict(sliderCases=len(data['cases']),extraDatasets=len
  for(const v of [2999,9501,NaN,5167.5,'5167'])assert.throws(()=>m.traffic(v));
  for(const a of [[],[1],Array(3),[1,NaN],[1,Infinity],[true,1],[1,1e7]])assert.throws(()=>m.summarize(a));assert.throws(()=>m.summarize([1,2],'unknown'));assert.throws(()=>m.svg(road,'unknown'));assert.throws(()=>m.svg(m.summarize([0,1])));
  assert.equal(m.correlation(m.pairs),0);assert.equal(m.correlation([...m.pairs].reverse()),0);assert.equal(m.scatter().wrongR,1);assert.equal(m.correlation([{x:1,y:2},{x:1,y:3}]),null);assert.throws(()=>m.correlation([{x:1,y:2},{x:NaN,y:3}]));
- const {parse}=await import('../contracts/node_modules/parse5/dist/index.js'),html=fs.readFileSync(root+'/'+c.file,'utf8'),before=execFileSync('git',['show','b893dce:'+c.file],{cwd:root,encoding:'utf8'}),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(c.next(before),html);assert.equal(c.next(html),html);
+ const {parse}=await import('../contracts/node_modules/parse5/dist/index.js'),html=fs.readFileSync(root+'/'+c.file,'utf8'),before=execFileSync('git',['show','b893dce:'+c.file],{cwd:root,encoding:'utf8'}),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(center.next(c.next(before)),html);assert.equal(c.next(html),html);
  for(const prev of ['frequency','coin','qq','selection','dm'])assert.equal(require('./oa-'+prev+'-content.cjs').next(html),html);
- for(let i=1;i<=14;i++){if(i===6)continue;const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],before.match(re)[0]);}
- const unrelatedSvg=s=>s.match(/<svg\b[\s\S]*?<\/svg>/g).filter(x=>!x.includes('p82t')&&!x.includes('data-generated-plot="oa-box-')&&!x.includes('data-generated-plot="oa-pairing"'));assert.deepEqual(unrelatedSvg(html),unrelatedSvg(before));
- const scripts=s=>c.stripOldWidget(s).match(/<script\b[\s\S]*?<\/script>/g).filter(x=>!x.includes('src="assets/boxplot'));assert.deepEqual(scripts(html),scripts(before));
+ for(let i=1;i<=14;i++){if(i===6)continue;const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],center.next(c.next(before)).match(re)[0]);}
+ const unrelatedSvg=s=>s.match(/<svg\b[\s\S]*?<\/svg>/g).filter(x=>!x.includes('p82t')&&!x.includes('data-generated-plot="oa-box-')&&!x.includes('data-generated-plot="oa-pairing"'));assert.deepEqual(unrelatedSvg(html),unrelatedSvg(center.next(c.next(before))));
+ const scripts=s=>c.stripOldWidget(s).match(/<script\b[\s\S]*?<\/script>/g).filter(x=>!x.includes('src="assets/boxplot'));assert.deepEqual(scripts(html),scripts(center.next(c.next(before))));
  assert(!html.includes('bx-canvas'));assert(!html.includes('the median and quartiles never move'));assert(!html.includes('Elimination rules of thumb'));assert(html.includes('step="1" value="5167" disabled'));assert.equal((html.match(/class="oa-w"/g)||[]).length,5);
  fs.writeFileSync('/home/ybc/notes-legacy-review-artifacts/oa-box-test.json',JSON.stringify({pins,arithmetic,markup:true,scope:'Section 6: paired observations, declared quartiles, all integer slider states and three Python examples; not verification of an August–September matching key'},null,2)+'\n');console.log(arithmetic);
 })().catch(e=>{console.error(e);process.exitCode=1;});
