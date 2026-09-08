@@ -1,12 +1,12 @@
 <!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PPS-05-Scala-Advanced</title>
+<title>PPS-05: Advanced Scala — Collections, Givens, Metaprogramming</title>
 <link rel="stylesheet" href="assets/lesson-kit.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 </head><body class="lk">
 <header class="lk-header">
 <div class="lk-kicker">Paradigmi di Programmazione e Sviluppo &mdash; Prof. Viroli</div>
-<h1>PPS-05-Scala-Advanced</h1>
+<h1>PPS-05: Advanced Scala — Collections, Givens, Metaprogramming</h1>
 <div class="lk-meta"><span>Advanced Scala: Scalability and Advanced Constructs</span></div>
 </header>
 <div class="lk-overview"><h2>In this lesson</h2><ul>
@@ -19,7 +19,7 @@
 <li>Exports and delegation vs inheritance</li>
 <li>Variance in generics</li>
 <li>Extension methods</li>
-<li>Contextual programming with given/using</li>
+<li>Contextual programming with given/using, context bounds, given conversions</li>
 <li>ScalaTest and For-comprehension</li>
 </ul></div>
 <nav class="lk-toc"><h3>Contents</h3><ol>
@@ -52,7 +52,7 @@
 
 <section id="s2"><h2>2. Right-Associative Construction</h2>
 <p>Scala supports <em>right-associative</em> operators: any method whose name ends with <code>:</code> is right-associative. This is the secret behind the elegant <code>1 :: 2 :: 3 :: Nil</code> syntax. Internally, <code>a :: b</code> is rewritten to <code>b.::(a)</code>, so the list is built from right to left.</p>
-<div class="callout exam"><span class="callout-label">Oral exam</span><p>Be ready to explain: <em>why does <code>::</code> need right associativity?</em> Because prepend to an immutable list is O(1), and chaining prepends naturally reads right-to-left: <code>10 :: 20 :: Nil</code> creates <code>Nil.::(20).::(10)</code>.</p></div>
+<div class="callout exam"><span class="callout-label">Oral exam</span><p>Be ready to explain: <em>why does <code>::</code> need right associativity?</em> Because the receiver of a prepend is the list, which sits on the <em>right</em>: <code>10 :: 20 :: Nil()</code> must parse as <code>10 :: (20 :: Nil())</code>, i.e. <code>Nil().::(20).::(10)</code>; with the usual left associativity <code>10 :: 20</code> would try to call a method on the <code>Int</code> 10. So the expression reads left-to-right while the list is built right-to-left, each step an O(1) prepend. The same name is used for the case constructor, because in a <em>pattern</em> the infix form <code>p op q</code> is equivalent to <code>op(p, q)</code>: <code>case h :: t</code> matches a cons node.</p></div>
 <p>Three equivalent construction styles:</p>
 <div id="ac-construction"></div>
 </section>
@@ -70,8 +70,10 @@
 <div class="callout note"><span class="callout-label">Editor's note</span><p><code>map</code> can be expressed as <code>foldRight(Nil())(f(_) :: _)</code>, and <code>filter</code> as <code>foldRight(Nil())((a,b) => if p(a) then a::b else b)</code>. This is the essence of fold-based refactoring.</p></div>
 <p>The companion object provides factory methods like <code>apply</code> and <code>of</code>:</p>
 <div id="ac-object"></div>
-<p>For mutable structures, we use a trait + private implementation pattern. Note that mutable operations have the same signature as their immutable counterparts but return <code>this</code>, enabling fluent chaining:</p>
+<p>For mutable structures, algebraic data types cannot be used: we use a trait + private implementation in the companion object. The implementation holds an <em>optional (head, tail) pair</em> in a <code>var</code>; if the head is empty the tail is empty. Note that mutable operations may keep the same signature as their immutable counterparts, just returning <code>this</code> (fluent style), so in principle mutable and immutable collections can share an interface; the implementation, however, is trickier &mdash; immutability is easier:</p>
 <div id="ac-mutable"></div>
+<div class="callout exam"><span class="callout-label">Oral exam</span><p>The slides ask: <em>what would happen with <code>l.append(l)</code>?</em> The last node of <code>l</code> gets <code>ht = Some((h, l))</code>, i.e. it points back to <code>l</code> itself: the list becomes cyclic and <code>toList</code> (or any traversal) never terminates. This aliasing hazard simply cannot arise with the immutable version, where <code>l.append(l)</code> builds a new list and <code>l.append(l) == l</code> is <code>false</code>.</p></div>
+<p>On performance: mutable structures win when frequently changed, but clever immutable structures (e.g. immutable red-black trees) offer logarithmic-time updates by <em>sharing</em> most of the original structure. Immutable collections are intrinsically thread-safe, can be freely shared, and suit information-extraction pipelines; side effects on mutable structures can be tricky.</p>
 </section>
 
 <section id="s5"><h2>5. Scala Collections Framework</h2>
@@ -102,12 +104,27 @@ classDiagram
   Seq <|-- LinearSeq
   Seq <|-- IndexedSeq
 </pre>
-<p>Aliases and constructors: without any import, <code>Seq</code>, <code>Set</code>, and <code>Map</code> refer to the <strong>immutable</strong> versions in <code>scala.collection.immutable</code>. Calling <code>Seq(1,2,3)</code> creates a <code>List</code>; <code>IndexedSeq(1,2,3)</code> creates a <code>Vector</code>; <code>Set(1,2,3)</code> creates a <code>HashSet</code>.</p>
+<p>Any class can join the framework by extending <code>Iterable</code> and implementing just <code>iterator</code>; all template methods (<code>map</code>, <code>toList</code>, ...) come for free:</p>
+<pre><code class="language-scala">class Fibonacci(n: Int) extends Iterable[Int]:
+  override def iterator: Iterator[Int] = new Iterator[Int]():
+    var counter = 0
+    var prev = (0, 1)
+    override def next(): Int =
+      prev = (prev._2, prev._1 + prev._2)
+      counter = counter + 1
+      prev._1
+    override def hasNext: Boolean = counter <= n
+
+val fibs = Fibonacci(20)
+val fibsAsStrings = fibs.map(i => s"Next one is $i")
+val list = fibs.toList</code></pre>
+<p>Aliases and constructors: without any import, <code>Iterable</code>, <code>Seq</code>, <code>IndexedSeq</code>, <code>Set</code>, <code>Map</code> and <code>List</code> refer to the <strong>immutable</strong> versions in <code>scala.collection.immutable</code>; mutable ones must be named explicitly (<code>mutable.ListBuffer</code>, <code>mutable.ArrayBuffer</code>, <code>mutable.HashSet</code>, <code>mutable.HashMap</code>). Each trait's companion has a varargs <code>apply</code>: immutable <code>Iterable</code>/<code>Seq</code>/<code>LinearSeq</code> create a <code>List</code>, <code>IndexedSeq</code> creates a <code>Vector</code>, <code>Set</code> a <code>HashSet</code>, <code>Map</code> a <code>HashMap</code>; mutable <code>Iterable</code>/<code>Seq</code>/<code>IndexedSeq</code> create an <code>ArrayBuffer</code>. <code>scala.Option</code> is somewhat part of the framework too (it has <code>map</code>, <code>filter</code>, <code>flatMap</code>, <code>fold</code>).</p>
+<div class="callout note"><span class="callout-label">Guidelines</span><p>Use immutable collections unless you have severe, measured performance issues; encapsulate mutability (prefer a private immutable <code>var</code> over a private mutable <code>val</code>). In interfaces stick to abstract types: <code>Iterable</code>, <code>Seq</code>, <code>Set</code>, <code>Map</code> (occasionally <code>LinearSeq</code>/<code>IndexedSeq</code>); never expose mutable structures, expose views instead. Local variables need no explicit type.</p></div>
 <div id="se-collection-hierarchy"></div>
 </section>
 
 <section id="s6"><h2>6. Collections in Practice</h2>
-<p>Working with the main collection types:</p>
+<p>Working with the main collection types (extracted from the slides; note the <code>getClass</code> outputs revealing the actual implementation behind each alias):</p>
 <div id="ac-collections-practice"></div>
 <table class="lk-table">
 <thead><tr><th>Collection</th><th>Type</th><th>Performance note</th></tr></thead>
@@ -115,9 +132,9 @@ classDiagram
 <tr><td><code>List</code></td><td>Immutable LinearSeq</td><td>Fast head/tail, slow indexed access</td></tr>
 <tr><td><code>LazyList</code></td><td>Immutable lazy LinearSeq</td><td>Elements computed on demand; memoised</td></tr>
 <tr><td><code>Vector</code></td><td>Immutable IndexedSeq</td><td>Fast apply/length, good all-around</td></tr>
-<tr><td><code>Array</code></td><td>Mutable IndexedSeq (JVM array)</td><td>Fixed length, low-level performance</td></tr>
+<tr><td><code>Array</code></td><td>Mutable IndexedSeq (a Java array, e.g. <code>int[]</code>; seen as <code>mutable.ArraySeq</code> when used as a collection)</td><td>Fixed length, low-level performance</td></tr>
 <tr><td><code>ArrayBuffer</code></td><td>Mutable IndexedSeq</td><td>Variable length, good general-purpose</td></tr>
-<tr><td><code>ListBuffer</code></td><td>Mutable LinearSeq</td><td>Efficient append to lists</td></tr>
+<tr><td><code>ListBuffer</code></td><td>Mutable buffer (listed with LinearSeq in the slides)</td><td>Efficient <code>+=</code>/<code>-=</code>, then <code>toList</code></td></tr>
 </tbody>
 </table>
 <div class="callout note"><span class="callout-label">Views</span><p>Views provide a lazy, immutable wrapper around a collection. Operations on a view are not computed until forced (via <code>.toList</code> or iteration). If the backing collection is mutable, changes to it are reflected in the view.</p></div>
@@ -134,53 +151,85 @@ classDiagram
 </tbody>
 </table>
 <div id="ac-loggers"></div>
-<div class="callout exam"><span class="callout-label">Oral question</span><p>Compare the three Logger implementations. Why is <code>private var strings = Seq()</code> often preferred in Scala over a mutable val? <em>Because it encapsulates mutability at the reference level, leaving the data structure itself immutable and sharable.</em></p></div>
+<div class="callout exam"><span class="callout-label">Oral question</span><p>Compare the three Logger implementations. Why is <code>private var strings = Seq()</code> often preferred in Scala over a mutable val? <em>Because it encapsulates mutability at the reference level, leaving the data structure itself immutable and sharable</em> (the slides: choose case 1 only after a precise performance evaluation, case 2 if the domain concept calls for mutability, case 3 whenever immutability is acceptable &mdash; "always put side-effects outwards: the core should be declarative"). Note also that <code>Logger3</code> has a <code>private</code> primary constructor plus a public auxiliary one, and that the fully immutable version is used as <code>logger3 = logger3.log("str1")</code>.</p></div>
 </section>
 
 <section id="s8"><h2>8. Nesting Constructs</h2>
-<p>Scala's constructs nest arbitrarily: classes inside classes (inner classes), classes inside objects (nested/static-like), methods inside methods (for recursive helpers), anonymous classes inside methods.</p>
+<p>Scala's constructs &mdash; <code>class</code>, <code>abstract class</code>, <code>object</code>, <code>trait</code>, <code>def</code> (and packages, which are very similar to objects) &mdash; nest arbitrarily: classes inside classes (inner classes, see also family polymorphism), classes inside objects (Java's static nested classes), methods inside methods (frequent with recursion), anonymous classes inside methods (local helpers). Anonymous classes are written <code>new D() {}</code> / <code>new D(): override def b = 2</code>, and a trait with a single abstract method can be filled with a lambda, Java-style: <code>val t2: T2 = () =&gt; 4</code>.</p>
 <div id="ac-nesting"></div>
 <div class="callout idea"><span class="callout-label">Scalability</span><p>The ability to nest constructs arbitrarily is what makes Scala <em>scalable</em>: the language grows with your needs, from a simple script to a large system.</p></div>
 </section>
 
 <section id="s9"><h2>9. Packages, Imports, Visibility</h2>
-<p>Packages in Scala are fully compatible with Java's but can also define namespaces directly in source files. Imports can appear at any point, are fine-grained, and support aliasing. Default imports include <code>scala.*</code>, <code>java.lang.*</code>, and <code>scala.Predef.*</code>.</p>
+<p>Packages in Scala are fully compatible with Java's, but sources need not live in a directory matching the package, and packages can define namespaces directly in source files (<code>package a:</code> ... as in C#); in Scala 3 top-level <code>val</code>s and <code>def</code>s can be defined directly in a package. Imports can appear at any point (fine-grained, no long lists at the top), can import a whole package or single/multiple members, can "statically import" the content of an object/val, and can create aliases. Default imports are <code>scala.*</code>, <code>java.lang.*</code>, and <code>scala.Predef.*</code> (the object providing <code>println</code>, <code>???</code>, ...). Being nested in a package or object means having its definitions "imported": at each point of the code the visible identifiers are those of all enclosing packages/objects, the explicit imports written so far, and the defaults &mdash; imports also control which <code>given</code>s and <code>extension</code>s are available.</p>
 <div id="ac-imports"></div>
 <p>Visibility modifiers in Scala:</p>
 <table class="lk-table">
 <thead><tr><th>Modifier</th><th>Meaning</th></tr></thead>
 <tbody>
-<tr><td><code>private</code></td><td>Visible only within the enclosing class/object</td></tr>
+<tr><td><code>private</code></td><td>Visible only within the enclosing class/object &mdash; and its companion: class and companion object share private members</td></tr>
 <tr><td><code>protected</code></td><td>Visible to subclasses</td></tr>
 <tr><td><code>private[package]</code></td><td>Visible within the specified package</td></tr>
 <tr><td><code>protected[package]</code></td><td>Visible to subclasses or within the package</td></tr>
 </tbody>
 </table>
+<p>The qualifier may name a package <em>or an enclosing object</em>; the slides' example (in <code>package u05.structure</code>, subpackages <code>pa1.pa2</code>):</p>
+<pre><code class="language-scala">class C:
+  private object pri               // visible only by C's instances (and object C)
+  private[pa2] object pri_pa2      // visible only up to package pa2
+  protected object pro             // visible to subclasses
+  protected[pa2] object pro_pa2    // visible to subclasses, or up to pa2
+  def f(c: C) = print(C.g())       // WORKS: can see the companion's private stuff
+
+object C:
+  print(new C().pri)               // WORKS: can see the class' private stuff
+  private def g() = 1
+
+class E(c: C):
+  print(c.pri_pa2, c.pro_pa2)      // WORKS (same package pa2); c.pri, c.pro would be errors
+
+class F extends pa2.C:             // outside pa2
+  print(pro_pa2)                   // WORKS (subclass); pri_pa2 would be an error
+
+// A private constructor: only the companion factory can create instances
+class CounterImpl private[structure] () extends Counter: ...
+object Counter:
+  def apply(): Counter = new CounterImpl</code></pre>
+<p>Instead of many private helper methods, the slides suggest nesting them in a single <code>private object ImplementationHelpers</code> inside the class (with <code>import ImplementationHelpers.*</code> to ease the calls). Remember that the level of accessibility is a key design factor.</p>
 <div class="callout exam"><span class="callout-label">Oral question</span><p>Why is <code>private</code> less frequent in Scala than in Java? Because the pattern <em>"private field + public getter"</em> is unnecessary thanks to uniform access. Also, private helper methods can be nested inside the single public method that uses them.</p></div>
 </section>
 
 <section id="s10"><h2>10. Abstract Types and Modelling</h2>
-<p>Scala supports <em>abstract type members</em>: a trait can declare <code>type T</code>, and subclasses concretise it with <code>override type T = SomeType</code>. This is an alternative to type parameterisation. Combined with alias creation, it enables powerful abstract modelling.</p>
+<p>Scala supports <em>abstract type members</em>: a trait or abstract class can declare <code>type T</code> (or a bounded <code>type T &lt;: R</code>), and subclasses must concretise it with <code>type T = R</code> before objects can be created. It is a form of type parameterisation where the abstracted types are members rather than parameters in brackets; abstract types can themselves be generic (<code>type MySeq[T] = List[T]</code>). Three applications: (1) <strong>aliases</strong>, as in <code>scala.Predef</code> (<code>type String = java.lang.String</code>, <code>type Map[A, +B] = collection.immutable.Map[A, B]</code>, <code>type Function[-A, +B] = A =&gt; B</code>) &mdash; similar to import renaming but usable with generics, typically paired with a same-named factory <code>def MySeq[T](elems: T*)</code>; (2) <strong>abstract modelling</strong> of concepts, as in ADTs; (3) <strong>path-dependent types</strong>, supporting family polymorphism (end of the course).</p>
 <div class="callout idea"><span class="callout-label">The Exams case study</span><p>The quintessential abstract modelling technique: define a <em>system</em> as a trait of abstract concepts (Student, Teacher, Course, Evaluation), then refine it progressively with concrete implementations.</p></div>
 <div id="ac-exams"></div>
 <div class="callout note"><span class="callout-label">Why this matters</span><p>This approach cannot be easily achieved in other mainstream languages. It lays the foundation for <em>family polymorphism</em> and <em>mixin-based</em> system composition.</p></div>
 </section>
 
 <section id="s11"><h2>11. Traits, Mixins, Linearization</h2>
-<p>Traits in Scala are richer than Java interfaces: they can carry fields, concrete methods, and be stacked using <em>linearization</em>. When a class mixes in multiple traits with <code>super</code> calls, Scala creates a linear chain that determines which implementation is invoked.</p>
+<p>Abstract classes are as in Java (translated to JVM abstract classes, single extension, no overhead). Traits are richer than Java interfaces: they can carry fields and concrete methods, and are compiled to interfaces plus static methods that the extending class calls as needed; a class can mix in many of them, and <em>linearization</em> stacks them from left (up) to right (down) as a sequence of decorations. Typical uses of traits: abstract concepts (like interfaces), rich interfaces, interfaces for strategies and type classes (<code>Ordered[T]</code>, any <code>FunctionN</code>), class templates (partial classes to be extended many times), and <strong>stackable modifications</strong> &mdash; the key mixin property. A <strong>mixin</strong> is a unit of code, possibly partially implemented, that is "included" or "stacked in" rather than inherited: it gives reuse, not necessarily substitutability. When a class mixes in traits with <code>super</code> calls, Scala creates a linear chain that determines which implementation is invoked.</p>
 <div id="ac-traits"></div>
-<p><strong>Rich interfaces</strong> define a few abstract methods and many template methods derived from them&mdash;<code>Iterable</code> is the canonical example:</p>
+<p>The test in the slides: <code>BasicParser(Set('a','b','c')).parseAll("aabc".toList)</code> is <code>true</code>, <code>"aabcdc"</code> gives <code>false</code>, the empty string <code>true</code>; with <code>NonEmptyBasicParser(Set('0','1'))</code>, <code>"0101"</code> is <code>true</code>, <code>"0123"</code> is <code>false</code> and <code>List()</code> is now <code>false</code>. Note that <code>NonEmpty</code> refers to an unknown <code>super</code> &mdash; nothing similar exists in Java &mdash; hence <code>abstract override</code>.</p>
+<p><strong>Rich interfaces</strong> define a few abstract methods and many template methods derived from them&mdash;<code>Iterable</code> is the canonical example; another is <code>scala.Ordered[T]</code>, which derives <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code> from the single abstract <code>compareTo</code> (<code>Ordered</code> plays the role of Java's <code>Comparable</code>, <code>Ordering</code> that of <code>Comparator</code>):</p>
 <div id="ac-rich-interface"></div>
-<p><strong>Self-types</strong> express that a trait requires being mixed into a specific type, enabling a form of dependency injection without inheritance:</p>
+<p><strong>Self-types</strong> (<code>trait T { name: Type =&gt; ... }</code>) express that a trait can only be instantiated when mixed into a class/trait of the given type; <code>name</code> is a reference equal to <code>this</code> but typed <code>Type</code>. The trait is <em>not</em> a subtype of that type: it is inheritance without subtyping, achieved internally by delegation/decoration &mdash; the typical way to create mere "decorations" and to declare a dependency without inheriting:</p>
 <div id="ac-self-type"></div>
-<p><strong>Linearization</strong> is how Scala resolves the diamond problem. For a class <code>C extends Base with A with B</code>, the linearization is computed as <code>C &rarr; B &rarr; A &rarr; Base</code>. The <code>super</code> call in each trait refers to the next element in this chain.</p>
+<p>If the type is omitted (<code>self =&gt;</code>), the name is just an alias for <code>this</code> of the enclosing class, used inside inner or anonymous classes where <code>this</code> would refer to the inner object:</p>
+<pre><code class="language-scala">trait FunctionOption[-A, +B]:
+  self =>
+  def apply(a: A): Option[B]
+  final def andThen[C](f: FunctionOption[B, C]): FunctionOption[A, C] =
+    new FunctionOption[A, C]:
+      override def apply(a: A): Option[C] =
+        self.apply(a).flatMap(b => f.apply(b))   // this.apply(a) would not compile: this is the new object</code></pre>
+<p><strong>Linearization</strong> is how Scala renders multiple inheritance on the JVM: by decoration (inheritance + delegation). For a class <code>C extends Base with A with B</code>, the linearization is <code>C &rarr; B &rarr; A &rarr; Base</code> (each trait's own parents are inserted after it, and no class ever appears twice). The <code>super</code> call in each trait refers to the next element in this chain: in <code>NonEmptyBasicParser</code>, <code>NonEmpty</code> uses the <code>BasicParser</code> part as <code>super</code>. When programming, "things just work".</p>
 <div id="se-linearization"></div>
 </section>
 
 <section id="s12"><h2>12. Exports and Delegation</h2>
 <p>Scala 3 introduces <code>export</code>, which eliminates the boilerplate of delegation. Instead of manually writing forwarding methods, you export the members of a delegated object:</p>
 <div id="ac-exports"></div>
-<div class="callout idea"><span class="callout-label">Principle</span><p>Prefer delegation over inheritance (least power principle). Inheritance opens a class too much and hardly deals with multiple reuse. Exports make delegation zero-boilerplate.</p></div>
+<div class="callout idea"><span class="callout-label">Principle</span><p>Prefer delegation over inheritance (least power principle). Inheritance opens a class to subclasses too much and hardly deals with multiple reuses; substitutability is better achieved by traits alone, focusing on the contract, and delegation combined with refined access modifiers is preferable. The problem with delegation was the boilerplate of forwarders: an <code>export</code> directly transfers the visibility of the "content" of a stable member to the outside, with almost the same syntax as imports. In the example, <code>MultiCounter</code> and <code>FancyCounter</code> are <code>Counter</code>s by substitutability only, with no inheritance of implementation; <code>c2.decrement()</code> on a <code>FancyCounter</code> does not compile, while <code>c2.creationTime()</code> does.</p></div>
 <p>Exports also serve as <em>import units</em>&mdash;reusable bundles of aliases and re-exports:</p>
 <div id="ac-export-units"></div>
 </section>
@@ -192,15 +241,26 @@ classDiagram
 <li><strong>Contravariant</strong> (<code>-A</code>): <code>Handler[Animal] &lt;: Handler[Cat]</code></li>
 <li><strong>Invariant</strong>: the default</li>
 </ul>
+<p>The compiler checks that a variance annotation makes sense with respect to Liskov's substitution principle: with <code>List[+T]</code> we get <code>List[Int] &lt;: List[AnyVal]</code>, but a setter taking <code>T</code> would be rejected because <code>T</code> occurs in <em>contravariant position</em>. Type parameters can also be constrained by <strong>bounds</strong>: <code>[A &lt;: Upper]</code>, <code>[A &gt;: Lower]</code>, or both. (Definition-site variance was studied in Igarashi &amp; Viroli, ECOOP 2002.)</p>
 <p>Common library examples:</p>
 <div id="ac-variance-examples"></div>
 <p><strong>Covariant stack:</strong> making a Stack covariant requires a more general <code>push</code> method that uses a lower type bound:</p>
 <div id="ac-costack"></div>
-<div class="callout exam"><span class="callout-label">Oral question</span><p>Why can't <code>Stack[T]</code> be covariant? Because <code>push(t: T)</code> puts T in <em>contravariant position</em>. The solution is <code>def push[R &gt;: T](r: R): CoStack[R]</code>.</p></div>
+<div class="callout exam"><span class="callout-label">Oral question</span><p>Why can't <code>Stack[T]</code> be covariant? Because <code>push(t: T)</code> puts T in <em>contravariant position</em>: if <code>Stack[Int] &lt;: Stack[Any]</code> were allowed, <code>val s: Stack[Any] = Stack[Int](10, 20); s.push("a string")</code> would corrupt an <code>Int</code> stack. The solution is <code>def push[R &gt;: T](r: R): CoStack[R]</code>: pushing a <code>String</code> onto a <code>CoStack[Int]</code> is allowed but yields a <code>CoStack[Any]</code>.</p></div>
+<p>Covariance is also what allows a single empty-list object. The slides' <code>CoList</code>:</p>
+<pre><code class="language-scala">enum CoList[+T]:
+  case Cons(head: T, tail: CoList[T])
+  case Nil                               // a single object, of type CoList[Nothing] <: CoList[T] for every T
+
+object CoList:
+  def apply[T](elems: T*): CoList[T] = elems.foldRight[CoList[T]](Nil)(Cons(_, _))
+
+// would not type-check with an invariant CoList[T]
+val ll: CoList[CoList[Any]] = CoList(CoList(10, 20, 30), CoList("a", "b", "c"), CoList(10, new java.util.Date, "a string"))</code></pre>
 </section>
 
 <section id="s14"><h2>14. Extension Methods</h2>
-<p>Extension methods let you add new methods to existing types without modification. They are an application of the adapter pattern, automatically provided by the compiler when the extension is in scope:</p>
+<p>Languages are shifting towards less rigidity and more terseness (DSLs, scripting, agility over predictivity); Scala's remaining flexibility features, all FP-oriented, are extension methods, given instances and automatic conversions &mdash; to be used with care, capturing and documenting the abstraction. <strong>Extension methods</strong> let you add new methods to existing types after their definition, only in certain programming contexts: an application of the adapter pattern without writing the adapter class. An extension method is defined outside the class, translates to a method taking the receiver as first argument, and can be called with dot notation whenever it is in scope. Typical uses: adding operators to existing classes, separating data from operations and recombining flexibly, giving an OOP flavour on top of pure FP:</p>
 <div id="ac-extensions"></div>
 <div class="callout idea"><span class="callout-label">Pure FP with extensions</span><p>Extension methods enable a purely functional style where you define types via enums/case classes and add operations as extensions in companion objects. This separates data from operations and recombines flexibly.</p></div>
 <p><strong>Do we really need OOP?</strong> Surprisingly, many cases can be solved with just enums + extension methods + delegation. Use OOP where it naturally fits (controllers, stateful models).</p>
@@ -208,14 +268,31 @@ classDiagram
 
 <section id="s15"><h2>15. Contextual Programming</h2>
 <p>Scala 3's <code>given</code>/<code>using</code> mechanism separates <em>inputs</em> from <em>context</em>. Context parameters can be inferred from the scope, avoiding verbose explicit passing&mdash;perfect for strategies, configurations, and type classes.</p>
-<div class="callout idea"><span class="callout-label">Term inference</span><p>A <code>given</code> instance is a canonical term of a type that the compiler can summon automatically using <code>using</code> clauses or <code>summon</code>.</p></div>
+<div class="callout idea"><span class="callout-label">Term inference</span><p>A <code>given</code> instance is a canonical term of a type that the compiler can synthesise in a scope: a parameter declared with <code>using</code> can be passed explicitly (<code>f(using context)(input)</code>) or omitted (<code>f(input)</code>), in which case the compiler looks for a given of that type; <code>summon[T]</code> recovers it by hand, and <code>import X.given</code> imports only the givens of <code>X</code>. Scala 2 did this with the much-criticised <code>implicit</code> mechanism; Scala 3's given/using is more direct and intent-revealing.</p></div>
 <div id="ac-given-using"></div>
-<p><strong>Context bounds</strong> (<code>T: MyOrdering</code>) enable ad-hoc polymorphism: a method works for any type T that has a <code>MyOrdering[T]</code> available:</p>
+<p><strong>Context bounds</strong> (<code>def m[A: B]</code>) enable <em>ad-hoc polymorphism</em>: the method can be invoked with a type <code>A</code> only if a given of type <code>B[A]</code> exists in scope, recovered inside with <code>summon[B[A]]</code>. This is not a trick: it paves the way to hierarchies of "contexts" as <strong>type classes</strong>, a method being applicable to few selected types (those with the context):</p>
 <div id="ac-context-bounds"></div>
+<p><strong>Given conversions</strong> automate the adapter pattern when legacy libraries must interoperate with new ones: provide a given instance of <code>scala.Conversion[-I, +O]</code> (a subtype of <code>I =&gt; O</code>) and the compiler inserts the conversion where an <code>I</code> is used as an <code>O</code>. The companion object of the target type is the proper place for it:</p>
+<pre><code class="language-scala">case class Point(n: Int, m: Int)
+object Point:
+  given Conversion[(Int, Int), Point] with
+    def apply(t: (Int, Int)): Point = Point(t._1, t._2)
+  given Conversion[List[Int], Point] = l => Point(l.head, l.tail.head)   // by a literal
+
+def pointToRadius(p: Point) = Math.sqrt(p.n * p.n + p.m * p.m)
+println(pointToRadius((3, 4)))         // 5.0: the tuple is converted
+println(pointToRadius(List(3, 4)))     // 5.0
+println(summon[((Int, Int)) => Point]((10, 20)))   // Point(10,20): checks a conversion is active
+
+// facading Swing: a lambda where Java wants an ActionListener, and a by-name overload
+given Conversion[ActionEvent => Unit, ActionListener] = f => f(_)
+extension (b: JButton)
+  def addActionListener(action: => Unit): Unit = b.addActionListener(e => action)
+// then: import ScalaSwingFacade.{*, given}; bquit.addActionListener(System.exit(0))</code></pre>
 </section>
 
 <section id="s16"><h2>16. For-Comprehension</h2>
-<p><code>for</code>-comprehension is syntactic sugar for chains of <code>map</code>, <code>flatMap</code>, <code>filter</code>, and <code>foreach</code>. It is a key mechanism for encoding sequential, exploratory computations.</p>
+<p><code>for</code>-comprehension is syntactic sugar for chains of <code>map</code>, <code>flatMap</code>, <code>filter</code> (<code>withFilter</code>), and <code>foreach</code>. The weak understanding is "an iteration construct with several variables"; the stronger one is that it is a key mechanism to encode <em>exploration-like</em> computations, to define a notion of <em>sequentiality</em> in FP, and to encapsulate <em>monads</em> (more to come). Basic building blocks on <code>List(10,20,30)</code>: <code>map(_ * 2)</code> gives <code>20,40,60</code>; <code>flatMap(List(_, 0))</code> gives <code>10,0,20,0,30,0</code>; <code>filter(_ &gt; 10)</code> gives <code>20,30</code>.</p>
 <div class="callout exam"><span class="callout-label">Oral question</span><p>Desugar the following <code>for</code>-comprehension into <code>flatMap</code>/<code>map</code>/<code>filter</code> calls. This is a classic oral exam question!</p></div>
 <div id="ac-forcomp"></div>
 <p><strong>N-Queens</strong>&mdash;the canonical example of search-space exploration using for-comprehension:</p>
@@ -233,19 +310,25 @@ classDiagram
 <details><summary>Explain the difference between <code>foldLeft</code> and <code>foldRight</code>. Which one is tail-recursive?</summary>
 <p><code>foldLeft</code> processes elements left-to-right and is tail-recursive: the accumulator is computed first, then passed to the next iteration. <code>foldRight</code> processes right-to-left: it pushes recursive calls onto the stack and combines on return. <code>foldRight</code> is not tail-recursive, but it expresses structure-preserving transformations naturally (e.g., <code>map</code>, <code>filter</code>, <code>concat</code>).</p></details>
 <details><summary>Desugar the expression <code>for x <- List(1,2); y <- List(3,4) if x+y > 3 yield (x,y)</code> into flatMap/map/filter calls.</summary>
-<p><code>List(1,2).flatMap(x => List(3,4).filter(y => x + y > 3).map(y => (x, y)))</code></p></details>
+<p><code>List(1,2).flatMap(x => List(3,4).filter(y => x + y > 3).map(y => (x, y)))</code>, giving <code>List((1,3), (1,4), (2,3), (2,4))</code>. Rule: every generator but the last becomes a <code>flatMap</code>, the last a <code>map</code> (a <code>foreach</code> for <code>for ... do</code>), guards become <code>filter</code> (strictly <code>withFilter</code>, the lazy variant) and <code>x = e</code> definitions become a <code>map</code> to a tuple.</p></details>
 <details><summary>Why does <code>::</code> need to be right-associative in Scala?</summary>
-<p>Because <code>a :: b :: Nil</code> should mean <code>Nil.::(b).::(a)</code> (prepend a then b). Right associativity makes the chain read naturally left-to-right: &ldquo;prepend 10, prepend 20, prepend 30 to Nil&rdquo;.</p></details>
+<p>Because the receiver of a prepend is the list, on the right: <code>a :: b :: Nil()</code> must group as <code>a :: (b :: Nil())</code>, i.e. <code>Nil().::(b).::(a)</code> &mdash; prepend <code>b</code> to the empty list, then prepend <code>a</code>. With left associativity <code>a :: b</code> would call <code>::</code> on the element <code>a</code>, which has no such method. Any method whose name ends in <code>:</code> gets this treatment, so the list reads left-to-right while being built right-to-left by O(1) prepends; and since a pattern <code>h :: t</code> means <code>::(h, t)</code>, the same name serves construction and extraction.</p></details>
 <details><summary>Compare the three immutability strategies. When would you use each?</summary>
 <p><strong>Mutable val</strong> (e.g., <code>val buf = ListBuffer()</code>): for hot loops with verified performance need. <strong>Immutable var</strong> (e.g., <code>var list = Seq()</code>): for domain concepts that are naturally mutable (register state, counters). <strong>Immutable val</strong> (e.g., <code>val list = List()</code>): preferred FP style; the data never changes, new versions are created. Always push side-effects outward.</p></details>
 <details><summary>What is trait linearization? Give an example with <code>NonEmpty</code> and <code>BasicParser</code>.</summary>
-<p>Linearization resolves which <code>super</code> implementation is called when traits are stacked. For <code>NonEmptyBasicParser extends BasicParser with NonEmpty[Char]</code>, the linearization is <code>NonEmptyBasicParser &rarr; NonEmpty &rarr; BasicParser &rarr; Parser</code>. NonEmpty's <code>super.parse(t)</code> calls BasicParser's <code>parse</code>.</p></details>
+<p>Linearization resolves which <code>super</code> implementation is called when traits are stacked: the class and its parents are ordered from right to left of the <code>extends ... with ...</code> clause, each followed by its own parents, with no class listed twice; <code>super</code> in a trait means "the next one in the chain", which is unknown when the trait is written (hence <code>abstract override</code>). For <code>NonEmptyBasicParser extends BasicParser with NonEmpty[Char]</code>, the linearization is <code>NonEmptyBasicParser &rarr; NonEmpty &rarr; BasicParser &rarr; Parser</code> (then <code>AnyRef</code>, <code>Any</code>). NonEmpty's <code>super.parse(t)</code> calls BasicParser's <code>parse</code>: on the JVM this is decoration, i.e. inheritance plus delegation.</p></details>
 <details><summary>How do you make <code>Stack[T]</code> covariant? What is the key change to the <code>push</code> method?</summary>
 <p>Declare <code>trait CoStack[+T]</code> and change push to use a lower type bound: <code>def push[R &gt;: T](r: R): CoStack[R]</code>. This prevents inserting the wrong type by widening the result type.</p></details>
 <details><summary>What is the difference between <code>import</code> and <code>export</code> in Scala 3?</summary>
 <p><code>import</code> brings names into the current scope for use. <code>export</code> re-exports stable members of a value to the enclosing scope, making them part of the public API&mdash;it is the inverse of import, and it enables zero-boilerplate delegation.</p></details>
 <details><summary>Explain how abstract types enable the Exams modelling approach.</summary>
 <p>The <code>Exams</code> trait declares abstract types (<code>type Student</code>, <code>type Teacher</code>, <code>type Course</code>, <code>type Evaluation</code>) that are concretised by subclasses (<code>override type Student = String</code>). This defines a whole &ldquo;system&rdquo; of concepts that can be refined progressively, keeping all mutual dependencies consistent without type parameters.</p></details>
+<details><summary>What is a self-type, and how does <code>trait ProducerUtils { producer: Producer =&gt; ... }</code> differ from <code>trait ProducerUtils extends Producer</code>?</summary>
+<p>A self-type declares that the trait can only be mixed into a class of the given type, and gives <code>this</code> (under the name <code>producer</code>) that type inside the trait. Unlike <code>extends</code>, it creates no subtyping: <code>ProducerUtils</code> is not a <code>Producer</code>, it merely requires one, so it works as a pure decoration attachable to any implementation (<code>new ConstantProducer("a") with ProducerUtils</code>). It is inheritance without subtyping, i.e. a declared dependency, achieved by delegation.</p></details>
+<details><summary>What do <code>using</code> parameters and context bounds add over ordinary parameters? What does <code>def max[T: MyOrdering](...)</code> mean?</summary>
+<p>A <code>using</code> parameter separates <em>context</em> (a strategy, a configuration) from <em>inputs</em>: it can be passed explicitly with <code>using</code>, or inferred by the compiler from the <code>given</code> instances in scope (term inference). <code>[T: MyOrdering]</code> is a context bound: the method can be called with a type <code>T</code> only if a given <code>MyOrdering[T]</code> exists in scope, retrievable inside with <code>summon[MyOrdering[T]]</code>. This is ad-hoc polymorphism: the method applies to exactly those types for which the context has been defined, the basis of type classes.</p></details>
+<details><summary>How is an extension method compiled, and when is <code>p.length</code> resolved to <code>extension (p: Point2D) def length</code>?</summary>
+<p>The extension translates to an ordinary method whose first parameter is the receiver (<code>length(p)</code>); the call <code>p.length</code> is rewritten to it by the compiler only when <code>Point2D</code> itself has no <code>length</code> member and the extension is in scope (defined or imported, e.g. <code>import Point2DOperators.*</code>). It is the adapter pattern without the adapter class, and it allows a pure-FP style: data as enums/case classes, operations as extensions in the companion object.</p></details>
 </div>
 </section>
 
@@ -260,12 +343,13 @@ LessonKit.annotatedCode('#ac-list-def', { lang:'scala', lines:[
   ['enum List[A]:', 'Define the List type as an enum (algebraic data type) with type parameter A'],
   ['  case ::(h: A, t: List[A])', 'The Cons case: a head element and a tail list. Colon suffix makes :: right-associative'],
   ['  case Nil()', 'The empty list case'],
-  ['  def ::(h: A): List[A] = List.::(h, this)', 'Prepend method: uses right-associative :: on the companion object'],
+  ['  def ::(h: A): List[A] = List.::(h, this)', 'Prepend method: builds a new :: node via the case constructor (qualified through the enum companion, to distinguish it from this method). Because the name ends in ":", 10 :: l means l.::(10)'],
+  ['  def isEmpty: Boolean = this == Nil()', 'Another method; structural equality of enum cases'],
   ['  def head: Option[A] = this match', 'Return the first element safely as Option, avoiding null'],
   ['    case h :: _ => Some(h)', 'Pattern match using the :: extractor; note infix notation'],
   ['    case _ => None', 'Empty list yields None'],
   ['  def tail: Option[List[A]] = this match', 'Return the rest of the list as Option'],
-  ['    case h :: t => Some(t)', 'Extract and return tail'],
+  ['    case _ :: t => Some(t)', 'Extract and return tail'],
   ['    case _ => None', 'Empty list has no tail'],
   ['  def append(list: List[A]): List[A] = this match', 'Append another list: recursive on the receiver'],
   ['    case h :: t => h :: t.append(list)', 'Prepend head, then recurse on tail'],
@@ -273,6 +357,10 @@ LessonKit.annotatedCode('#ac-list-def', { lang:'scala', lines:[
   ['  def foreach(consumer: A => Unit): Unit = this match', 'Apply a side-effecting function to each element'],
   ['    case h :: t => consumer(h); t.foreach(consumer)', 'Process head, recurse on tail'],
   ['    case _ =>', 'Base case: do nothing'],
+  ['  def get(pos: Int): Option[A] = this match', 'Positional access, again safe via Option'],
+  ['    case h :: _ if pos == 0 => Some(h)', 'Found'],
+  ['    case _ :: t if pos > 0 => t.get(pos - 1)', 'Walk the tail'],
+  ['    case _ => None', 'Out of range (or negative)'],
   ['  def filter(predicate: A => Boolean): List[A] = this match', 'Retain only elements satisfying the predicate'],
   ['    case h :: t if predicate(h) => h :: t.filter(predicate)', 'Keep h if it satisfies the predicate'],
   ['    case _ :: t => t.filter(predicate)', 'Skip h if it does not satisfy'],
@@ -287,48 +375,48 @@ LessonKit.annotatedCode('#ac-construction', { lang:'scala', lines:[
   ['val l2: List[Int] = Nil().::(30).::(20).::(10)', 'Style 2: OO dot-notation -- each :: prepends to the receiver'],
   ['val l3: List[Int] = 10 :: 20 :: 30 :: Nil()', 'Style 3: infix notation (the idiomatic way). :: is right-associative!'],
   ['  // recall: operators ending with ":" have right-associativity', 'a :: b :: Nil rewrites to Nil.::(b).::(a) -- reads left-to-right'],
-  ['println(head(l))', 'FP-like call to a companion object method'],
-  ['println(l.isEmpty)', 'OO-like call to an instance method']
+  ['println(head(l))', 'FP-like call to a companion-object method (the slides also define def head(l: List[Int]) in object List, imported with import List.*): Some(10)'],
+  ['println(l.isEmpty)', 'OO-like call to an instance method: false']
 ]});
 
 LessonKit.annotatedCode('#ac-folds', { lang:'scala', lines:[
   ['@tailrec final def foldLeft[B](init: B)(f: (B, A) => B): B = this match', 'foldLeft: tail-recursive, left-to-right'],
   ['  case h :: t => t.foldLeft(f(init, h))(f)', 'Apply f to accumulator and head, recurse on tail'],
   ['  case _ => init', 'When list is empty, return the accumulator'],
-  ['def size: Int = foldLeft(0)((acc, _) => acc + 1)', 'size implemented via foldLeft -- just count elements'],
+  ['def size(init: Int = 0): Int = foldLeft(init)((acc, _) => acc + 1)', 'size implemented via foldLeft -- just count elements'],
   ['override def toString: String = foldLeft("|")((acc, h) => acc + h.toString + "|")', 'toString via foldLeft -- build a string left-to-right'],
   ['def foldRight[B](init: B)(op: (A, B) => B): B = this match', 'foldRight: NOT tail-recursive, processes right-to-left'],
   ['  case h :: t => op(h, t.foldRight(init)(op))', 'Recurse first on tail, then combine head with result'],
   ['  case _ => init', 'Base case'],
   ['def map[B](f: A => B): List[B] = foldRight(Nil())(f(_) :: _)', 'map via foldRight: rebuild structure from right to left'],
   ['def concat(l: List[A]): List[A] = foldRight(l)(_ :: _)', 'concat via foldRight: prepend each element of this to l'],
-  ['def reverse: List[A] = foldLeft(Nil[A]())((acc, h) => h :: acc)', 'reverse via foldLeft: prepend each element to accumulator']
+  ['def reverse: List[A] = foldLeft(Nil[A]())((acc, h) => h :: acc)', 'reverse via foldLeft: prepend each element to accumulator (right-to-left construction with tail recursion)'],
+  ['def mapTail[B](f: A => B): List[B] = foldLeft(Nil[B]())((acc, h) => f(h) :: acc).reverse', 'A tail-recursive map: fold left then reverse -- two passes, but constant stack']
 ]});
 
 LessonKit.stepper('#stepper-fold', {
   title: 'Step-by-step: foldLeft vs foldRight',
   sub: 'Trace the execution of foldLeft and foldRight on List(10, 20, 30) with sum operation',
-  shared: { list: '[10,20,30]', acc: '?', step: 0 },
-  watch: ['list', 'acc', 'step'],
+  shared: { remaining: '[10,20,30]', acc: '0 (init)', pending: '-', done: 0 },
+  watch: ['remaining', 'acc', 'pending'],
   threads: {
-    left: { name:'foldLeft', steps:[
-      { label:'init: acc = 0', run:function(s){ s.acc = 0; s.step = 1; }},
-      { label:'10 :: [20,30] -> acc = f(0,10) = 10', run:function(s){ s.acc = 10; s.step = 2; }},
-      { label:'20 :: [30] -> acc = f(10,20) = 30', run:function(s){ s.acc = 30; s.step = 3; }},
-      { label:'30 :: [] -> acc = f(30,30) = 60', run:function(s){ s.acc = 60; s.step = 4; }},
-      { label:'[] -> return 60', run:function(s){ s.acc = 60; s.step = 5; }}
+    left: { name:'foldLeft(0)(_ + _)', steps:[
+      { label:'[10,20,30].foldLeft(0)  ->  h=10: tail call with f(0,10)', run:function(s){ s.remaining='[20,30]'; s.acc='10'; s.pending='- (tail call, no frame kept)'; }},
+      { label:'[20,30].foldLeft(10)  ->  h=20: tail call with f(10,20)', run:function(s){ s.remaining='[30]'; s.acc='30'; s.pending='- (tail call, no frame kept)'; }},
+      { label:'[30].foldLeft(30)  ->  h=30: tail call with f(30,30)', run:function(s){ s.remaining='[]'; s.acc='60'; s.pending='- (tail call, no frame kept)'; }},
+      { label:'[].foldLeft(60)  ->  base case: return init = 60', run:function(s){ s.remaining='[]'; s.acc='60 (result)'; s.pending='-'; s.done++; }}
     ]},
-    right: { name:'foldRight', steps:[
-      { label:'init: acc = 0, stack: [10,20,30]', run:function(s){ s.acc = 0; s.step = 1; }},
-      { label:'Recurse on tail: foldRight(30::Nil, 0)', run:function(s){ s.acc = '?'; s.step = 2; }},
-      { label:'  Recurse on tail: foldRight(Nil, 0)', run:function(s){ s.acc = '?'; s.step = 3; }},
-      { label:'    Nil -> return 0 (base case)', run:function(s){ s.acc = 0; s.step = 4; }},
-      { label:'  op(30, 0) = 30, return 30', run:function(s){ s.acc = 30; s.step = 5; }},
-      { label:'op(20, 30) = 50, return 50', run:function(s){ s.acc = 50; s.step = 6; }},
-      { label:'op(10, 50) = 60, return 60', run:function(s){ s.acc = 60; s.step = 7; }}
+    right: { name:'foldRight(0)(_ + _)', steps:[
+      { label:'[10,20,30].foldRight(0)  ->  must compute op(10, [20,30].foldRight(0)) : frame kept', run:function(s){ s.remaining='[20,30]'; s.acc='? (not yet)'; s.pending='op(10, ?)'; }},
+      { label:'[20,30].foldRight(0)  ->  op(20, [30].foldRight(0)) : another frame', run:function(s){ s.remaining='[30]'; s.acc='? (not yet)'; s.pending='op(10, op(20, ?))'; }},
+      { label:'[30].foldRight(0)  ->  op(30, [].foldRight(0)) : third frame', run:function(s){ s.remaining='[]'; s.acc='? (not yet)'; s.pending='op(10, op(20, op(30, ?)))'; }},
+      { label:'[].foldRight(0)  ->  base case: return 0', run:function(s){ s.remaining='[]'; s.acc='0'; s.pending='op(10, op(20, op(30, 0)))'; }},
+      { label:'unwind: op(30, 0) = 30', run:function(s){ s.acc='30'; s.pending='op(10, op(20, 30))'; }},
+      { label:'unwind: op(20, 30) = 50', run:function(s){ s.acc='50'; s.pending='op(10, 50)'; }},
+      { label:'unwind: op(10, 50) = 60', run:function(s){ s.acc='60 (result)'; s.pending='-'; s.done++; }}
     ]}
   },
-  verdict: function(s) { if (s.step >= 5 && s.acc === 60) return {status:'ok', text:'Both folds compute 10+20+30 = 60. foldLeft uses tail recursion; foldRight uses the call stack.'}; return {status:'', text:'Step through each fold to see the difference.'}; }
+  verdict: function(s, allDone) { if (allDone) return {status:'ok', text:'Both folds compute 10+20+30 = 60. foldLeft consumes the list left-to-right with a tail call (constant stack); foldRight must first recurse to the end, keeping one frame per element, then combines right-to-left.'}; if (s.done > 0) return {status:'', text:'One fold finished with 60. Run the other one (or Reset) to compare how the stack is used.'}; return {status:'', text:'Step through each fold to see the difference (the state box shows the elements still to visit, the accumulator, and the frames pending on the stack).'}; }
 });
 
 LessonKit.annotatedCode('#ac-object', { lang:'scala', lines:[
@@ -340,7 +428,14 @@ LessonKit.annotatedCode('#ac-object', { lang:'scala', lines:[
   ['  def of[A](elem: A, n: Int): List[A] =', 'Create a list with n copies of elem'],
   ['    if n == 0 then Nil() else elem :: of(elem, n - 1)', 'Recursive construction'],
   ['object Test extends App:', 'Test harness'],
-  ['  println(List(10, 20, 30, 40))', 'Using the apply factory'],
+  ['  import List.*', 'Bring the enum cases and companion methods into scope'],
+  ['  println(List(10, 20, 30, 40))', 'Using the apply factory: |10|20|30|40| (toString via foldLeft)'],
+  ['  val l = 10 :: 20 :: 30 :: 40 :: Nil()', 'Same list, built with the right-associative prepend'],
+  ['  println(l.head)', '// Some(10)'],
+  ['  println(l get 2)', '// Some(30) -- infix call of a one-argument method'],
+  ['  println(of("a", 10))', '// a,a,a,...,a'],
+  ['  println(l filter (_ <= 20) map ("a" + _))', '// a10, a20 -- method chaining, as with Java streams'],
+  ['  for i <- l do println(i)', 'for-do uses our foreach'],
   ['  println(l.append(l) == l)', 'false -- immutability: append creates a new list, original unchanged']
 ]});
 
@@ -353,20 +448,36 @@ LessonKit.annotatedCode('#ac-mutable', { lang:'scala', lines:[
   ['  def map[B](f: A => B): MutableList[B]', 'Transform all elements, return new mutable list'],
   ['  def toList: List[A]', 'Convert to immutable List'],
   ['object MutableList:', 'Companion object'],
-  ['  private case class MutableListImpl[A](var ht: Option[(A, MutableList[A])])', 'Private implementation: mutable var holds optional pair'],
+  ['  def apply[A](): MutableList[A] = MutableListImpl(None)', 'Factory: an empty list is a node with no (head, tail)'],
+  ['  private case class MutableListImpl[A](var ht: Option[(A, MutableList[A])])', 'Private implementation: a var holding an optional (head, tail) pair'],
   ['    extends MutableList[A]:', 'Extends the trait'],
-  ['    override def prepend(h: A): MutableList[A] =', 'Prepend: wrap existing head in a new pair'],
-  ['      ht = Some((h, MutableListImpl(ht)))', 'Create a new node pointing to old head'],
+  ['    override def head: Option[A] = ht.map(_._1)', 'Head is the first component, if any'],
+  ['    override def tail: Option[MutableList[A]] = ht.map(_._2)', 'Tail is the second component, if any'],
+  ['    override def prepend(h: A): MutableList[A] =', 'Prepend: the old content becomes a new node'],
+  ['      ht = Some((h, MutableListImpl(ht)))', 'This node now holds h, and points to a fresh node holding the old pair'],
   ['      this', 'Return this for fluent chaining'],
-  ['    override def append(l: MutableList[A]): MutableList[A] =', 'Append: walk to end then attach'],
-  ['      ht match', 'Pattern match on current state'],
-  ['        case None => ht = Some((l.head.get, l.tail.get))', 'If empty, just take l\'s head and tail'],
-  ['        case Some((h, t)) => ht = Some((h, t.append(l)))', 'Recurse on tail to find the end'],
+  ['    override def append(l: MutableList[A]): MutableList[A] =', 'Append: walk to the end, then attach l'],
+  ['      ht match', 'Four cases, in the slides\' notation [] and [H|T]'],
+  ['        case None if l.head.isEmpty => {}', '[], [] --> [] : nothing to do'],
+  ['        case None => ht = Some((l.head.get, l.tail.get))', '[], [H|T] --> [H|T] : copy the first node of l'],
+  ['        case Some((h, t)) if t.head.isEmpty => ht = Some((h, l))', '[H], L --> [H|L] : last node, link directly to l'],
+  ['        case Some((h, t)) => ht = Some((h, t.append(l)))', '[H|T], L --> [H|T.append(L)] : recurse on the tail'],
   ['      this', 'Return this'],
+  ['    override def map[B](f: A => B): MutableList[B] =', 'map builds a NEW mutable list'],
+  ['      MutableListImpl(ht.map((h, t) => (f(h), t.map(f))))', 'Apply f to the head, recurse on the tail'],
+  ['    override def toList: List[A] = ht match', 'Conversion to the immutable enum List'],
+  ['      case None => List.Nil()', 'Empty'],
+  ['      case Some((h, t)) => List.::(h, t.toList)', 'Cons node'],
   ['object TestMutableList extends App:', 'Usage'],
   ['  val l: MutableList[Int] = MutableList()', 'Create empty mutable list'],
-  ['  l.prepend(40).prepend(30).prepend(20).prepend(10)', 'Fluent chaining: each returns this'],
-  ['  println(l.toList)', '// 10, 20, 30, 40']
+  ['  l.prepend(40).prepend(30).prepend(20).prepend(10)', 'Fluent chaining: each returns this (side effect on l)'],
+  ['  println(l.toList)', '// 10, 20, 30, 40'],
+  ['  println(l.head)', '// Some(10)'],
+  ['  val l2: MutableList[Int] = MutableList()', 'A second list'],
+  ['  l2.prepend(60).prepend(50)', '// l2 = 50, 60'],
+  ['  l.append(l2)', 'Mutates l in place -- what would happen with l.append(l)? (see below)'],
+  ['  println(l.toList)', '// 10, 20, 30, 40, 50, 60'],
+  ['  println(l.map(_ + 1).toList)', '// 11, 21, 31, 41, 51, 61']
 ]});
 
 LessonKit.annotatedCode('#ac-loggers', { lang:'scala', lines:[
@@ -376,11 +487,20 @@ LessonKit.annotatedCode('#ac-loggers', { lang:'scala', lines:[
   ['  def getLog: Iterable[String] = strings.view', 'Expose as lazy immutable view'],
   ['class Logger2:', 'Mutable class with immutable var (mixed style)'],
   ['  private var strings = Seq[String]()', 'var holds immutable Seq'],
-  ['  def log(string: String): Unit = strings = strings :+ string', 'Replace entire collection with new one'],
-  ['class Logger3 private (private val strings: List[String]):', 'Immutable class (FP style)'],
+  ['  def log(string: String): Unit = strings = strings :+ string', 'Replace the reference with a new, appended immutable Seq'],
+  ['  def getLog: Iterable[String] = strings', 'Safe to expose: the Seq is immutable'],
+  ['class Logger3 private (private val strings: List[String]):', 'Immutable class (FP style); primary constructor is private'],
   ['  def this() = this(List[String]())', 'Auxiliary constructor starting empty'],
   ['  def log(string: String): Logger3 = Logger3(strings :+ string)', 'Return a NEW Logger3 with updated list'],
-  ['  def getLog: Iterable[String] = strings.view', 'Expose as view']
+  ['  def getLog: Iterable[String] = strings.view', 'Expose as view'],
+  ['object TryLogger extends App:', 'Usage of the mutable and the immutable version'],
+  ['  val logger = new Logger()', ''],
+  ['  logger.log("str1"); logger.log("str2")', 'Mutation in place'],
+  ['  logger.getLog foreach (println(_))', ''],
+  ['  var logger3 = new Logger3()', 'A var is needed at the client: each log returns a new logger'],
+  ['  logger3 = logger3.log("str1")', 'Side effect pushed outwards, to the client'],
+  ['  logger3 = logger3.log("str2")', ''],
+  ['  logger3.getLog foreach (println(_))', '']
 ]});
 
 LessonKit.annotatedCode('#ac-nesting', { lang:'scala', lines:[
@@ -396,16 +516,20 @@ LessonKit.annotatedCode('#ac-nesting', { lang:'scala', lines:[
   ['      def g(n: Int): Int = n + O.v', 'Accesses O\'s field'],
   ['  println(new O.D().g(4))', '// 14'],
   ['object Anonymous extends App:', 'Anonymous classes and nested methods'],
-  ['  def min[A](list: List[A], comp: Comparator[A]): Option[A] =', 'A method with nested helper'],
+  ['  trait Comparator[A]:', 'A strategy trait with a single abstract method'],
+  ['    def compare(a: A, b: A): Int', ''],
+  ['  def min[A](list: List[A], comp: Comparator[A]): Option[A] =', 'A method with nested helper (a function inside a function)'],
   ['    @annotation.tailrec', 'Tail-recursive annotation on inner method'],
   ['    def min2(list: List[A], minSoFar: A): A = list match', 'Inner recursive helper (tail-recursive)'],
   ['      case h :: t if comp.compare(h, minSoFar) > 0 => min2(t, minSoFar)'],
   ['      case h :: t => min2(t, h)'],
   ['      case _ => minSoFar'],
-  ['    Some(list) filter(!_.isEmpty) map(l => min2(l.tail, l.head))', 'Option-based return'],
-  ['  val comp = new Comparator[Int]():', 'Anonymous class instantiation'],
+  ['    Some(list) filter(!_.isEmpty) map(l => min2(l.tail, l.head))', 'Option-based return: same as if list.isEmpty then None else Some(min2(list.tail, list.head))'],
+  ['  val comp = new Comparator[Int]():', 'Anonymous class instantiation (Scala 3: colon + indented body)'],
   ['    override def compare(a: Int, b: Int): Int = a - b'],
-  ['  println(min(List(10, 20, 5, 40), comp))', '// Some(5)']
+  ['  println(min(List(10, 20, 5, 40), comp))', '// Some(5)'],
+  ['  println(min(List(), comp))', '// None'],
+  ['  println(min(List(10, 20, 5, 40), _ - _))', '// Some(5): a lambda fills the single-method trait (SAM conversion)']
 ]});
 
 LessonKit.annotatedCode('#ac-imports', { lang:'scala', lines:[
@@ -440,31 +564,39 @@ LessonKit.annotatedCode('#ac-exams', { lang:'scala', lines:[
   ['  type Registration = (Exam, Evaluation)', 'Type alias for readability'],
   ['  def register(registration: Registration): Unit', 'Abstract method'],
   ['  def evaluation(student: Student, course: Course): Evaluation', 'Abstract method'],
-  ['abstract class AbstractExams extends Exams:', 'Partial implementation'],
+  ['abstract class AbstractExams extends Exams:', 'Partial implementation: methods, but types still abstract'],
   ['  private var registrations: Set[Registration] = Set()', 'Mutable state (immutable var pattern)'],
+  ['  override def register(registration: Registration) =', 'Registering is adding to the set'],
+  ['    registrations = registrations + registration', 'New Set, reassigned to the var'],
   ['  override def evaluation(student: Student, course: Course) =', 'Implement evaluation using collect & maxBy'],
-  ['    registrations.collect { case (Exam(`course`, `call`, `student`), eval) => (call.id, eval) }.maxBy(_._1)._2', 'Pattern match with backtick quoting for stable ids'],
+  ['    registrations.collect { case (Exam(`course`, call, `student`), eval) => (call.id, eval) }.maxBy(_._1)._2', 'Backticks: match the VALUE of the parameters course/student (stable identifiers); call is a fresh binding. Keep the evaluation of the latest session'],
   ['class BasicExamsImpl extends AbstractExams:', 'Full concrete implementation'],
   ['  override type Student = String', 'Concretise abstract types'],
   ['  override type Teacher = String', 'All abstract types become String'],
   ['  override type Course = String', ''],
   ['  override type Evaluation = Int', 'Evaluation is Int (a grade)'],
   ['  case class SessionWithId(id: Int) extends Session', 'Concrete Session'],
+  ['  def session(id: Int): Session = SessionWithId(id)', 'Factory for sessions'],
   ['object WorkWithExams extends App:', 'Usage'],
-  ['  exams.register((exams.Exam("oop", exams.session(0), "mirko"), 20))', 'Register an exam (note path-dependent types)']
+  ['  val exams = new BasicExamsImpl()', 'The system instance'],
+  ['  exams.register((exams.Exam("oop", exams.session(0), "mirko"), 20))', 'Register an exam: Exam and Session are path-dependent types, exams.Exam'],
+  ['  exams.register((exams.Exam("oop", exams.session(1), "mirko"), 25))', 'A later session for the same course'],
+  ['  exams.register((exams.Exam("sisop", exams.session(0), "mirko"), 30))', ''],
+  ['  println(exams.evaluation("mirko", "oop"))', '// 25: the evaluation of the latest session'],
+  ['  println(exams.evaluation("mirko", "sisop"))', '// 30']
 ]});
 
 LessonKit.annotatedCode('#ac-traits', { lang:'scala', lines:[
   ['abstract class Parser[T]:', 'Abstract base class with template method'],
   ['  def parse(t: T): Boolean', 'Abstract method: accept a token?'],
   ['  def end: Boolean', 'Abstract method: is end-of-input ok?'],
-  ['  def parseAll(seq: Seq[T]): Boolean = (seq forall (parse(_))) && end', 'Template method using the abstract methods'],
+  ['  def parseAll(seq: Seq[T]): Boolean = (seq forall (parse(_))) & end', 'Template method using the abstract methods (the slides use &; && would work as well)'],
   ['case class BasicParser(chars: Set[Char]) extends Parser[Char]:', 'Concrete implementation'],
   ['  override def parse(t: Char) = chars contains t', 'Basic parsing logic'],
   ['  override def end = true', 'Always acceptable at end'],
   ['trait NonEmpty[T] extends Parser[T]:', 'Mixin trait -- decorates a Parser'],
   ['  private var empty = true', 'Stateful tracking'],
-  ['  abstract override def parse(t: T) = { empty = false; super.parse(t) }', 'abstract override: required when super is unknown'],
+  ['  abstract override def parse(t: T) = { empty = false; super.parse(t) }', 'abstract override: required because super is still abstract here -- who is super? decided by linearization'],
   ['  abstract override def end = !empty && super.end', 'Reject empty input'],
   ['class NonEmptyBasicParser(chars: Set[Char]) extends BasicParser(chars) with NonEmpty[Char]', 'Stacking: combine BasicParser + NonEmpty mixin']
 ]});
@@ -489,8 +621,12 @@ LessonKit.annotatedCode('#ac-self-type', { lang:'scala', lines:[
   ['  def getMany(n: Int): Seq[String] = for i <- 0 to n yield producer.get()', 'Uses producer (which is "this" typed as Producer)'],
   ['class RandomProducer extends Producer:', 'Concrete Producer'],
   ['  override def get(): String = Math.random().toString'],
+  ['class ConstantProducer(s: String) extends Producer:', 'Another Producer'],
+  ['  override def get(): String = s'],
   ['class FullRandomProducer extends RandomProducer with ProducerUtils', 'Mix ProducerUtils into any Producer implementation'],
-  ['val producer = new RandomProducer() with ProducerUtils', 'On-the-fly mixin: attach utils to any Producer instance']
+  ['val producer2 = new RandomProducer() with ProducerUtils', 'On-the-fly mixin: attach utils to any Producer instance'],
+  ['val producer3 = new ConstantProducer("a") with ProducerUtils', 'Same utils, different producer -- the decoration is reusable'],
+  ['// new ProducerUtils {}  would NOT compile: no Producer mixed in', 'The self-type is checked at instantiation']
 ]});
 
 LessonKit.annotatedCode('#ac-exports', { lang:'scala', lines:[
@@ -498,18 +634,22 @@ LessonKit.annotatedCode('#ac-exports', { lang:'scala', lines:[
   ['  def value: Int', 'Abstract methods'],
   ['  def increment(): Unit', ''],
   ['class BasicCounter extends Counter:', 'Full implementation with private var'],
-  ['  private[Exports] var counterValue = 0', 'Package-private var'],
+  ['  private[Exports] var counterValue = 0', 'Visible within the enclosing object Exports (where all this code lives), so MultiCounter can touch it'],
   ['  def value: Int = counterValue', ''],
   ['  def increment(): Unit = counterValue += 1', ''],
   ['  def reset(): Unit = counterValue = 0', ''],
   ['class MultiCounter extends Counter:', 'No inheritance: uses delegation via export'],
   ['  private val counter = new BasicCounter()', 'Delegate to BasicCounter'],
-  ['  export counter.*', 'Export ALL public members of counter (value, increment, reset)'],
+  ['  export counter.*', 'Export all accessible members of counter (value, increment, reset, counterValue): forwarders are generated'],
   ['  def decrement(): Unit = counterValue -= 1', 'Additional method'],
   ['class FancyCounter extends Counter:', 'Selective export'],
   ['  private val counter = new BasicCounter()', ''],
+  ['  private val initDate = java.util.Calendar.getInstance()', 'A second delegate'],
   ['  export counter.{reset as _, *}', 'Export all EXCEPT reset (selective hiding)'],
-  ['  export initDate.getTime as creationTime', 'Export with alias']
+  ['  export initDate.getTime as creationTime', 'Export with alias: c2.creationTime() works'],
+  ['val c: Counter = new FancyCounter()', 'Substitutability without inheritance of implementation'],
+  ['c.increment(); println(c.value)', '// 1'],
+  ['// new FancyCounter().decrement()  would not compile', 'Only what is exported is visible']
 ]});
 
 LessonKit.annotatedCode('#ac-export-units', { lang:'scala', lines:[
@@ -538,11 +678,16 @@ LessonKit.annotatedCode('#ac-costack', { lang:'scala', lines:[
   ['  def push[R >: T](r: R): CoStack[R]', 'Key change: lower type bound R >: T, returns CoStack[R]'],
   ['  def toList: List[T]', 'Output position: fine'],
   ['object CoStack:', 'Companion with factory'],
-  ['  private case class CoStackImpl[+T](list: List[T]) extends CoStack[T]:', 'Implementation must also be covariant'],
-  ['    override def push[R >: T](r: R) = CoStackImpl(r :: list)', 'Push widens the type if needed'],
+  ['  def apply[T](elems: T*): CoStack[T] = CoStackImpl(elems.toList)', 'Varargs factory'],
+  ['  private case class CoStackImpl[+T](list: List[T]) extends CoStack[T]:', 'Implementation must also be covariant (List[+T] is)'],
+  ['    override def top = list.headOption', 'Output position: fine'],
+  ['    override def pop = top map ((_, CoStackImpl(list.tail)))', 'Return the top and a new stack'],
+  ['    override def push[R >: T](r: R) = CoStackImpl(r :: list)', 'Push widens the type if needed: r :: list is a List[R]'],
+  ['    override def toList = list', ''],
   ['object TryCoStacks extends App:', 'Proof of covariance'],
   ['  var stack: CoStack[Any] = CoStack[Int](10, 20, 30)', 'CoStack[Int] assigned to CoStack[Any] -- works due to +T'],
-  ['  stack = stack.push("a string")', 'push widens to CoStack[Any]; prevents type corruption']
+  ['  stack = stack.push("a string")', 'push widens to CoStack[Any]; prevents type corruption'],
+  ['  val list: List[Any] = stack.toList', '// List(a string, 10, 20, 30)']
 ]});
 
 LessonKit.annotatedCode('#ac-extensions', { lang:'scala', lines:[
@@ -554,9 +699,12 @@ LessonKit.annotatedCode('#ac-extensions', { lang:'scala', lines:[
   ['  extension (p: Point2D)', ''],
   ['    def +(q: Point2D): Point2D = Point2D(p.x + q.x, p.y + q.y)', 'Operator overloading via extension'],
   ['    def -(q: Point2D): Point2D = Point2D(p.x - q.x, p.y - q.y)', ''],
-  ['@main def main() =', 'Usage: import extensions to enable operators'],
-  ['  import Point2DOperators.*', 'Now + and - are available on Point2D'],
-  ['  println(p + p)', '// Point2D(20, 40)'],
+  ['@main def main() =', 'Usage'],
+  ['  val p = Point2D(10, 20)', 'Plain case class instance'],
+  ['  println(p.length)', 'Top-level extension is in scope: 22.36...'],
+  ['  import Point2DOperators.*', 'Import the extensions to enable the operators'],
+  ['  println(p + p)', '// Point2D(20.0,40.0)'],
+  ['  println((p - p).isZero)', '// true'],
   ['extension [T](l: List[T])', 'Generic extension on standard List'],
   ['  def second: T = l.tail.head', 'Access second element'],
   ['println(List(10,20,30).second)', '// 20']
@@ -575,6 +723,8 @@ LessonKit.annotatedCode('#ac-given-using', { lang:'scala', lines:[
   ['  def greater(x: Int, y: Int): Boolean = x > y', ''],
   ['println(max("a","b"))', 'Implicit: the given ordering is found by the compiler'],
   ['println(max(10, 20))', '// 20 -- uses the Int given'],
+  ['given MyOrdering[List[Int]] = _.size > _.size', 'Third style: a lambda, since MyOrdering has a single abstract method'],
+  ['println(max(List(10, 20), List(30)))', '// List(10, 20) -- the longer list (the slide comment says 20, a typo)'],
   ['println(summon[MyOrdering[String]])', 'summon retrieves the given instance explicitly']
 ]});
 
@@ -591,7 +741,7 @@ LessonKit.annotatedCode('#ac-context-bounds', { lang:'scala', lines:[
   ['import GivenOrderings.given', 'Import only the given instances (not other members)'],
   ['println(max("a","d","b","c"))', '// "d" -- uses String ordering'],
   ['println(max(10,40,20,30))', '// 40 -- uses Int ordering'],
-  ['println(max(List(10,20), List(30,40,50)))', '// List(30,40,50) -- uses listOrdering']
+  ['println(max(List(10,20), List(30,40,50), List("a","b")))', '// List(30,40,50) -- uses listOrdering[Any]: the type of the elements is unified to List[Any]']
 ]});
 
 LessonKit.annotatedCode('#ac-forcomp', { lang:'scala', lines:[
@@ -602,7 +752,7 @@ LessonKit.annotatedCode('#ac-forcomp', { lang:'scala', lines:[
   ['  if x + y + z == 10', 'Guard: filter the triplet'],
   ['  if x < y && y < z', 'Another guard'],
   ['  w = x * y * z', 'Variable definition: computed from earlier bindings'],
-  ['yield (x, y, z, w)', 'Produce output element'],
+  ['yield (x, y, z, w)', 'Produce output element: Vector((1,2,7,14), (1,3,6,18), (1,4,5,20), (2,3,5,30))'],
   ['// desugared version:', 'Compiler desugars to:'],
   ['val l3 = (1 until 9)', ''],
   ['  .flatMap(x => (1 until 9)', 'flatMap for each generator'],
@@ -610,15 +760,18 @@ LessonKit.annotatedCode('#ac-forcomp', { lang:'scala', lines:[
   ['      .filter(z => x + y + z == 10)', 'Guards become filter calls'],
   ['      .filter(z => x < y && y < z)', ''],
   ['      .map(z => (z, x * y * z))', 'Variables become map'],
-  ['      .map { case (z, w) => (x, y, z, w) }))', 'Restructure into final tuple']
+  ['      .map { case (z, w) => (x, y, z, w) }))', 'Restructure into final tuple; l3 == l2']
 ]});
 
 LessonKit.annotatedCode('#ac-nqueens', { lang:'scala', lines:[
   ['object Nqueen:', 'The classic N-Queens problem solved with for-comprehension'],
   ['  type Queen = (Int, Int)', 'Alias: queen position (row, column)'],
   ['  type Solution = Iterable[Queen]', 'Alias: a solution is a set of queen positions'],
+  ['  type IterableFactory = Solution => Iterable[Solution]', 'Alias for the strategy that chooses the collection to explore with'],
   ['  val size = 10', 'Board size (10x10)'],
-  ['  def placeQueens(n: Int = size): Iterable[Solution] = n match', 'Recursively place n queens'],
+  ['  given IterableFactory = LazyList(_)', 'Lazy exploration; could switch to Set(_), List(_) or List(_).view'],
+  ['  @main def run() = placeQueens().zipWithIndex foreach (printSolution(_))', 'Print all solutions'],
+  ['  def placeQueens(n: Int = size)(using factory: IterableFactory): Iterable[Solution] = n match', 'Recursively place n queens on rows 1..n; the factory is a context parameter'],
   ['    case 0 => factory(Set())', 'Base: empty solution set with one solution (no queens)'],
   ['    case _ =>', 'Recursive case'],
   ['      for', 'For-comprehension exploring the search space'],
@@ -642,7 +795,10 @@ LessonKit.annotatedCode('#ac-scalatest', { lang:'scala', lines:[
   ['    testedList.size shouldBe 4', 'Should matcher: more readable'],
   ['    testedList should have size 4', 'Property matcher'],
   ['    testedList should not be empty', 'Negation matcher'],
+  ['    testedList.forall(_ > 5) should be(true)', 'Boolean property'],
   ['    a[IndexOutOfBoundsException] should be thrownBy testedList(5)', 'Exception matcher'],
+  ['    testedList.collect { case i if i > 20 => i + 1 } should contain allOf (31, 41)', 'Containment matcher'],
+  ['    "val l = 10 :: 20 :: Nil" should compile', 'Even a compile-check matcher'],
   ['class SetSpec extends org.scalatest.flatspec.AnyFlatSpec:', 'FlatSpec style: more narrative'],
   ['  "A mutable Set" should "correctly add elements" in:', 'Spec reads like a sentence'],
   ['    val s: collection.mutable.Set[Int] = collection.mutable.Set()'],
@@ -650,14 +806,63 @@ LessonKit.annotatedCode('#ac-scalatest', { lang:'scala', lines:[
   ['    s should be(Set(10, 20, 30))', 'Assertion']
 ]});
 
+LessonKit.annotatedCode('#ac-collections-practice', { lang:'scala', lines:[
+  ['// Lists: immutable linear sequences, optimising head/tail access', ''],
+  ['val l: List[Int] = List(10,20,30,40,50)', 'Works without imports: List is an alias of scala.collection.immutable.List'],
+  ['println(l.getClass)', '// class scala.collection.immutable.$colon$colon -- a non-empty list IS a :: node'],
+  ['println(l.reverse)', '// List(50, 40, 30, 20, 10)'],
+  ['println(l.zipWithIndex)', '// List((10,0), (20,1), (30,2), (40,3), (50,4))'],
+  ['println(l.splitAt(3))', '// (List(10, 20, 30),List(40, 50)) -- a tuple'],
+  ['println(l(2))', '// 30 -- apply: indexed access, but linear-time on a List'],
+  ['println(5 :: l)', '// List(5, 10, 20, 30, 40, 50) -- prepend'],
+  ['println(l ::: l)', '// List(10, 20, 30, 40, 50, 10, 20, 30, 40, 50) -- concatenation (right-associative too)'],
+  ['println(l :+ 51)', '// List(10, 20, 30, 40, 50, 51) -- append (a new list)'],
+  ['println((l :+ 11).sortWith(_ < _))', '// List(10, 11, 20, 30, 40, 50)'],
+  ['println(l collect { case i if i > 20 => i + 1 })', '// List(31, 41, 51) -- filter + map in one shot, with a partial function'],
+  ['println(List.range(0,10))', '// List(0, 1, ..., 9)'],
+  ['println(List.iterate(0,5)(_ + 3))', '// List(0, 3, 6, 9, 12)'],
+  ['import scala.collection.mutable.ListBuffer', 'Mutable structures must be named explicitly'],
+  ['val fruits = ListBuffer[String]()', 'A mutable buffer to build a List'],
+  ['fruits += "Apple"', 'Means fruits.+=("Apple"): mutation in place'],
+  ['fruits += "Banana"; fruits += ("Strawberry", "Kiwi"); fruits -= "Apple"', ''],
+  ['println(fruits.toList)', '// List(Banana, Strawberry, Kiwi)'],
+  ['// LazyLists: lazy linear sequences', ''],
+  ['val s: LazyList[Int] = LazyList(10,20,30,40,50)', ''],
+  ['println(s)', '// LazyList(<not computed>) -- nothing evaluated yet'],
+  ['println(s(2)); println(s)', '// 30, then LazyList(10, 20, 30, <not computed>) -- memoised up to what was needed'],
+  ['println(s.toList); println(s)', '// List(10,20,30,40,50), then LazyList(10, 20, 30, 40, 50): fully forced'],
+  ['// Vectors and arrays: indexed sequences', ''],
+  ['val v: Vector[Int] = Vector(10,20,30,40,50)', 'Immutable, fast apply/length; supports all List operations'],
+  ['val a: Array[Int] = Array(10,20,30)', 'Backed by a Java int[]: mutable, constant length'],
+  ['println(a.getClass); println(a.reverse.toList)', '// class [I, then List(30, 20, 10)'],
+  ['val b = collection.mutable.ArrayBuffer[Int]()', 'The default fully mutable indexed sequence'],
+  ['b.addAll(List(10,20,30,40)); println(b.toVector)', '// Vector(10, 20, 30, 40) -- back to an immutable sequence'],
+  ['// Sets: no sequencing, no duplicates', ''],
+  ['val set: Set[Int] = Set(10,20,30,40,50)', 'Immutable HashSet by default'],
+  ['println(set + 60 + 70)', '// Set(10, 20, 60, 70, 50, 40, 30) -- a new set, order not meaningful'],
+  ['println(set & Set(10,30)); println(set.contains(10))', '// Set(10) (intersection), true'],
+  ['val ms = collection.mutable.Set(10,20,30); ms += 40; ms += 40', 'Mutable HashSet: += adds in place, duplicates ignored'],
+  ['// Maps: key-value stores', ''],
+  ['val m: Map[Int, String] = Map(10 -> "a", 20 -> "b", 30 -> "c")', 'k -> v builds a tuple (k, v)'],
+  ['println(m(10)); println(m.keys); println(m.values)', '// a, Set(10, 20, 30), Iterable(a, b, c)'],
+  ['println(m.map { case (k, v) => (v, k + ".") })', '// Map(a -> 10., b -> 20., c -> 30.) -- mapping to pairs gives a Map'],
+  ['println(m.map { case (k, v) => v + v })', '// List(aa, bb, cc) -- mapping to non-pairs gives an Iterable'],
+  ['val mm = collection.mutable.Map[Int, String](); mm += (10 -> "a")', 'Mutable HashMap'],
+  ['// Options: chain calls, neglect handling cases', ''],
+  ['val some: Option[Int] = Some(10); val none: Option[Int] = None', ''],
+  ['println(some.fold(-1)(_ + 1)); println(none.fold(-1)(_ + 1))', '// 11, -1'],
+  ['println(some map (_ + 1)); println(Some(-5) filter (_ > 0))', '// Some(11), None'],
+  ['println(some.flatMap(x => Some(1) filter (i => x > 0)))', '// Some(1) -- flatMap avoids Option[Option[Int]]']
+]});
+
 LessonKit.stateExplorer('#se-collection-hierarchy', {
   start: 'Iterable',
   states: {
-    Iterable: { desc: 'Root trait in the Scala collections hierarchy. Provides template methods like map, flatMap, filter, fold, reduce, foreach.', to:[['Divides into three main subtypes', 'Seq'],['Ordered without duplicates', 'Set'],['Key-value pairs', 'Map'],['Lazy computation', 'View']] },
-    Seq: { desc: 'Ordered sequences of elements. Further split into linear and indexed access patterns.', to:[['Linked-list style', 'LinearSeq'],['Array-like random access', 'IndexedSeq']] },
+    Iterable: { desc: 'Root of the usable hierarchy (its parent IterableOnce only declares iterator). Provides ~100 template methods like map, flatMap, filter, fold, reduce, foreach, all defined on top of iterator.', to:[['Ordered sequences', 'Seq'],['No duplicates, no order', 'Set'],['Key-value pairs', 'Map'],['Lazy wrapper', 'View']] },
+    Seq: { desc: 'Ordered sequences of elements (roughly Java lists); a Seq[A] is also a PartialFunction[Int, A]. Further split into linear and indexed access patterns.', to:[['Linked-list style', 'LinearSeq'],['Array-like random access', 'IndexedSeq']] },
     LinearSeq: { desc: 'Optimised for head and tail access. Common implementations: List (immutable), LazyList (lazy), ListBuffer (mutable).', to:[] },
     IndexedSeq: { desc: 'Optimised for apply (indexing) and length. Common implementations: Vector (immutable), Array (mutable, fixed-size), ArrayBuffer (mutable, variable-size).', to:[] },
-    Set: { desc: 'A collection without duplicate elements. Uses hashCode-based lookup. Common: HashSet (immutable/mutable), SortedSet (TreeSet).', to:[] },
+    Set: { desc: 'A collection without duplicate elements (no sequencing); a Set[A] is also a function A => Boolean. Common: HashSet (immutable/mutable), SortedSet (TreeSet).', to:[] },
     Map: { desc: 'A collection of key-value pairs. Keys are unique. Common: HashMap (immutable/mutable), SortedMap (TreeMap).', to:[] },
     View: { desc: 'A lazy, immutable wrapper around a collection. Operations are deferred until forced (via .toList or iteration). Reflects changes to mutable backing collections.', to:[] }
   }
