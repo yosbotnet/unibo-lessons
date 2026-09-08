@@ -1,5 +1,6 @@
 'use strict';
-const center=require('./oa-center-content.cjs');
+const center=require('./oa-center-content.cjs'),density=require('./oa-density-content.cjs');
+const afterCenter=html=>density.next(center.next(html));
 const box=require('./oa-box-content.cjs');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process'),c=require('./oa-dm-content.cjs');
 const root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_DM_EVIDENCE,python=process.env.NOTES_OA_DM_PYTHON;assert(dir&&python,'Set NOTES_OA_DM_EVIDENCE and pinned NumPy/SciPy/pandas Python');
@@ -39,10 +40,10 @@ for bad in [[], [1]*12, [True]*12, [float('nan')]*12, [float('inf')]*12, [1e7]*1
  else: raise AssertionError('Invalid or zero-variance case accepted')
 assert abs(t.ppf(.975,11)-2.200985160082949)<1e-12
 print(json.dumps(dict(model=ours.example(),sourceImplementationCompared=True,fractionalLossesChecked=24,swapAndScaleInvariance=True,numpy=numpy.__version__,scipy=scipy.__version__,pandas=pandas.__version__)))`,dir],{cwd:root,encoding:'utf8'}));assert.deepEqual(arithmetic.model,m,'Regenerate oa-dm-values.json from the Python model, not by hand');
- const {parse,parseFragment}=await import('../contracts/node_modules/parse5/dist/index.js'),html=fs.readFileSync(root+'/'+c.file,'utf8'),before=execFileSync('git',['show','e93df47:'+c.file],{cwd:root,encoding:'utf8'}),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(center.next(box.next(c.next(before))),html);assert.equal(c.next(html),html);
+ const {parse,parseFragment}=await import('../contracts/node_modules/parse5/dist/index.js'),html=fs.readFileSync(root+'/'+c.file,'utf8'),before=execFileSync('git',['show','e93df47:'+c.file],{cwd:root,encoding:'utf8'}),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(afterCenter(box.next(c.next(before))),html);assert.equal(c.next(html),html);
  for(const previous of ['oa-frequency-content','oa-coin-content','oa-qq-content','oa-selection-content'])assert.equal(require('./'+previous+'.cjs').next(html),html);
- for(let i=1;i<=13;i++){const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],center.next(box.next(before)).match(re)[0]);}
- assert.deepEqual(html.match(/<svg\b[\s\S]*?<\/svg>/g).filter(x=>!x.includes('oa-dm-alignment')),center.next(box.next(before)).match(/<svg\b[\s\S]*?<\/svg>/g));assert.deepEqual(html.match(/<script\b[\s\S]*?<\/script>/g),center.next(box.next(before)).match(/<script\b[\s\S]*?<\/script>/g));
+ for(let i=1;i<=13;i++){const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],afterCenter(box.next(before)).match(re)[0]);}
+ assert.deepEqual(html.match(/<svg\b[\s\S]*?<\/svg>/g).filter(x=>!x.includes('oa-dm-alignment')),afterCenter(box.next(before)).match(/<svg\b[\s\S]*?<\/svg>/g));assert.deepEqual(html.match(/<script\b[\s\S]*?<\/script>/g),afterCenter(box.next(before)).match(/<script\b[\s\S]*?<\/script>/g));
  const section=html.match(/<section id="s14"[^>]*>[\s\S]*?<\/section>/)[0],fragment=parseFragment(section),codes=[];function walk(n){if(n.tagName==='code')codes.push(n.childNodes.map(x=>x.value||'').join(''));for(const ch of n.childNodes||[])walk(ch);}walk(fragment);assert.equal(codes.length,1);assert.equal(codes[0],fs.readFileSync(__dirname+'/oa-dm-model.py','utf8').trim());assert.deepEqual(JSON.parse(execFileSync(python,['-B','-c',codes[0]],{encoding:'utf8'})),m);
  for(const phrase of ['not ±1.96','do not identify which alignment is correct','not equivalence','lag zero','out-of-sample','not an exact finite-sample guarantee'])assert(section.includes(phrase),phrase);
  fs.writeFileSync('/home/ybc/notes-legacy-review-artifacts/oa-dm-test.json',JSON.stringify({pins,arithmetic,markup:true,scope:'Arithmetic reproduction of both printed orders, not verification of temporal alignment or out-of-sample provenance'},null,2)+'\n');console.log('Both slide orderings match pinned implementation; 24 exact-rational losses, model/embedded-code reproduction, markup and preserved sections passed');

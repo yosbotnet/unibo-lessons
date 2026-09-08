@@ -1,5 +1,6 @@
 'use strict';
-const center=require('./oa-center-content.cjs');
+const center=require('./oa-center-content.cjs'),density=require('./oa-density-content.cjs');
+const afterCenter=html=>density.next(center.next(html));
 const box=require('./oa-box-content.cjs');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),{execFileSync}=require('node:child_process'),c=require('./oa-selection-content.cjs');
 const root=path.resolve(__dirname,'../..'),dir=process.env.NOTES_OA_SELECTION_EVIDENCE,python=process.env.NOTES_OA_SELECTION_PYTHON;assert(dir&&python,'Set reviewed source directory and pinned NumPy/SciPy Python');
@@ -36,10 +37,10 @@ x = np.array([1,2,3,4,5,6]); y = np.array([2,1,4,3,7,5])
 assert not math.isclose(ttest_rel(x,y).statistic,ttest_rel(x,y[::-1]).statistic)
 assert math.isclose(ttest_ind(x,y,equal_var=False).statistic,ttest_ind(x,y[::-1],equal_var=False).statistic)
 print(json.dumps(dict(pointBiserial=float(pointbiserialr(binary,quantitative).statistic),phi=float(phi),pageStatistic=int(observed),orderedTail=int(tail),orderPermutations=len(distribution),reversedPageP=float(reversed_page.pvalue),pairingChangesPairedStatistic=True,numpy=np.__version__,scipy=scipy.__version__)))`],{encoding:'utf8'}));
- const {parse,parseFragment}=await import('../contracts/node_modules/parse5/dist/index.js'),html=fs.readFileSync(root+'/'+c.file,'utf8'),before=execFileSync('git',['show','954a22c:'+c.file],{cwd:root,encoding:'utf8'}),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(center.next(box.next(require('./oa-dm-content.cjs').next(c.next(before)))),html);assert.equal(c.next(html),html);
+ const {parse,parseFragment}=await import('../contracts/node_modules/parse5/dist/index.js'),html=fs.readFileSync(root+'/'+c.file,'utf8'),before=execFileSync('git',['show','954a22c:'+c.file],{cwd:root,encoding:'utf8'}),errors=[];parse(html,{onParseError:e=>errors.push(e)});assert.deepEqual(errors,[]);assert.equal(afterCenter(box.next(require('./oa-dm-content.cjs').next(c.next(before)))),html);assert.equal(c.next(html),html);
  for(const previous of ['oa-frequency-content','oa-coin-content','oa-qq-content'])assert.equal(require('./'+previous+'.cjs').next(html),html);
- for(let i=1;i<=13;i++){if(i===12)continue;const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],center.next(box.next(before)).match(re)[0]);}
- assert.deepEqual(html.match(/<svg\b[\s\S]*?<\/svg>/g).filter(x=>!x.includes('oa-dm-alignment')),center.next(box.next(before)).match(/<svg\b[\s\S]*?<\/svg>/g));assert.deepEqual(html.match(/<script\b[\s\S]*?<\/script>/g),center.next(box.next(before)).match(/<script\b[\s\S]*?<\/script>/g));
+ for(let i=1;i<=13;i++){if(i===12)continue;const re=new RegExp('<section id="s'+i+'"[^>]*>[\\s\\S]*?</section>');assert.equal(html.match(re)[0],afterCenter(box.next(before)).match(re)[0]);}
+ assert.deepEqual(html.match(/<svg\b[\s\S]*?<\/svg>/g).filter(x=>!x.includes('oa-dm-alignment')),afterCenter(box.next(before)).match(/<svg\b[\s\S]*?<\/svg>/g));assert.deepEqual(html.match(/<script\b[\s\S]*?<\/script>/g),afterCenter(box.next(before)).match(/<script\b[\s\S]*?<\/script>/g));
  const rows=c.groups.flatMap(g=>g.rows);assert.deepEqual(rows.map(r=>r.id),['counts-gof','counts-independence','numeric-association','binary-association','two-paired','two-independent','many-independent','many-blocked','ordered','factorial']);
  const contracts={'counts-gof':['specified probabilities','expected counts'],'counts-independence':['independence','independent observational units','Paired binary'],'numeric-association':['linear','monotonic','causation'],'binary-association':['0/1','not generic rank-based'],'two-paired':['mean difference','symmetric about zero','ties'],'two-independent':['equal means','equal population variances','shape assumptions'],'many-independent':['equality of means','Rejection does not identify'],'many-blocked':['sphericity','complete blocks'],'ordered':['same subjects/blocks','ordered independent groups','prespecified order'],'factorial':['interactions','not a general replacement']};
  for(const r of rows)for(const phrase of contracts[r.id])assert(r.limits.includes(phrase),r.id+': '+phrase);
