@@ -105,7 +105,8 @@ paragraphs are addressed separately in [AGENT-ARCHITECTURE.md](AGENT-ARCHITECTUR
 The large/small-model comparison and Attack@1 material are addressed separately
 in [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md); full-text/raw-data limits remain explicit.
 Zero-shot/alignment and injection claims are addressed in [INJECTION.md](INJECTION.md).
-Later legal terminology and regulatory summaries still need primary-source review.
+Legal terminology and regulatory summaries are addressed in [REGULATION.md](REGULATION.md),
+without claiming exhaustive legal research or a compliance determination.
 Narration/audio has not been regenerated.
 Production is separate; no deployment, paid image generation or service restart
 is performed by this workflow.

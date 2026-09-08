@@ -175,7 +175,8 @@ excluded from this checkpoint.
 The study's full text, raw outcomes, judge validation, missing-run handling and
 meaning of the ± terms remain unresolved; they are explicitly marked in the
 lesson. Alignment and injection channels are addressed separately in
-[INJECTION.md](INJECTION.md). Regulatory summaries, other clinical literature
-claims and audio/narration still need separate review. This is not
+[INJECTION.md](INJECTION.md); regulatory summaries and concluding claims are
+addressed in [REGULATION.md](REGULATION.md). Other clinical literature claims
+and audio/narration still need separate review. This is not
 completion of all notes. Preview and production remain separate; no deployment
 or service restart is part of this checkpoint.

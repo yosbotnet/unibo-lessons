@@ -112,6 +112,7 @@ This is an agent-architecture checkpoint, not certification of all AI Security o
 notes. Deployment tables, Attack@1 and slide-reported healthcare evidence are
 addressed in [HEALTHCARE-EVALUATION.md](HEALTHCARE-EVALUATION.md), including its
 explicit full-text/raw-data limitations. Alignment and injection claims are
-addressed in [INJECTION.md](INJECTION.md). Regulatory material and narration still
+addressed in [INJECTION.md](INJECTION.md), regulatory material in
+[REGULATION.md](REGULATION.md). Narration and remaining literature leads still
 need review. Production remains separate; this workflow neither deploys nor
 restarts services.
