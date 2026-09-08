@@ -2,7 +2,7 @@
 
 **Aggiornamento successivo:** dopo questo report, l'utente ha autorizzato il deploy.
 Il lavoro completato è stato pubblicato al commit `738deb1` e verificato sul dominio
-pubblico. Vedi [verbale del rilascio](deploy-2026-09-08.md). Le indicazioni di
+pubblico. Le indicazioni di
 «preview/non pubblicato» nel corpo seguente descrivono lo stato precedente al deploy;
 la copertura parziale dei contenuti e il lavoro ancora aperto restano invariati.
 
