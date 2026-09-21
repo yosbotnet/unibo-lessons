@@ -66,6 +66,9 @@
     var trunk = line(host), lines = [trunk], cur = 0, i = 0;
     Array.prototype.forEach.call(host.querySelectorAll('.cb-branch'), function (el) { lines.push(line(el)); });
     trunk.from = trunk.fens.length - 1;
+    // puzzles open at the decision point: explicit data-start ply, else where the first variation leaves the trunk
+    if (host.dataset.start) i = Math.min(+host.dataset.start, trunk.fens.length - 1);
+    else if (host.dataset.puzzle && lines.length > 1) i = Math.min.apply(null, lines.slice(1).map(function (L) { return L.from; }));
     // a branch's own arrays start at the trunk position `from`; step k>from maps to branch index k-from
     function at(k) { var L = lines[cur]; if (cur === 0 || k <= L.from) return { fen: trunk.fens[k], san: trunk.sans[k - 1], arr: trunk.arr[k], mks: trunk.mks[k] };
       var j = k - L.from; return { fen: L.fens[j], san: L.sans[j - 1], arr: L.arr[j], mks: L.mks[j] }; }
