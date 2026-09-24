@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Consensus — Distributed Systems</title>
+<meta name="description" content="Agreement problems, the FLP impossibility, and how Paxos keeps safety unconditional while making progress depend on a calm enough system.">
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/ds.css">
+<style>
+.px-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:.5rem;margin:.55rem 0}
+.px-card{border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper);padding:.5rem .6rem;font:.82rem/1.5 var(--lk-utility);color:var(--lk-ink)}
+.px-card h4{margin:0 0 .2rem!important;font:700 .76rem var(--lk-utility);letter-spacing:.07em;text-transform:uppercase;color:var(--lk-cobalt)}
+.px-card h4 small{font-weight:400;letter-spacing:0;text-transform:none;color:var(--lk-ink-soft)}
+.px-card.down{border-color:var(--lk-vermilion);background:var(--lk-warnbg)}
+.px-card.down h4{color:var(--lk-vermilion)}
+.px-card code{font-size:.9em}
+.px-card .ds-btn{padding:.22rem .5rem;font-size:.74rem;margin:.3rem .3rem 0 0}
+.px-sub{font:700 .7rem/1.3 var(--lk-utility)!important;letter-spacing:.1em;text-transform:uppercase;color:var(--lk-ink-soft);margin:.7rem 0 0!important}
+.px-flight{list-style:none;padding:0;margin:.3rem 0;font:.78rem var(--lk-mono)}
+.px-flight li{font-size:.78rem!important;display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;padding:.22rem 0;border-bottom:1px dotted var(--lk-rule-soft);margin:0}
+.px-flight li span{flex:1 1 13rem}
+.px-flight .ds-btn{padding:.18rem .45rem;font-size:.72rem}
+.px-say{font-size:.88rem!important}
+.px-legend{font:.72rem/1.4 var(--lk-mono)!important;color:var(--lk-ink-soft);margin:.2rem 0 0!important}
+.px-tracewrap{position:relative;margin:.5rem 0}
+.px-tracewrap .st-canvas{padding-left:30px;margin:0}
+.px-lanes{position:absolute;left:1px;top:1px;bottom:1px;width:30px;background:var(--lk-paper);border-right:1px solid var(--lk-rule-soft);pointer-events:none}
+.px-lanes span{position:absolute;left:4px;font:700 11px/1 var(--lk-utility);color:var(--lk-ink)}
+@media (max-width:640px){ .figure-diagram{overflow-x:auto} .figure-diagram svg{min-width:560px} }
+</style>
+</head>
+<body class="lk">
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-05-replication-consistency.html">&larr; 5 · Replication, consistency and CAP</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-07-ledgers.html">7 · Distributed ledgers as middleware &rarr;</a>
+</nav>
+
+<header class="lk-header">
+  <div class="lk-kicker">Part II — Failure, replication, agreement · Chapter 6</div>
+  <h1>Consensus</h1>
+  <div class="lk-meta"><span>~20 min</span><span>1 instrument</span><span>A.Y. 2025/26 · Prof. Omicini</span></div>
+  <div class="ds-sources" aria-label="Source slide decks"><span><b>C3</b> The Problem of Consensus in Distributed Systems</span></div>
+</header>
+
+<div class="ds-spine"><span class="ds-label">The question</span>
+<p>Can unreliable processes on an asynchronous network always reach the same decision? If not, what can they still guarantee?</p></div>
+
+<div class="ds-thesis"><span class="ds-label">The argument in one paragraph</span>
+<p>Committing a transaction, keeping replicas identical, recovering from a crash: all are agreement problems, and consensus is their general form. <b>FLP</b> proves that in a fully asynchronous system no deterministic protocol can guarantee a decision if even one process may crash, because a crashed process looks exactly like a slow one. The way out is to keep <em>safety</em> unconditional and let only <em>termination</em> depend on the system staying calm for long enough. <b>Paxos</b> does exactly that. Run it once per log slot and you get <b>state machine replication</b>.</p></div>
+
+<nav class="ds-contents" aria-label="In this chapter"><ol>
+<li><a href="#why">Why agree</a></li>
+<li><a href="#model">The model</a></li>
+<li><a href="#problem">The problem</a></li>
+<li><a href="#flp">FLP</a></li>
+<li><a href="#possible">Impossible to possible</a></li>
+<li><a href="#paxos">Paxos</a></li>
+<li><a href="#log">Replicated logs</a></li>
+<li><a href="#lessons">Lessons</a></li>
+<li><a href="#oral">For the oral</a></li>
+</ol></nav>
+
+<!-- ============================================================ -->
+<section id="why">
+<h2>Why processes must agree</h2>
+<p>Components may hold divergent views of the system state and of what is happening. Coherent behaviour then requires them to agree on everything relevant (state, events…). What matters is that they reach <em>the very same</em> conclusion, whatever it is about.</p>
+<p class="ds-count-head">Examples of agreement problems [Fischer, 1983]</p>
+<ol class="ds-count">
+<li><b>Distributed database:</b> commit or abort a distributed transaction?</li>
+<li><b>Replicated file system:</b> where should the file copies reside?</li>
+<li><b>Flight control:</b> the engine and flight-surface control modules must agree whether to continue or abort a landing.</li>
+</ol>
+<div class="defn" id="def-agreement-problem"><div class="defn-term"><b>Agreement problem</b><cite>[Fischer, 1983]</cite></div>
+<p>Agreement problems involve a system of processes, some of which may be faulty. A fundamental problem of fault-tolerant distributed computing is for the reliable processes to reach a consensus.</p></div>
+<div class="defn" id="def-consensus"><div class="defn-term"><b>Consensus</b><cite>[C3]</cite></div>
+<p><dfn id="term-consensus">Consensus</dfn> is the process by which we reach agreement over system state between unreliable machines connected by (possibly) asynchronous networks.</p></div>
+<p>When processes fail, the reliable ones must agree on what has happened and what happens next, so that state and evolution stay consistent, e.g. during recovery (<a class="xref" href="ch-04-failure-recovery.html#logging">Ch. 4</a>). So consensus is essential to fault tolerance: when a crash breaks replica synchronisation, recovery needs the replicas to agree on each replica's state and on the events handled or still to handle.</p>
+<p>Consensus is often hidden inside other problems: commit (<a href="#problem">§3</a>), replication (<a class="xref" href="ch-05-replication-consistency.html#replication">Ch. 5</a>), replicated state machines (<a href="#log">§7</a>), coordinator election (<a class="xref" href="ch-02-time.html#coordination">Ch. 2</a>) and ledgers (<a class="xref" href="ch-07-ledgers.html#blockchain">Ch. 7</a>). Reducing so many issues to one abstract problem gives general solutions. “…how hard can this be?”</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="model">
+<h2>The model: processes, time, failures</h2>
+<p>A system is modelled as a collection of processes (logical) or processors (physical) that compute at the same time and interact through:</p>
+<ol class="ds-count">
+<li><b>one-to-one direct channels:</b> message-passing architectures;</li>
+<li><b>shared channels:</b> shared-memory architectures.</li>
+</ol>
+<p>Concurrent or distributed, process or processor, even parallel: the literature uses them interchangeably when the problem is unaffected by its physical nature (precise terms: <a class="xref" href="ch-01-distribution.html#contexts">Ch. 1</a>).</p>
+<div class="defn" id="def-time-model"><div class="defn-term"><b>Time model</b><cite>C3 · basic ontology</cite></div>
+<p><dfn id="term-synchronous-system">Synchronous</dfn>: there is a bound <var>Δ</var> on message transmission delay and a bound <var>Φ</var> on the relative speed of processes, which allows accurate failure detection.</p>
+<p><dfn id="term-asynchronous-system">Asynchronous</dfn>: otherwise. This models unpredictable load on network and CPUs, where <strong>it is never possible to know whether a process has crashed or not</strong>.</p></div>
+<p>A crashed process and a slow one both look silent. Waiting for it may never end; deciding without it risks contradicting a decision it is about to make.</p>
+<p>Failure model: processes, processors and links may all fail, in diverse ways. Fault tolerance is the property of keeping working beyond faults of any sort (<a class="xref" href="ch-04-failure-recovery.html#faults">Ch. 4</a>).</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="problem">
+<h2>The problem, precisely</h2>
+<div class="defn" id="def-basic-single-bit-consensus"><div class="defn-term"><b>Basic (single-bit) consensus</b><cite>[Fischer, 1983]</cite></div>
+<p>There is a fixed number <var>n</var> of possibly faulty processors, and each has an initial bit <var>x<sub>i</sub></var>. The non-faulty processes must agree on a bit <var>y</var>, the <em>consensus value</em>. The problem is solvable if some protocol makes all non-faulty processors terminate with the same <var>y</var>.</p></div>
+<p>As stated, “always output 0” would work. So <dfn id="term-dependency-requirements">dependency requirements</dfn> say how <var>y</var> must depend on the inputs, and each choice defines a different problem:</p>
+<p class="ds-count-head">Dependency requirements [Fischer, 1983]</p>
+<ol class="ds-count">
+<li><b>Non-triviality:</b> for each <var>y ∈ {0, 1}</var>, some input vector and run lead to <var>y</var>.</li>
+<li><b>Strong unanimity:</b> if <var>x<sub>i</sub> = x</var> for all <var>i</var>, then <var>y = x</var>.</li>
+<li><b>Weak unanimity:</b> the same, required only if no failures occur at run time.</li>
+</ol>
+<p>Two relatives change <em>what</em> is agreed on:</p>
+<table>
+<thead><tr><th>Problem [Fischer, 1983]</th><th>Agree on</th><th>Strong</th><th>Weak</th></tr></thead>
+<tbody>
+<tr><td><dfn id="term-interactive-consistency">Interactive consistency</dfn></td><td>a vector <var>y</var>: what each processor's initial value was</td><td><var>y<sub>i</sub> = x<sub>i</sub></var> for each non-faulty <var>i</var></td><td>the same, if no failures occur during the run</td></tr>
+<tr><td><dfn id="term-generals-problem">Generals problem</dfn> (reliable broadcast)</td><td>the bit <var>x</var> that the general (transmitter) sends to all</td><td><var>y = x</var> if the general is not faulty</td><td><var>y = x</var> if no failures occur</td></tr>
+</tbody></table>
+<p>The concrete case is <b>transaction commit</b> [Dolev &amp; Strong, 1982]: the data managers of a transaction agree whether to install its results or discard them (say, because one could not do its part). All must decide the same, or the database becomes inconsistent.</p>
+<p>For Paxos the slides use today's names. <dfn id="term-agreement">Agreement</dfn>: no two processes decide differently. <dfn id="term-validity">Validity</dfn>: the decided value was proposed. <dfn id="term-termination">Termination</dfn>: every non-faulty process eventually decides. The first two are <em>safety</em>, the third <em>liveness</em>.</p>
+<p>With reliable processes and network, commit is straightforward. Real systems suffer faults [Fich &amp; Ruppert, 2003]:</p>
+<ol class="ds-count">
+<li>process crashes;</li>
+<li>network partitioning;</li>
+<li>lost, distorted or duplicated messages;</li>
+<li>Byzantine failures, where faulty processes go out of control or behave malevolently.</li>
+</ol>
+<p>Enough faults overwhelm any protocol, so the goal is tolerating a prescribed number of “expected” ones.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="flp">
+<h2>FLP: impossible with one crash</h2>
+<p>Fich &amp; Ruppert survey “hundreds” of impossibility results, outright or within resource bounds, across models of synchrony, fault tolerance, communication and randomisation. CAP is not alone (<a class="xref" href="ch-05-replication-consistency.html#cap">Ch. 5</a>):</p>
+<p class="ds-count-head">Impossibility, again</p>
+<ol class="ds-count">
+<li>Distributed systems are easy to conceive and build, easy to crash, hard to understand and debug.</li>
+<li>Formal proofs are fundamental for serious engineering, yet properties are difficult to prove.</li>
+<li>So we must know how models affect properties, and what we <em>cannot</em> solve.</li>
+</ol>
+<div class="defn" id="def-flp-impossibility"><div class="defn-term"><b>FLP impossibility</b><cite>[Fischer, Lynch &amp; Paterson, 1985]</cite></div>
+<p>In a fully asynchronous system, <strong>no consensus protocol can tolerate even a single crash failure</strong>, under the mere requirement of non-triviality.</p></div>
+<p>The other hypotheses are kind: no Byzantine failures, reliable exactly-once delivery. Still, one process stopping at an inopportune time can defeat any commit protocol. Without further assumptions, or tighter limits on the failures tolerated, there is no robust solution.</p>
+<h3>What the proof shows</h3>
+<p>A configuration (all process states plus the messages in transit) is <dfn id="term-univalent">univalent</dfn> (0- or 1-valent) if only one decision is still reachable from it, and <dfn id="term-bivalent">bivalent</dfn> if both are. For a deterministic protocol, the proof has two steps:</p>
+<ol>
+<li><b>Some initial configuration is bivalent</b> (Fig. 6.1): the inputs alone do not fix the outcome; the schedule does.</li>
+<li><b>Bivalence can last forever.</b> From a bivalent configuration, any pending step can be taken, possibly after others, and still reach a bivalent configuration. That yields an infinite run where every process keeps stepping and every message arrives, yet nobody decides.</li>
+</ol>
+<figure class="lk-fig"><div class="figure-diagram">
+<svg viewBox="0 0 620 205" role="img" aria-label="A chain of initial configurations 000, 100, 110, 111; somewhere two neighbours differing in one process's input would have different valences, and silencing that process makes them indistinguishable">
+  <text x="10" y="18" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">WHY SOME INITIAL CONFIGURATION IS BIVALENT</text>
+  <g font-family="var(--lk-mono)" font-size="18" font-weight="700" text-anchor="middle">
+    <rect x="15" y="45" width="115" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="72" y="76" fill="var(--lk-ink)">0 0 0</text>
+    <rect x="175" y="45" width="115" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="2"/><text x="232" y="76" fill="var(--lk-ink)">1 0 0</text>
+    <rect x="335" y="45" width="115" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)" stroke-width="2"/><text x="392" y="76" fill="var(--lk-ink)">1 1 0</text>
+    <rect x="495" y="45" width="115" height="48" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="552" y="76" fill="var(--lk-ink)">1 1 1</text>
+  </g>
+  <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle">
+    <text x="72" y="36">inputs p1 p2 p3</text>
+    <text x="72" y="110">0-valent</text><text x="232" y="110">if 0-valent: C</text><text x="392" y="110">if 1-valent: C′</text><text x="552" y="110">1-valent</text>
+    <text x="152" y="64">p1</text><text x="312" y="64">p2</text><text x="472" y="64">p3</text>
+  </g>
+  <g stroke="var(--lk-rule)" stroke-width="1.3"><line x1="132" y1="72" x2="173" y2="72"/><line x1="292" y1="72" x2="333" y2="72"/><line x1="452" y1="72" x2="493" y2="72"/></g>
+  <path d="M232 118 V140 H392 V118" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+  <g font-family="var(--lk-utility)" font-size="12" fill="var(--lk-ink)" text-anchor="middle">
+    <text x="312" y="160">C and C′ differ only in p2's input. Run both with p2 silent:</text>
+    <text x="312" y="178">p1 and p3 see exactly the same run, so they must decide the same value in both.</text>
+    <text x="312" y="196" fill="var(--lk-vermilion)" font-weight="700">So C and C′ cannot be 0-valent and 1-valent: one of them is bivalent.</text>
+  </g>
+</svg></div>
+<figcaption><b>Fig. 6.1</b> — Step 1 with three processes. Neighbouring initial configurations differ in one input, so if all were univalent the valence would flip somewhere along the chain. Unanimity fixes the endpoints here for concreteness; FLP needs only non-triviality.</figcaption>
+</figure>
+<div class="slidefix"><span class="ds-label">Reading the FLP slide</span>
+<p>The slide says a stopped process can make a commit protocol “fail to reach agreement”. Read this as <em>fail to reach a decision</em>. The proof's run stays undecided forever; it never makes processes decide differently. Nor does anyone actually stop in it: one process that is slow at the wrong moments is enough, because it cannot be told apart from a crashed one.</p></div>
+<p>FLP shows that a bad run <em>exists</em> for every such protocol, not that it is likely.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="possible">
+<h2>From impossible to possible</h2>
+<p>Give up the problems, or essential features of the systems solving them? The slides choose a third road: solutions within the boundaries impossibility theorems set, following Howard's “making impossible possible”:</p>
+<p class="ds-count-head">Solution to FLP [Howard, 2016]</p>
+<ol class="ds-count">
+<li><b>In practice:</b> accept that the system will sometimes be unavailable, and mitigate that with timers and backoffs.</li>
+<li><b>In theory:</b> make weaker assumptions about synchrony, e.g. “messages arrive within a year”.</li>
+</ol>
+<p>Neither refutes FLP. A timer only guesses that a silent process crashed, so a wrong guess must cost time, never safety; and assuming <em>some</em> bound, however large, suffices to prove eventual decision. Paxos is built on this split.</p>
+<div class="beyond"><span class="ds-label">Beyond the slides · the classic escapes</span>
+<p><b>Partial synchrony</b> [Dwork, Lynch &amp; Stockmeyer, 1988]: bounds exist but are unknown. <b>Failure detectors</b> [Chandra &amp; Toueg, 1996]: eventually accurate suspicion. <b>Randomisation</b> [Ben-Or, 1983]: termination with probability 1.</p></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="paxos">
+<h2>Paxos</h2>
+<p class="ds-count-head">Lineage</p>
+<ol class="ds-count">
+<li>A 1989 technical report by Lamport, recast in a more academically viable form as “The part-time parliament” [Lamport, 1998].</li>
+<li>Generalised with respect to state machine replication [Lampson, 1996].</li>
+<li>Formally described and proven correct [De Prisco et al., 1997].</li>
+<li>Nicely explained in “Paxos made simple” [Lamport, 2001].</li>
+</ol>
+<p class="ds-count-head">Features</p>
+<ol class="ds-count">
+<li><dfn id="term-paxos">Paxos</dfn> implements fault-tolerant consensus on a single value.</li>
+<li>It runs on a completely connected network of <var>n</var> processes and tolerates up to <var>f</var> failures, with <strong><var>n ≥ 2f + 1</var></strong>.</li>
+<li>Processes can crash and messages may be lost. Byzantine failures are ruled out.</li>
+<li>It primarily guarantees agreement and validity.</li>
+<li>Termination is ensured only if there is a sufficiently long interval in which no process restarts the protocol.</li>
+</ol>
+<p>Items 4 and 5 are the answer to FLP: safety is unconditional, liveness is conditional.</p>
+<p class="ds-count-head">Process roles</p>
+<ol class="ds-count">
+<li><b><dfn id="term-proposer">Proposer</dfn>:</b> submits proposed values on behalf of clients.</li>
+<li><b><dfn id="term-acceptor">Acceptor</dfn>:</b> decides the candidate values for the final decision.</li>
+<li><b><dfn id="term-learner">Learner</dfn>:</b> collects this from the acceptors and reports the final decision back to the clients.</li>
+</ol>
+<p>Roles are logical processes [Tanenbaum &amp; van Steen, 2017]: one process may play all three. The basic idea is a <b>two-phase</b> process (promise, then commit), <b>majority</b> agreement and <b>monotonically increasing numbers</b> labelling proposals.</p>
+
+<h3>Why two phases</h3>
+<p class="ds-count-head">Paxos made simple [Lamport, 2001]</p>
+<ol class="ds-count">
+<li>Values are proposed by proposers.</li>
+<li>There is not one acceptor but several, an odd number.</li>
+<li><b><dfn id="term-quorum">Quorum</dfn>:</b> once a bare majority of acceptors accepts a value, it is chosen.</li>
+<li>Once a value is chosen, future proposals must propose the same value.</li>
+<li>Hence two phases: <em>prepare</em> finds out whether a value may already be chosen, and <em>accept</em> proposes accordingly.</li>
+<li>The result is either a chosen value or another iteration, which in theory might lead to livelock.</li>
+</ol>
+<p>One acceptor's crash would stop everything, hence several. A majority suffices because <strong>any two majorities share at least one acceptor</strong>, and with <var>2f + 1</var> acceptors a majority survives <var>f</var> crashes. Hence <var>n ≥ 2f + 1</var>, and an odd number: a <var>(2f + 2)</var>-th acceptor enlarges the majority without tolerating another crash.</p>
+<p>Point 4 is the core. A proposer cannot <em>see</em> whether a value was chosen: acceptances may be lost or sit on crashed acceptors. So it first asks a majority what they accepted, and makes them promise to ignore older proposals so the answer cannot go stale. That majority overlaps any choosing majority, so the chosen value (or a later proposal carrying it) is among the replies, and adopting the highest-numbered one suffices.</p>
+
+<h3>The phases [Ghosh, 2014]</h3>
+<p class="ds-count-head">Proposals</p>
+<ol class="ds-count">
+<li>A proposal is a pair <var>(v, n)</var>: a value and a sequence number.</li>
+<li>To deal with crashes, multiple acceptors are selected for the proposal.</li>
+<li>A proposal must be endorsed by at least one acceptor before it becomes a candidate for the final decision.</li>
+<li>The sequence number distinguishes successive attempts to invoke the protocol.</li>
+<li>On receiving a proposal with a larger sequence number from a given process, acceptors discard those with lower numbers.</li>
+<li>Eventually, an acceptor accepts the majority's choice.</li>
+</ol>
+<p class="ds-count-head">Phases</p>
+<ol class="ds-count">
+<li><b>Preparatory phase.</b> Each proposer sends <var>(v, n)</var> to each acceptor. If <var>n</var> is the largest number an acceptor has seen, it replies <code>ack(n, ⊥, ⊥)</code>, a promise to ignore proposals numbered below <var>n</var>. If it has already accepted <var>(v, n′)</var> with <var>n′ &lt; n</var>, it replies <code>ack(n, v, n′)</code>.</li>
+<li><b>Request for acceptance.</b> A proposer with acks from a majority sends <code>accept(v, n)</code> to all acceptors. If any ack carried a value, <var>v</var> must be the one with the highest number (<b>rule 2.1</b>). An acceptor accepts unless it has promised some <var>n′ &gt; n</var>.</li>
+<li><b>Final decision.</b> A value accepted by a majority becomes the decision. The acceptors multicast it to the learners, which check the majority and tell the clients.</li>
+</ol>
+<p>Ghosh's <b>observations</b> turn these rules into the two invariants behind safety:</p>
+<ol class="ds-count">
+<li>An acceptor accepts proposal <var>n</var> only if it has not promised any <var>n′ &gt; n</var>.</li>
+<li>If <code>accept(v, n)</code> is sent, then either no acceptor in some majority has accepted any <var>n′ &lt; n</var>, or <var>v</var> is the value of the highest-numbered such proposal accepted in that majority.</li>
+</ol>
+<div class="slidefix"><span class="ds-label">Three loose phrasings</span>
+<p>In Lamport's formulation <em>prepare</em> carries only <var>n</var>; the value is fixed after the acks. The slides read <code>ack(n, v, n′)</code> as “no point” in trying a larger number; what it actually imposes is rule 2.1: drop your own value and propose <var>v</var>. And a promise holds against lower numbers from <em>any</em> proposer, not one given process.</p></div>
+<figure class="lk-fig"><div class="figure-diagram">
+<svg viewBox="0 0 620 285" role="img" aria-label="Basic Paxos: the proposer sends PREPARE to three acceptors and receives PREPARE_ACK, then sends ACCEPT and receives ACCEPT_ACK, then sends COMMIT to two learners">
+  <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle">
+    <text x="190" y="16">Prepare phase</text><text x="385" y="16">Accept phase</text><text x="545" y="16">Learning phase</text>
+  </g>
+  <g stroke="var(--lk-rule-soft)" stroke-dasharray="3 3"><line x1="290" y1="24" x2="290" y2="275"/><line x1="480" y1="24" x2="480" y2="275"/></g>
+  <g font-family="var(--lk-utility)" font-size="12" font-weight="700" fill="var(--lk-ink)">
+    <text x="6" y="49">Proposer</text><text x="6" y="99">Acceptor</text><text x="6" y="139">Acceptor</text><text x="6" y="179">Acceptor</text><text x="6" y="229">Learner</text><text x="6" y="269">Learner</text>
+  </g>
+  <g stroke="var(--lk-rule)" stroke-width="1.2"><line x1="80" y1="45" x2="612" y2="45"/><line x1="80" y1="95" x2="612" y2="95"/><line x1="80" y1="135" x2="612" y2="135"/><line x1="80" y1="175" x2="612" y2="175"/><line x1="80" y1="225" x2="612" y2="225"/><line x1="80" y1="265" x2="612" y2="265"/></g>
+  <defs><marker id="f62a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-cobalt)"/></marker>
+  <marker id="f62b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--lk-forest)"/></marker></defs>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none" marker-end="url(#f62a)">
+    <line x1="110" y1="45" x2="160" y2="93"/><line x1="110" y1="45" x2="160" y2="133"/><line x1="110" y1="45" x2="160" y2="173"/>
+    <line x1="200" y1="95" x2="250" y2="47"/><line x1="200" y1="135" x2="250" y2="47"/><line x1="200" y1="175" x2="250" y2="47"/>
+  </g>
+  <g stroke="var(--lk-forest)" stroke-width="1.4" fill="none" marker-end="url(#f62b)">
+    <line x1="305" y1="45" x2="355" y2="93"/><line x1="305" y1="45" x2="355" y2="133"/><line x1="305" y1="45" x2="355" y2="173"/>
+    <line x1="395" y1="95" x2="445" y2="47"/><line x1="395" y1="135" x2="445" y2="47"/><line x1="395" y1="175" x2="445" y2="47"/>
+    <line x1="500" y1="45" x2="560" y2="223"/><line x1="500" y1="45" x2="590" y2="263"/>
+  </g>
+  <g font-family="var(--lk-mono)" font-size="9.5" font-weight="600">
+    <text x="92" y="200" fill="var(--lk-cobalt-dark)">PREPARE</text><text x="190" y="200" fill="var(--lk-cobalt-dark)">PREPARE_ACK</text>
+    <text x="298" y="200" fill="var(--lk-forest)">ACCEPT</text><text x="384" y="200" fill="var(--lk-forest)">ACCEPT_ACK</text>
+    <text x="500" y="165" fill="var(--lk-forest)">COMMIT</text>
+  </g>
+</svg></div>
+<figcaption><b>Fig. 6.2</b> — Basic Paxos, after Zhao [2014]: one round trip per phase. In Ghosh's version the acceptors notify the learners directly.</figcaption>
+</figure>
+
+<div class="ds-inst" id="px">
+<header><b>Instrument 1</b><span>Paxos simulator</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">P1 wants <code>red</code>, P2 wants <code>blue</code>. You are the network: deliver, drop, crash. Step through a scenario or play freely; the verdict checks that at most one value is ever chosen.</p>
+<div class="ds-row">
+<label>Scenario <select id="px-scn">
+<option value="free">Free play</option>
+<option value="normal">1 · Normal run</option>
+<option value="crash">2 · Crashes</option>
+<option value="survive">3 · Chosen value survives</option>
+<option value="duel">4 · Duelling proposers</option>
+</select></label>
+<button type="button" class="ds-btn primary" id="px-next">Next step</button>
+<button type="button" class="ds-btn" id="px-undo">Undo</button>
+<button type="button" class="ds-btn" id="px-reset">Reset</button>
+<label><input type="checkbox" id="px-cheat"> break rule 2.1</label>
+</div>
+<div class="ds-readout px-say" id="px-say" aria-live="polite"></div>
+<div class="px-grid" id="px-top"></div>
+<div class="px-grid" id="px-acc"></div>
+<p class="px-sub">In flight</p>
+<ul class="px-flight" id="px-flight"></ul>
+<div class="ds-row"><button type="button" class="ds-btn" id="px-all">Deliver all</button></div>
+<div class="px-tracewrap"><div class="st-canvas" id="px-trace"></div><div class="px-lanes" id="px-lanes" aria-hidden="true"></div></div>
+<p class="px-legend">blue: prepare/ack · green: accept/accepted · ○ ignored · × dropped or lost · red bar: acceptor down</p>
+<div class="ds-verdict" id="px-verdict"></div>
+<noscript><p>Interactive simulator (requires JavaScript). Following the rules, no run chooses two values, despite losses and one crash; with two acceptors down nothing is chosen. Breaking rule 2.1 lets a later round choose a second value. Duelling proposers can block any choice.</p></noscript>
+</div></div>
+
+<h3>Duelling proposers and leaders</h3>
+<p>Scenario 4 is point 6's livelock. Promises for 2 make P1's accept for 1 ignored; P1 retries with 3, making P2's accept ignored; and so on. Every rule holds and nothing is chosen: FLP's endless run, made concrete. The remedy is a distinguished proposer, a <dfn id="term-leader">leader</dfn>, plus timers and backoffs. This <strong>reduces</strong> conflicts without eliminating them: electing a leader is itself agreement, so two processes may briefly both believe they lead. That costs progress, never safety.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="log">
+<h2>From one value to a replicated log</h2>
+<div class="defn" id="def-state-machine-replication"><div class="defn-term"><b>State machine replication</b><cite>[Schneider, 1990]</cite></div>
+<p>Replication relates to consensus because all replicas of a resource must agree on the same state over time. The <dfn id="term-state-machine-replication">state machine approach</dfn> is a general method for implementing fault-tolerant services in distributed systems.</p></div>
+<ol class="ds-count">
+<li>The same state machine is replicated over a distributed system.</li>
+<li>Each replica has a consensus module.</li>
+<li>An operation is performed on a replica only if and when all machines have agreed on the same order of execution.</li>
+<li>Consensus over distributed <em>state</em> becomes consensus over distributed <em>actions on state</em>.</li>
+<li>Determinism is assumed.</li>
+</ol>
+<p>Determinism makes the shift sound: same start, same operations, same order, same state. It is the replicated bank account of <a class="xref" href="ch-02-time.html#order">Ch. 2</a>, fixed by agreement rather than clocks.</p>
+<figure class="lk-fig"><div class="figure-diagram">
+<svg viewBox="0 0 620 200" role="img" aria-label="Three replicas, each with a consensus module, an identical log of operations and a state machine reaching the same state">
+  <g font-family="var(--lk-utility)" font-size="11.5" fill="var(--lk-ink)">
+    <rect x="8" y="80" width="78" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="47" y="98" text-anchor="middle" font-weight="700">client</text><text x="47" y="112" text-anchor="middle" font-family="var(--lk-mono)" font-size="10">y ← x+1</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none"><path d="M86 100 L118 38"/><path d="M86 100 L118 100"/><path d="M86 100 L118 162"/></g>
+  <g font-family="var(--lk-mono)" font-size="10.5">
+    <g id="smr-r">
+      <rect x="120" y="20" width="130" height="36" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="185" y="42" text-anchor="middle" fill="var(--lk-cobalt-dark)" font-weight="600">consensus module</text>
+      <rect x="270" y="20" width="44" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="292" y="42" text-anchor="middle" fill="var(--lk-ink)">x←3</text>
+      <rect x="314" y="20" width="58" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="343" y="42" text-anchor="middle" fill="var(--lk-ink)">y←x+1</text>
+      <rect x="372" y="20" width="44" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-dasharray="3 2"/><text x="394" y="42" text-anchor="middle" fill="var(--lk-ink-soft)">…</text>
+      <rect x="440" y="20" width="96" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="488" y="42" text-anchor="middle" fill="var(--lk-ink)">state machine</text>
+      <text x="545" y="42" fill="var(--lk-forest)" font-weight="700">x=3 y=4</text>
+      <path d="M250 38 H268 M416 38 H438" stroke="var(--lk-rule)" fill="none"/>
+    </g>
+    <use href="#smr-r" y="62"/><use href="#smr-r" y="124"/>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1" stroke-dasharray="3 3" fill="none"><path d="M185 56 V82"/><path d="M185 118 V144"/></g>
+  <text x="200" y="74" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-cobalt-dark)">agree on slot 2</text>
+</svg></div>
+<figcaption><b>Fig. 6.3</b> — State machine replication, after Howard [2016]: consensus fills each log slot, and deterministic machines replay the log.</figcaption>
+</figure>
+<p class="ds-count-head">Multi-Paxos [Van Renesse &amp; Altinbuken, 2015]</p>
+<ol class="ds-count">
+<li>SMR needs consensus over an array of values; Paxos handles one.</li>
+<li><dfn id="term-multi-paxos">Multi-Paxos</dfn> runs one separate, indexed Paxos instance per array entry,</li>
+<li>plus leader election to reduce proposer conflict, presumably dropping iterations.</li>
+<li>It is not really well specified overall.</li>
+</ol>
+<p class="ds-count-head">Other Paxos-based algorithms</p>
+<ol class="ds-count">
+<li><b>Fast Paxos</b> [Lamport, 2006]: proposers send values straight to the acceptors, bypassing the leader. Without conflicts this saves a message delay, at the price of larger quorums.</li>
+<li><b>ZooKeeper</b> [Hunt et al., 2010]: a coordination service.</li>
+<li><b>ZAB</b>, ZooKeeper atomic broadcast [Reed &amp; Junqueira, 2008].</li>
+<li><b>Egalitarian Paxos</b> [Moraru et al., 2013]: leaderless.</li>
+<li><b>Raft</b> [Ongaro &amp; Ousterhout, 2014]: designed to be understandable, with a strong leader.</li>
+</ol>
+<p><b>Chubby.</b> Google built a Paxos-based fault-tolerant database [Chandra et al., 2007] for Chubby [Burrows, 2006], a reliable lock service used widely inside Google, e.g. by GFS and Bigtable. They use Chubby; Chubby runs Paxos. Ledgers take the same state-machine idea to open, Byzantine settings (<a class="xref" href="ch-07-ledgers.html#blockchain">Ch. 7</a>).</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="lessons">
+<h2>Lessons</h2>
+<p class="ds-count-head">General</p>
+<ol class="ds-count">
+<li>Impossibility results define the space of problems we can actually solve.</li>
+<li>Relating formal models to their practical instances often reveals a technically feasible solution.</li>
+<li>Formal models are essential to sound engineering of distributed systems, and not just in very complex settings.</li>
+</ol>
+<p class="ds-count-head">Specific</p>
+<ol class="ds-count">
+<li>Faults are both the source of the problems of distributed systems and the reason we need them.</li>
+<li>Consensus is one of the most expressive and general ways to model distributed application problems.</li>
+<li>Its complexity defies common sense and yields archetypal impossibility results.</li>
+<li>Yet protocols solve it in meaningful cases by relaxing some hypotheses: Paxos &amp; friends.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="oral" class="ds-oral">
+<h2>For the oral</h2>
+<details><summary>Why can't a timeout solve FLP?</summary>
+<p>A timeout guesses a crash; the process may only be slow. Acting risks disagreement, never acting risks waiting forever. Timeouts give progress; safety must survive wrong ones.</p></details>
+<details><summary>Why does Paxos need a prepare phase?</summary>
+<p>A proposer cannot see whether a value was chosen. Prepare queries a majority (intersecting any choosing one) and freezes the answer with promises; rule 2.1 carries the value forward. Show scenario 3 with and without the broken rule.</p></details>
+<details><summary>Where does n ≥ 2f + 1 come from?</summary>
+<p>Majorities intersect, so no accepted value is forgotten, and <var>2f + 1</var> acceptors keep a majority after <var>f</var> crashes. With more crashes (scenario 2), Paxos stalls but never decides wrongly.</p></details>
+<details><summary>Does Paxos contradict FLP?</summary>
+<p>No. Safety always holds; termination needs a calm enough period. Duelling proposers can stall it forever. A leader makes that unlikely, not impossible.</p></details>
+<details><summary>How do consensus, replication and CAP connect?</summary>
+<p>SMR turns replication into agreeing on the order of deterministic operations. In a partition, a minority cannot form a majority and stops rather than diverging: in CAP terms, Paxos picks consistency (<a class="xref" href="ch-05-replication-consistency.html#cap">Ch. 5</a>).</p></details>
+</section>
+
+<div class="ds-project"><span class="ds-label">Project lens · Thunk</span>
+<ul>
+<li><b>The main path needs no consensus.</b> Tasks are pure, so any worker computes the same result and a re-executed duplicate is harmless. Determinism does the work that ordering agreement does in SMR.</li>
+<li><b>Failure detection is FLP in miniature.</b> BEAM monitors and <code>:nodedown</code> rely on timeouts, so a slow node can be declared dead. In Thunk that costs duplicate work, never a wrong result: lose time, not safety.</li>
+<li><b>Where agreement would appear:</b> dynamic membership, or one dashboard coordinator. As with Chubby, reuse a consensus service rather than writing Paxos.</li>
+<li><b>Termination detection is not consensus.</b> Dijkstra–Scholten detects a stable property; it does not choose between values (<a href="project.html">project page</a>).</li>
+</ul></div>
+
+<details class="ds-coverage"><summary>Slide coverage: where each slide section went</summary>
+<table>
+<thead><tr><th>Slides</th><th>Content</th><th>Here</th></tr></thead>
+<tbody>
+<tr><td>C3 · Agreement I–II; Agreement &amp; FT; Consensus; Consensus &amp; FT</td><td>Problem, examples, definitions, why</td><td><a href="#why">§1</a></td></tr>
+<tr><td>C3 · Basic ontology I–IV</td><td>Components, terms, time and failure models</td><td><a href="#model">§2</a></td></tr>
+<tr><td>C3 · Many problems I–III; Commit; So what?; What is the problem?</td><td>Fischer's problems and requirements; commit; faults</td><td><a href="#problem">§3</a>, <a href="#why">§1</a></td></tr>
+<tr><td>C3 · Impossibility I–II; FLP</td><td>Impossibility results; FLP</td><td><a href="#flp">§4</a></td></tr>
+<tr><td>C3 · So what?; Harsh reality I–II</td><td>Options; solution to FLP</td><td><a href="#possible">§5</a></td></tr>
+<tr><td>C3 · Paxos I–VI; Made simple; Phases I–IV; Observations</td><td>Lineage, features, roles, reasoning, phases</td><td><a href="#paxos">§6</a></td></tr>
+<tr><td>C3 · SMR I–II; Beyond Paxos I–II; Chubby</td><td>SMR, Multi-Paxos, variants, Chubby</td><td><a href="#log">§7</a></td></tr>
+<tr><td>C3 · Lessons learnt I–II</td><td>General and specific lessons</td><td><a href="#lessons">§8</a></td></tr>
+</tbody></table></details>
+
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-05-replication-consistency.html">&larr; 5 · Replication, consistency and CAP</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-07-ledgers.html">7 · Distributed ledgers as middleware &rarr;</a>
+</nav>
+<footer class="lk-foot">Distributed Systems · University of Bologna · built from the slides of Andrea Omicini (DISI), A.Y. 2025/26. Personal study notes, not an official source.</footer>
+
+<script src="assets/lesson-kit.js"></script>
+<script>
+(function () {
+  'use strict';
+  var root = document.getElementById('px'); if (!root) return;
+  var ACC = ['A1', 'A2', 'A3'], PROPS = ['P1', 'P2'], LANES = ['P1', 'P2', 'A1', 'A2', 'A3', 'L'];
+  var OWN = { P1: 'red', P2: 'blue' };
+  var MAJ = 2;
+  var S, undoStack = [], script = [], sidx = 0, scnName = 'free';
+  var $ = function (id) { return document.getElementById(id); };
+  var say = $('px-say'), cheatBox = $('px-cheat');
+
+  function fresh() {
+    var s = { tick: 0, seq: 0, msgs: [], accepts: [], marks: [], ignoredAccepts: 0,
+      props: {}, accs: {}, lrn: { seen: {}, learned: null, at: null } };
+    PROPS.forEach(function (p, i) { s.props[p] = { next: i + 1, n: 0, phase: 'idle', acks: {}, value: null, why: '' }; });
+    ACC.forEach(function (a) { s.accs[a] = { prom: 0, acc: null, down: false }; });
+    return s;
+  }
+  function send(type, from, to, f) {
+    var m = { id: ++S.seq, type: type, from: from, to: to, n: f.n, v: f.v || null, an: f.an || 0, av: f.av || null, t0: S.tick, t1: null, fate: null };
+    S.msgs.push(m); return m;
+  }
+  function label(m) {
+    if (m.type === 'prepare') return 'prepare(' + m.n + ')';
+    if (m.type === 'ack') return m.an ? 'ack(' + m.n + ', ' + m.av + ', ' + m.an + ')' : 'ack(' + m.n + ', ⊥, ⊥)';
+    if (m.type === 'accept') return 'accept(' + m.v + ', ' + m.n + ')';
+    return 'accepted(' + m.v + ', ' + m.n + ')';
+  }
+  function inflight() { return S.msgs.filter(function (m) { return m.fate === null; }); }
+  function count(o) { return Object.keys(o).length; }
+  function best(P) {
+    var b = null;
+    Object.keys(P.acks).forEach(function (a) { var k = P.acks[a]; if (k.an && (!b || k.an > b.an)) b = { an: k.an, av: k.av, who: a }; });
+    return b;
+  }
+
+  /* ---------- protocol actions (each returns a sentence, or null if not possible) ---------- */
+  function prepare(p) {
+    var P = S.props[p]; S.tick++;
+    var n = P.next; P.next += 2; P.n = n; P.phase = 'prepare'; P.acks = {}; P.value = null; P.why = '';
+    ACC.forEach(function (a) { send('prepare', p, a, { n: n }); });
+    return p + ' starts round ' + n + ': prepare(' + n + ') goes to A1, A2 and A3.';
+  }
+  function accept(p) {
+    var P = S.props[p];
+    if (P.phase !== 'prepare' || count(P.acks) < MAJ) return null;
+    var b = best(P), v, txt;
+    if (b && !cheatBox.checked) { v = b.av; txt = p + ' must propose ' + v + ': it is the value of the highest-numbered proposal reported in the acks (n′ = ' + b.an + ', from ' + b.who + ').'; }
+    else if (b) { v = OWN[p]; txt = p + ' ignores the reported ' + b.av + ' (accepted at ' + b.an + ') and proposes its own ' + v + '. This breaks rule 2.1.'; }
+    else { v = OWN[p]; txt = 'No ack reports an accepted value, so ' + p + ' is free to propose its own value, ' + v + '.'; }
+    S.tick++; P.phase = 'accept'; P.value = v;
+    ACC.forEach(function (a) { send('accept', p, a, { n: P.n, v: v }); });
+    return txt + ' accept(' + v + ', ' + P.n + ') goes to all acceptors.';
+  }
+  function deliver(m) {
+    S.tick++; m.t1 = S.tick;
+    var L = label(m), who = m.to;
+    if (S.accs[who]) {
+      var A = S.accs[who];
+      if (A.down) { m.fate = 'lost'; return who + ' is down: ' + L + ' is lost.'; }
+      if (m.type === 'prepare') {
+        if (m.n > A.prom) {
+          A.prom = m.n; m.fate = 'ok';
+          send('ack', who, m.from, { n: m.n, an: A.acc ? A.acc.n : 0, av: A.acc ? A.acc.v : null });
+          return who + ' promises to ignore proposals below ' + m.n + (A.acc ? ' and reports that it accepted (' + A.acc.v + ', ' + A.acc.n + ').' : '; it has accepted nothing yet.');
+        }
+        m.fate = 'ignored'; return who + ' has already promised ' + A.prom + ', so it ignores ' + L + '.';
+      }
+      if (m.type === 'accept') {
+        if (m.n >= A.prom) {
+          A.prom = m.n; A.acc = { n: m.n, v: m.v }; m.fate = 'ok';
+          S.accepts.push({ a: who, n: m.n, v: m.v, t: S.tick });
+          send('accepted', who, 'L', { n: m.n, v: m.v });
+          return who + ' accepts (' + m.v + ', ' + m.n + ') and tells the learner.';
+        }
+        m.fate = 'ignored'; S.ignoredAccepts++;
+        return who + ' has promised ' + A.prom + ' > ' + m.n + ', so it ignores ' + L + '.';
+      }
+    }
+    if (S.props[who]) {
+      var P = S.props[who];
+      if (P.phase === 'prepare' && P.n === m.n) {
+        P.acks[m.from] = { an: m.an, av: m.av }; m.fate = 'ok';
+        var c = count(P.acks);
+        return who + ' has ' + c + ' of 3 acks for round ' + m.n + (c >= MAJ ? ': a majority, so it may send accept.' : '.');
+      }
+      m.fate = 'ignored'; return who + ' is no longer collecting acks for round ' + m.n + ', so ' + L + ' is ignored.';
+    }
+    // learner
+    var sn = S.lrn.seen[m.n] = S.lrn.seen[m.n] || { v: m.v, from: {} };
+    sn.from[m.from] = 1; m.fate = 'ok';
+    if (count(sn.from) >= MAJ && S.lrn.learned === null) { S.lrn.learned = m.v; S.lrn.at = m.n; return 'The learner has accepted(' + m.v + ', ' + m.n + ') from a majority: it learns ' + m.v + '.'; }
+    return 'The learner records ' + L + ' from ' + m.from + '.';
+  }
+  function drop(m) { S.tick++; m.t1 = S.tick; m.fate = 'dropped'; return 'The network drops ' + label(m) + ' ' + m.from + '→' + m.to + '.'; }
+  function setDown(a, d) {
+    if (S.accs[a].down === d) return null;
+    S.tick++; S.accs[a].down = d; S.marks.push({ t: S.tick, a: a, down: d });
+    return d ? a + ' crashes.' : a + ' recovers from stable storage: its promise and accepted proposal are intact.';
+  }
+
+  function chosen() {
+    var by = {};
+    S.accepts.forEach(function (x) { var k = by[x.n] = by[x.n] || { v: x.v, who: {}, t: 0 }; if (!k.who[x.a]) { k.who[x.a] = 1; if (count(k.who) === MAJ) k.t = x.t; } });
+    var list = [];
+    Object.keys(by).forEach(function (n) { var k = by[n]; if (count(k.who) >= MAJ) list.push({ n: +n, v: k.v, who: Object.keys(k.who), t: k.t }); });
+    list.sort(function (a, b) { return a.n - b.n; });
+    return list;
+  }
+
+  /* ---------- scenarios ---------- */
+  var SC = {
+    free: { intro: 'Free play. Start with <b>prepare</b> on P1 or P2, then deliver or drop messages in any order.', steps: [] },
+    normal: { intro: 'A normal run, with some messages late. Press <b>Next step</b>.', steps: [
+      { a: 'prepare', p: 'P1' },
+      { a: 'deliver', type: 'prepare', to: ['A1', 'A2'], pre: 'prepare(1) reaches A1 and A2; the copy for A3 is delayed.' },
+      { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P1' },
+      { a: 'deliver', type: 'accept', to: ['A1', 'A2'], post: 'Two of three acceptors have accepted (red, 1): red is now <b>chosen</b>, though nobody knows it yet.' },
+      { a: 'deliver', type: 'accepted' },
+      { a: 'deliver', type: 'prepare', to: ['A3'], pre: 'Late messages do no harm.' },
+      { a: 'deliver', type: 'ack' },
+      { a: 'deliver', type: 'accept' },
+      { a: 'deliver', type: 'accepted', post: 'Done. Try Free play and deliver things in a nastier order.' }
+    ] },
+    crash: { intro: 'n = 3 = 2f + 1 acceptors tolerate f = 1 crash. Press <b>Next step</b>.', steps: [
+      { a: 'crash', x: 'A3' },
+      { a: 'prepare', p: 'P1' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P1' }, { a: 'deliver', type: 'accept' }, { a: 'deliver', type: 'accepted', post: 'One crash, and red is still chosen and learned.' },
+      { a: 'crash', x: 'A2', post: 'Only A1 is left: less than a majority.' },
+      { a: 'prepare', p: 'P2' }, { a: 'deliver', type: 'prepare' },
+      { a: 'deliver', type: 'ack', post: 'P2 can never collect a majority of acks. No progress, but nothing wrong can be decided either.' },
+      { a: 'recover', x: 'A2' },
+      { a: 'prepare', p: 'P2' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P2', post: function () { return S.props.P2.value === 'red' ? 'P2 wanted blue, but red survives.' : ''; } }, { a: 'deliver', type: 'accept' }, { a: 'deliver', type: 'accepted' }
+    ] },
+    survive: { intro: 'Why rule 2.1 matters. Run it once as is, then tick <b>break rule 2.1</b> and run it again.', steps: [
+      { a: 'prepare', p: 'P1' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P1' },
+      { a: 'deliver', type: 'accept', to: ['A1', 'A2'], post: 'red is chosen by A1 and A2. The accept for A3 is still in flight.' },
+      { a: 'prepare', p: 'P2', pre: 'P2 knows nothing of this.' },
+      { a: 'deliver', type: 'prepare', from: 'P2', to: ['A2', 'A3'], post: 'P2’s majority {A2, A3} overlaps the choosing majority {A1, A2} in A2.' },
+      { a: 'deliver', type: 'ack', to: ['P2'] },
+      { a: 'accept', p: 'P2' },
+      { a: 'deliver', type: 'accept', from: 'P2', to: ['A2', 'A3'] },
+      { a: 'deliver', type: 'accept', from: 'P1', pre: 'The old accept(red, 1) finally reaches A3.' }
+    ] },
+    duel: { intro: 'Two proposers pre-empting each other. Press <b>Next step</b>.', steps: [
+      { a: 'prepare', p: 'P1' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'prepare', p: 'P2', pre: 'Before P1 sends its accept, P2 starts a round.' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P1' }, { a: 'deliver', type: 'accept' },
+      { a: 'prepare', p: 'P1', pre: 'P1 times out and retries with a higher number.' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P2' }, { a: 'deliver', type: 'accept' },
+      { a: 'prepare', p: 'P2', pre: 'P2 retries too.' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P1' }, { a: 'deliver', type: 'accept', post: 'This can go on forever: <b>livelock</b>. Every rule is respected, and nothing is chosen.' },
+      { a: 'prepare', p: 'P1', pre: 'Now suppose P1 is elected leader and P2 stops starting rounds.' }, { a: 'deliver', type: 'prepare' }, { a: 'deliver', type: 'ack' },
+      { a: 'accept', p: 'P1' }, { a: 'deliver', type: 'accept' }, { a: 'deliver', type: 'accepted', post: 'With one active proposer, the round completes.' }
+    ] }
+  };
+  function match(st) {
+    return inflight().filter(function (m) {
+      return m.type === st.type && (!st.from || m.from === st.from) && (!st.to || st.to.indexOf(m.to) >= 0);
+    });
+  }
+  function runStep(st) {
+    var out = [];
+    if (st.a === 'prepare') out.push(prepare(st.p));
+    else if (st.a === 'accept') out.push(accept(st.p));
+    else if (st.a === 'crash') out.push(setDown(st.x, true));
+    else if (st.a === 'recover') out.push(setDown(st.x, false));
+    else if (st.a === 'deliver') { var ms = match(st); if (!ms.length) return null; ms.forEach(function (m) { out.push(deliver(m)); }); }
+    if (out.some(function (x) { return x === null; })) return null;
+    var post = typeof st.post === 'function' ? st.post() : st.post;
+    return (st.pre ? st.pre + ' ' : '') + out.join(' ') + (post ? ' ' + post : '');
+  }
+
+  /* ---------- UI ---------- */
+  function snap() { undoStack.push(JSON.stringify({ S: S, sidx: sidx })); if (undoStack.length > 200) undoStack.shift(); }
+  function act(fn) { snap(); var t = fn(); if (t === null || t === undefined) { undoStack.pop(); return; } say.innerHTML = t; render(); }
+  function loadScenario(name) {
+    scnName = name; S = fresh(); undoStack = []; sidx = 0; script = SC[name].steps;
+    say.innerHTML = SC[name].intro; render();
+  }
+  function btn(txt, fn, dis, cls) {
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'ds-btn' + (cls ? ' ' + cls : ''); b.textContent = txt;
+    b.disabled = !!dis; b.addEventListener('click', fn); return b;
+  }
+  function card(title, sub, lines, down) {
+    var d = document.createElement('div'); d.className = 'px-card' + (down ? ' down' : '');
+    d.innerHTML = '<h4>' + title + ' <small>' + sub + '</small></h4>' + lines.map(function (l) { return '<div>' + l + '</div>'; }).join('');
+    return d;
+  }
+  var PHASE = { idle: 'idle', prepare: 'collecting acks', accept: 'accept sent' };
+  function render() {
+    var top = $('px-top'), acc = $('px-acc'); top.innerHTML = ''; acc.innerHTML = '';
+    PROPS.forEach(function (p) {
+      var P = S.props[p], lines = ['own value: <code>' + OWN[p] + '</code>'];
+      lines.push(P.n ? 'round <code>' + P.n + '</code> · ' + PHASE[P.phase] + (P.phase === 'prepare' ? ' (' + count(P.acks) + '/3)' : '') : 'no round yet');
+      if (P.phase === 'accept') lines.push('proposed: <code>' + P.value + '</code>');
+      else if (P.phase === 'prepare' && count(P.acks) >= MAJ) { var b = best(P); lines.push('must propose: <code>' + (b && !cheatBox.checked ? b.av : OWN[p]) + '</code>'); }
+      var c = card(p, 'proposer', lines);
+      c.appendChild(btn('prepare(' + P.next + ')', function () { act(function () { return prepare(p); }); }));
+      c.appendChild(btn('send accept', function () { act(function () { return accept(p); }); }, !(P.phase === 'prepare' && count(P.acks) >= MAJ)));
+      top.appendChild(c);
+    });
+    top.appendChild(card('L', 'learner', ['learned: ' + (S.lrn.learned ? '<code>' + S.lrn.learned + '</code> (round ' + S.lrn.at + ')' : '—')]));
+    ACC.forEach(function (a) {
+      var A = S.accs[a];
+      var c = card(a, 'acceptor' + (A.down ? ' · down' : ''), ['promised: <code>' + (A.prom || '—') + '</code>', 'accepted: <code>' + (A.acc ? '(' + A.acc.v + ', ' + A.acc.n + ')' : '—') + '</code>'], A.down);
+      c.appendChild(btn(A.down ? 'recover' : 'crash', function () { act(function () { return setDown(a, !A.down); }); }));
+      acc.appendChild(c);
+    });
+    var fl = $('px-flight'); fl.innerHTML = '';
+    var inf = inflight();
+    if (!inf.length) { var li = document.createElement('li'); li.innerHTML = '<span class="ds-muted">none</span>'; fl.appendChild(li); }
+    inf.forEach(function (m) {
+      var li = document.createElement('li');
+      var s = document.createElement('span'); s.textContent = label(m) + '  ' + m.from + ' → ' + m.to; li.appendChild(s);
+      li.appendChild(btn('deliver', function () { act(function () { return deliver(m); }); }));
+      li.appendChild(btn('drop', function () { act(function () { return drop(m); }); }));
+      fl.appendChild(li);
+    });
+    $('px-all').disabled = !inf.length;
+    $('px-undo').disabled = !undoStack.length;
+    var nx = $('px-next'); nx.disabled = sidx >= script.length;
+    nx.textContent = script.length ? (sidx >= script.length ? 'Scenario finished' : 'Next step (' + (sidx + 1) + '/' + script.length + ')') : 'Next step';
+    renderVerdict(); renderTrace();
+  }
+  function renderVerdict() {
+    var v = $('px-verdict'), ch = chosen();
+    var vals = []; ch.forEach(function (c) { if (vals.indexOf(c.v) < 0) vals.push(c.v); });
+    var desc = ch.map(function (c) { return c.v + ' at round ' + c.n + ' (' + c.who.join(', ') + ')'; }).join('; ');
+    if (!ch.length) {
+      v.className = 'ds-verdict';
+      v.innerHTML = 'Nothing chosen yet: no proposal has been accepted by a majority. Safety holds trivially.' +
+        (S.ignoredAccepts >= 2 ? ' ' + S.ignoredAccepts + ' accept messages were pre-empted by higher promises: duelling proposers.' : '');
+    } else if (vals.length === 1) {
+      v.className = 'ds-verdict ok';
+      v.innerHTML = 'Chosen: ' + desc + '. One value only: <b>safety holds</b>.';
+    } else {
+      v.className = 'ds-verdict bad';
+      v.innerHTML = 'Chosen: ' + desc + '. <b>Two different values chosen: safety violated.</b>' + (cheatBox.checked ? ' This happened because rule 2.1 was broken.' : '');
+    }
+  }
+  var NS = 'http://www.w3.org/2000/svg';
+  function mk(tag, a, txt) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; }
+  function renderTrace() {
+    var host = $('px-trace'), left = 10, top = 18, rowH = 28;
+    var avail = Math.max(300, host.clientWidth - 30 - 14);
+    var tw = Math.max(6, Math.min(15, avail / (S.tick + 2)));
+    var W = Math.max(avail, left + (S.tick + 2) * tw + 10), H = top + LANES.length * rowH;
+    var svg = mk('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img', 'aria-label': 'Message trace of the current run' });
+    svg.style.minWidth = W + 'px'; svg.style.width = W + 'px';
+    var X = function (t) { return left + t * tw; }, Y = function (l) { return top + LANES.indexOf(l) * rowH + 8; };
+    var lanes = $('px-lanes'); lanes.innerHTML = '';
+    LANES.forEach(function (l) {
+      svg.appendChild(mk('line', { x1: 0, y1: Y(l), x2: W - 6, y2: Y(l), stroke: 'var(--lk-rule-soft)', 'stroke-width': 1 }));
+      var sp = document.createElement('span'); sp.textContent = l; sp.style.top = (Y(l) - 5) + 'px'; lanes.appendChild(sp);
+    });
+    ACC.forEach(function (a) {
+      var from = null;
+      S.marks.filter(function (k) { return k.a === a; }).forEach(function (k) {
+        if (k.down) from = k.t; else if (from !== null) { svg.appendChild(mk('line', { x1: X(from), y1: Y(a), x2: X(k.t), y2: Y(a), stroke: 'var(--lk-vermilion)', 'stroke-width': 4, opacity: .55 })); from = null; }
+      });
+      if (from !== null) svg.appendChild(mk('line', { x1: X(from), y1: Y(a), x2: X(S.tick + 1), y2: Y(a), stroke: 'var(--lk-vermilion)', 'stroke-width': 4, opacity: .55 }));
+    });
+    chosen().forEach(function (c) {
+      svg.appendChild(mk('line', { x1: X(c.t), y1: 4, x2: X(c.t), y2: H - 4, stroke: 'var(--lk-forest)', 'stroke-dasharray': '3 3' }));
+      var endA = X(c.t) > W - 70; svg.appendChild(mk('text', { x: X(c.t) + (endA ? -3 : 3), y: 11, 'text-anchor': endA ? 'end' : 'start', 'font-family': 'var(--lk-mono)', 'font-size': 9.5, fill: 'var(--lk-forest)' }, c.v + ' chosen'));
+    });
+    S.msgs.forEach(function (m) {
+      var col = (m.type === 'prepare' || m.type === 'ack') ? 'var(--lk-cobalt)' : 'var(--lk-forest)';
+      var x1 = X(m.t0), y1 = Y(m.from), x2, y2, g = mk('g', {});
+      var t = mk('title', {}, label(m) + ' ' + m.from + '→' + m.to + (m.fate ? ' · ' + m.fate : ' · in flight'));
+      g.appendChild(t);
+      if (m.fate === null) { x2 = X(S.tick + 1); y2 = y1 + (Y(m.to) - y1) * 0.5; }
+      else if (m.fate === 'dropped') { x2 = X(m.t1); y2 = y1 + (Y(m.to) - y1) * 0.5; }
+      else { x2 = X(m.t1); y2 = Y(m.to); }
+      var reply = m.type === 'ack' || m.type === 'accepted';
+      g.appendChild(mk('line', { x1: x1, y1: y1, x2: x2, y2: y2, stroke: col, 'stroke-width': reply ? 1 : 1.5, 'stroke-dasharray': m.fate === null ? '3 3' : (reply ? '' : ''), opacity: m.fate === 'ignored' ? .6 : 1 }));
+      if (m.fate === 'ok' || m.fate === null) g.appendChild(mk('circle', { cx: x2, cy: y2, r: 2.2, fill: col }));
+      else if (m.fate === 'ignored') g.appendChild(mk('circle', { cx: x2, cy: y2, r: 4, fill: 'var(--lk-paper)', stroke: 'var(--lk-vermilion)', 'stroke-width': 1.4 }));
+      else g.appendChild(mk('path', { d: 'M' + (x2 - 4) + ' ' + (y2 - 4) + 'l8 8m0 -8l-8 8', stroke: 'var(--lk-vermilion)', 'stroke-width': 1.8 }));
+      svg.appendChild(g);
+    });
+    host.innerHTML = ''; host.appendChild(svg);
+    host.scrollLeft = host.scrollWidth;
+    lanes.style.height = '';
+  }
+
+  $('px-scn').addEventListener('change', function () { loadScenario(this.value); });
+  $('px-reset').addEventListener('click', function () { loadScenario(scnName); });
+  $('px-undo').addEventListener('click', function () {
+    if (!undoStack.length) return; var o = JSON.parse(undoStack.pop()); S = o.S; sidx = o.sidx; say.textContent = 'Undone.'; render();
+  });
+  $('px-next').addEventListener('click', function () {
+    if (sidx >= script.length) return;
+    snap(); var t = runStep(script[sidx]);
+    if (t === null) { undoStack.pop(); say.innerHTML = 'The run no longer matches the scenario (you changed something). Press <b>Reset</b> to replay it.'; return; }
+    sidx++; say.innerHTML = t; render();
+  });
+  $('px-all').addEventListener('click', function () {
+    act(function () { var ms = inflight(); if (!ms.length) return null; return ms.map(deliver).join(' '); });
+  });
+  cheatBox.addEventListener('change', function () { render(); });
+  loadScenario('free');
+})();
+</script>
+</body>
+</html>

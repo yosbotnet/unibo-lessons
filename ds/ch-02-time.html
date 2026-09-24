@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Time, Order and Causality — Distributed Systems</title>
+<meta name="description" content="Physical clocks, happens-before, Lamport and vector clocks: what processes can agree on without a shared now.">
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/ds.css">
+<style>ol.ds-count.cps{columns:2;column-gap:1.5rem}ol.ds-count.cps>li{break-inside:avoid;padding-top:.3rem;padding-bottom:.3rem}ol.ds-count.cps>li::before{top:.25rem}@media (max-width:560px){ol.ds-count.cps{columns:1}}</style>
+</head>
+<body class="lk">
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-01-distribution.html">&larr; 1 · What makes a system distributed</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-03-space.html">3 · Space, situatedness and mobility &rarr;</a>
+</nav>
+
+<header class="lk-header">
+  <div class="lk-kicker">Part I — Foundations · Chapter 2</div>
+  <h1>Time, order and causality</h1>
+  <div class="lk-meta"><span>~25 min</span><span>3 instruments</span><span>A.Y. 2025/26 · Prof. Omicini</span></div>
+  <div class="ds-sources" aria-label="Source slide decks"><span><b>M6</b> Computing with Time</span><span><b>C5</b> Logical Clocks</span></div>
+</header>
+
+<div class="ds-spine"><span class="ds-label">The question</span>
+<p>When there is no shared “now”, what can the processes of a distributed system still agree on?</p></div>
+
+<div class="ds-thesis"><span class="ds-label">The argument in one paragraph</span>
+<p>Computing has always abstracted time away, but distributed systems cannot: each machine has its own drifting clock, and there is no global one. Physical clocks can be synchronised, to UTC or to each other, and that is enough when you need the time of day or the length of an interval. Often, though, what matters is not <em>when</em> events happened but <em>in which order</em>, and ordering only needs to respect what could have influenced what. Lamport's <b>happens-before</b> relation captures exactly that, and <b>logical clocks</b> turn it into numbers. Scalar clocks respect causality but cannot detect concurrency. Vector clocks can, at the cost of <var>n</var> integers per timestamp. Ordering is still not the whole story: coordinating a system also depends on what its actions <em>are</em>.</p></div>
+
+<nav class="ds-contents" aria-label="In this chapter"><ol>
+<li><a href="#needs-time">Computing needs time</a></li>
+<li><a href="#no-single-time">No single time</a></li>
+<li><a href="#physical">Physical clocks</a></li>
+<li><a href="#order">From time to order</a></li>
+<li><a href="#causality">Happens-before</a></li>
+<li><a href="#logical">Logical clocks</a></li>
+<li><a href="#scalar">Lamport's scalar time</a></li>
+<li><a href="#vector">Vector clocks</a></li>
+<li><a href="#coordination">Beyond synchronisation</a></li>
+<li><a href="#oral">For the oral</a></li>
+</ol></nav>
+
+<!-- ============================================================ -->
+<section id="needs-time">
+<h2>Computing needs time</h2>
+<p>The chapter opens with Edward Lee's argument [Lee, 2009]. Computing's foundations (Turing, Church, von Neumann) are about <em>transforming data</em>, and they say nothing about the dynamics of physical processes. Meanwhile the two worlds are merging. Special-purpose devices (cars, medical devices, robots, toys) now have general-purpose architectures and are networked in the IoT, their complexity possibly costing dependability. General-purpose computers, in turn, are asked to sense and control physical dynamics. The result is <dfn id="term-cyber-physical-systems">cyber-physical systems</dfn> (CPS): the integration of physical processes with networked computing, “to create new science, techniques, and products”.</p>
+<p class="ds-count-head">Remarkable examples of CPS [Lee, 2009]</p>
+<ol class="ds-count cps">
+<li>high-confidence medical devices</li><li>assisted living</li><li>traffic control and safety</li><li>advanced automotive systems</li><li>process control</li><li>energy conservation</li><li>environmental control</li><li>avionics, instrumentation</li><li>critical infrastructure control: electric power, water resources, communications</li><li>distributed robotics: telepresence, telemedicine</li><li>defence systems</li><li>manufacturing</li><li>smart structures</li>
+</ol>
+<p>Lee's point is that “the passage of time is essentially absent in computing”. He lists four common beliefs that keep it absent:</p>
+<p class="ds-count-head">Four misconceptions about time [Lee, 2009]</p>
+<ol class="ds-count">
+<li><b>“Computing takes time.”</b> True, but the real issue is not efficiency: time is <em>abstracted away</em>, so computing always omits it.</li>
+<li><b>“Time is a resource.”</b> A strange one: practically unbounded and spent anyway. Generic resource handling is fine for memory, but time needs to be a <em>semantic</em> property.</li>
+<li><b>“Time is a non-functional property.”</b> A Turing machine computes its function regardless of time, but the function of a CPS is defined by <em>actions occurring in physical time, with a duration</em>.</li>
+<li><b>“Real time is a QoS problem.”</b> In CPS, time is mostly about <em>predictability and repeatability</em>, not speed. Precision and jitter are QoS issues, but time itself should be part of the semantics of programs.</li>
+</ol>
+<p>The conclusion: <strong>core computing abstractions should be rethought to include time.</strong></p>
+</section>
+
+<!-- ============================================================ -->
+<section id="no-single-time">
+<h2>No single time</h2>
+<p>What notion of time should we use? The dictionary gives a “measurable continuum”, but physics has not believed in a single one since relativity. Summarising Rovelli [2017]: there is no <em>true</em> time and no <em>unique</em> time. Physics describes how things evolve in <em>their own</em> times and how those times relate. There is no privileged direction, no global “now”, time is not independent, and <strong>time is related to change</strong>: events happen, and time is a way of relating their dynamics. Keep that last sentence in mind, because logical clocks are exactly that idea made operational.</p>
+<p>Recall the definitions from <a class="xref" href="ch-01-distribution.html#contexts">Ch. 1</a>. A computation is <em>parallel</em> when all processes share the same temporal context <var>T</var>, <em>concurrent</em> when at least two have different temporal contexts (<var>T ≠ T′</var>), and <em>distributed</em> when at least two have different spatial contexts (<var>S ≠ S′</var>). Distributed concurrent computing (<var>S ≠ S′</var>, <var>T ≠ T′</var>) is the most natural and general model of a distributed system. It is also the one where time stops being obvious:</p>
+<div class="ds-versus">
+<div><h4>Centralised system</h4><p>Time is unambiguous. There is one clock; a process asks the kernel for the time, and any later request gets a higher value. The result is a <strong>total order</strong> of events for free.</p></div>
+<div><h4>Distributed system</h4><p>There is no natural notion of time: no global clock, no common memory. Every process has its own clock, and clocks drift apart by up to several seconds a day. Even clocks synchronised at start tick differently.</p></div>
+</div>
+<p>The slides then ask four questions, and the rest of the chapter answers them in turn. Is there a useful, well-founded notion of time in a distributed system? Is there a coherent notion of <em>global</em> time? If not, what can we do, and how do we synchronise activities? (“Synchronous” literally means <em>existing or occurring at the same time</em>.) Behind them are two sharper questions: is it <strong>possible</strong> to build a global notion of time, and is it <strong>useful</strong>?</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="physical">
+<h2>Physical clocks: what can be synchronised</h2>
+<p>A computer clock is really a <dfn id="term-timer">timer</dfn>: an oscillating quartz crystal with a counter and a holding register. When the counter reaches zero it raises an interrupt and reloads from the register. Each interrupt is a <em>clock tick</em>. Two quartz crystals never oscillate at exactly the same rate, which is why clocks drift.</p>
+
+<div class="defn" id="def-physical-clock-synchronisation"><div class="defn-term"><b>Physical clock synchronisation</b><cite>[Kshemkalyani &amp; Singhal, 2011]</cite></div>
+<p>The process of ensuring that physically distributed processors have a common notion of time.</p></div>
+
+<p>Most applications need physical time for one of three reasons:</p>
+<ol class="ds-count">
+<li><b>Time of day</b> at which an event happened on a specific machine.</li>
+<li><b>Time interval</b> between two events that happened on <em>different</em> machines.</li>
+<li><b>Relative ordering</b> of events that happened on different machines.</li>
+</ol>
+<p>Keep the third one in mind. It is the only one that logical clocks can replace.</p>
+
+<h3>Vocabulary</h3>
+<p>For machines <var>a</var>, <var>b</var> with clocks <var>C<sub>a</sub></var>, <var>C<sub>b</sub></var>, where <var>t</var> is real time:</p>
+<table>
+<thead><tr><th>Term</th><th>Definition</th><th>Formula</th></tr></thead>
+<tbody>
+<tr><td><b>Time</b></td><td>the reading of the clock at real time <var>t</var>; a perfect clock has <var>C<sub>a</sub>(t) = t</var></td><td><var>C<sub>a</sub>(t)</var></td></tr>
+<tr><td><b>Frequency</b></td><td>the rate at which the clock progresses</td><td><var>C′<sub>a</sub>(t)</var></td></tr>
+<tr><td><b>Offset</b></td><td>difference from real time; relative offset between two clocks</td><td><var>C<sub>a</sub>(t) − t</var> ; <var>C<sub>a</sub>(t) − C<sub>b</sub>(t)</var></td></tr>
+<tr><td><b>Skew</b></td><td>frequency difference from the perfect clock; relative skew</td><td><var>C′<sub>a</sub>(t) − 1</var> ; <var>C′<sub>a</sub>(t) − C′<sub>b</sub>(t)</var></td></tr>
+<tr><td><b>Drift</b></td><td>the second derivative of the clock</td><td><var>C″<sub>a</sub>(t)</var> ; <var>C″<sub>a</sub>(t) − C″<sub>b</sub>(t)</var></td></tr>
+</tbody></table>
+<p>Manufacturers specify a <dfn id="term-maximum-skew-rate">maximum skew rate</dfn> <var>ρ</var>. A clock works within its specification when</p>
+<span class="ds-math">1 − ρ ≤ dC/dt ≤ 1 + ρ</span>
+<p>A <em>fast</em> clock has <var>dC/dt &gt; 1</var>, a <em>perfect</em> one <var>= 1</var>, a <em>slow</em> one <var>&lt; 1</var>. The instrument below exaggerates <var>ρ</var> so you can see it.</p>
+
+<div class="ds-inst" id="drift-lab">
+<header><b>Instrument 1</b><span>Clock drift lab</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">A fast and a slow clock, both within spec, against UTC. Move the skew rate and the resynchronisation period, then scrub along real time.</p>
+<div class="ds-row">
+<label>max skew ρ <input type="range" id="dl-rho" min="0" max="0.2" step="0.01" value="0.08"> <output id="dl-rho-v">0.08</output></label>
+<label>resync every <select id="dl-sync"><option value="0">never</option><option value="20">20 s</option><option value="40" selected>40 s</option></select></label>
+<label>real time t <input type="range" id="dl-t" min="0" max="100" step="1" value="70"> <output id="dl-t-v">70 s</output></label>
+</div>
+<div class="st-canvas" style="overflow:hidden"><svg id="dl-svg" viewBox="0 0 560 250" style="min-width:0" role="img" aria-label="Offset from UTC over time for a fast, a perfect and a slow clock"></svg></div>
+<div class="ds-readout" id="dl-out" aria-live="polite"></div>
+<noscript><p>Interactive plot (requires JavaScript). With skew rate ρ, two in-spec clocks can move apart at up to 2ρ seconds per second.</p></noscript>
+</div></div>
+
+<div class="beyond"><span class="ds-label">Beyond the slides · why resync periods follow from ρ</span>
+<p>Two clocks within spec can drift apart at up to <var>2ρ</var> per second. To keep them within <var>δ</var> of each other you must resynchronise at least every <var>δ / 2ρ</var> seconds. Because <strong>clocks only run forward</strong> (see NTP below), a fast clock is not set back but <em>slowed down</em> (slewed) until real time catches up; otherwise timestamps would go back in time and <code>make</code> would misjudge which files are newer. Real NTP daemons slew small offsets but step the clock, even backwards, when the offset is large.</p></div>
+
+<h3>Absolute time: UTC</h3>
+<p>To synchronise to real time, clocks need an accurate standard. That standard is <dfn id="term-utc">UTC</dfn>, officially Coordinated Universal Time (the slides write “Universal Coordinated Time”). The BIPM in Sèvres combines and averages the atomic time standards of member nations into a single official UTC. It is broadcast as a short radio pulse every UTC second (e.g. NIST's WWV station) and by satellites providing a UTC service. If one machine has access to UTC, an algorithm can synchronise all the others to it. The standard example is <dfn id="term-ntp">NTP</dfn> (Network Time Protocol, v4 in RFC 5905): a time server holds global absolute time and other machines synchronise to it. And, again, <strong>clocks can only run forward</strong>.</p>
+
+<h3>Relative time: agreeing without UTC</h3>
+<p>Sometimes applications need a time related to physical time: <dfn id="term-global-absolute-time">global absolute time</dfn>. Sometimes a time server is not stably available, or not available at all, and all the processes need is <em>a common time</em>, whatever its relation to UTC: <dfn id="term-global-relative-time">global relative time</dfn>. Then active servers poll each other, estimate an average and apply corrections, and no machine needs UTC. Two examples:</p>
+<ul>
+<li><b>Berkeley algorithm</b> [Gusella &amp; Zatti, 1989]: time daemons on all machines poll and respond to each other and agree on a common time.</li>
+<li><b>Reference Broadcast Synchronisation (RBS)</b> [Elson et al., 2002]: global relative time in wireless networks.</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="order">
+<h2>From time to order</h2>
+<p>So far synchronisation has meant physical time. Relative time was already a hint that we can loosen it: processes may need to share a clock that is <em>not</em> real time. One step further, what many algorithms need is not a clock at all but an <strong>agreed order of events</strong>.</p>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 620 210" role="img" aria-label="Two replicas apply the same two updates in different orders and end with 1110 and 1111 dollars">
+  <text x="20" y="22" font-family="var(--lk-mono)" font-size="11" fill="var(--lk-vermilion)">SAME TWO UPDATES · DIFFERENT ORDER · DIFFERENT STATE</text>
+  <g font-family="var(--lk-utility)" font-size="13" font-weight="700" fill="var(--lk-ink)"><text x="20" y="72">LA replica</text><text x="20" y="162">NY replica</text></g>
+  <g stroke="var(--lk-rule)" stroke-width="1.3"><line x1="110" y1="67" x2="600" y2="67"/><line x1="110" y1="157" x2="600" y2="157"/></g>
+  <g font-family="var(--lk-mono)" font-size="12">
+    <rect x="120" y="52" width="70" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="155" y="72" text-anchor="middle" fill="var(--lk-ink)">$1000</text>
+    <rect x="250" y="52" width="110" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="305" y="72" text-anchor="middle" fill="var(--lk-cobalt-dark)">×1.01 → 1010</text>
+    <rect x="400" y="52" width="110" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="455" y="72" text-anchor="middle" fill="var(--lk-cobalt-dark)">+100 → 1110</text>
+    <rect x="120" y="142" width="70" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="155" y="162" text-anchor="middle" fill="var(--lk-ink)">$1000</text>
+    <rect x="250" y="142" width="110" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="305" y="162" text-anchor="middle" fill="var(--lk-cobalt-dark)">+100 → 1100</text>
+    <rect x="400" y="142" width="110" height="30" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="455" y="162" text-anchor="middle" fill="var(--lk-cobalt-dark)">×1.01 → 1111</text>
+    <text x="545" y="72" fill="var(--lk-vermilion)" font-weight="700">$1110</text><text x="545" y="162" fill="var(--lk-vermilion)" font-weight="700">$1111</text>
+  </g>
+  <text x="20" y="200" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)">customer: +$100 · employee: +1% interest · issued concurrently, received in opposite orders</text>
+</svg>
+<figcaption><b>Fig. 2.1</b> — The replicated bank account from the slides [Tanenbaum &amp; van Steen, 2017].</figcaption>
+</figure>
+
+<p>A bank account of $1000 is replicated in LA and NY. At the same time, a customer adds $100 and an employee applies 1% interest. Each replica applies both updates, but in a different order, so LA ends with $1110 and NY with $1111. That is an inconsistency caused by concurrent updates on a replicated database. Better clocks would not fix it. What fixes it is both replicas applying the updates <em>in the same order</em>, and which order does not even matter.</p>
+
+<div class="defn" id="def-lamport-s-observation"><div class="defn-term"><b>Lamport's observation</b><cite>[Lamport, 1978]</cite></div>
+<p>If two processes do not interact, they need no synchronisation, because lack of synchronisation would not be observable. What usually matters is not the exact time at which events occur but <strong>the order</strong> in which they occur. Synchronising non-physical, <strong>logical clocks</strong> is therefore both admissible and useful.</p></div>
+<p>The slides' example is UNIX <code>make</code> (or Gradle). It rebuilds a target when a source is <em>newer</em> than the target, so it only needs the order of the two edits, not their exact times. On a distributed file system with unsynchronised clocks, that order can come out wrong, and an edited file does not get rebuilt.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="causality">
+<h2>Causality and happens-before</h2>
+<p>Following Baquero &amp; Preguiça [2016]: any computational system can be modelled as a sequence of executed <dfn id="term-actions">actions</dfn>, each defined by a change of state in the system or, more generally, in the world (reading memory, writing a file, switching on a lamp). In a distributed system actions execute in many places and are represented as <dfn id="term-events">events</dfn>: sending or receiving a message, updating a database record. The places may be two processes on the same machine or two sites on opposite sides of the globe.</p>
+<p>Not all events are related, but some can cause or influence later ones: a reply to an email is influenced by that email. Detecting potential cause-and-effect relations is fundamental to distributed algorithms. Replica consistency, garbage collection, checkpointing (<a class="xref" href="ch-04-failure-recovery.html#snapshots">Ch. 4</a>) and concurrency analysis all rely on it.</p>
+
+<div class="ds-versus">
+<div><h4>Internal causality</h4><p>Cause-and-effect the system itself can perceive: messages it carries, the order of steps inside a process. This is the scope we reason about.</p></div>
+<div><h4>External causality</h4><p>Cause-and-effect in the outside world. Alice books dinner for two and tells Bob; Bob books movie tickets for after dinner. Even if both booking systems belong to the same multiplex, they cannot know that Alice's booking caused Bob's. External causality generally cannot be detected, and without domain knowledge it can only be approximated with physical time.</p></div>
+</div>
+
+<p>When can event <var>c</var> cause event <var>e</var>? Exactly when <var>e</var> could <em>know</em> about <var>c</var>. Either they are on the same process and <var>c</var> ran first, or they are on different processes and <var>e</var> learned about <var>c</var> through a message from some process that knew about <var>c</var>. Otherwise there is no way <var>c</var> could be a cause of <var>e</var>.</p>
+
+<div class="defn" id="def-happens-before-a-b"><div class="defn-term"><b>Happens-before (a → b)</b><cite>[Lamport, 1978]</cite></div>
+<p>“<var>a</var> happens before <var>b</var>”: all processes agree that <var>a</var> occurs first, then <var>b</var>. It is observed directly in two situations, and closed under transitivity:</p>
+<ol class="ds-count" style="margin:.4rem 0">
+<li><b>Same process.</b> If <var>a</var> and <var>b</var> are events of the same process and <var>a</var> comes first, then <var>a → b</var>: local events are ordered by local time.</li>
+<li><b>Message.</b> If <var>a</var> is the sending of a message and <var>b</var> its receipt, then <var>a → b</var>: a message takes a finite, positive, non-zero time to propagate.</li>
+<li><b>Transitivity.</b> <var>a → b</var> and <var>b → c</var> imply <var>a → c</var>.</li>
+</ol>
+<p>Happens-before is a <strong>partial order</strong>. When neither <var>a → b</var> nor <var>b → a</var>, nothing can be said about their order. They are <dfn id="term-concurrent">concurrent</dfn>: <var>a ∥ b</var>.</p></div>
+
+<p>This gives a practical test. <var>c</var> is a possible cause of <var>e</var> iff there is at least one <dfn id="term-causal-path">causal path</dfn>, a directed path through process lines and messages, from <var>c</var> to <var>e</var>. <var>e</var> plus everything with a path to it is its <dfn id="term-causal-history">causal history</dfn>: the events that could have influenced it. Concurrent does <em>not</em> mean “at the same physical instant”. In the run below, <var>a1</var> happens well before <var>c2</var> in physical time, yet <var>a1 ∥ c2</var>.</p>
+
+<div class="ds-inst">
+<header><b>Instrument 2</b><span>Space-time explorer · causality</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">The slides' Alice / Bob / Chris run. Click an event to light up its causal past (cobalt) and future (vermilion); dashed events are concurrent with it. Click a second event to compare the two. Try <b>a1</b> then <b>c3</b>, and <b>a1</b> then <b>c2</b>. Switch to <em>Blank sandbox</em> to build your own run.</p>
+<div id="st-causality"></div>
+<noscript><p class="ds-fallback">Causal histories in this run: a1 {a1}; a2 {a1,a2}; a3 {a1,a2,a3}; b1 {b1}; b2 {a1,a2,b1,b2}; b3 {a1,a2,b1,b2,b3}; c1 {c1}; c2 {c1,c2}; c3 {a1,a2,b1,b2,b3,c1,c2,c3}. Hence a1 → b2 → c3, while a1 ∥ c2.</p></noscript>
+</div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="logical">
+<h2>Logical clocks: the contract</h2>
+<p>Physical time can approximate causality: something earlier might be a cause of something later. But then we lose the explicit connection between events, which is the message. And a common physical time might not be available at all. What we want is a <em>logical</em> time: a value <var>C(a)</var> for each event that every process agrees upon.</p>
+
+<div class="defn" id="def-logical-clock-clock-consistency"><div class="defn-term"><b>Logical clock &amp; clock consistency</b><cite>[Kshemkalyani &amp; Singhal, 2011]</cite></div>
+<p>With <var>H</var> the domain of events and <var>T</var> the domain of logical time, a logical clock is a function <var>C : H → T</var> satisfying the monotonicity property called the <strong>clock consistency condition</strong>:</p>
+<span class="math">∀ a, b ∈ H :  a → b  ⇒  C(a) &lt; C(b)</span>
+<p>If the implication also holds backwards, the system of clocks is <strong>strongly consistent</strong>:</p>
+<span class="math">∀ a, b ∈ H :  a → b  ⇔  C(a) &lt; C(b)</span></div>
+
+<p>Consistency says timestamps never contradict causality. Strong consistency says timestamps also <em>reveal</em> it: comparing two timestamps tells you whether the events are causally related or concurrent.</p>
+<p>Any implementation has to settle two issues:</p>
+<ol class="ds-count">
+<li><b>Local data structures</b> representing logical time in every process <var>p<sub>i</sub></var>: a <em>local clock</em> (the process's own progress) and a <em>global clock</em> (its view of global time).</li>
+<li><b>A protocol</b> of two rules that update the local clock and the global clock consistently.</li>
+</ol>
+<p>Systems of logical clocks differ in how they represent time and in their protocol. All of them implement these two rules and guarantee the monotonicity property, and each adds specific properties of its own.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="scalar">
+<h2>Lamport's scalar time</h2>
+<p>Scalar time squashes both clocks into a single integer <var>lc<sub>i</sub></var> per process, with an increment <var>δ<sub>i</sub></var> (usually 1):</p>
+<ol class="ds-count">
+<li><b>Tick before every event.</b> Before any local event, including sends and receives, <var>lc<sub>i</sub> ← lc<sub>i</sub> + δ<sub>i</sub></var>.</li>
+<li><b>Piggyback on send.</b> A message <var>m</var> from <var>p<sub>i</sub></var> carries the (just updated) value <var>lc<sub>i</sub></var> as its timestamp.</li>
+<li><b>Catch up on receive.</b> On receiving <var>m</var> with timestamp <var>lc<sub>i</sub></var>, process <var>p<sub>j</sub></var> sets <var>lc<sub>j</sub> ← max(lc<sub>j</sub>, lc<sub>i</sub>)</var>. It then applies rule 1, because the receive is itself an event, and delivers the message: max first, then tick.</li>
+</ol>
+
+<p>The timestamp of event <var>a</var> on <var>p<sub>i</sub></var> is <var>C(a) = lc<sub>i</sub>(a)</var>, a distributed implementation of logical global time. Clocks only increase along process lines and across messages, so scalar clocks are <strong>consistent by construction</strong>. They have three further properties, one of which is a limit:</p>
+<ol class="ds-count">
+<li><b>Total order.</b> Break ties between equal timestamps with linearly ordered process identifiers, so that <var>(C(a), i)</var> orders every pair of events. This is safe on the assumption that concurrent events are independent, so no causal relation is violated. Many liveness properties depend on such a total order, typically through event queues.</li>
+<li><b>Event counting.</b> With <var>δ = 1</var>, an event with timestamp <var>h</var> has <var>h − 1</var> events before it on the <em>longest</em> causal path leading to it, whichever processes produced them. This is its <dfn id="term-height">height</dfn>, the minimum logical duration needed to produce it.</li>
+<li><b>No strong consistency.</b> <var>C(a) &lt; C(b)</var> does <em>not</em> imply <var>a → b</var>. Merging the local and global clock into one number throws away <em>where</em> the knowledge came from: once <var>p<sub>2</sub></var> jumps to 3, it no longer remembers that the <var>p<sub>1</sub></var> event it depends on was stamped 2.</li>
+</ol>
+
+<div class="ds-inst">
+<header><b>Instrument 3</b><span>Space-time explorer · scalar vs vector</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">A run built to show every property above. Select <b>b2</b> to see rule 3 (max, then tick). Compare <b>a3</b> with <b>b2</b> (equal timestamps, broken by process id) and <b>a3</b> with <b>b3</b> (3 &lt; 4 but concurrent). Check <b>a4</b>'s height: 8, so 7 events precede it on its longest causal path. Then switch the labels to <em>Vector</em>.</p>
+<div id="st-clocks"></div>
+</div></div>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 620 200" role="img" aria-label="Lamport clocks implemented in a middleware layer between application and network">
+  <g font-family="var(--lk-utility)" font-size="12" fill="var(--lk-ink)">
+    <rect x="30" y="20" width="250" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="155" y="45" text-anchor="middle" font-weight="700">Application · sender</text>
+    <rect x="30" y="80" width="250" height="40" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="155" y="98" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">Middleware</text><text x="155" y="113" text-anchor="middle" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-cobalt-dark)">tick lc · stamp m with lc</text>
+    <rect x="30" y="140" width="250" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="155" y="165" text-anchor="middle" font-weight="700">Network</text>
+    <rect x="340" y="20" width="250" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="465" y="45" text-anchor="middle" font-weight="700">Application · receiver</text>
+    <rect x="340" y="80" width="250" height="40" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="465" y="98" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">Middleware</text><text x="465" y="113" text-anchor="middle" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-cobalt-dark)">lc = max(lc, ts) + 1 · then deliver</text>
+    <rect x="340" y="140" width="250" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="465" y="165" text-anchor="middle" font-weight="700">Network</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.6" fill="none"><path d="M155 60 V80"/><path d="M155 120 V140"/><path d="M280 160 H340"/><path d="M465 140 V120"/><path d="M465 80 V60"/></g>
+  <g fill="var(--lk-cobalt)"><path d="M150 74 L155 80 L160 74z"/><path d="M150 134 L155 140 L160 134z"/><path d="M334 155 L340 160 L334 165z"/><path d="M460 126 L465 120 L470 126z"/><path d="M460 66 L465 60 L470 66z"/></g>
+</svg>
+<figcaption><b>Fig. 2.2</b> — Middleware support for Lamport's clocks [Tanenbaum &amp; van Steen, 2017]. The application just sends and receives; the clock logic sits in the layer below it.</figcaption>
+</figure>
+</section>
+
+<!-- ============================================================ -->
+<section id="vector">
+<h2>Vector clocks</h2>
+<p>The problem with scalar clocks in one line: <var>a → b ⇒ C(a) &lt; C(b)</var>, but <var>C(a) &lt; C(b) ⇏ a → b</var>. Timestamps can be totally ordered when events are not, so comparing timestamps of unrelated events is meaningless, and scalar clocks cannot tell you whether events are unrelated. Causal histories could, but they grow without bound. Vector clocks keep just enough of the history.</p>
+
+<div class="defn" id="def-vector-clock"><div class="defn-term"><b>Vector clock</b><cite>[Kshemkalyani &amp; Singhal, 2011]</cite></div>
+<p>For a system of <var>n</var> processes, a vector clock is an array of <var>n</var> logical clocks, one per process. It assumes <strong><var>n</var> is known</strong>; smaller vectors are possible, but the properties are proven for <var>n</var>. Process <var>p<sub>i</sub></var> keeps a vector <var>vc<sub>i</sub></var> in which:</p>
+<ul>
+<li><var>vc<sub>i</sub>[i]</var> is the number of events that have occurred so far at <var>p<sub>i</sub></var>: its own scalar clock;</li>
+<li><var>vc<sub>i</sub>[j] = k</var> means that <var>p<sub>i</sub></var> knows at least <var>k</var> events have occurred at <var>p<sub>j</sub></var>: <var>p<sub>j</sub></var>'s clock “to <var>p<sub>i</sub></var>'s best knowledge”.</li>
+</ul></div>
+
+<ol class="ds-count">
+<li><b>Tick.</b> Before any action at <var>p<sub>i</sub></var>: <var>vc<sub>i</sub>[i] ← vc<sub>i</sub>[i] + 1</var>.</li>
+<li><b>Stamp.</b> A message sent by <var>p<sub>i</sub></var> carries the whole vector: <var>ts(m) ← vc<sub>i</sub></var>.</li>
+<li><b>Merge.</b> On receipt at <var>p<sub>j</sub></var>: <var>∀k, vc<sub>j</sub>[k] ← max(vc<sub>j</sub>[k], ts(m)[k])</var>, component by component. The receive is an event, so the tick applies too.</li>
+</ol>
+<p>Here the order of tick and merge does not change the result. A sender can never know more events of <var>p<sub>j</sub></var> than <var>p<sub>j</sub></var> itself has executed, so the max never touches entry <var>j</var>. That is exactly the protection the scalar clock lacks.</p>
+
+<div class="defn" id="def-vector-order-strong-consistency"><div class="defn-term"><b>Vector order &amp; strong consistency</b></div>
+<span class="math">vc(a) &lt; vc(b)  ⇔  ∀i  vc(a)[i] ≤ vc(b)[i]  ∧  ∃i′  vc(a)[i′] &lt; vc(b)[i′]</span>
+<p>This relation is antisymmetric and transitive, subsumes simple logical clocks, and captures causality:</p>
+<span class="math">vc(a) &lt; vc(b)  ⇔  a → b</span>
+<p>So vector clocks are <strong>strongly consistent</strong>, even though the order on vectors is not total. When neither vector is below the other, the events are concurrent.</p></div>
+
+<p>What does a vector mean? Each <var>ts(m)[i]</var> counts the events at <var>p<sub>i</sub></var> that causally precede the sending of <var>m</var>. So <var>ts(m)</var> summarises everything <var>m</var> may depend on. Information about the “chain of events” is preserved and shared among processes: every process knows how many events preceded the sending of a received message at the sender. In Instrument 2, compare <em>Causal history</em> with <em>Vector</em>. <var>b2</var>'s history is <code>{a1, a2, b1, b2}</code> and its vector is <code>[2,2,0]</code>. The vector <em>is</em> the history, compressed to one count per process. The compression works because each process's events are totally ordered.</p>
+
+<div class="ds-versus">
+<div><h4>Scalar (Lamport)</h4><p>1 integer per event and message. Consistent. Gives a total order with tie-breaking. Cannot detect concurrency.</p></div>
+<div><h4>Vector</h4><p><var>n</var> integers per event and message; <var>n</var> must be known. Strongly consistent: detects causality <em>and</em> concurrency.</p></div>
+<div><h4>Matrix</h4><p>Some squashing still happens in vectors. Matrix clocks extend logical time further; the slides “stop here”.</p></div>
+</div>
+<div class="beyond"><span class="ds-label">Beyond the slides · what the matrix adds</span>
+<p>In a matrix clock, row <var>j</var> of <var>p<sub>i</sub></var>'s matrix is <var>p<sub>i</sub></var>'s knowledge of <var>p<sub>j</sub></var>'s vector: what <var>p<sub>i</sub></var> knows that <var>p<sub>j</sub></var> knows. A process can then tell when <em>everyone</em> has seen an event. That is useful for discarding obsolete information, such as log entries every replica already has.</p></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="coordination">
+<h2>Beyond synchronisation: coordination</h2>
+<p>M6 ends by widening the frame. Communication is only half the story; interaction is the general issue. Governing interaction means doing the right thing <em>at the right time</em>, and “at the right time” is the critical problem. Yet ordering events is not always enough:</p>
+<ul>
+<li><b>Mutual exclusion.</b> Concurrent access to a shared resource can harm its consistency or corrupt it, so more articulated policies are needed. There are centralised, decentralised and distributed algorithms (e.g. Token Ring). The slides do not review them. Their point is that some are based on a coordinator, and all of them are <em>coordination</em> algorithms.</li>
+<li><b>Election.</b> Many distributed algorithms need an elected coordinator. Election algorithms are coordination algorithms, and they are used by coordination algorithms.</li>
+</ul>
+<p>More fundamentally, synchronisation is about <em>when</em> things happen, but actions are more than sending messages. Meaningful interaction depends on the <em>nature</em> of the actions, not just on their being suitably ordered as undifferentiated steps.</p>
+<div class="defn" id="def-the-problem-of-coordination"><div class="defn-term"><b>The problem of coordination</b><cite>[Omicini et al., 2001]</cite></div>
+<p>Governing interaction based both on time and on the nature of actions, aimed at achieving some global objective of the distributed system.</p></div>
+
+<h3>Which tool for which question</h3>
+<table>
+<thead><tr><th>You need…</th><th>Use</th><th>Because</th></tr></thead>
+<tbody>
+<tr><td>time of day, time intervals, timeouts</td><td>physical clocks (UTC / NTP)</td><td>only physical time measures duration</td></tr>
+<tr><td>a common clock without UTC</td><td>global relative time (Berkeley, RBS)</td><td>agreement, not accuracy, is the goal</td></tr>
+<tr><td>one agreed order of all events</td><td>Lamport clock + process id</td><td>consistent with causality, total, cheap</td></tr>
+<tr><td>to know if two events are related or concurrent</td><td>vector clocks</td><td>strongly consistent</td></tr>
+<tr><td>to act on what the events <em>mean</em></td><td>coordination</td><td>order is necessary, not sufficient</td></tr>
+</tbody></table>
+</section>
+
+<!-- ============================================================ -->
+<section id="oral" class="ds-oral">
+<h2>For the oral</h2>
+<p>Practise each out loud in two minutes.</p>
+<details><summary>Why is a message receipt “max, then +1” and not just “max”?</summary>
+<p>The receive is an event, so rule 1 applies to it. With only <em>max</em>, a process at 1 receiving timestamp 2 would give the receive the value 2, the same as the send, violating <var>a → b ⇒ C(a) &lt; C(b)</var>. Show it on a two-process diagram.</p></details>
+<details><summary>Lamport clocks give a total order. Is that the “real” order of events?</summary>
+<p>No. It is <em>a</em> linear extension of happens-before. Causally related events keep their order; concurrent events are ordered arbitrarily (by timestamp, then process id). That is fine because concurrent events are independent. It is useful because everyone computes the <em>same</em> order, e.g. the two bank replicas applying updates identically.</p></details>
+<details><summary>If logical clocks exist, why do we still synchronise physical clocks?</summary>
+<p>Logical time only replaces the third use (relative ordering). Time of day and intervals between events on different machines, including timeouts, leases and failure detection, need physical time. External causality (Alice tells Bob) can also only be approximated by physical time.</p></details>
+<details><summary>What does <var>vc<sub>i</sub>[j] = k</var> tell <var>p<sub>i</sub></var>, and what does it cost?</summary>
+<p><var>p<sub>i</sub></var> knows that at least <var>k</var> events of <var>p<sub>j</sub></var> precede its current state causally. The cost is <var>n</var> integers per event and per message, and <var>n</var> must be known: awkward under dynamic membership.</p></details>
+<details><summary>Why is coordination not the same as synchronisation?</summary>
+<p>Synchronisation fixes <em>when</em> things happen relative to each other. Coordination also depends on what actions <em>are</em> (reading vs writing, acquiring vs releasing) and on a global objective. Mutual exclusion and election are coordination algorithms, not clocks.</p></details>
+</section>
+
+<div class="ds-project"><span class="ds-label">Project lens · Thunk</span>
+<ul>
+<li><b>No global clock needed for scheduling.</b> Work stealing is a local decision: an idle worker asks a random peer. Say explicitly that correctness never depends on synchronised clocks. It is a strong design argument.</li>
+<li><b>Physical time appears only in failure detection.</b> Timeouts measure intervals on one machine. They need a clock that ticks at a reasonable rate, not one synchronised with the others.</li>
+<li><b>Tracing the task tree.</b> If the dashboard shows a log of splits, steals and results gathered from several nodes, stamping each record with a Lamport clock plus node id gives one order consistent with causality, so no result appears before its task. Vector clocks would let you point out which steals were truly concurrent.</li>
+<li><b>Termination detection</b> (Dijkstra–Scholten) reasons about outstanding messages along causal paths, not about time. It is a good place to reuse this chapter's vocabulary. See the <a href="project.html">project page</a>.</li>
+</ul></div>
+
+<details class="ds-coverage"><summary>Slide coverage: where each slide section went</summary>
+<table>
+<thead><tr><th>Slides</th><th>Content</th><th>Here</th></tr></thead>
+<tbody>
+<tr><td>M6 · Prologue</td><td>Computing needs time; CPS I–III; four misconceptions [Lee, 2009]</td><td><a href="#needs-time">§1</a></td></tr>
+<tr><td>M6 · Time &amp; Computation</td><td>Which notion of time; time after relativity [Rovelli, 2017]</td><td><a href="#no-single-time">§2</a></td></tr>
+<tr><td>M6 · Time in DS</td><td>Parallel / concurrent / distributed recap; basic questions; the issue of time</td><td><a href="#no-single-time">§2</a>, <a href="ch-01-distribution.html#contexts">Ch. 1</a></td></tr>
+<tr><td>M6 · Physical time</td><td>Timers; synchronisation I–III; terminology; UTC/BIPM/WWV; NTP; inaccuracies (ρ); absolute vs relative; Berkeley, RBS</td><td><a href="#physical">§3</a></td></tr>
+<tr><td>M6 · Logical time</td><td>Physical vs logical; bank example; logical clocks [Lamport, 1978]; make/Gradle</td><td><a href="#order">§4</a></td></tr>
+<tr><td>M6 · Toward coordination</td><td>Communication &amp; interaction; beyond synchronisation I–III; coordination</td><td><a href="#coordination">§9</a></td></tr>
+<tr><td>C5 · Actions, events, causes</td><td>Actions &amp; events; events &amp; causes; internal vs external causality</td><td><a href="#causality">§5</a></td></tr>
+<tr><td>C5 · Logical clocks</td><td>Detecting causality; happens-before; causal paths; causal histories</td><td><a href="#causality">§5</a></td></tr>
+<tr><td>C5 · Logical clocks</td><td>Time, causes, events; logical time I–III</td><td><a href="#logical">§6</a></td></tr>
+<tr><td>C5 · Lamport I–IX</td><td>Algorithm; middleware support; implementation; consistency; total order; event counting; no strong consistency</td><td><a href="#scalar">§7</a></td></tr>
+<tr><td>C5 · Vector clocks</td><td>Problem; definition; rules; example; ordering; result; matrix time</td><td><a href="#vector">§8</a></td></tr>
+</tbody></table></details>
+
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-01-distribution.html">&larr; 1 · What makes a system distributed</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-03-space.html">3 · Space, situatedness and mobility &rarr;</a>
+</nav>
+<footer class="lk-foot">Distributed Systems · University of Bologna · built from the slides of Andrea Omicini (DISI), A.Y. 2025/26. Personal study notes, not an official source.</footer>
+
+<script src="assets/lesson-kit.js"></script>
+<script src="assets/spacetime.js"></script>
+<script>
+(function () {
+  /* ---------- Instrument 1: drift lab ---------- */
+  var svg = document.getElementById('dl-svg'), NS = 'http://www.w3.org/2000/svg';
+  var rho = document.getElementById('dl-rho'), sync = document.getElementById('dl-sync'), tS = document.getElementById('dl-t');
+  var out = document.getElementById('dl-out');
+  function mk(tag, a, txt) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; }
+  function simulate(r, period) {
+    // returns arrays of clock values for t=0..100 for fast and slow clocks under forward-only correction
+    var fast = [0], slow = [0], slewing = false;
+    for (var t = 1; t <= 100; t++) {
+      var f = fast[t - 1] + (slewing ? 0.5 : 1 + r);
+      var s = slow[t - 1] + (1 - r);
+      if (slewing && f <= t) { slewing = false; f = t; }
+      if (period && t % period === 0) {
+        if (s < t) s = t;                 // slow clock may jump forward
+        if (f > t) slewing = true;        // fast clock may not go back: slew it
+      }
+      fast.push(f); slow.push(s);
+    }
+    return { fast: fast, slow: slow };
+  }
+  function draw() {
+    var r = +rho.value, period = +sync.value, t = +tS.value;
+    document.getElementById('dl-rho-v').textContent = r.toFixed(2);
+    document.getElementById('dl-t-v').textContent = t + ' s';
+    var S = simulate(r, period);
+    var L = 52, W = 486, mid = 118, H2 = 95, span = 1;   // offset axis: -span..+span seconds, fitted to the run
+    for (var q = 0; q <= 100; q++) span = Math.max(span, Math.abs(S.fast[q] - q), Math.abs(S.slow[q] - q));
+    span = Math.ceil(span * 1.25);
+    var X = function (v) { return L + v / 100 * W; }, Y = function (off) { return mid - Math.max(-span, Math.min(span, off)) / span * H2; };
+    svg.innerHTML = '';
+    // spec envelope: |offset| <= rho * t
+    svg.appendChild(mk('polygon', { points: [X(0) + ',' + Y(0), X(100) + ',' + Y(100 * r), X(100) + ',' + Y(-100 * r)].join(' '), fill: 'var(--lk-hl)', opacity: .8 }));
+    if (period) for (var p = period; p <= 100; p += period) {
+      svg.appendChild(mk('line', { x1: X(p), y1: mid - H2, x2: X(p), y2: mid + H2, stroke: 'var(--lk-rule-soft)', 'stroke-dasharray': '2 3' }));
+      svg.appendChild(mk('text', { x: X(p), y: mid + H2 + 14, 'text-anchor': 'middle', 'font-family': 'var(--lk-mono)', 'font-size': 9.5, fill: 'var(--lk-ink-soft)' }, 'resync'));
+    }
+    svg.appendChild(mk('line', { x1: L, y1: mid - H2, x2: L, y2: mid + H2, stroke: 'var(--lk-rule)' }));
+    [[span, '+' + span + ' s'], [0, '0 (UTC)'], [-span, '−' + span + ' s']].forEach(function (k) {
+      svg.appendChild(mk('text', { x: L - 6, y: Y(k[0]) + 4, 'text-anchor': 'end', 'font-family': 'var(--lk-mono)', 'font-size': 10, fill: 'var(--lk-ink-soft)' }, k[1]));
+    });
+    svg.appendChild(mk('text', { x: L + W, y: mid + H2 + 28, 'text-anchor': 'end', 'font-family': 'var(--lk-mono)', 'font-size': 10, fill: 'var(--lk-ink-soft)' }, 'real time (UTC) →'));
+    svg.appendChild(mk('text', { x: L + 4, y: 14, 'font-family': 'var(--lk-mono)', 'font-size': 10, fill: 'var(--lk-ink-soft)' }, 'offset  C(t) − t'));
+    function path(arr, color, dash) {
+      var d = arr.map(function (v, i) { return (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v - i).toFixed(1); }).join(' ');
+      svg.appendChild(mk('path', { d: d, fill: 'none', stroke: color, 'stroke-width': 2.2, 'stroke-dasharray': dash || '' }));
+    }
+    var perfect = []; for (var i = 0; i <= 100; i++) perfect.push(i);
+    path(perfect, 'var(--lk-ink)', '5 4'); path(S.fast, 'var(--lk-vermilion)'); path(S.slow, 'var(--lk-cobalt)');
+    svg.appendChild(mk('line', { x1: X(t), y1: mid - H2, x2: X(t), y2: mid + H2, stroke: 'var(--lk-ink)', 'stroke-width': 1 }));
+    [['fast clock', 'var(--lk-vermilion)', 400], ['perfect', 'var(--lk-ink)', 470], ['slow clock', 'var(--lk-cobalt)', 520]].forEach(function (x, k) {
+      svg.appendChild(mk('text', { x: x[2] - 150, y: 14, 'font-family': 'var(--lk-mono)', 'font-size': 10.5, 'font-weight': 600, fill: x[1] }, x[0]));
+    });
+    var f = S.fast[t], s = S.slow[t];
+    var maxRel = 0; for (i = 0; i <= 100; i++) maxRel = Math.max(maxRel, Math.abs(S.fast[i] - S.slow[i]));
+    out.innerHTML = 'At t = ' + t + ' s: fast clock reads <code>' + f.toFixed(1) + '</code> (offset ' + (f - t >= 0 ? '+' : '') + (f - t).toFixed(1) +
+      '), slow clock <code>' + s.toFixed(1) + '</code> (offset ' + (s - t).toFixed(1) + '). Relative offset <code>' + (f - s).toFixed(1) + ' s</code>; worst over the run <code>' + maxRel.toFixed(1) + ' s</code>.' +
+      (period ? ' Each resync pushes the slow clock <em>forward</em> to UTC. The fast clock may not go back, so it is slewed (runs at half speed) until UTC catches up. The shaded wedge is where in-spec clocks can be.' : ' Without resynchronisation the gap grows at 2ρ = ' + (2 * r).toFixed(2) + ' s per second, filling the shaded wedge of in-spec clocks.');
+  }
+  [rho, sync, tS].forEach(function (c) { c.addEventListener('input', draw); });
+  draw();
+
+  /* ---------- Instruments 2 & 3: space-time explorer ---------- */
+  var ABC = {
+    processes: [{ id: 'a', name: 'Alice' }, { id: 'b', name: 'Bob' }, { id: 'c', name: 'Chris' }],
+    events: [
+      { id: 'a1', p: 'a', x: 1 }, { id: 'a2', p: 'a', x: 2 }, { id: 'a3', p: 'a', x: 5 },
+      { id: 'b1', p: 'b', x: 1.5 }, { id: 'b2', p: 'b', x: 3 }, { id: 'b3', p: 'b', x: 4 },
+      { id: 'c1', p: 'c', x: 0.8 }, { id: 'c2', p: 'c', x: 2.6 }, { id: 'c3', p: 'c', x: 5 }
+    ],
+    messages: [{ from: 'a2', to: 'b2', label: 'Dinner?' }, { from: 'b3', to: 'c3' }]
+  };
+  var BLANK = { processes: [{ id: 'a', name: 'P1' }, { id: 'b', name: 'P2' }, { id: 'c', name: 'P3' }], events: [], messages: [] };
+  var CLOCKS = {
+    processes: [{ id: 'a', name: 'P1' }, { id: 'b', name: 'P2' }, { id: 'c', name: 'P3' }],
+    events: [
+      { id: 'a1', p: 'a', x: 1 }, { id: 'a2', p: 'a', x: 2 }, { id: 'a3', p: 'a', x: 3.2 }, { id: 'a4', p: 'a', x: 7.6 },
+      { id: 'b1', p: 'b', x: 1.2 }, { id: 'b2', p: 'b', x: 2.8 }, { id: 'b3', p: 'b', x: 3.8 }, { id: 'b4', p: 'b', x: 4.6 },
+      { id: 'c1', p: 'c', x: 1.6 }, { id: 'c2', p: 'c', x: 5.4 }, { id: 'c3', p: 'c', x: 6.5 }
+    ],
+    messages: [{ from: 'a2', to: 'b2', label: 'm1' }, { from: 'b4', to: 'c2', label: 'm2' }, { from: 'c3', to: 'a4', label: 'm3' }]
+  };
+  if (window.DSSpaceTime) {
+    DSSpaceTime.mount('#st-causality', { presets: { 'Alice · Bob · Chris (slides)': ABC, 'Blank sandbox': BLANK }, modes: ['history', 'vector', 'lamport', 'none'], mode: 'history', editable: true });
+    DSSpaceTime.mount('#st-clocks', { presets: { 'Scalar-clock run': CLOCKS, 'Alice · Bob · Chris': ABC, 'Blank sandbox': BLANK }, modes: ['lamport', 'vector', 'history'], mode: 'lamport', editable: true });
+  }
+})();
+</script>
+</body>
+</html>

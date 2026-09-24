@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Replication, Consistency and CAP — Distributed Systems</title>
+<meta name="description" content="Why replicate, what consistency contracts replicas can offer, and what CAP says we must give up when the network partitions.">
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/ds.css">
+<style>
+.hc-hist{display:grid;grid-template-columns:auto 1fr;gap:.35rem .6rem;align-items:center;margin:.6rem 0;padding:.6rem .7rem;background:var(--lk-paper);border:1px solid var(--lk-rule-soft);border-radius:3px}
+.hc-hist .hc-p{font:700 .82rem var(--lk-utility);color:var(--lk-ink)}
+.hc-hist .hc-ops{display:flex;flex-wrap:wrap;gap:.3rem}
+.hc-op{font:.8rem var(--lk-mono);padding:.12rem .45rem;border:1px solid var(--lk-cobalt);border-radius:2px;color:var(--lk-cobalt-dark);background:var(--lk-paper-light)}
+.hc-op.r{border-color:var(--lk-rule);color:var(--lk-ink)}
+.hc-edit input{font:.82rem var(--lk-mono);padding:.3rem .45rem;border:1px solid var(--lk-rule);border-radius:3px;background:var(--lk-paper);color:var(--lk-ink);width:13rem;max-width:100%}
+.hc-res .ds-verdict{margin-top:.35rem}
+.inst-svg{border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper);margin:.5rem 0}
+.inst-svg svg{display:block;width:100%;max-width:640px;margin:0 auto;height:auto}
+.cap-log{margin:.4rem 0 0;padding:0 0 0 2.1rem;max-height:12rem;overflow-y:auto}
+.cap-log li{margin:.1rem 0;font:.8rem/1.45 var(--lk-mono)!important}
+.cap-log .bad{color:var(--lk-vermilion)}
+.cap-log .ok{color:var(--lk-forest)}
+</style>
+</head>
+<body class="lk">
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-04-failure-recovery.html">&larr; 4 · Failure and recovery</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-06-consensus.html">6 · Consensus &rarr;</a>
+</nav>
+
+<header class="lk-header">
+  <div class="lk-kicker">Part II — Failure, replication, agreement · Chapter 5</div>
+  <h1>Replication, consistency and CAP</h1>
+  <div class="lk-meta"><span>~27 min</span><span>3 instruments</span><span>A.Y. 2025/26 · Prof. Omicini</span></div>
+  <div class="ds-sources" aria-label="Source slide decks"><span><b>M3</b> Replication &amp; Consistency in Distributed Systems</span><span><b>C1</b> The CAP Theorem</span></div>
+</header>
+
+<div class="ds-spine"><span class="ds-label">The question</span>
+<p>Once data lives in several copies, what may a reader see, and what must we give up when the network splits?</p></div>
+
+<div class="ds-thesis"><span class="ds-label">The argument in one paragraph</span>
+<p>Replication buys reliability, performance and scale, but copies drift, and keeping them identical needs the global synchronisation replication was meant to avoid. The way out is to <b>relax consistency</b> and write the relaxation down as a <b>contract</b>. Data-centric models state what all processes may observe (bounded deviation, sequential, causal); eventual consistency only promises convergence; client-centric models promise a single mobile client that its own view never goes backwards. The hard limit is the <b>CAP theorem</b>: during a network partition, a replicated service cannot answer every request <em>and</em> stay atomically consistent; without a partition it can do both. Most large services choose availability and live with <b>BASE</b>.</p></div>
+
+<nav class="ds-contents" aria-label="In this chapter"><ol>
+<li><a href="#replication">Why replicate</a></li>
+<li><a href="#contract">Consistency as a contract</a></li>
+<li><a href="#data-centric">Data-centric models</a></li>
+<li><a href="#client-centric">Client-centric models</a></li>
+<li><a href="#replica-management">What gets replicated</a></li>
+<li><a href="#cap">The CAP theorem</a></li>
+<li><a href="#cap-proof">Proving CAP</a></li>
+<li><a href="#base">Living with CAP: BASE</a></li>
+<li><a href="#oral">For the oral</a></li>
+</ol></nav>
+
+<!-- ============================================================ -->
+<section id="replication">
+<h2>Why replicate, and what it costs</h2>
+<p>M3 borrows heavily from Tanenbaum &amp; van Steen [2017]. <dfn id="term-replication">Replication</dfn> keeps several copies of the same data on different machines, for three reasons:</p>
+<ol class="ds-count">
+<li><b>Reliability.</b> If a replica of a file system crashes, operation continues on another. With three copies, and every read and write done on each, a single failing write is hidden by trusting the value at least two copies return.</li>
+<li><b>Performance.</b> Many processes hitting one server: replicate the server and divide the workload.</li>
+<li><b>Scaling</b>, <em>in numbers</em> and <em>in geographical area</em>. A copy near the process that uses it cuts access time, so performance <em>as perceived by that process</em> increases.</li>
+</ol>
+<p>But keeping replicas up to date consumes bandwidth: is there a benefit overall? At first glance the benefits look unquestionable:</p>
+<ol class="ds-count">
+<li>reliability</li><li>fault tolerance</li><li>accessibility</li><li>performance</li><li>scalability</li>
+</ol>
+<p>So should we just replicate data, processes, whatever, and be content with it? No: replication has its own problems.</p>
+<ol class="ds-count">
+<li><b>Costs.</b> Replicas need (new?) machines elsewhere, possibly bought and placed near the processes using the data: more management costs (physical spaces, technical personnel, …), possibly acquisition costs.</li>
+<li><b>Computational resources.</b> Copies must be kept consistent, which takes computation <em>within</em> replicas…</li>
+<li><b>Bandwidth.</b> …and communication <em>among</em> them.</li>
+<li><b>Consistency</b>, the main problem. A modified copy differs from the others, so the modification must be carried out on all copies. <strong>When and how modifications are carried out determines the cost of replication.</strong></li>
+</ol>
+
+<h3>Two examples of the cost</h3>
+<p><b>Web caching.</b> Browsers cache fetched pages, so a page requested again appears instantly. But if the page changed on the server, the user gets a stale copy. Preventing that hurts either way:</p>
+<ol class="ds-count">
+<li><b>Forbid caching</b>: perceived performance suffers badly.</li>
+<li><b>The server invalidates or updates cached copies</b>: it must track every cache and message it, a heavy load with poor scalability.</li>
+</ol>
+<p><b>Access versus update rate.</b> A process <var>P</var> reads a local replica <var>N</var> times per second; the replica is updated <var>M</var> times per second, each update fully refreshing it. If <var>N ≪ M</var>, most versions shipped are never read, and their network traffic is wasted. Is the local replica worth it, or should updates propagate differently?</p>
+
+<h3>The replication and consistency dilemma</h3>
+<p>Scalability problems usually show up as performance problems, and replication and caching are the standard cure. But keeping copies consistent can itself become a scalability problem. Intuitively, copies are consistent when they are always the same, so a read at any copy returns the same result. Then an update must reach all copies before any subsequent operation: <dfn id="term-synchronous-replication">synchronous replication</dfn>, whose result is informally called <dfn id="term-tight-consistency">tight consistency</dfn>.</p>
+<p>The key idea is to update all copies as one <strong>atomic operation</strong>, or transaction. That is hard when operations must also be fast: replicas must first agree on <em>when exactly</em> each update is applied, e.g. on a global order of operations (<a class="xref" href="ch-02-time.html#order">Ch. 2</a>'s bank replicas). Global synchronisation takes a lot of communication, and the slides ask whether we are “bumping into another set of impossibility theorems”. We are: CAP (<a href="#cap">§6</a>) and FLP (<a class="xref" href="ch-06-consensus.html#flp">Ch. 6</a>).</p>
+<p>Is the cure worse than the disease? There is no general answer, but often a solution: <strong>relax the consistency constraints</strong>. Drop atomic updates, avoid instantaneous global synchronisation, gain performance, and accept that replicas are not always the same. When and how far that is acceptable depends on the <em>access and update patterns</em> of the data and on the <em>purpose</em> of its use.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="contract">
+<h2>Consistency as a contract</h2>
+<p>Instead of one notion of consistency we can define several, each fitting different scenarios, so that engineers can trade the costs of consistency against its benefits. Each <em>consistency model</em> can then be implemented by different protocols, whose features affect how well it works.</p>
+<p>Historically, <strong>the first things to be distributed are data</strong>. So the first problem is consistency of data across copies, and the actions to account for are <em>operations over data</em>. The setting is a <dfn id="term-data-store">data store</dfn>: logically one store, physically distributed and replicated across processes, each working on a local or nearby copy.</p>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 520 190" role="img" aria-label="Three processes each access a local copy; the copies together form one logical distributed data store">
+  <g font-family="var(--lk-utility)" font-size="14" font-weight="700" fill="var(--lk-ink)">
+    <text x="85" y="30" text-anchor="middle">Process P1</text><text x="260" y="30" text-anchor="middle">Process P2</text><text x="435" y="30" text-anchor="middle">Process P3</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.6"><line x1="85" y1="38" x2="85" y2="92"/><line x1="260" y1="38" x2="260" y2="92"/><line x1="435" y1="38" x2="435" y2="92"/></g>
+  <rect x="20" y="92" width="480" height="78" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-dasharray="6 4"/>
+  <g font-family="var(--lk-mono)" font-size="13" fill="var(--lk-cobalt-dark)">
+    <rect x="35" y="104" width="100" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="85" y="127" text-anchor="middle">local copy</text>
+    <rect x="210" y="104" width="100" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="260" y="127" text-anchor="middle">local copy</text>
+    <rect x="385" y="104" width="100" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="435" y="127" text-anchor="middle">local copy</text>
+  </g>
+  <g stroke="var(--lk-vermilion)" stroke-width="1.4" fill="none" stroke-dasharray="3 3"><path d="M135 122 H210"/><path d="M310 122 H385"/></g>
+  <text x="260" y="162" text-anchor="middle" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink-soft)">distributed data store · updates propagate between copies</text>
+</svg>
+<figcaption><b>Fig. 5.1</b> — General organisation of a distributed data store [Tanenbaum &amp; van Steen, 2017]. Each process reads and writes its nearby copy; the store is one object only logically.</figcaption>
+</figure>
+
+<div class="defn" id="def-consistency-model"><div class="defn-term"><b>Consistency model</b><cite>[M3, after Tanenbaum &amp; van Steen, 2017]</cite></div>
+<p>A <dfn id="term-consistency-model">consistency model</dfn> is essentially a <strong>contract</strong> among the processes and the data store, ensuring the correctness of data given a set of rules that processes have to follow.</p></div>
+<p>What is “correct” depends on what processes expect, which is hard to define without a global notion of time (<a class="xref" href="ch-02-time.html#physical">Ch. 2</a>). The definition shifts the focus from the replicated data to the <em>processes using it</em> and their application needs. Different needs, different contracts, in two families: data-centric models constrain what <em>all</em> processes observe; client-centric models what <em>one</em> client observes.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="data-centric">
+<h2>Data-centric models</h2>
+
+<h3>Continuous consistency: bounding the deviation</h3>
+<p>The first contract does not demand equal copies; it imposes <strong>limits on the deviation between replicas</strong>. The level of consistency is set along three independent axes:</p>
+<ol class="ds-count">
+<li><b>Numerical deviation</b>, absolute or relative: two copies of a stock price should not differ by more than $0.01.</li>
+<li><b>Staleness deviation</b>: weather data should not be more than four hours stale.</li>
+<li><b>Ordering deviation</b>: in a bulletin board, at most six messages may be out of order.</li>
+</ol>
+<p>These bounds define <dfn id="term-continuous-consistency">continuous consistency</dfn>. Deviation is measured on a unit of consistency, the <dfn id="term-conit">conit</dfn>. A data store's nature suggests its conit, but the model (and replication) is defined around a suitably designed one, and deviation is measured as differences of conits. There is no absolute measure: choose the conit for the resource and problem at hand. Granularity matters (Fig. 5.2).</p>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 520 250" role="img" aria-label="Replica A updates both x and y. With one conit containing x and y, A has two unpropagated updates in it and must propagate. With two conits each has one and no propagation is needed.">
+  <text x="130" y="22" text-anchor="middle" font-family="var(--lk-utility)" font-size="14" font-weight="700" fill="var(--lk-ink)">(a) one conit {x, y}</text>
+  <text x="390" y="22" text-anchor="middle" font-family="var(--lk-utility)" font-size="14" font-weight="700" fill="var(--lk-ink)">(b) two conits {x}, {y}</text>
+  <g font-family="var(--lk-mono)" font-size="13" fill="var(--lk-ink)">
+    <text x="20" y="66">A</text><text x="20" y="136">B</text><text x="280" y="66">A</text><text x="280" y="136">B</text>
+  </g>
+  <rect x="40" y="38" width="200" height="120" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.8"/>
+  <g font-family="var(--lk-mono)" font-size="13">
+    <rect x="52" y="48" width="80" height="28" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="92" y="67" text-anchor="middle" fill="var(--lk-cobalt-dark)">x ← 5</text>
+    <rect x="148" y="48" width="80" height="28" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="188" y="67" text-anchor="middle" fill="var(--lk-cobalt-dark)">y ← 2</text>
+    <rect x="52" y="118" width="80" height="28" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="92" y="137" text-anchor="middle" fill="var(--lk-ink-soft)">x</text>
+    <rect x="148" y="118" width="80" height="28" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="188" y="137" text-anchor="middle" fill="var(--lk-ink-soft)">y</text>
+  </g>
+  <rect x="300" y="38" width="95" height="120" fill="none" stroke="var(--lk-forest)" stroke-width="1.8"/>
+  <rect x="405" y="38" width="95" height="120" fill="none" stroke="var(--lk-forest)" stroke-width="1.8"/>
+  <g font-family="var(--lk-mono)" font-size="13">
+    <rect x="308" y="48" width="80" height="28" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="348" y="67" text-anchor="middle" fill="var(--lk-cobalt-dark)">x ← 5</text>
+    <rect x="413" y="48" width="80" height="28" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="453" y="67" text-anchor="middle" fill="var(--lk-cobalt-dark)">y ← 2</text>
+    <rect x="308" y="118" width="80" height="28" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="348" y="137" text-anchor="middle" fill="var(--lk-ink-soft)">x</text>
+    <rect x="413" y="118" width="80" height="28" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="453" y="137" text-anchor="middle" fill="var(--lk-ink-soft)">y</text>
+  </g>
+  <g font-family="var(--lk-mono)" font-size="14">
+    <text x="140" y="188" text-anchor="middle" fill="var(--lk-vermilion)">2 unpropagated</text>
+    <text x="140" y="208" text-anchor="middle" fill="var(--lk-vermilion)">→ must propagate</text>
+    <text x="400" y="188" text-anchor="middle" fill="var(--lk-forest)">1 unpropagated each</text>
+    <text x="400" y="208" text-anchor="middle" fill="var(--lk-forest)">→ no traffic</text>
+  </g>
+  <text x="260" y="240" text-anchor="middle" font-family="var(--lk-mono)" font-size="13.5" fill="var(--lk-ink-soft)">rule: at most 1 unpropagated update per conit at a replica</text>
+</svg>
+<figcaption><b>Fig. 5.2</b> — Choosing the granularity of a conit [Tanenbaum &amp; van Steen, 2017]. The same two updates at A force propagation with a larger conit (a), and none with smaller ones (b).</figcaption>
+</figure>
+
+<h3>Ordering operations</h3>
+<p>The next models come from parallel and concurrent environments, where processes access shared resources simultaneously. To commit to a state for the replicas, processes must agree on a <strong>global ordering of updates</strong>.</p>
+
+<div class="defn" id="def-sequential-consistency"><div class="defn-term"><b>Sequential consistency</b><cite>[M3, after Tanenbaum &amp; van Steen, 2017]</cite></div>
+<p>Main idea: all update operations are seen by all processes in the same order. A data store is <dfn id="term-sequential-consistency">sequentially consistent</dfn> when the result of any execution is the same as if</p>
+<ol class="ds-count" style="margin:.4rem 0">
+<li>the (read and write) operations by all processes on the data store were executed in <strong>some sequential order</strong>, and</li>
+<li>the operations of each individual process appear in this sequence <strong>in the order specified by its program</strong>.</li>
+</ol></div>
+<p>Any interleaving will do, if one exists and everybody sees it; real time plays no role. Take two processes, with <var>x = y = 0</var> initially:</p>
+<span class="ds-math">P1: W(x)1; R(y)? &nbsp;&nbsp;·&nbsp;&nbsp; P2: W(y)1; R(x)?</span>
+<p>Can both reads return 0? <var>R(y)</var> must then precede <var>W(y)1</var>, and <var>R(x)</var> precede <var>W(x)1</var>. With program order that is a cycle: <var>W(x)1 → R(y) → W(y)1 → R(x) → W(x)1</var>. No sequential order exists, so <strong>sequential consistency forbids both reads returning 0</strong>; every other combination is allowed. This “store buffer” history is Instrument 1's first preset.</p>
+
+<div class="defn" id="def-causal-consistency"><div class="defn-term"><b>Causal consistency</b><cite>[M3, after Tanenbaum &amp; van Steen, 2017]</cite></div>
+<p>A data store is <dfn id="term-causal-consistency">causally consistent</dfn> when all processes see write operations that are in a cause/effect relation in the same order.</p></div>
+<p>It weakens sequential consistency: ordering is limited to operations in a cause/effect relation, and concurrent writes may be seen in different orders by different processes. The relation is happens-before (<a class="xref" href="ch-02-time.html#causality">Ch. 2</a>) on operations: program order, plus a read follows the write whose value it returns (write as send, read as receive). Every sequentially consistent history is causally consistent, since its single order respects causality. Not conversely: the store-buffer history is causally consistent, because its two writes are concurrent.</p>
+
+<h3>Eventual consistency</h3>
+<p>The slides introduce the weakest model at the start of the client-centric part, as the scenario that motivates it: a large distributed data store with almost no update conflicts. Typically a single authority updates and many processes read, so the only conflict is <em>read-write</em>: one process updates an item while another reads it (DNS changes, Web content). Readers may get non-updated data, which is mostly acceptable. If no update takes place for a while, all replicas gradually become consistent: <dfn id="term-eventual-consistency">eventual consistency</dfn>. It promises convergence, so it allows any finite history whose reads return already-written values, provided replicas agree once updates stop.</p>
+
+<div class="ds-inst" id="hist-check">
+<header><b>Instrument 1</b><span>History checker</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">Pick a history (all variables start at 0) or type your own, one line per process, e.g. <code>W(x)1 R(y)0</code>. The checker searches for a sequential order, for causally consistent per-process views, and for values nobody wrote.</p>
+<div class="ds-row"><div class="ds-seg" id="hc-presets" role="group" aria-label="Preset histories"></div></div>
+<div class="ds-row hc-edit"><label>P1 <input id="hc-p1" spellcheck="false" aria-label="Operations of P1"></label><label>P2 <input id="hc-p2" spellcheck="false" aria-label="Operations of P2"></label><button class="ds-btn primary" type="button" id="hc-go">Check</button></div>
+<div id="hc-hist"></div>
+<div class="hc-res" id="hc-res" aria-live="polite"></div>
+<div class="ds-readout" id="hc-out"></div>
+<noscript><p>Interactive checker (requires JavaScript). Store buffer, P1: W(x)1 R(y)0 and P2: W(y)1 R(x)0: forbidden by sequential consistency (no interleaving respects program order), allowed by causal and eventual consistency.</p></noscript>
+</div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="client-centric">
+<h2>Client-centric models</h2>
+<p>Switch perspective to data sharing in <strong>mobile computing</strong>. A client connects to different replicas over time, and their differences should be transparent (<a class="xref" href="ch-01-distribution.html#transparency">Ch. 1</a>). Simultaneous updates are not the issue. An eventually consistent store works while a client always talks to the same replica; when it moves, the new replica may lack what the client saw, or wrote, a minute ago.</p>
+<div class="defn" id="def-client-centric-consistency"><div class="defn-term"><b>Client-centric consistency</b><cite>[M3]</cite></div>
+<p><dfn id="term-client-centric-consistency">Client-centric consistency models</dfn> ensure that whenever a client connects to a new replica, that replica is up to date according to the client's previous accesses to the same data at other replicas. Consistency no longer refers to the resource itself (its nature, its dynamics) but to <strong>the view each client has of it</strong>.</p></div>
+<p class="ds-count-head">Four client-centric models [M3]</p>
+<ol class="ds-count">
+<li><b><dfn id="term-monotonic-reads">Monotonic reads</dfn>.</b> If a process reads the value of a data item <var>x</var>, any successive read operation on <var>x</var> by the process will always return that same value or a more recent value. <em>Example:</em> a distributed e-mail database; mail you have seen does not vanish when you reconnect elsewhere.</li>
+<li><b><dfn id="term-monotonic-writes">Monotonic writes</dfn>.</b> A write operation by a process on a data item <var>x</var> is completed before any successive operation on <var>x</var> by the same process. <em>Idea:</em> the order of updates is maintained over distributed replicas. <em>Example:</em> a software library under development, where each new version builds on the previous one.</li>
+<li><b><dfn id="term-read-your-writes">Read your writes</dfn>.</b> The effect of a write operation by a process on data item <var>x</var> will always be seen by a successive read operation on <var>x</var> by the same process. <em>Idea:</em> avoid the “web page failed update” effect. <em>Example:</em> updating a password.</li>
+<li><b><dfn id="term-writes-follow-reads">Writes follow reads</dfn>.</b> A write operation by a process on data item <var>x</var> following a previous read operation on <var>x</var> by the same process is guaranteed to take place on the same or a more recent value of <var>x</var> that was read. <em>Idea:</em> writes affect only up-to-date data items. <em>Example:</em> comments to posts on Facebook.</li>
+</ol>
+<div class="slidefix"><span class="ds-label">Slide note · monotonic writes</span>
+<p>The slide says “any successive <em>operation</em>”; Tanenbaum &amp; van Steen [2017] say any successive <em>write</em>, matching the slide's idea and example. A later <em>read</em> of your own write is read-your-writes.</p></div>
+<p>The guarantees are per client and independent. Each covers one pair of operations by the same client at two replicas (Instrument 2).</p>
+
+<div class="ds-inst" id="cc-trace">
+<header><b>Instrument 2</b><span>Mobile client trace</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">A client does one operation at replica L1, moves, and does a second one at L2. Choose the two operations and whether L1's updates have reached L2 in between.</p>
+<div class="ds-row"><span class="ds-muted" style="font:.8rem var(--lk-utility)">At L1</span><div class="ds-seg" id="cc-op1" role="group" aria-label="First operation"><button type="button" data-v="R">read</button><button type="button" data-v="W">write</button></div>
+<span class="ds-muted" style="font:.8rem var(--lk-utility)">then at L2</span><div class="ds-seg" id="cc-op2" role="group" aria-label="Second operation"><button type="button" data-v="R">read</button><button type="button" data-v="W">write</button></div></div>
+<div class="ds-row"><span class="ds-muted" style="font:.8rem var(--lk-utility)">Before the second operation, L2</span><div class="ds-seg" id="cc-prop" role="group" aria-label="Propagation"><button type="button" data-v="1">has L1's updates</button><button type="button" data-v="0">has not got them yet</button></div></div>
+<div class="inst-svg"><svg id="cc-svg" viewBox="0 0 520 200" role="img" aria-label="Replicas L1 and L2 and the client's two operations"></svg></div>
+<div class="ds-readout" id="cc-out" aria-live="polite"></div>
+<div class="ds-verdict" id="cc-verdict"></div>
+<noscript><p>Interactive trace (requires JavaScript). read→read is monotonic reads, write→write monotonic writes, write→read read-your-writes, read→write writes-follow-reads. Each is violated exactly when L2 has not received the relevant update from L1 before the second operation.</p></noscript>
+</div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="replica-management">
+<h2>What gets replicated, and with what</h2>
+<p>Supporting replication means deciding <em>where, when and by whom</em> replicas are placed, and which mechanisms keep them consistent. <dfn id="term-replica-management">Replica management</dfn> has two subproblems, and they are not the same problem:</p>
+<ol class="ds-count">
+<li><b>Placing replica servers</b>: where the machines that host replicas go.</li>
+<li><b>Placing content</b>: which data goes on which of those servers.</li>
+</ol>
+<p>Replication is not merely of data. <dfn id="term-service-replication">Service replication</dfn> replicates functions, for the same reasons, which may or may not rely on the same data store: two layers, each with its own consistency and replication model. <dfn id="term-process-replication">Process replication</dfn> replicates processes in a mobile setting, which may require cloning or higher-level mechanisms such as goal-passing (<a class="xref" href="ch-03-space.html#mobility">Ch. 3</a>).</p>
+
+<h3>The technology landscape</h3>
+<p>M3 ends with a “fast scan of the Web” of replication and consistency for fault tolerance:</p>
+<table>
+<thead><tr><th>Consistency type</th><th>Key mechanism / protocol</th><th>Typical systems / tech</th></tr></thead>
+<tbody>
+<tr><td>strong</td><td>Raft, Paxos</td><td>etcd, Spanner, CockroachDB</td></tr>
+<tr><td>eventual</td><td>Gossip, Merkle trees</td><td>DynamoDB, Cassandra, Riak</td></tr>
+<tr><td>causal</td><td>Vector clocks, CRDTs</td><td>AntidoteDB, Orleans, Akka</td></tr>
+<tr><td>tunable</td><td>Quorums (R/W)</td><td>Cassandra, Dynamo-style DBs</td></tr>
+<tr><td>transactional</td><td>Consensus + TrueTime</td><td>Spanner, CockroachDB</td></tr>
+<tr><td>log-based</td><td>ISR, CDC streams</td><td>Kafka, Debezium, Aurora</td></tr>
+</tbody></table>
+<p>The framing is the point: there is a lot to see before we can understand (almost) all of it, e.g. logical time (<a class="xref" href="ch-02-time.html#vector">Ch. 2</a>) and group and coordination algorithms (<a class="xref" href="ch-06-consensus.html#paxos">Ch. 6</a>). The Kubernetes class (<a class="xref" href="ch-09-kubernetes.html#control-loop">Ch. 9</a>) gives concrete examples.</p>
+
+<div class="beyond"><span class="ds-label">Beyond the slides · quorums (R/W)</span>
+<p>With <var>N</var> replicas, a write waits for <var>W</var> acknowledgements and a read collects <var>R</var> answers. If <var>R + W &gt; N</var>, every read quorum intersects every write quorum, so a read reaches at least one replica holding the latest completed write (recognised by its version). Tuning <var>R</var> and <var>W</var> trades latency against how many unreachable replicas each operation tolerates.</p></div>
+
+<p><em>Replication. Theory and Practice</em> [Charron-Bost et al., 2010] shows how much this basic course leaves out; after it, you should read that book proficiently. Other books: Kemme et al. [2010], Helal et al. [2002], Özsu &amp; Valduriez [2020]; for MySQL, Bradford &amp; Schneider [2012] and Schwartz et al. [2012]; for PostgreSQL, Böszörmenyi &amp; Schönig [2013]; for Veeam, Childerhose [2022].</p>
+<p class="ds-count-head">Lessons learnt · M3</p>
+<ol class="ds-count">
+<li>Replication is useful in distributed systems.</li>
+<li>Replication requires consistency.</li>
+<li>Consistency is not an absolute notion: different application needs mandate different models.</li>
+<li>We talk about data, yet nowadays we replicate whatever resource we need, e.g. cloning in mobile distributed systems.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="cap">
+<h2>The CAP theorem</h2>
+<p>Continuing to provide services in spite of failures is supposed to be a main benefit of distributed over centralised systems [Friedman &amp; Birman, 1996]. The intuition: if a component fails, or is disconnected or partitioned, others replace it and hide the failure, or at least reduce its perceived impact. A system hiding (most of) its failures is <dfn id="term-highly-available">highly available</dfn> (<a class="xref" href="ch-04-failure-recovery.html#attributes">Ch. 4</a>). The design question: how much failure can a system sustain before failure is noticed?</p>
+<p>We want systems <em>consistent</em> (correct replies) and <em>available</em> (live, making good things happen), yet they suffer power losses, crashes, network failures, message loss, malicious attacks, Byzantine failures: they are <em>unreliable</em> [Gilbert &amp; Lynch, 2012]. Hence: “The CAP theorem is one example of a more general tradeoff between <strong>safety and liveness</strong> in unreliable systems.”</p>
+
+<h3>The statement</h3>
+<p>Informally, it is only possible to provide any two of consistency (C), availability (A) and partition tolerance (P) [Shim, 2012]. In Zhao's [2014] words: <b>C</b>, replicated data is always consistent; <b>A</b>, data is highly available to users; <b>P</b>, the system keeps providing services when the network partitions. The first formulation is Brewer's:</p>
+<div class="defn" id="def-cap-brewer-s-conjecture"><div class="defn-term"><b>CAP (Brewer's conjecture)</b><cite>[Brewer, 2000]</cite></div>
+<p>A distributed database potentially features three desirable properties: <strong>C</strong>onsistency, <strong>A</strong>vailability, and tolerance towards network <strong>P</strong>artition. According to the <dfn id="term-cap-theorem">CAP theorem</dfn>, any shared-data distributed system can have at most two of these three.</p></div>
+<p>An impossibility result: “we repent and renounce”. What is our sin? Distributed systems, that's what it is. So pick one to give up:</p>
+<ol class="ds-count">
+<li><b>CA</b>: forget partition tolerance, and have consistency and availability.</li>
+<li><b>AP</b>: forget consistency, and live with a partition-tolerant, highly available system.</li>
+<li><b>CP</b>: forget availability, and enjoy a system that is both consistent and partition-tolerant.</li>
+</ol>
+<p>But the three properties are not of the same sort, technically or conceptually:</p>
+<ol class="ds-count">
+<li>Consistency and availability range over a <strong>spectrum</strong> of options; partition tolerance is more of an <strong>on/off</strong> feature.</li>
+<li>All three are desirable, yet forfeiting partition tolerance is <strong>not really an option</strong> in real-world systems…</li>
+<li>…particularly with pervasive systems in the IoT era, where instability of the network rules [Grimm et al., 2004].</li>
+<li>Long story short, CAP most often forces us to choose <strong>between availability and consistency</strong>.</li>
+</ol>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 520 200" role="img" aria-label="Consistency and availability drawn as sliders, partition tolerance as a switch fixed to on; during a partition, moving one slider up moves the other down">
+  <g font-family="var(--lk-utility)" font-size="14" font-weight="700" fill="var(--lk-ink)"><text x="20" y="48">C</text><text x="20" y="108">A</text><text x="20" y="168">P</text></g>
+  <g stroke="var(--lk-rule)" stroke-width="6" stroke-linecap="round"><line x1="50" y1="43" x2="330" y2="43"/><line x1="50" y1="103" x2="330" y2="103"/></g>
+  <g stroke="var(--lk-cobalt)" stroke-width="6" stroke-linecap="round"><line x1="50" y1="43" x2="250" y2="43"/><line x1="50" y1="103" x2="130" y2="103"/></g>
+  <circle cx="250" cy="43" r="10" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="2.5"/>
+  <circle cx="130" cy="103" r="10" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="2.5"/>
+  <g font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink-soft)"><text x="50" y="72">weaker</text><text x="330" y="72" text-anchor="end">stronger</text><text x="50" y="132">rarer answers</text><text x="330" y="132" text-anchor="end">always answers</text></g>
+  <path d="M362 50 C 400 60, 400 90, 362 100" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.6"/>
+  <text x="400" y="70" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">during a</text>
+  <text x="400" y="86" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">partition:</text>
+  <text x="400" y="102" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">trade one for</text>
+  <text x="400" y="118" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-vermilion)">the other</text>
+  <rect x="50" y="150" width="64" height="28" rx="14" fill="var(--lk-cobalt)"/><circle cx="100" cy="164" r="10" fill="var(--lk-paper-light)"/>
+  <text x="130" y="169" font-family="var(--lk-mono)" font-size="12" fill="var(--lk-ink-soft)">on/off · in practice always on</text>
+</svg>
+<figcaption><b>Fig. 5.3</b> — The spectrum view of slide 15: C and A are dials, P is a switch the network sets for you.</figcaption>
+</figure>
+
+<h3>Example: location-based games</h3>
+<p>Location-based services use a user's or device's position to provide information, entertainment, security [Shekhar et al., 2016]; location-based games use it to evolve the gameplay (BotFighters, GeoZombie [Prandi et al., 2016], Ingress, Pokémon Go, Harry Potter: Wizards Unite, Minecraft Earth). Their CAP profile:</p>
+<ol class="ds-count">
+<li><b>P is not negotiable.</b> Millions of players roam physical space with mobile devices, inherently unstable in connectivity. Players move in and out of coverage and concentrate in places, e.g. at special events. Scalability is multi-level: players overall, places, players per place. See the costly Chicago 2017 Pokémon Go Fest disaster.</li>
+<li><b>C matters.</b> Consistent game data (goals, situation, achievements) keeps players in the game. Architectures are logically centralised, with spatial replication to cut perceived latency and improve scalability.</li>
+<li><b>A pays.</b> When strong consistency is required, e.g. for in-game transactions, players wait while servers reach a consistent state. The first, usual casualty is availability: the Spinning Wheel of Death.</li>
+</ol>
+
+<h3>A detour: catching a Pokémon on Google Cloud</h3>
+<ol class="ds-count">
+<li>Opening the app downloads all static media, stored in Cloud Storage; Cloud CDN (Google's global edge network, with Cloud Load Balancing) caches and serves them close to users.</li>
+<li>Requests go through an NGINX reverse proxy to the Frontend game service on Google Kubernetes Engine (GKE).</li>
+<li>The Spatial Query Backend keeps a cache sharded by location and decides which Pokémon, gyms and PokéStops are around, the time zone, …</li>
+<li>Catching a Pokémon sends an event to Google Spanner; the device gets its response when the write completes. <strong>Spanner is strongly consistent.</strong></li>
+<li>Every action is recorded in Bigtable (as Protobuf) for logging and tracking, and sent to Pub/Sub for the analysis pipeline.</li>
+<li>Players in the same region stay in sync by <strong>determinism</strong> of the maps: at the same physical location, all players' inputs are the same, even on different machines.</li>
+<li>All servers stay in sync on settings and event timings, so players feel part of a shared world.</li>
+</ol>
+<p>Note the mix: cached replicas for performance (1, 3), strong consistency only where a wrong answer is unacceptable (4), agreement by determinism instead of synchronisation (6).</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="cap-proof">
+<h2>Proving CAP</h2>
+<p>A proof needs a precise formulation. Gilbert &amp; Lynch [2002] soon gave one, with some limitations; others followed. First, the concepts.</p>
+
+<div class="defn" id="def-availability"><div class="defn-term"><b>Availability</b><cite>[Gilbert &amp; Lynch, 2002]</cite></div>
+<p>“For a distributed system to be continuously available, every request received by a non-failing node in the system must result in a response.” If the system is available, we get responses.</p></div>
+<div class="defn" id="def-consistency-atomic"><div class="defn-term"><b>Consistency (atomic)</b><cite>[Gilbert &amp; Lynch, 2002]</cite></div>
+<p>A consistent service is modelled as an <strong>atomic data object</strong>: operations are totally ordered, and each operation occurs in a single instant of time. Among the consequences, all read operations occurring after a write operation completes must return the value of that write or of a later one. If the system is consistent, we get correct responses.</p>
+<p>This C is unlike ACID's: it encompasses both the A (atomicity) and the C (consistency) of ACID.</p></div>
+<div class="defn" id="def-network-partition"><div class="defn-term"><b>Network partition</b><cite>[Gilbert &amp; Lynch, 2002]</cite></div>
+<p>“When a <dfn id="term-network-partition">network is partitioned</dfn>, all messages sent from nodes in one component of the partition to nodes in another component are lost.” “And, any pattern of message loss can be modelled as a temporary partition separating the communicating nodes at the exact instant the message is lost.”</p></div>
+<p>Roughly: A sends a message to B. The network is partitioned if it does not reach B; availability is B responding; consistency is B's response being correct.</p>
+
+<div class="beyond"><span class="ds-label">Beyond the slides · atomic = linearisable</span>
+<p>Atomic consistency is today called <em>linearisability</em> [Herlihy &amp; Wing, 1990]: sequential consistency (<a href="#data-centric">§3</a>) whose single order also respects the real-time order of non-overlapping operations. So linearisable ⇒ sequential ⇒ causal. A read returning an old value after a write has <em>completed</em> is allowed by sequential consistency and forbidden by atomic consistency; CAP is about the latter.</p></div>
+
+<p>The proof is given for three sorts of network:</p>
+<ol class="ds-count">
+<li><b>Asynchronous network with message loss.</b></li>
+<li><b>Asynchronous network without message loss.</b></li>
+<li><b>Partially synchronous network with local clocks.</b></li>
+</ol>
+<p>The slides focus on the <strong>asynchronous model</strong>: no single clock; nodes act on local computation and received messages.</p>
+
+<div class="defn" id="def-theorem"><div class="defn-term"><b>Theorem</b><cite>[Gilbert &amp; Lynch, 2002]</cite></div>
+<p>“It is impossible in the asynchronous network model to implement a read/write data object that guarantees the following properties: availability; atomic consistency — in all fair executions (including those in which messages are lost).”</p></div>
+
+<h3>The proof, by indistinguishability</h3>
+<p>Assume, for contradiction, that atomicity, availability and partition tolerance all hold. Split the nodes into disjoint, non-empty sets <var>G<sub>1</sub></var>, <var>G<sub>2</sub></var>, with all messages between them lost. The atomic object <var>o</var> starts at <var>v<sub>0</sub></var>.</p>
+<ul>
+<li><var>α<sub>1</sub></var>: a single write <var>v<sub>1</sub> ≠ v<sub>0</sub></var> of <var>o</var> in <var>G<sub>1</sub></var>, the only request. By availability it completes. No message crosses.</li>
+<li><var>α<sub>2</sub></var>: a single read of <var>o</var> in <var>G<sub>2</sub></var>, no message crossing. It completes too.</li>
+</ul>
+<p>Run <var>α<sub>1</sub></var> then <var>α<sub>2</sub></var>. Nothing from <var>G<sub>1</sub></var> reached <var>G<sub>2</sub></var>, so <var>G<sub>2</sub></var> cannot tell this run from <var>α<sub>2</sub></var> alone, where the answer must be <var>v<sub>0</sub></var>. It returns <var>v<sub>0</sub></var> although <var>v<sub>1</sub></var>'s write has completed: atomic consistency is violated. Q.E.D. Instrument 3 replays it and shows the two ways out: answer and be stale (AP), or refuse and stay correct (CP).</p>
+
+<div class="ds-inst" id="cap-sim">
+<header><b>Instrument 3</b><span>Partition simulator</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">Two replicas of one object, initially <var>v0</var>. Choose a policy, cut the link, then write at G1 and read at G2. <em>Replay the proof</em> runs α1 then α2 for you.</p>
+<div class="ds-row"><div class="ds-seg" id="cap-pol" role="group" aria-label="Policy"><button type="button" data-v="AP">AP · always answer</button><button type="button" data-v="CP">CP · write must reach both</button></div>
+<button class="ds-btn" type="button" id="cap-part">Cut the link</button></div>
+<div class="ds-row"><button class="ds-btn" type="button" data-a="w0">write at G1</button><button class="ds-btn" type="button" data-a="r0">read at G1</button><button class="ds-btn" type="button" data-a="w1">write at G2</button><button class="ds-btn" type="button" data-a="r1">read at G2</button><button class="ds-btn primary" type="button" id="cap-proof-btn">Replay the proof</button><button class="ds-btn" type="button" id="cap-reset">reset</button></div>
+<div class="inst-svg"><svg id="cap-svg" viewBox="0 0 350 150" style="max-width:460px" role="img" aria-label="Replicas G1 and G2, their values and the link between them"></svg></div>
+<ol class="cap-log" id="cap-log" aria-live="polite"></ol>
+<div class="ds-verdict" id="cap-verdict"></div>
+<noscript><p>Interactive simulator (requires JavaScript). With the link cut, AP accepts the write of v1 at G1 and G2 then answers v0: a stale read, consistency lost. CP refuses the write because it cannot reach G2: availability lost, but every answer is correct. With the link up, both policies give correct answers to every request.</p></noscript>
+</div></div>
+
+<div class="beyond"><span class="ds-label">Beyond the slides · the other two network models</span>
+<p>Without message loss the asynchronous result still holds: a node cannot tell an arbitrarily delayed message from a lost one. With partial synchrony, local clocks allow timeouts, yet the impossibility remains once messages can be lost; only a weaker, time-bounded consistency becomes achievable [Gilbert &amp; Lynch, 2002].</p></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="base">
+<h2>Living with CAP: BASE</h2>
+<p>Should we stop distributing systems, as we stopped using axiomatic systems after Gödel [1931]? Of course we did not. Negative results set the <strong>boundaries</strong>, and an impossibility result becomes a lever for effective engineering. Brewer later gave a very simple scheme [Brewer, 2012]:</p>
+<ol class="ds-count">
+<li>When the network is <strong>partitioned</strong>, a distributed system should choose a trade-off between consistency and availability.</li>
+<li>When there is <strong>no partition</strong>, a system can feature both consistency and availability.</li>
+</ol>
+<p>So CAP does not say you always lose a property; it says what to decide while the network is split (in Instrument 3, with the link up both policies answer correctly).</p>
+
+<h3>ACID vs BASE</h3>
+<p>ACID semantics (Atomicity, Consistency, Isolation, Durability) might be too strong [Fox et al., 1997]: “The design space for network services can be partitioned according to the data semantics that each service demands.” For many services “the primary value to the user is not necessarily strong consistency or durability, but rather high availability of data”. What such services can accept instead:</p>
+<ol class="ds-count">
+<li><b>Stale data</b> “can be temporarily tolerated as long as all copies of data eventually reach consistency after a short time”.</li>
+<li><b>Soft state</b>, “which can be generated at the expense of additional computation or file I/O, is exploited to improve performance; data is not durable”.</li>
+<li><b>Approximate answers</b> “(based on stale data or incomplete soft state) delivered quickly may be more valuable than exact answers”.</li>
+</ol>
+<div class="defn" id="def-base"><div class="defn-term"><b>BASE</b><cite>[Fox et al., 1997]</cite></div>
+<p><dfn id="term-base">BASE</dfn>: <strong>B</strong>asically <strong>A</strong>vailable, <strong>S</strong>oft state, <strong>E</strong>ventual consistency.</p></div>
+
+<p><strong>Most cloud services nowadays adopt BASE</strong>, e.g. eBay and Amazon DynamoDB, and try to <strong>mask inconsistencies</strong> from users [Birman et al., 2012]. The slides note that Amazon S3 allows strong read-after-write consistency, and that DynamoDB writes are eventually consistent, reads too, but strongly consistent reads can be configured (at a higher cost). Steps ahead lead to new data-consistency models.</p>
+<p>Brewer [2012] sums up: “The modern CAP goal should be to maximise combinations of consistency and availability that make sense for the specific application. Such an approach incorporates plans for operation during a partition and for recovery afterward, thus helping designers think about CAP beyond its historically perceived limitations.” In Instrument 3, healing an AP partition reconciles concurrent writes by last-writer-wins.</p>
+<p class="ds-count-head">Lessons learnt · C1</p>
+<ol class="ds-count">
+<li>When the network fails, we typically have to choose between a responsive system and a fully consistent one.</li>
+<li>We can leverage CAP to design a system with different features depending on the overall system status.</li>
+<li>ACID is a thing to know and understand, yet less stringent models such as BASE can be both theoretically and practically useful in real-world distributed systems.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="oral" class="ds-oral">
+<h2>For the oral</h2>
+<p>The exam is a discussion of your project, so expect “why” questions rather than recitation. Practise answering these out loud in two minutes each.</p>
+<details><summary>Why is “just replicate” not the answer?</summary>
+<p>Copies drift once one is modified. Tight consistency needs every update applied atomically everywhere: global synchronisation, costing time, bandwidth and computation, and unavailable during partitions. When and how updates propagate is the real cost, plus machines and personnel.</p></details>
+<details><summary>Why is <code>W(x)1; R(y)0 ∥ W(y)1; R(x)0</code> causally but not sequentially consistent?</summary>
+<p>Both reads returning 0 needs each read before the other's write: with program order, a cycle, so no interleaving. The writes are concurrent, so causally each process may see its own first.</p></details>
+<details><summary>Give an example for each client-centric guarantee, and what breaks it.</summary>
+<p>Vanishing e-mail (monotonic reads), library versions out of order (monotonic writes), new password rejected (read your writes), comment without its post (writes follow reads). Each breaks when the new replica lacks an update the client already saw or made.</p></details>
+<details><summary>State CAP precisely. What exactly is impossible?</summary>
+<p>In an asynchronous network, no read/write object guarantees both availability and atomic consistency in all fair executions, including those with message loss. Sketch <var>α<sub>1</sub></var> / <var>α<sub>2</sub></var> and indistinguishability.</p></details>
+<details><summary>“Pick two of three”: why is that misleading?</summary>
+<p>P is not a choice: networks partition, especially in IoT. C and A are spectra. Without a partition you get both [Brewer, 2012]. The question is what to do during a partition and how to recover.</p></details>
+</section>
+
+<div class="ds-project"><span class="ds-label">Project lens · Thunk</span>
+<ul>
+<li><b>Purity makes the memo table easy to replicate.</b> A cached sub-result never changes, so copies cannot disagree; a node can only <em>miss</em> an entry, which costs a recomputation, never a wrong answer. Eventual propagation is enough.</li>
+<li><b>Re-execution is replication in time.</b> Purity makes two executions interchangeable, so a late duplicate result is harmless, not a conflict.</li>
+<li><b>Know your CAP position.</b> During a partition workers keep evaluating local work, but the root delivers the final result only when every sub-result arrives or is recomputed: for the answer, Thunk picks correctness over availability.</li>
+<li><b>Membership is a local view.</b> Each node knows the peers it is connected to (configured at boot); there is no agreed global membership. Work stealing tolerates a stale view: asking a departed peer fails and the worker picks another.</li>
+</ul></div>
+
+<details class="ds-coverage"><summary>Slide coverage: where each slide section went</summary>
+<table>
+<thead><tr><th>Slides</th><th>Content</th><th>Here</th></tr></thead>
+<tbody>
+<tr><td>M3 · Prologue</td><td>Disclaimer</td><td><a href="#replication">§1</a></td></tr>
+<tr><td>M3 · Why replication? I–IV</td><td>Reasons; benefits</td><td><a href="#replication">§1</a></td></tr>
+<tr><td>M3 · Issues I–IV</td><td>Costs; consistency; Web caching</td><td><a href="#replication">§1</a></td></tr>
+<tr><td>M3 · Scaling technique I–VI</td><td>N ≪ M; tight consistency; dilemma; relaxing</td><td><a href="#replication">§1</a></td></tr>
+<tr><td>M3 · Consistency</td><td>Models; data first; data store; contract</td><td><a href="#contract">§2</a></td></tr>
+<tr><td>M3 · Data-centric</td><td>Continuous; conit; ordering; sequential; causal</td><td><a href="#data-centric">§3</a></td></tr>
+<tr><td>M3 · Client-centric</td><td>Switching perspective; eventual consistency</td><td><a href="#client-centric">§4</a>, <a href="#data-centric">§3</a></td></tr>
+<tr><td>M3 · Client-centric</td><td>The four guarantees</td><td><a href="#client-centric">§4</a></td></tr>
+<tr><td>M3 · Replication</td><td>Replica, service, process replication</td><td><a href="#replica-management">§5</a></td></tr>
+<tr><td>M3 · More on replication I–II</td><td>Books</td><td><a href="#replica-management">§5</a></td></tr>
+<tr><td>M3 · Fault tolerance? I–II</td><td>Technology table</td><td><a href="#replica-management">§5</a></td></tr>
+<tr><td>M3 · Conclusion</td><td>Lessons learnt</td><td><a href="#replica-management">§5</a></td></tr>
+<tr><td>C1 · Availability, consistency, failure</td><td>Hiding failure; safety vs liveness</td><td><a href="#cap">§6</a></td></tr>
+<tr><td>C1 · CAP at a glance</td><td>Statements; pick one I–II</td><td><a href="#cap">§6</a></td></tr>
+<tr><td>C1 · CAP at a glance</td><td>Location-based games I–III</td><td><a href="#cap">§6</a></td></tr>
+<tr><td>C1 · Pokémon Go</td><td>Google Cloud I–III</td><td><a href="#cap">§6</a></td></tr>
+<tr><td>C1 · Some proof</td><td>One way to see CAP (diagram); conjecture to theorem; C, A, P</td><td><a href="#cap-proof">§7</a></td></tr>
+<tr><td>C1 · Some proof</td><td>Theorem I–II; proof I–II</td><td><a href="#cap-proof">§7</a></td></tr>
+<tr><td>C1 · Building on CAP</td><td>Impossibility; switching strategy</td><td><a href="#base">§8</a></td></tr>
+<tr><td>C1 · Building on CAP</td><td>ACID vs BASE; beyond BASE; CAP today</td><td><a href="#base">§8</a></td></tr>
+<tr><td>C1 · Conclusion</td><td>Lessons learnt</td><td><a href="#base">§8</a></td></tr>
+</tbody></table></details>
+
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-04-failure-recovery.html">&larr; 4 · Failure and recovery</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-06-consensus.html">6 · Consensus &rarr;</a>
+</nav>
+<footer class="lk-foot">Distributed Systems · University of Bologna · built from the slides of Andrea Omicini (DISI), A.Y. 2025/26. Personal study notes, not an official source.</footer>
+
+<script src="assets/lesson-kit.js"></script>
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  function $(id) { return document.getElementById(id); }
+  function mk(tag, a, txt) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; }
+  function segSet(seg, v) { [].forEach.call(seg.querySelectorAll('button'), function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-v') === v)); }); }
+  function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+
+  /* ================= Instrument 1: history checker ================= */
+  var PRESETS = [
+    { name: 'Store buffer', p1: 'W(x)1 R(y)0', p2: 'W(y)1 R(x)0',
+      note: 'Each process writes its own variable, then reads the other one. For both reads to return 0, each read must precede the other process’s write; with program order that is the cycle W(x)1 → R(y)0 → W(y)1 → R(x)0 → W(x)1, so no sequential order exists. The two writes are concurrent (neither process read the other’s value before writing), so causal consistency lets each process see its own write first. The name comes from hardware store buffers, which produce exactly this outcome.' },
+    { name: 'Sequential', p1: 'W(x)1 R(y)0', p2: 'W(y)1 R(x)1',
+      note: 'Change one read and a legal interleaving appears. Sequential consistency does not say which order, only that one exists and that every process’s operations appear in it in program order.' },
+    { name: 'Crossed writes', p1: 'W(x)1 R(x)2', p2: 'W(x)2 R(x)1',
+      note: 'P1 sees 1 then 2, P2 sees 2 then 1: no single order of the two writes fits both, so sequential consistency forbids it. The writes are concurrent, and causal consistency allows different processes to see concurrent writes in different orders.' },
+    { name: 'Effect before cause', p1: 'W(x)1 W(y)1', p2: 'R(y)1 R(x)0',
+      note: 'P1 wrote x before y, so W(x)1 → W(y)1 by program order. P2 sees the effect (y = 1) but not its cause (x still 0). Causal consistency forbids it, and so does sequential consistency. Eventual consistency allows it: P2’s replica simply has not received W(x)1 yet.' },
+    { name: 'Cause via a read', p1: 'W(x)1 R(x)2 R(x)1', p2: 'R(x)1 W(x)2',
+      note: 'P2 read x = 1 before writing 2, so W(x)1 → R(x)1 → W(x)2: the two writes are causally related, and everyone must see 1 before 2. P1 sees 2 and then 1 again. Forbidden by causal (hence by sequential) consistency; eventual consistency allows it if replicas converge later.' },
+    { name: 'Thin air', p1: 'W(x)1', p2: 'R(x)2',
+      note: 'Nobody wrote 2 into x. Every model, including eventual consistency, assumes that a read returns the initial value or a value some process actually wrote.' }
+  ];
+  var presetSeg = $('hc-presets'), in1 = $('hc-p1'), in2 = $('hc-p2');
+  PRESETS.forEach(function (p, i) {
+    var b = document.createElement('button'); b.type = 'button'; b.textContent = p.name; b.setAttribute('data-v', String(i));
+    b.addEventListener('click', function () { in1.value = p.p1; in2.value = p.p2; segSet(presetSeg, String(i)); check(p.note); });
+    presetSeg.appendChild(b);
+  });
+  $('hc-go').addEventListener('click', function () { segSet(presetSeg, ''); check(null); });
+  [in1, in2].forEach(function (inp) { inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { segSet(presetSeg, ''); check(null); } }); });
+
+  function parse(s, p) {
+    var toks = s.trim().split(/[\s,;]+/).filter(Boolean), ops = [];
+    for (var i = 0; i < toks.length; i++) {
+      var m = /^([WRwr])\(\s*([a-zA-Z])\s*\)\s*(\d+)$/.exec(toks[i]);
+      if (!m) return { err: 'P' + (p + 1) + ': cannot read “' + toks[i] + '”. Use W(x)1 or R(x)0.' };
+      ops.push({ p: p, k: i, t: m[1].toUpperCase(), x: m[2].toLowerCase(), v: +m[3] });
+    }
+    if (ops.length > 5) return { err: 'P' + (p + 1) + ': at most 5 operations.' };
+    return { ops: ops };
+  }
+  function lbl(o) { return o.t + (o.p + 1) + '(' + o.x + ')' + o.v; }
+
+  function seqCheck(P) {
+    var out = null;
+    (function go(i, mem, seq) {
+      if (out) return;
+      if (i[0] === P[0].length && i[1] === P[1].length) { out = seq.slice(); return; }
+      for (var p = 0; p < 2; p++) {
+        if (i[p] >= P[p].length) continue;
+        var o = P[p][i[p]], m2 = mem;
+        if (o.t === 'W') { m2 = Object.assign({}, mem); m2[o.x] = o.v; }
+        else if ((mem[o.x] || 0) !== o.v) continue;
+        var n = i.slice(); n[p]++; seq.push(o); go(n, m2, seq); seq.pop();
+      }
+    })([0, 0], {}, []);
+    return out;
+  }
+  function causalCheck(P, all) {
+    var n = all.length, R = [];
+    for (var a = 0; a < n; a++) { R.push([]); for (var b = 0; b < n; b++) R[a].push(false); }
+    all.forEach(function (o, i) {
+      all.forEach(function (q, j) {
+        if (o.p === q.p && o.k + 1 === q.k) R[i][j] = true;                              // program order
+        if (o.t === 'W' && q.t === 'R' && o.x === q.x && o.v === q.v) R[i][j] = true;    // reads-from
+      });
+    });
+    for (var k = 0; k < n; k++) for (var i = 0; i < n; i++) for (var j = 0; j < n; j++) if (R[i][k] && R[k][j]) R[i][j] = true;
+    var views = [];
+    for (var p = 0; p < 2; p++) {
+      var S = []; all.forEach(function (o, i) { if (o.p === p || o.t === 'W') S.push(i); });
+      var found = null;
+      (function go(placed, mem, seq) {
+        if (found) return;
+        if (seq.length === S.length) { found = seq.slice(); return; }
+        S.forEach(function (i) {
+          if (found || placed[i]) return;
+          for (var q = 0; q < S.length; q++) if (!placed[S[q]] && S[q] !== i && R[S[q]][i]) return;
+          var o = all[i], m2 = mem;
+          if (o.t === 'W') { m2 = Object.assign({}, mem); m2[o.x] = o.v; }
+          else if ((mem[o.x] || 0) !== o.v) return;
+          placed[i] = true; seq.push(o); go(placed, m2, seq); seq.pop(); placed[i] = false;
+        });
+      })({}, {}, []);
+      views.push(found);
+    }
+    views.cyc = R.some(function (row, i) { return row[i]; });
+    return views;
+  }
+
+  function check(note) {
+    var A = parse(in1.value, 0), B = parse(in2.value, 1);
+    var res = $('hc-res'), out = $('hc-out'), hist = $('hc-hist');
+    if (A.err || B.err) { res.innerHTML = ''; hist.innerHTML = ''; out.innerHTML = '<span class="bad">' + esc(A.err || B.err) + '</span>'; return; }
+    var P = [A.ops, B.ops], all = A.ops.concat(B.ops);
+    var seen = {}, dup = null;
+    all.forEach(function (o) { if (o.t === 'W') { var key = o.x + '=' + o.v; if (o.v === 0) dup = 'Writes must use non-zero values (0 is the initial value).'; else if (seen[key]) dup = 'Each written value must be unique per variable, so every read identifies its write (' + key + ' is written twice).'; seen[key] = 1; } });
+    if (dup) { res.innerHTML = ''; hist.innerHTML = ''; out.innerHTML = '<span class="bad">' + esc(dup) + '</span>'; return; }
+    hist.innerHTML = '<div class="hc-hist">' + P.map(function (ops, p) {
+      return '<span class="hc-p">P' + (p + 1) + '</span><span class="hc-ops">' + (ops.length ? ops.map(function (o) { return '<span class="hc-op' + (o.t === 'R' ? ' r' : '') + '">' + o.t + '(' + o.x + ')' + o.v + '</span>'; }).join('') : '<span class="ds-muted">(no operations)</span>') + '</span>';
+    }).join('') + '</div>';
+    var thin = all.filter(function (o) { return o.t === 'R' && o.v !== 0 && !seen[o.x + '=' + o.v]; });
+    var sc = thin.length ? null : seqCheck(P);
+    var cv = thin.length ? [null, null] : causalCheck(P, all);
+    var causal = !thin.length && cv[0] && cv[1], cyc = !thin.length && cv.cyc;
+    function verdict(ok, name, why) { return '<div class="ds-verdict ' + (ok ? 'ok' : 'bad') + '">' + name + ': ' + (ok ? 'allowed' : 'forbidden') + ' — ' + why + '</div>'; }
+    var h = '';
+    h += verdict(!!sc, 'Sequential', sc ? 'order ' + sc.map(lbl).join(', ') : thin.length ? 'a read returns a value nobody wrote' : 'no interleaving that keeps program order makes every read return the latest write');
+    h += verdict(causal, 'Causal', causal ? 'each process has a view that respects causality' : thin.length ? 'a read returns a value nobody wrote' : cyc ? 'program order and reads-from form a cycle' : 'P' + (cv[0] ? 2 : 1) + ' sees causally related writes out of order');
+    h += verdict(!thin.length && !cyc, 'Eventual', thin.length ? lbl(thin[0]) + ' returns a value nobody wrote' : cyc ? 'a read returns a value written only causally after it (a cycle of program order and reads-from)' : 'every read returns a written (or initial) value; replicas only have to converge once writes stop');
+    res.innerHTML = h;
+    var lines = [];
+    if (note) lines.push(note);
+    else if (sc) lines.push('A sequential order exists, so the history is also causally consistent: sequential consistency implies causal consistency.');
+    else if (causal) lines.push('No single order fits, but each process can explain what it read with its own causally ordered view of the writes.');
+    else if (cyc) lines.push('Each read returns a value whose write causally depends on that very read: no execution, on any store, produces this.');
+    else if (!thin.length) lines.push('Some process read a value and later an older one, or saw an effect before its cause (program order plus reads-from).');
+    if (causal) lines.push('Causal views: ' + cv.map(function (v, p) { return 'P' + (p + 1) + ' sees <code>' + v.map(lbl).join(', ') + '</code>'; }).join(' · '));
+    out.innerHTML = lines.join('<br>');
+  }
+  in1.value = PRESETS[0].p1; in2.value = PRESETS[0].p2; segSet(presetSeg, '0'); check(PRESETS[0].note);
+
+  /* ================= Instrument 2: mobile client trace ================= */
+  var cc = { op1: 'R', op2: 'R', prop: '0' };
+  var CASES = {
+    RR: { g: 'Monotonic reads', ex: 'distributed e-mail database',
+      l1: ['inbox: m1, m2'], l2ok: ['inbox: m1, m2'], l2bad: ['inbox: m1'],
+      s1: 'read inbox → m1, m2', s2: 'read inbox',
+      ok: 'L2 returns m1, m2: the same value or a more recent one.',
+      bad: 'L2 returns only m1. Mail the client has already seen vanishes: the second read returns an older value than the first.' },
+    WW: { g: 'Monotonic writes', ex: 'software library under development',
+      l1: ['lib v1 (written)'], l2ok: ['lib v1', 'lib v2 (written)'], l2bad: ['lib v2 (written)', 'lib v1 (arrives later)'],
+      s1: 'write lib v1', s2: 'write lib v2 (builds on v1)',
+      ok: 'L2 applies v1 before v2: the client’s updates keep their order.',
+      bad: 'L2 applies v2 before v1 has reached it, and v1 arrives afterwards. The order of the client’s updates is not maintained across replicas.' },
+    WR: { g: 'Read your writes', ex: 'password update',
+      l1: ['password: new (written)'], l2ok: ['password: new'], l2bad: ['password: old'],
+      s1: 'write new password', s2: 'log in (reads password)',
+      ok: 'L2 already has the new password: the client sees the effect of its own write.',
+      bad: 'L2 still holds the old password, so logging in with the new one fails: the “web page failed update” effect.' },
+    RW: { g: 'Writes follow reads', ex: 'comments to posts on Facebook',
+      l1: ['post p'], l2ok: ['post p', 'comment on p (written)'], l2bad: ['comment on p (written)', '(post p not here yet)'],
+      s1: 'read post p', s2: 'write a comment on p',
+      ok: 'The comment is applied at L2 on top of the post the client read.',
+      bad: 'The comment is applied at L2 before the post it answers: the write does not take place on the value the client read (or a newer one), and L2’s readers see a reply to nothing.' }
+  };
+  var ccSvg = $('cc-svg');
+  function ccRender() {
+    segSet($('cc-op1'), cc.op1); segSet($('cc-op2'), cc.op2); segSet($('cc-prop'), cc.prop);
+    var C = CASES[cc.op1 + cc.op2], ok = cc.prop === '1';
+    ccSvg.innerHTML = '';
+    var narrow = (ccSvg.parentNode.clientWidth || 600) < 470;
+    var T = function (x, y, str, o) { o = o || {}; ccSvg.appendChild(mk('text', { x: x, y: y, 'text-anchor': o.a || 'start', 'font-family': o.f || 'var(--lk-mono)', 'font-size': o.s || 13, 'font-weight': o.w || 400, fill: o.c || 'var(--lk-ink)' }, str)); };
+    var c2 = ok ? 'var(--lk-forest)' : 'var(--lk-vermilion)';
+    function box(x, y, w, h, name, lines, stroke) {
+      ccSvg.appendChild(mk('rect', { x: x, y: y, width: w, height: h, fill: 'var(--lk-paper-light)', stroke: stroke, 'stroke-width': 1.6 }));
+      T(x + 10, y + 20, 'replica ' + name, { f: 'var(--lk-utility)', w: 700, s: 13.5 });
+      lines.forEach(function (str, i) { T(x + 10, y + 44 + i * 20, str, { c: /later|not here/.test(str) ? 'var(--lk-vermilion)' : 'var(--lk-ink)' }); });
+    }
+    var L2 = ok ? C.l2ok : C.l2bad;
+    if (narrow) {
+      ccSvg.setAttribute('viewBox', '0 0 320 300');
+      T(10, 18, '1 · ' + C.s1, { c: 'var(--lk-cobalt-dark)' });
+      box(10, 28, 300, 72, 'L1', C.l1, 'var(--lk-cobalt)');
+      ccSvg.appendChild(mk('path', { d: 'M160 100 V168', stroke: c2, 'stroke-width': 1.6, 'stroke-dasharray': ok ? '' : '4 4' }));
+      T(170, 132, ok ? 'updates propagated' : 'updates not yet here', { s: 11.5, c: c2 });
+      T(10, 162, '2 · ' + C.s2, { c: 'var(--lk-cobalt-dark)' });
+      box(10, 172, 300, 92, 'L2', L2, c2);
+      T(160, 290, 'client moves L1 → L2 in between', { a: 'middle', s: 12, c: 'var(--lk-ink-soft)' });
+    } else {
+      ccSvg.setAttribute('viewBox', '0 0 540 200');
+      T(120, 22, '1 · ' + C.s1, { a: 'middle', c: 'var(--lk-cobalt-dark)' });
+      T(420, 22, '2 · ' + C.s2, { a: 'middle', c: 'var(--lk-cobalt-dark)' });
+      ccSvg.appendChild(mk('path', { d: 'M120 30 V50 M420 30 V50', stroke: 'var(--lk-cobalt)', 'stroke-width': 1.4 }));
+      box(10, 52, 220, 92, 'L1', C.l1, 'var(--lk-cobalt)');
+      box(310, 52, 220, 92, 'L2', L2, c2);
+      ccSvg.appendChild(mk('path', { d: 'M230 98 H310', stroke: c2, 'stroke-width': 1.6, 'stroke-dasharray': ok ? '' : '4 4' }));
+      T(270, 90, ok ? 'propagated' : 'not yet', { a: 'middle', s: 11.5, c: c2 });
+      T(270, 178, 'client moves L1 → L2 between the two operations', { a: 'middle', s: 12, c: 'var(--lk-ink-soft)' });
+    }
+    $('cc-out').innerHTML = 'Pair <b>' + (cc.op1 === 'R' ? 'read' : 'write') + ' → ' + (cc.op2 === 'R' ? 'read' : 'write') + '</b> by the same client: the guarantee at stake is <b>' + C.g + '</b> (slide example: ' + C.ex + '). ' + (ok ? C.ok : C.bad);
+    var v = $('cc-verdict'); v.className = 'ds-verdict ' + (ok ? 'ok' : 'bad');
+    v.textContent = C.g + (ok ? ' holds.' : ' violated. The store may still be eventually consistent: L2 will catch up, just too late for this client.');
+  }
+  [['cc-op1', 'op1'], ['cc-op2', 'op2'], ['cc-prop', 'prop']].forEach(function (s) {
+    [].forEach.call($(s[0]).querySelectorAll('button'), function (b) { b.addEventListener('click', function () { cc[s[1]] = b.getAttribute('data-v'); ccRender(); }); });
+  });
+  ccRender();
+  window.addEventListener('resize', ccRender);
+
+  /* ================= Instrument 3: partition simulator ================= */
+  var cap;
+  function capReset(keepPol) {
+    cap = { pol: keepPol ? cap.pol : 'AP', part: false, g: [{ v: 'v0', ver: 0 }, { v: 'v0', ver: 0 }], pend: [[], []], last: { v: 'v0', ver: 0 }, n: 0, log: [], stale: 0, refused: 0, answered: 0 };
+  }
+  function G(i) { return 'G' + (i + 1); }
+  function log(s, cls) { cap.log.push({ s: s, c: cls || '' }); }
+  function capWrite(i) {
+    var val = 'v' + (cap.n + 1);
+    if (!cap.part) {
+      cap.n++; var w = { v: val, ver: cap.n }; cap.g[0] = w; cap.g[1] = w; cap.last = w; cap.answered++;
+      log('write ' + val + ' at ' + G(i) + ': replicated to ' + G(1 - i) + ', acknowledged.', 'ok');
+    } else if (cap.pol === 'CP') {
+      cap.refused++;
+      log('write ' + val + ' at ' + G(i) + ': cannot reach ' + G(1 - i) + ', so it never completes: no response (availability lost).', 'bad');
+    } else {
+      cap.n++; var w2 = { v: val, ver: cap.n }; cap.g[i] = w2; cap.pend[1 - i].push(w2); cap.last = w2; cap.answered++;
+      log('write ' + val + ' at ' + G(i) + ': accepted locally and acknowledged; the update message to ' + G(1 - i) + ' is lost (it will be resent when the link returns).');
+    }
+  }
+  function capRead(i) {
+    var r = cap.g[i]; cap.answered++;
+    if (r.ver === cap.last.ver) log('read at ' + G(i) + ' → ' + r.v + ' (correct: latest completed write).', 'ok');
+    else { cap.stale++; log('read at ' + G(i) + ' → ' + r.v + ', but ' + cap.last.v + ' has already completed: stale read (atomic consistency lost).', 'bad'); }
+  }
+  function capToggle() {
+    if (!cap.part) { cap.part = true; log('link cut: every message between G1 and G2 is now lost.'); return; }
+    cap.part = false;
+    var moved = [];
+    [0, 1].forEach(function (i) { cap.pend[i].forEach(function (w) { if (w.ver > cap.g[i].ver) { cap.g[i] = w; } moved.push(w.v + '→' + G(i)); }); cap.pend[i] = []; });
+    var both = cap.g[0].ver !== cap.g[1].ver;
+    var win = cap.g[0].ver > cap.g[1].ver ? cap.g[0] : cap.g[1];
+    var conflict = moved.length > 1 && moved.some(function (m) { return /G1$/.test(m); }) && moved.some(function (m) { return /G2$/.test(m); });
+    cap.g[0] = win; cap.g[1] = win;
+    if (!moved.length) log('link restored. Nothing to reconcile.');
+    else log('link restored: updates exchanged (' + moved.join(', ') + '); both replicas converge on ' + win.v + (conflict ? '. Both sides wrote during the partition: last-writer-wins kept ' + win.v + ' and discarded the other write.' : '.'), both || conflict ? '' : 'ok');
+  }
+  var capSvg = $('cap-svg');
+  function capRender() {
+    segSet($('cap-pol'), cap.pol);
+    $('cap-part').textContent = cap.part ? 'Restore the link' : 'Cut the link';
+    capSvg.innerHTML = '';
+    var T = function (x, y, str, o) { o = o || {}; capSvg.appendChild(mk('text', { x: x, y: y, 'text-anchor': o.a || 'middle', 'font-family': o.f || 'var(--lk-mono)', 'font-size': o.s || 13, 'font-weight': o.w || 400, fill: o.c || 'var(--lk-ink)' }, str)); };
+    [[10, 0], [220, 1]].forEach(function (r) {
+      var stale = cap.g[r[1]].ver !== cap.last.ver;
+      capSvg.appendChild(mk('rect', { x: r[0], y: 14, width: 120, height: 84, fill: 'var(--lk-paper-light)', stroke: stale ? 'var(--lk-vermilion)' : 'var(--lk-cobalt)', 'stroke-width': 1.8 }));
+      T(r[0] + 60, 36, 'replica ' + G(r[1]), { f: 'var(--lk-utility)', w: 700, s: 13.5 });
+      T(r[0] + 60, 66, 'o = ' + cap.g[r[1]].v, { s: 17, w: 600, c: stale ? 'var(--lk-vermilion)' : 'var(--lk-cobalt-dark)' });
+      if (stale) T(r[0] + 60, 88, 'behind', { s: 12, c: 'var(--lk-vermilion)' });
+    });
+    if (cap.part) {
+      capSvg.appendChild(mk('path', { d: 'M130 56 H164 M186 56 H220', stroke: 'var(--lk-vermilion)', 'stroke-width': 2, 'stroke-dasharray': '5 4' }));
+      capSvg.appendChild(mk('path', { d: 'M167 44 L183 68 M183 44 L167 68', stroke: 'var(--lk-vermilion)', 'stroke-width': 2.4 }));
+      T(175, 88, 'cut', { s: 12, c: 'var(--lk-vermilion)' });
+    } else {
+      capSvg.appendChild(mk('path', { d: 'M130 56 H220', stroke: 'var(--lk-cobalt)', 'stroke-width': 2 }));
+      T(175, 48, 'link up', { s: 12, c: 'var(--lk-cobalt-dark)' });
+    }
+    T(175, 124, 'latest completed write: ' + cap.last.v, { s: 12.5, c: 'var(--lk-ink-soft)' });
+    T(175, 142, 'policy ' + cap.pol, { s: 12.5, c: 'var(--lk-ink-soft)' });
+    var L = $('cap-log'); L.innerHTML = cap.log.length ? cap.log.map(function (e) { return '<li class="' + e.c + '">' + esc(e.s) + '</li>'; }).join('') : '<li>No operations yet.</li>';
+    L.scrollTop = L.scrollHeight;
+    var v = $('cap-verdict');
+    var cOk = cap.stale === 0, aOk = cap.refused === 0;
+    v.className = 'ds-verdict ' + (cOk && aOk ? 'ok' : 'bad');
+    v.textContent = 'This run — consistency: ' + (cOk ? 'held' : 'broken (' + cap.stale + ' stale read' + (cap.stale > 1 ? 's' : '') + ')') + ' · availability: ' + (aOk ? 'held' : 'broken (' + cap.refused + ' request' + (cap.refused > 1 ? 's' : '') + ' without response)') + (cap.part ? '' : cap.log.length ? '' : ' · with the link up, both policies keep both.');
+  }
+  [].forEach.call($('cap-pol').querySelectorAll('button'), function (b) {
+    b.addEventListener('click', function () { var p = b.getAttribute('data-v'); if (p === cap.pol) return; capReset(false); cap.pol = p; log('policy ' + p + '; replicas reset to v0.'); capRender(); });
+  });
+  $('cap-part').addEventListener('click', function () { capToggle(); capRender(); });
+  [].forEach.call(document.querySelectorAll('#cap-sim [data-a]'), function (b) {
+    b.addEventListener('click', function () { var a = b.getAttribute('data-a'), i = +a[1]; if (a[0] === 'w') capWrite(i); else capRead(i); capRender(); });
+  });
+  $('cap-reset').addEventListener('click', function () { capReset(true); capRender(); });
+  $('cap-proof-btn').addEventListener('click', function () {
+    capReset(true); cap.part = true;
+    log('proof setup: G1 and G2 partitioned, o = v0 on both.');
+    capWrite(0); cap.log[cap.log.length - 1].s = 'α1 · ' + cap.log[cap.log.length - 1].s;
+    capRead(1); cap.log[cap.log.length - 1].s = 'α2 · ' + cap.log[cap.log.length - 1].s;
+    capRender();
+  });
+  capReset(false); capRender();
+})();
+</script>
+</body>
+</html>

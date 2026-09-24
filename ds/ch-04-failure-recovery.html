@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Failure and Recovery — Distributed Systems</title>
+<meta name="description" content="Dependability, faults and failure models, availability and reliability; consistent global states, checkpointing, snapshots and message logging for rollback recovery.">
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/ds.css">
+<style>
+.figure-diagram{overflow-x:auto}
+.figure-diagram svg{min-width:600px}
+.av-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.4rem .8rem;margin-top:.6rem}
+.av-grid div{border:1px solid var(--lk-rule-soft);border-radius:3px;padding:.35rem .6rem;background:var(--lk-paper)}
+.av-grid span{display:block;font:.76rem var(--lk-utility);color:var(--lk-ink-soft)}
+.av-grid b{font:600 1rem var(--lk-mono);color:var(--lk-cobalt-dark)}
+.ds-row input[type=range]{width:min(220px,60vw)}
+table td.sub{padding-left:1.4rem}
+</style>
+</head>
+<body class="lk">
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-03-space.html">&larr; 3 · Space, situatedness and mobility</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-05-replication-consistency.html">5 · Replication, consistency and CAP &rarr;</a>
+</nav>
+
+<header class="lk-header">
+  <div class="lk-kicker">Part II — Failure, replication, agreement · Chapter 4</div>
+  <h1>Failure and recovery</h1>
+  <div class="lk-meta"><span>~25 min</span><span>3 instruments</span><span>A.Y. 2025/26 · Prof. Omicini</span></div>
+  <div class="ds-sources" aria-label="Source slide decks"><span><b>M1</b> Dependability in Distributed Systems</span><span><b>C2</b> Logging &amp; Checkpointing. Towards Recovery of Distributed Systems</span></div>
+</header>
+
+<div class="ds-spine"><span class="ds-label">The question</span>
+<p>When part of a distributed system fails, what does it take to bring the whole system back to a correct state?</p></div>
+
+<div class="ds-thesis"><span class="ds-label">The argument in one paragraph</span>
+<p>A dependable system keeps providing correct service despite threats. Threats are modelled as <b>faults</b>, which cause <b>errors</b> in the state, which become <b>failures</b> when they reach the interface. Dependability is measured by attributes such as availability and reliability. Its basic means of tolerance is <b>rollback recovery</b>: save the state (<b>checkpointing</b>), save the events since then (<b>logging</b>), restart from them. In a distributed system, local checkpoints are only usable together if they form a <b>consistent global state</b>, messages in transit included. Independent checkpoints may never form one; coordinated protocols (Tamir &amp; Sequin, blocking; Chandy &amp; Lamport, non-blocking) build one on purpose. Logging then replays what came after, provided execution is piecewise deterministic.</p></div>
+
+<nav class="ds-contents" aria-label="In this chapter"><ol>
+<li><a href="#dependability">Dependability</a></li>
+<li><a href="#faults">Faults and failures</a></li>
+<li><a href="#attributes">Attributes and metrics</a></li>
+<li><a href="#means">Means</a></li>
+<li><a href="#recovery">Rollback recovery</a></li>
+<li><a href="#global-state">Global state</a></li>
+<li><a href="#checkpointing">Checkpointing protocols</a></li>
+<li><a href="#snapshots">Snapshots</a></li>
+<li><a href="#logging">Logging</a></li>
+<li><a href="#oral">For the oral</a></li>
+</ol></nav>
+
+<!-- ============================================================ -->
+<section id="dependability">
+<h2>What dependability is</h2>
+<p>Distributed systems run services we rely on daily: finance (online banking, stock trading), e-commerce, civil infrastructure (power grid, traffic control), entertainment (gaming, streaming), personal data storage (Dropbox, Google Drive, SkyDrive). A data centre brought down by a failure can cost tens to hundreds of thousands of euros per hour, in wasted expenses and lost revenue.</p>
+<p>Dependability is not cheap either, which is possibly why nearly <strong>60% of Fortune 500 companies</strong> suffer more than an hour and a half of downtime per week. A data centre costs from $450 per square foot for 99.671% availability (28.8 hours of downtime a year) to $1,100 for 99.995% (0.4 hours). To reduce that cost, the slides propose training more “engineers against downtime”.</p>
+<p>The Oxford dictionary defines dependability as “the quality of being able to be relied on to do what somebody wants or needs”, synonym <em>reliability</em>. In systems engineering, a field much wider than computing, the two are closely related but <strong>not the same thing</strong> (<a href="#attributes">§3</a>).</p>
+
+<div class="defn" id="def-dependability"><div class="defn-term"><b>Dependability</b><cite>[Zhao, 2014]</cite></div>
+<p>In distributed computing, <dfn id="term-dependability">dependability</dfn> is the ability of a distributed system to provide correct services to its users despite the many different threats: undetected software defects, hardware failures, malicious attacks, …</p></div>
+
+<p>Reasoning about it needs a model of the <strong>system</strong> and a model of the <strong>threats</strong>.</p>
+
+<h3>The system and its state</h3>
+<p>A system provides services to its users (clients), each through an <em>interface</em>; a <em>functional specification</em> defines what each should do. At each moment the system is in a state, determined collectively by its processes and threads: registers, stack, heap, file descriptors, kernel state… The part visible through user interaction is the <dfn id="term-external-state">external</dfn> (observable) state, basically the abstract state of the specification. The rest is <dfn id="term-internal-state">internal state</dfn>.</p>
+<div class="defn" id="def-state"><div class="defn-term"><b>State</b><cite>M1 · System Models III</cite></div>
+<p>The <dfn id="term-state">state</dfn> of a system at time <var>t</var> is the (minimum amount of) information that, together with knowledge of the dynamics of a (deterministic) system, allows an observer to completely describe the system's future behaviour from <var>t</var> on.</p></div>
+<p>So state serves recovery: a system can be brought back to where it was before a failure if its state was (consistently) captured and not lost, e.g. serialised to stable storage and intact after the failure. How do we capture the state of a distributed system at time <var>t</var>? First, fix the <dfn id="term-boundary">boundary</dfn>, the line between the system's components (inside) and its environment: every other system that affects it in any way. Whether something is a system or a component depends on the level of abstraction. Second, “at time <var>t</var>” means little without a global clock (<a class="xref" href="ch-02-time.html#physical">Ch. 2</a>); <a href="#global-state">§6</a> does without one.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="faults">
+<h2>Faults, errors and failures</h2>
+<p>A system not complying with its functional specification has a (service) <em>failure</em>, caused by wrong values in its state (<em>errors</em>), which in the causal model are caused by <em>faults</em>. So threats are modelled as sorts of faults. In Tanenbaum &amp; van Steen's words:</p>
+<div class="defn" id="def-failure-error-fault"><div class="defn-term"><b>Failure, error, fault</b><cite>[Tanenbaum &amp; van Steen, 2017]</cite></div>
+<p>A system <dfn id="term-failure">fails</dfn> when it does not behave as promised. An <dfn id="term-error">error</dfn> is a part of a system's state that might have caused a failure. The cause of an error is a <dfn id="term-fault">fault</dfn>.</p></div>
+<p>A fault may be <dfn id="term-dormant-fault">dormant</dfn>: a bug harmless until its code runs, an unlocked shared variable harmless until two threads update it concurrently. When its condition is met, the fault is <em>activated</em> into an error, which <em>propagates</em> through interactions; when it reaches the interface, a service failure occurs. Since systems are composed recursively, a component's failure is a fault of the larger system. This is the <dfn id="term-chain-of-threats">chain of threats</dfn>, and why “fault” and “failure” are often, somewhat improperly, used interchangeably.</p>
+
+<figure class="lk-fig"><div class="figure-diagram">
+<svg viewBox="0 0 720 150" role="img" aria-label="Chain of threats: in a component, a fault is activated into an error that propagates into a failure; that failure causes a fault in the larger system, which goes through the same chain">
+  <g fill="none" stroke="var(--lk-rule)" stroke-dasharray="4 3"><rect x="8" y="30" width="330" height="92"/><rect x="382" y="30" width="330" height="92"/></g>
+  <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)"><text x="16" y="116">component</text><text x="390" y="116">(larger) system</text></g>
+  <g font-family="var(--lk-utility)" font-size="13" font-weight="700" text-anchor="middle">
+    <rect x="22" y="62" width="80" height="32" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="62" y="83" fill="var(--lk-ink)">Fault</text>
+    <rect x="132" y="62" width="80" height="32" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="172" y="83" fill="var(--lk-ink)">Error</text>
+    <rect x="242" y="62" width="80" height="32" fill="var(--lk-paper)" stroke="var(--lk-vermilion)"/><text x="282" y="83" fill="var(--lk-vermilion)">Failure</text>
+    <rect x="398" y="62" width="80" height="32" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="438" y="83" fill="var(--lk-ink)">Fault</text>
+    <rect x="508" y="62" width="80" height="32" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="548" y="83" fill="var(--lk-ink)">Error</text>
+    <rect x="618" y="62" width="80" height="32" fill="var(--lk-paper)" stroke="var(--lk-vermilion)"/><text x="658" y="83" fill="var(--lk-vermilion)">Failure</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.6"><line x1="102" y1="78" x2="126" y2="78"/><line x1="212" y1="78" x2="236" y2="78"/><line x1="322" y1="78" x2="392" y2="78"/><line x1="478" y1="78" x2="502" y2="78"/><line x1="588" y1="78" x2="612" y2="78"/></g>
+  <g fill="var(--lk-cobalt)"><path d="M126 73 L132 78 L126 83z"/><path d="M236 73 L242 78 L236 83z"/><path d="M392 73 L398 78 L392 83z"/><path d="M502 73 L508 78 L502 83z"/><path d="M612 73 L618 78 L612 83z"/></g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)" text-anchor="middle"><text x="117" y="52">activation</text><text x="227" y="52">propagation</text><text x="360" y="20">causation</text><text x="493" y="52">activation</text><text x="603" y="52">propagation</text></g>
+  <line x1="360" y1="24" x2="360" y2="74" stroke="var(--lk-rule-soft)"/>
+</svg></div>
+<figcaption><b>Fig. 4.1</b> — The chain of threats with two levels of recursion [Zhao, 2014].</figcaption>
+</figure>
+
+<h3>Six ways to classify faults</h3>
+<p>Different sorts need different treatment. Six criteria:</p>
+<ol class="ds-count">
+<li><b>Source.</b> <em>Hardware</em> (power outages, hard-drive failures, bad memory chips), <em>software</em> (bugs such as race conditions, missing array bound checks), <em>operator</em> (misconfiguration, wrong upgrade procedures).</li>
+<li><b>Intent.</b> <em>Non-malicious</em> (a natural hardware fault, an unintended bug) or <em>malicious</em>: caused by someone intending harm, e.g. denying service to legitimate clients or compromising the service's integrity. The slides point here to commission and Byzantine faults.</li>
+<li><b>Duration.</b> <em>Transient</em>: activated momentarily, then dormant (a power spike). <em>Intermittent</em>: occurs, vanishes, reappears (a race condition). <em>Permanent</em>: stays until the component is repaired or the source addressed (a power outage, a process crash).</li>
+<li><b>Manifestation.</b> <em>Content</em>: wrong values passed on to other components, always the same ones, or different values to different components, the case modelled as <dfn id="term-byzantine-fault">Byzantine faults</dfn>. <em>Timing</em>: replying too early or too late; at the extreme never, as when a component crashes or hangs (infinite loop, deadlock).</li>
+<li><b>Reproducibility.</b> <em>Reproducible</em> (deterministic), like a null-pointer access, easily identified and repaired; or <em>nondeterministic</em>, like a bad thread interleaving, hard to reproduce: <dfn id="term-heisenbug">Heisenbugs</dfn>.</li>
+<li><b>Relationship.</b> <em>Independent</em> (no causal relationship) or <em>correlated</em> (one causes the other). Multiple components failing for a common reason are <dfn id="term-common-mode-failure">common mode failures</dfn>.</li>
+</ol>
+<p>Under <em>manifestation</em>, Byzantine means telling different parties different things, which a bug can do as well as an attacker. A <em>commission</em> fault is doing something that should not have been done, as opposed to <em>omitting</em> something.</p>
+
+<h3>Failure models</h3>
+<p>Tanenbaum &amp; van Steen classify failures by a server's observable behaviour:</p>
+<table>
+<thead><tr><th>Type of failure</th><th>Description of server's behaviour</th></tr></thead>
+<tbody>
+<tr><td><b>Crash</b></td><td>halts, but is working correctly until it halts</td></tr>
+<tr><td><b>Omission</b></td><td>fails to respond to incoming requests</td></tr>
+<tr><td class="sub">receive omission</td><td>fails to receive incoming messages</td></tr>
+<tr><td class="sub">send omission</td><td>fails to send messages</td></tr>
+<tr><td><b>Timing</b></td><td>response lies outside a specified time interval</td></tr>
+<tr><td><b>Response</b></td><td>response is incorrect</td></tr>
+<tr><td class="sub">value failure</td><td>the value of the response is wrong</td></tr>
+<tr><td class="sub">state-transition failure</td><td>deviates from the correct flow of control</td></tr>
+<tr><td><b>Arbitrary</b> (Byzantine)</td><td>may produce arbitrary responses at arbitrary times</td></tr>
+</tbody></table>
+
+<h3>Failing well</h3>
+<ol class="ds-count">
+<li><b><dfn id="term-fail-stop">Fail-stop</dfn>.</b> Dependability mechanisms make the system <em>stop responding</em> to requests when it fails, avoiding catastrophic consequences.</li>
+<li><b><dfn id="term-fail-safe">Fail-safe</dfn>.</b> Failure causes no great harm to human life or the environment: the system defines <em>safe states</em> and moves to one when it can no longer meet its specification. Nuclear plant control must be fail-safe.</li>
+<li><b><dfn id="term-fail-fast">Fail fast</dfn>.</b> The practice of halting immediately on an error state or unexpected condition. It enables early detection and diagnosis: a fault propagated to many components is much harder to pinpoint.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="attributes">
+<h2>Attributes and metrics</h2>
+<p>Two lists from two books, overlapping but different: keep them apart.</p>
+<div class="defn" id="def-features-of-dependable-systems"><div class="defn-term"><b>Features of dependable systems</b><cite>[Tanenbaum &amp; van Steen, 2017]</cite></div>
+<ol class="ds-count" style="margin:.4rem 0">
+<li><b><dfn id="term-availability">Availability</dfn></b>: the system is ready for immediate use, i.e. the probability that it operates correctly at any given moment.</li>
+<li><b><dfn id="term-reliability">Reliability</dfn></b>: the system can run continuously without failure. It is defined over a <em>time interval</em>, not an instant.</li>
+<li><b><dfn id="term-safety">Safety</dfn></b>: when the system temporarily fails, nothing catastrophic happens. Hard to define and to ensure; <em>catastrophic</em> basically means there is <strong>no established path from fault back to normal operation</strong>.</li>
+<li><b><dfn id="term-maintainability">Maintainability</dfn></b>: how easily a failed system can be repaired. Closely related to availability: a highly maintainable system may also be highly available.</li>
+</ol></div>
+<div class="defn" id="def-attributes-of-dependable-systems"><div class="defn-term"><b>Attributes of dependable systems</b><cite>[Zhao, 2014]</cite></div>
+<ol class="ds-count" style="margin:.4rem 0">
+<li><b>Availability</b>: readiness at any point in time, the probability that the system is there when a client needs the service.</li>
+<li><b>Reliability</b>: providing correct services continuously for a period of time.</li>
+<li><b><dfn id="term-integrity">Integrity</dfn></b>: protecting the system's state from being compromised under various threats. In dependable computing research it typically translates into the <strong>consistency of server replicas</strong>, if redundancy is exploited: as long as the faulty replicas do not exceed a predefined threshold, the consistency of the correct replicas naturally implies system integrity (<a class="xref" href="ch-05-replication-consistency.html#replication">Ch. 5</a>).</li>
+<li><b>Maintainability</b>: the capability to <strong>evolve after deployment</strong>. A patch for a detected fault should not require uninstalling the system and reinstalling an updated one, and the same mechanism can add features or improve performance. Ideally: <em>live upgrade</em>.</li>
+<li><b>Safety</b>: failures do not cause catastrophic consequences; the system must be fail-safe. Required where operations may be catastrophic (nuclear plants) or endanger lives (hospital operating rooms); not important for, e.g., e-commerce.</li>
+</ol></div>
+<p>Availability and reliability can serve as <strong>evaluation metrics</strong>; the other three are difficult to quantify. Availability, reliability and integrity are <strong>fundamental</strong> to all distributed systems; maintainability and safety are secondary or not always applicable.</p>
+
+<h3>Measuring them</h3>
+<p class="ds-count-head">Availability factors</p>
+<ol class="ds-count">
+<li><b><dfn id="term-mttf">MTTF</dfn></b>, Mean Time To Failure: the average time until the system fails.</li>
+<li><b><dfn id="term-mttr">MTTR</dfn></b>, Mean Time To Repair: the average time needed to repair it.</li>
+<li><b><dfn id="term-mtbf">MTBF</dfn></b>, Mean Time Between Failures: just MTTF + MTTR.</li>
+</ol>
+<span class="ds-math">Availability = MTTF / (MTTF + MTTR) = MTTF / MTBF</span>
+<p><strong>Five nines</strong> means 99.999%: a 10<sup>−5</sup> probability of finding the system unavailable, at most <strong>5.256 minutes of downtime a year</strong>. Reliability is the probability of correct service for a period <var>Δt</var>:</p>
+<span class="ds-math">R(Δt) = e<sup>−λΔt</sup>,  λ ∈ [0, ∞) the failure rate</span>
+<p>The slide adds “≈ proportional to MTTF” under <var>λ</var>.</p>
+<div class="slidefix"><span class="ds-label">Slide correction</span>
+<p>Reliability grows with MTTF; <var>λ</var> is <strong>inversely</strong> proportional to it: with a constant failure rate, MTTF = 1/<var>λ</var>, so <var>R(Δt) = e<sup>−Δt/MTTF</sup></var>.</p></div>
+<p>And <strong>availability ≠ reliability</strong>: a system failing frequently but recovering very quickly may have high availability and very low reliability.</p>
+
+<div class="ds-inst" id="av-lab">
+<header><b>Instrument 1</b><span>Availability vs reliability</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">Set MTTF and MTTR, or pick a preset. Of the first two presets, which is more available, and which would you trust to run for a week?</p>
+<div class="ds-row"><div class="ds-seg" role="group" aria-label="Presets" id="av-presets">
+<button type="button" data-f="24" data-r="0.016667">Fails daily, 1-min repair</button>
+<button type="button" data-f="8760" data-r="72">Fails yearly, 3-day repair</button>
+<button type="button" data-f="8760" data-r="0.0876">Five nines</button>
+</div></div>
+<div class="ds-row">
+<label>MTTF <input type="range" id="av-f" min="0" max="1000" step="1"> <output id="av-f-v"></output></label>
+<label>MTTR <input type="range" id="av-r" min="0" max="1000" step="1"> <output id="av-r-v"></output></label>
+<label>interval Δt <select id="av-dt"><option value="1">1 hour</option><option value="24">1 day</option><option value="168" selected>1 week</option><option value="720">30 days</option><option value="8760">1 year</option></select></label>
+</div>
+<div class="av-grid" aria-live="polite">
+<div><span>MTBF</span><b id="av-mtbf"></b></div>
+<div><span>Availability</span><b id="av-a"></b></div>
+<div><span>Nines</span><b id="av-n"></b></div>
+<div><span>Downtime / year</span><b id="av-d"></b></div>
+<div><span>λ = 1/MTTF</span><b id="av-l"></b></div>
+<div><span>R(Δt)</span><b id="av-rel"></b></div>
+</div>
+<div class="ds-verdict" id="av-verdict"></div>
+<noscript><p>Availability = MTTF/(MTTF + MTTR). MTTF 24 h and MTTR 1 min give 99.93% availability (about 6 hours of downtime a year) but R(1 week) = e<sup>−7</sup> ≈ 0.001. MTTF 1 year and MTTR 3 days give only 99.18% availability, yet R(1 week) ≈ 0.98. Five nines allow 5.256 minutes of downtime a year.</p></noscript>
+</div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="means">
+<h2>Means to achieve dependability</h2>
+<p>Zhao lists four approaches:</p>
+<ol class="ds-count">
+<li><b>Fault avoidance.</b> Quality software and hardware, less prone to failures. For software: correct design and implementation <em>before</em> deployment, through rigorous design (possibly formal methods to verify properties) and rigorous testing.</li>
+<li><b>Fault detection &amp; diagnosis.</b> <strong>Crash faults are trivial to detect</strong> by periodically probing each component's health. But components may fail in other ways than crashing, where probing does not always help, and <strong>if a fault is not detected, the integrity of the system cannot be guaranteed</strong>. Diagnosis then confirms the fault and pinpoints the faulty component, with formal models and (statistical) tools. Exception handling is an example of detection and handling.</li>
+<li><b>Fault removal.</b> The fault is isolated and removed; the component is repaired or replaced and reintroduced. This reconfiguration needs a notion of <em>membership</em>: the faulty component is excluded, the repaired one rejoins. Special case: software update.</li>
+<li><b><dfn id="term-fault-tolerance">Fault tolerance</dfn>.</b> Hardware fails, so robust software is not enough; and unless a system is fully stateless, restarting it does not restore its state.</li>
+</ol>
+<p>Applications needing high availability but not necessarily high reliability could be served by <strong>logging and checkpointing</strong>; more demanding ones by recovery-oriented computing. Both rely on <dfn id="term-rollback-recovery">rollback recovery</dfn>: going back to the most recent recorded correct state. Alternatively, failures can be <em>masked</em>, hidden from other processes, by <strong>redundancy</strong>:</p>
+<ol class="ds-count">
+<li><b>Information redundancy</b>, e.g. extra bits.</li>
+<li><b>Time redundancy</b>, e.g. redoing a transaction after it aborts.</li>
+<li><b>Physical redundancy</b>, typical of biological systems; replicas are the distributed form (<a class="xref" href="ch-05-replication-consistency.html#replication">Ch. 5</a>).</li>
+</ol>
+<p>M1's lessons: dependability is essential, it needs models of systems and threats, and the failure-handling techniques determine the level reached. The rest of this chapter follows the rollback route.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="recovery">
+<h2>Rollback recovery: the toolkit</h2>
+<p>C2 starts from interaction. Components (with their functions, services, tasks, goals…) do not work in isolation: they interact over time and space because they <em>depend</em> on each other, and a “mischievously simple” way to model dependencies is <strong>causality</strong>. In general causality is subtle: a human cognitive tool (“mind reading” others' goals), a word nineteenth-century physics papers used in titles but almost never in the text, and not the same as correlation (the tobacco industry's hypothetical genotype causing both cancer and smoking). Pearl [2009] makes it precise. Distributed systems need less: cause tied to the system model, defining dependencies between processes, with causes preceding effects. That is happens-before (<a class="xref" href="ch-02-time.html#causality">Ch. 2</a>).</p>
+
+<div class="defn" id="def-checkpoint-checkpointing"><div class="defn-term"><b>Checkpoint, checkpointing</b><cite>[Zhao, 2014]</cite></div>
+<p>A <dfn id="term-checkpoint">checkpoint</dfn> of a distributed system is a copy of the system state. If it is available after the system fails, it can be used to recover the system to the state it had when the checkpoint was taken. <dfn id="term-checkpointing">Checkpointing</dfn> is (periodically) taking a copy of the system state and saving it to a stable storage that can survive the faults tolerated.</p></div>
+<p>To recover to the point right <em>before</em> the failure, all incoming messages are typically <strong>logged</strong> too, and possibly other nondeterministic events. Both are rollback recovery: back to a state prior to the failure. Roll-forward mechanisms exist but typically cost more runtime overhead and physical resources.</p>
+<p>Checkpointing and logging are the most fundamental dependability techniques, used at every level. Alone, they are relatively easy to implement with low runtime overhead, but limited: with checkpointing only, some information can be lost, and recovery is typically slower than with more sophisticated approaches.</p>
+
+<h3>The model</h3>
+<p><var>N</var> processes interact by message exchange, and with the outside world through input and output.</p>
+<p class="ds-count-head">Fault model</p>
+<ol class="ds-count">
+<li><b>Failures occur in processes.</b></li>
+<li><b>Fail-stop.</b> A failed process simply stops executing and loses all its volatile state.</li>
+<li><b>Reliable, FIFO communication</b> (e.g. TCP): message ordering is maintained, and there is no network partition.</li>
+</ol>
+<p>A process's state is, from the operating system's viewpoint, its entire address space, which a generic checkpointing library saves whole. Application semantics can define a smaller one. <dfn id="term-stable-storage">Stable storage</dfn> is essential: it survives process failures, so its contents are available to the recovering process, and all checkpoints and logged messages must go there. Its forms:</p>
+<ol class="ds-count">
+<li><b>Local disks</b>, enough to tolerate process failures only.</li>
+<li><b>Redundant disks</b> (RAID-1, RAID-5), to tolerate disk failures.</li>
+<li><b>Replicated or cloud-based file systems</b>, for more robust stable storage.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="global-state">
+<h2>Consistent global states</h2>
+<p>The state of a distributed system, its <dfn id="term-global-state">global state</dfn>, includes the state of every process. Aggregating them is not enough: messages move information between processes and change their states, so processes causally depend on each other, and <strong>dependencies cannot be lost in the global state</strong>.</p>
+<p>The slides' example: processes <var>P0</var>, <var>P1</var>, <var>P2</var> with checkpoints <var>C0</var>, <var>C1</var>, <var>C2</var> and messages <var>m0</var> (<var>P0</var> → <var>P1</var>), <var>m1</var> (<var>P1</var> → <var>P2</var>). <var>P0</var> and <var>P1</var> are bank accounts <var>A</var> and <var>B</var>; <var>m0</var> is a $100 deposit from <var>A</var> to <var>B</var>.</p>
+<div class="ds-versus">
+<div><h4>(a) Inconsistent</h4><p><var>C1</var> reflects the reception of <var>m0</var>, <var>C0</var> does not reflect its sending. If <var>P0</var> crashes after <var>m0</var> and <var>P1</var> after <var>C1</var>, recovering from <var>C0</var> and <var>C1</var> makes <strong>$100 appear from nowhere</strong>.</p></div>
+<div><h4>(b) Consistent</h4><p><var>C0</var> reflects the sending of <var>m0</var>, <var>C1</var> its reception; likewise <var>C1</var>, <var>C2</var> and <var>m1</var>. Recovering from <var>C0</var> and <var>C1</var> moves the $100 correctly from <var>A</var> to <var>B</var>.</p></div>
+<div><h4>(c) Consistent, unrecoverable</h4><p><var>m0</var> and <var>m1</var> are sent before the checkpoints and received after them. The state is reachable, but recovery loses the dependencies on <var>m0</var> and <var>m1</var>: the $100 may disappear. The problem is the <strong>messages in transit</strong>.</p></div>
+</div>
+<div class="defn" id="def-consistent-global-state"><div class="defn-term"><b>Consistent global state</b><cite>[Zhao, 2014]</cite></div>
+<p>A global state from a set of checkpoints is a <dfn id="term-consistent-global-state">consistent global state</dfn> if it is reachable from the initial state of the system. Otherwise it is <em>inconsistent</em>: its checkpoints are incompatible, not admissible, and cannot be used for recovery.</p></div>
+<div class="defn" id="def-system-model-refined-channel-state"><div class="defn-term"><b>System model refined · channel state</b><cite>[Zhao, 2014]</cite></div>
+<p>A set of <var>N</var> processes, each with a set of states (one of them initial) and a set of events that trigger its changes of state. A set of <em>channels</em>, each a uni-directional reliable communication channel between two processes (a TCP connection is two channels). The <dfn id="term-channel-state">channel state</dfn> is the set of messages in transit along the channel, not yet received by the target process.</p></div>
+<p>In scenario (c), if <var>m0</var> is saved in <var>C0</var> as channel state and <var>m1</var> in <var>C1</var>, recovery becomes possible. A usable global state is consistent process states <em>plus</em> channel states.</p>
+
+<div class="beyond"><span class="ds-label">Beyond the slides · cuts and orphans</span>
+<p>A set of local checkpoints draws a <em>cut</em> across the space-time diagram. It is consistent iff every message received inside it was also sent inside it, i.e. it contains the causal past of each of its events (<a class="xref" href="ch-02-time.html#causality">Ch. 2</a>). A message received inside but sent outside is an <dfn id="term-orphan-message">orphan message</dfn>, an effect without its cause: scenario (a). One sent inside and received outside is exactly channel state: scenario (c).</p></div>
+
+<div class="ds-inst">
+<header><b>Instrument 2</b><span>Global-state checker</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">The dashed line is a candidate global state. Load the slides' scenarios, then click events to move each process's frontier. Try to make <var>m2</var> an orphan.</p>
+<div class="ds-row"><div class="ds-seg" role="group" aria-label="Slide scenarios" id="gs-scen">
+<button type="button" data-s="a">(a) inconsistent</button><button type="button" data-s="b">(b) consistent</button><button type="button" data-s="c">(c) messages in transit</button>
+</div></div>
+<div id="st-global"></div>
+<noscript><p class="ds-fallback">Frontiers (a) P0 before sending m0, P1 after receiving it: m0 is received inside the cut but sent outside it, so the state is inconsistent. (b) Every message inside the cut is both sent and received inside it: consistent. (c) m0 and m1 are sent inside and received outside: consistent, but both must be recorded as channel state.</p></noscript>
+</div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="checkpointing">
+<h2>Checkpointing protocols</h2>
+<p>Checkpoint-based protocols focus on <em>state</em> rather than events, so they do not rely on the piecewise deterministic assumption (<a href="#logging">§9</a>). They are simpler and less restrictive: no need to identify and log every nondeterministic event. The price: unless a checkpoint precedes every event, which is typically not realistic, some execution is lost.</p>
+
+<h3>Uncoordinated checkpointing</h3>
+<p>In <dfn id="term-uncoordinated-checkpointing">uncoordinated checkpointing</dfn>, each process autonomously decides when to checkpoint. After a failure, recovery goes backwards to select the most recent set of consistent checkpoints. The main problem: the checkpoints might <strong>not allow a consistent global state</strong> to be reconstructed. To select one, the dependencies between checkpoints must be determined and recorded with each checkpoint, which adds overhead and complexity.</p>
+<div class="beyond"><span class="ds-label">Beyond the slides · the domino effect</span>
+<p>Rolling a process back undoes its sends, so their receipts become orphans; each receiver rolls back before its receipt, undoing <em>its</em> sends, and so on. With an unlucky pattern, this <dfn id="term-domino-effect">domino effect</dfn> pushes every process back to its initial state.</p></div>
+
+<div class="ds-inst">
+<header><b>Instrument 3</b><span>Crash and roll back</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">Green bars are checkpoints. Crash <b>P0</b> on the uncoordinated run and read the rollback trace; then crash either process on the coordinated run (same messages).</p>
+<div id="st-domino"></div>
+<noscript><p class="ds-fallback">Uncoordinated run, P0 crashes: P0 restarts from C0,2; m5 becomes an orphan, so P1 rolls back to C1,2; then m4 sends P0 to C0,1, m3 sends P1 to C1,1, m2 sends P0 to its initial state and m1 sends P1 to its initial state. Coordinated run: both processes return to their latest checkpoints, which form a consistent recovery line.</p></noscript>
+</div></div>
+
+<h3>Coordinated checkpointing: Tamir &amp; Sequin</h3>
+<p>Tamir &amp; Sequin [1984] is a <dfn id="term-coordinated-checkpointing">coordinated checkpointing</dfn> protocol. A <em>coordinator</em> knows all the other processes, the <em>participants</em>, and uses <strong>two-phase commit</strong> to make the local checkpoints mutually consistent. The round is an atomic transaction: either all processes create a new set of checkpoints, or they abandon it and revert to the previous set. Phase one creates a <dfn id="term-quiescent-point">quiescent point</dfn> of the system state; phase two atomically moves from the old checkpoint to the new one. A round aborts when a participant fails to respond.</p>
+<p class="ds-count-head">Control messages</p>
+<ol class="ds-count">
+<li><b>CHECKPOINT</b>: initiates a global checkpoint and establishes a quiescent point where all processes have stopped normal execution.</li>
+<li><b>SAVED</b>: a participant has taken its local checkpoint.</li>
+<li><b>FAULT</b>: a timeout occurred; abort the round.</li>
+<li><b>RESUME</b>: participants can resume normal execution.</li>
+</ol>
+<p class="ds-count-head">Coordinator</p>
+<ol class="ds-count">
+<li>Starts the first phase: stops normal execution and sends CHECKPOINT to every process.</li>
+<li>Waits for incoming CHECKPOINT messages from all processes; aborts if some are missing.</li>
+<li>Checkpoints its state.</li>
+<li>Waits for SAVED from every process; aborts if some are missing, sending FAULT.</li>
+<li>Switches to the new checkpoint and sends RESUME to every process.</li>
+<li>Resumes normal execution.</li>
+</ol>
+<p class="ds-count-head">Participant</p>
+<ol class="ds-count">
+<li>Stops normal execution when it receives CHECKPOINT.</li>
+<li>Sends CHECKPOINT through all its outgoing channels, and waits for CHECKPOINT from all its incoming channels; aborts if some are missing.</li>
+<li>Checkpoints its state.</li>
+<li>Sends its SAVED, and passes SAVED from its downstream neighbours up to its upstream neighbour, towards the coordinator.</li>
+<li>On RESUME, commits the checkpoint and propagates RESUME through every outgoing channel except the one it came from.</li>
+<li>Resumes normal execution.</li>
+</ol>
+<p>Channel state is captured in the state machines' waiting state: a process waiting for CHECKPOINT that receives a <em>regular</em> message <strong>logs</strong> it. Channels are FIFO, so a channel's CHECKPOINT arrives after everything its sender sent before stopping. When CHECKPOINT has arrived on every incoming channel, those channels are drained and their in-transit messages are in the log. The quiescent point does not mean “no messages in transit”, but “every in-transit message accounted for”.</p>
+
+<figure class="lk-fig"><div class="figure-diagram">
+<svg viewBox="0 0 660 280" role="img" aria-label="Tamir and Sequin round with coordinator P0 connected to P1 and P2: CHECKPOINT flood, a regular message logged by P0, local checkpoints, SAVED messages, then RESUME">
+  <defs>
+    <marker id="ts-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--lk-cobalt)"/></marker>
+    <marker id="ts-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--lk-forest)"/></marker>
+    <marker id="ts-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--lk-ink-soft)"/></marker>
+  </defs>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">
+    <line x1="110" y1="26" x2="325" y2="26" stroke="var(--lk-rule)"/><text x="110" y="20">phase 1 · quiescent point</text>
+    <line x1="340" y1="26" x2="425" y2="26" stroke="var(--lk-rule)"/><text x="340" y="20">phase 2</text>
+  </g>
+  <g font-family="var(--lk-utility)" font-size="13" font-weight="700" fill="var(--lk-ink)"><text x="12" y="74">P1</text><text x="12" y="144">P0</text><text x="12" y="214">P2</text></g>
+  <text x="12" y="158" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">coordinator</text>
+  <g stroke="var(--lk-rule)" stroke-width="1.4"><line x1="80" y1="70" x2="440" y2="70"/><line x1="80" y1="140" x2="440" y2="140"/><line x1="80" y1="210" x2="440" y2="210"/></g>
+  <g fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width=".8"><rect x="170" y="66" width="240" height="8"/><rect x="110" y="136" width="230" height="8"/><rect x="185" y="206" width="235" height="8"/></g>
+  <g stroke="var(--lk-ink-soft)" stroke-width="1.3" marker-end="url(#ts-k)"><line x1="130" y1="210" x2="222" y2="143"/></g>
+  <text x="184" y="192" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink)">m</text>
+  <text x="206" y="162" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">logged</text>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.5" marker-end="url(#ts-a)">
+    <line x1="110" y1="140" x2="168" y2="72"/><line x1="110" y1="140" x2="183" y2="208"/>
+    <line x1="170" y1="70" x2="243" y2="138"/><line x1="185" y1="210" x2="263" y2="142"/>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ts-a)">
+    <line x1="200" y1="70" x2="298" y2="138"/><line x1="215" y1="210" x2="313" y2="142"/>
+  </g>
+  <g stroke="var(--lk-forest)" stroke-width="1.8" marker-end="url(#ts-g)">
+    <line x1="340" y1="140" x2="408" y2="72"/><line x1="340" y1="140" x2="418" y2="208"/>
+  </g>
+  <g fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="2"><rect x="186" y="59" width="9" height="22"/><rect x="201" y="199" width="9" height="22"/><rect x="280" y="129" width="9" height="22"/></g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)" text-anchor="middle"><text x="190" y="54">C1</text><text x="205" y="236">C2</text><text x="284" y="124">C0</text></g>
+  <g fill="var(--lk-ink)"><circle cx="110" cy="140" r="4"/><circle cx="340" cy="140" r="4"/></g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)"><text x="84" y="128">stop</text><text x="346" y="130">commit</text></g>
+  <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink)">
+    <line x1="462" y1="60" x2="492" y2="60" stroke="var(--lk-cobalt)" stroke-width="1.5"/><text x="500" y="64">CHECKPOINT</text>
+    <line x1="462" y1="84" x2="492" y2="84" stroke="var(--lk-cobalt)" stroke-width="1.5" stroke-dasharray="5 3"/><text x="500" y="88">SAVED</text>
+    <line x1="462" y1="108" x2="492" y2="108" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="500" y="112">RESUME</text>
+    <line x1="462" y1="132" x2="492" y2="132" stroke="var(--lk-ink-soft)" stroke-width="1.3"/><text x="500" y="136">regular message</text>
+    <rect x="462" y="152" width="30" height="8" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width=".8"/><text x="500" y="160">execution stopped</text>
+    <text x="462" y="198" fill="var(--lk-cobalt-dark)">new global checkpoint =</text>
+    <text x="462" y="214" fill="var(--lk-cobalt-dark)">C0 + C1 + C2 + logged m</text>
+  </g>
+</svg></div>
+<figcaption><b>Fig. 4.2</b> — One Tamir &amp; Sequin round, coordinator <var>P0</var> linked to <var>P1</var> and <var>P2</var>. <var>m</var>, in transit on <var>P2</var> → <var>P0</var> when <var>P2</var> stopped, is logged by <var>P0</var>.</figcaption>
+</figure>
+</section>
+
+<!-- ============================================================ -->
+<section id="snapshots">
+<h2>Chandy–Lamport snapshots</h2>
+<p>Tamir &amp; Sequin is <strong>blocking</strong>: normal execution is suspended during each round. The Chandy &amp; Lamport distributed snapshot protocol [1985] is <strong>non-blocking</strong>: normal execution is never interrupted. But it is only concerned with how to <em>produce</em> a consistent global checkpoint. It prescribes <strong>no mechanism</strong> to determine the end of the round, nor to switch atomically to the new global checkpoint.</p>
+<ol class="ds-count">
+<li><b>Two states.</b> A process is either <em>Normal</em> or <em>Checkpointing</em>.</li>
+<li><b>Initiation.</b> Any process can initiate: it takes a local checkpoint, sends a <dfn id="term-marker">Marker</dfn> on all its outgoing channels, and moves to Checkpointing.</li>
+<li><b>First Marker.</b> A Normal process receiving a Marker does the same, and also records the <em>Marker certificate</em>, to be completed with a Marker from every incoming channel.</li>
+<li><b>Completion.</b> When the certificate is complete, the process goes back to Normal.</li>
+</ol>
+<p>While Checkpointing, a regular message arriving on a channel whose Marker has not arrived yet is appended to that channel's state, and executed; after the Marker, messages are just executed. So <strong>a channel's state is the messages arriving after the process's own local checkpoint and before the Marker on that channel</strong>. The channel that brought the first Marker is empty: by FIFO, everything sent on it before the sender's checkpoint has already arrived. The state machine's final “report completion” is local; how the round ends is left open.</p>
+
+<figure class="lk-fig"><div class="figure-diagram">
+<svg viewBox="0 0 660 230" role="img" aria-label="Chandy-Lamport snapshot between accounts A and B: the 100 dollar message crosses the marker and is recorded as channel state">
+  <defs>
+    <marker id="cl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--lk-cobalt)"/></marker>
+    <marker id="cl-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--lk-ink)"/></marker>
+  </defs>
+  <g font-family="var(--lk-utility)" font-size="13" font-weight="700" fill="var(--lk-ink)"><text x="12" y="74">P0 · A</text><text x="12" y="164">P1 · B</text></g>
+  <g stroke="var(--lk-rule)" stroke-width="1.4"><line x1="80" y1="70" x2="440" y2="70"/><line x1="80" y1="160" x2="440" y2="160"/></g>
+  <rect x="150" y="155" width="232" height="10" fill="var(--lk-hl)"/>
+  <text x="200" y="190" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">recording channel P0→P1</text>
+  <g stroke="var(--lk-ink)" stroke-width="1.5" marker-end="url(#cl-k)"><line x1="110" y1="70" x2="297" y2="157"/></g>
+  <text x="112" y="100" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink)">m0 · $100</text>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.6" stroke-dasharray="6 3" marker-end="url(#cl-a)"><line x1="150" y1="160" x2="248" y2="73"/><line x1="268" y1="70" x2="378" y2="157"/></g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)"><text x="168" y="130">marker</text><text x="330" y="105">marker</text></g>
+  <g fill="var(--lk-paper-light)" stroke="var(--lk-forest)" stroke-width="2"><rect x="145" y="149" width="9" height="22"/><rect x="255" y="59" width="9" height="22"/></g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-forest)" text-anchor="middle"><text x="149" y="144">C1</text><text x="259" y="54">C0</text></g>
+  <g fill="var(--lk-ink)"><circle cx="110" cy="70" r="4"/><circle cx="300" cy="160" r="4"/><circle cx="380" cy="160" r="4"/></g>
+  <text x="287" y="210" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-vermilion)">m0 appended</text>
+  <text x="365" y="145" font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">done</text>
+  <g font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink)">
+    <text x="462" y="60" font-weight="700" fill="var(--lk-cobalt-dark)">recorded snapshot</text>
+    <text x="462" y="84">C0: A after sending $100</text>
+    <text x="462" y="104">C1: B before receiving it</text>
+    <text x="462" y="124">P1→P0: empty</text>
+    <text x="462" y="144" fill="var(--lk-vermilion)">P0→P1: { m0 = $100 }</text>
+    <text x="462" y="176" fill="var(--lk-ink-soft)">the $100 is in the channel,</text>
+    <text x="462" y="192" fill="var(--lk-ink-soft)">not lost: scenario (c) fixed</text>
+  </g>
+</svg></div>
+<figcaption><b>Fig. 4.3</b> — A snapshot initiated by <var>P1</var> on the slides' bank accounts: <var>m0</var> arrives after <var>C1</var> and before the Marker on <var>P0</var> → <var>P1</var>, so it is channel state.</figcaption>
+</figure>
+
+<h3>Comparing the two protocols</h3>
+<p class="ds-count-head">Analogies</p>
+<ol class="ds-count">
+<li>Basically the same system model, and a special control message to propagate and coordinate the global checkpoint.</li>
+<li>Both recognise the need to capture channel state for recoverability.</li>
+<li>Virtually the same mechanism to capture it.</li>
+<li>Identical communication overhead.</li>
+</ol>
+<p class="ds-count-head">Differences</p>
+<ol class="ds-count">
+<li>The blocking protocol is more conservative, but blocking.</li>
+<li>The blocking protocol is more complete and robust.</li>
+<li>The non-blocking protocol provides no mechanism for the atomicity of the round.</li>
+<li>The blocking protocol is coordinated; the non-blocking one lets any process initiate, which may suit different sorts of systems.</li>
+</ol>
+<div class="slidefix"><span class="ds-label">Slide correction</span>
+<p>“Identical” holds for the shared part, one CHECKPOINT or Marker per channel. Tamir &amp; Sequin adds SAVED and RESUME (and FAULT) messages: the price of its atomicity.</p></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="logging">
+<h2>Log-based protocols</h2>
+<p>Log-based protocols save <em>events</em> rather than state, and can recover to the state right before the failure, provided all events are logged and the log is available on recovery. They rest on an assumption:</p>
+<div class="defn" id="def-piecewise-deterministic-assumption"><div class="defn-term"><b>Piecewise deterministic assumption</b><cite>[Zhao, 2014]</cite></div>
+<ol class="ds-count" style="margin:.4rem 0">
+<li>Each state evolves deterministically until a nondeterministic event happens, such as the reception of a message.</li>
+<li>All nondeterministic events can be identified.</li>
+<li>Enough information is logged for each event.</li>
+</ol></div>
+<p>Execution is modelled as consecutive <dfn id="term-state-interval">state intervals</dfn>, each started by a nondeterministic event (such as a message receipt) or by the process's initialisation, and followed by deterministic state changes. If the starting event is logged, the <strong>entire interval can be replayed</strong>.</p>
+
+<div class="defn" id="def-output-commit-problem"><div class="defn-term"><b>Output commit problem</b><cite>C2 · Models</cite></div>
+<p>Once the system emits an output to the outside world (e.g. its clients), part of its state becomes observable: a sort of commitment. Recovery must keep the outside view consistent, yet the outside world cannot be relied upon for recovery. This is the <dfn id="term-output-commit">output commit problem</dfn>: enough recovery information must be logged <strong>before</strong> the system commits to an output message.</p></div>
+
+<p class="ds-count-head">Sorts of logging protocols [Alvisi &amp; Marzullo, 1998]</p>
+<ol class="ds-count">
+<li><b><dfn id="term-pessimistic-logging">Pessimistic</dfn>.</b> A received message is logged synchronously, before it is executed.</li>
+<li><b><dfn id="term-optimistic-logging">Optimistic</dfn>.</b> To reduce latency, nondeterministic events go first to volatile memory, then asynchronously to stable storage. A failure may lose some messages permanently, forcing a rollback to a state earlier than the one at failure.</li>
+<li><b><dfn id="term-causal-logging">Causal</dfn>.</b> Events not yet on stable storage are piggybacked on every message sent, so a process can access all nondeterministic events that may causally affect its state, enabling consistent recovery.</li>
+</ol>
+<p>Long story short: optimistic and causal logging must track dependencies and piggyback them on every message. That complicates logging and, above all, makes recovery sophisticated and expensive: the recovering process must examine its logs, find missing messages, and often trigger cascading recovery at other processes. Pessimistic logging is much simpler, and its recovery can be much faster.</p>
+
+<h3>Logging and checkpointing together</h3>
+<p>In practice, logging is always used with checkpointing: states saved as checkpoints, events logged from one checkpoint to the next. Two benefits:</p>
+<ol class="ds-count">
+<li><b>Limited recovery time.</b> Restart from the last checkpoint, not the initial state, then replay the logged nondeterministic events.</li>
+<li><b>Limited log size.</b> Events logged before a checkpoint can be garbage collected.</li>
+</ol>
+<p>C2's lessons: dependability requires a coherent notion of dependencies and causality, and simple techniques like checkpointing and logging improve the chance of recovery.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="oral" class="ds-oral">
+<h2>For the oral</h2>
+<p>Practise answering out loud, two minutes each.</p>
+<details><summary>Your system is up 99.9% of the time. Is it reliable?</summary>
+<p>Not necessarily. Availability is a probability at an instant, MTTF/(MTTF + MTTR); reliability covers an interval, <var>R(Δt) = e<sup>−Δt/MTTF</sup></var>. Frequent failures with fast repair give high availability and low reliability. Say which one your users need.</p></details>
+<details><summary>Walk through fault, error and failure for one crash in your system.</summary>
+<p>A worker container is killed: a permanent crash fault (hardware or operator). The error is the lost state, its tasks in progress. It becomes a service failure only if it reaches the interface: the final result never arrives. For the cluster, the worker's failure is a fault: the chain of threats.</p></details>
+<details><summary>Why can't each process just checkpoint whenever it likes?</summary>
+<p>Local checkpoints must form a consistent global state: nothing received that was not sent (the $100 from nowhere). Independent checkpoints may never line up, so recovery needs recorded dependencies and may cascade. Show the domino run.</p></details>
+<details><summary>Tamir &amp; Sequin or Chandy &amp; Lamport?</summary>
+<p>Both flood a control message and record channel state the same way. T&amp;S blocks and uses 2PC, so the new global checkpoint is committed atomically or aborted. C-L never blocks and anyone can initiate, but ending the round and switching over are left to you.</p></details>
+<details><summary>What does logging add to checkpointing, and what does it assume?</summary>
+<p>Replay from the last checkpoint to just before the failure, if execution is piecewise deterministic and every nondeterministic event is logged; log before any output. Pessimistic logging costs latency but recovers simply; optimistic and causal cut latency but track dependencies and may cascade.</p></details>
+</section>
+
+<div class="ds-project"><span class="ds-label">Project lens · Thunk</span>
+<ul>
+<li><b>Fault model.</b> A killed container stops and loses its volatile state: fail-stop, as in C2. BEAM node monitoring is periodic probing, so crashes are “trivial to detect”; a worker returning a wrong value would not be caught.</li>
+<li><b>Re-execution is time redundancy.</b> Recomputing a lost subtask is M1's “redo”. Purity makes it safe: a task is a deterministic state interval, and its description, travelling as data, is all you need to replay it.</li>
+<li><b>What would need a checkpoint.</b> Workers are nearly stateless. The pending task tree at the node that started the computation is real state; saving it to a volume (local disk: stable storage against process failures only) is the natural extension.</li>
+<li><b>Output commit.</b> Duplicate results from re-execution are identical, hence harmless inside. The answer shown to the user is an output: emit it once, when the combination is complete.</li>
+</ul></div>
+
+<details class="ds-coverage"><summary>Slide coverage: where each slide section went</summary>
+<table>
+<thead><tr><th>Slides</th><th>Content</th><th>Here</th></tr></thead>
+<tbody>
+<tr><td>M1 · Prologue</td><td>Premises I–IV: services, costs, engineers against downtime</td><td><a href="#dependability">§1</a></td></tr>
+<tr><td>M1 · Dependability &amp; faults</td><td>Dictionary; basic concepts; system models I–V</td><td><a href="#dependability">§1</a></td></tr>
+<tr><td>M1 · Dependability &amp; faults</td><td>Threat models I–III; sorts of faults (six criteria)</td><td><a href="#faults">§2</a></td></tr>
+<tr><td>M1 · Dependability &amp; faults</td><td>Failure models; fail-stop; fail-safe; fail fast</td><td><a href="#faults">§2</a></td></tr>
+<tr><td>M1 · Attributes</td><td>Features [Tanenbaum &amp; van Steen]</td><td><a href="#attributes">§3</a></td></tr>
+<tr><td>M1 · Attributes</td><td>Attributes [Zhao]; availability I–III; reliability; integrity; maintainability; safety</td><td><a href="#attributes">§3</a></td></tr>
+<tr><td>M1 · Means</td><td>Improving dependability; fault tolerance I–II; redundancy</td><td><a href="#means">§4</a></td></tr>
+<tr><td>M1 · Conclusion</td><td>Lessons learnt</td><td><a href="#means">§4</a></td></tr>
+<tr><td>C2 · Interaction…</td><td>Components; interaction; (inter)dependencies; causality I–V; time</td><td><a href="#recovery">§5</a></td></tr>
+<tr><td>C2 · Basic techniques</td><td>Basic mechanisms; checkpointing; recovery spoiler</td><td><a href="#recovery">§5</a></td></tr>
+<tr><td>C2 · Models</td><td>System model I–II; fault model; process state; stable storage</td><td><a href="#recovery">§5</a></td></tr>
+<tr><td>C2 · Models</td><td>Global state I–V (scenarios a, b, c); system model refined</td><td><a href="#global-state">§6</a></td></tr>
+<tr><td>C2 · Models</td><td>Piecewise deterministic assumption; output commit</td><td><a href="#logging">§9</a></td></tr>
+<tr><td>C2 · Checkpoint-based</td><td>Generality; uncoordinated checkpointing; Tamir &amp; Sequin I–VII</td><td><a href="#checkpointing">§7</a></td></tr>
+<tr><td>C2 · Checkpoint-based</td><td>Chandy &amp; Lamport I–IV; discussion I–II</td><td><a href="#snapshots">§8</a></td></tr>
+<tr><td>C2 · Log-based</td><td>Generality; sorts of logging; long story short; logging &amp; checkpointing</td><td><a href="#logging">§9</a></td></tr>
+<tr><td>C2 · Conclusion</td><td>Lessons learnt</td><td><a href="#logging">§9</a></td></tr>
+</tbody></table></details>
+
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-03-space.html">&larr; 3 · Space, situatedness and mobility</a>
+  <a href="index.html">Course index</a>
+  <a href="ch-05-replication-consistency.html">5 · Replication, consistency and CAP &rarr;</a>
+</nav>
+<footer class="lk-foot">Distributed Systems · University of Bologna · built from the slides of Andrea Omicini (DISI), A.Y. 2025/26. Personal study notes, not an official source.</footer>
+
+<script src="assets/lesson-kit.js"></script>
+<script src="assets/spacetime.js"></script>
+<script>
+(function () {
+  /* ---------- Instrument 1: availability vs reliability ---------- */
+  var fS = document.getElementById('av-f'), rS = document.getElementById('av-r'), dtS = document.getElementById('av-dt');
+  var F_LO = 0, F_HI = Math.log10(87600);            // 1 hour .. 10 years
+  var R_LO = Math.log10(10 / 3600), R_HI = Math.log10(168); // 10 seconds .. 1 week
+  var mttf = 24, mttr = 1 / 60;
+  function toS(v, lo, hi) { return Math.round((Math.log10(v) - lo) / (hi - lo) * 1000); }
+  function fromS(s, lo, hi) { return Math.pow(10, lo + s / 1000 * (hi - lo)); }
+  function sig(x) { return x >= 100 ? Math.round(x).toString() : x >= 10 ? x.toFixed(1).replace(/\.0$/, '') : parseFloat(x.toPrecision(4)).toString(); }
+  function dur(h) {
+    if (h < 1 / 60) return sig(h * 3600) + ' s';
+    if (h < 1) return sig(h * 60) + ' min';
+    if (h < 48) return sig(h) + ' h';
+    if (h < 24 * 365) return sig(h / 24) + ' days';
+    var y = sig(h / 8760); return y + (y === '1' ? ' year' : ' years');
+  }
+  function pct(a) {
+    var d = Math.max(2, Math.min(5, Math.ceil(-Math.log10(1 - a) - 1e-4) - 2));
+    return (a * 100).toFixed(d) + '%';
+  }
+  function update(fromSliders) {
+    if (fromSliders) { mttf = fromS(+fS.value, F_LO, F_HI); mttr = fromS(+rS.value, R_LO, R_HI); }
+    else { fS.value = toS(mttf, F_LO, F_HI); rS.value = toS(mttr, R_LO, R_HI); }
+    document.getElementById('av-f-v').textContent = dur(mttf);
+    document.getElementById('av-r-v').textContent = dur(mttr);
+    var mtbf = mttf + mttr, A = mttf / mtbf, dt = +dtS.value, R = Math.exp(-dt / mttf);
+    var nines = -Math.log10(1 - A);
+    document.getElementById('av-mtbf').textContent = dur(mtbf);
+    document.getElementById('av-a').textContent = pct(A);
+    document.getElementById('av-n').textContent = nines.toFixed(1);
+    document.getElementById('av-d').textContent = dur((1 - A) * 8760);
+    document.getElementById('av-l').textContent = (1 / mttf < 0.01 ? (1 / mttf).toExponential(1) : sig(1 / mttf)) + ' / h';
+    document.getElementById('av-rel').textContent = R < 0.001 ? R.toExponential(1) : R.toFixed(3);
+    var v = document.getElementById('av-verdict'), dtName = dtS.options[dtS.selectedIndex].text;
+    if (A >= 0.999 && R < 0.5) { v.className = 'ds-verdict bad'; v.textContent = 'Highly available, poorly reliable: up ' + pct(A) + ' of the time, but only a ' + (R < 1e-4 ? '<0.01' : (R * 100).toFixed(R < 0.01 ? 2 : 0)) + '% chance of running ' + dtName + ' without a failure.'; }
+    else if (A < 0.999 && R >= 0.5) { v.className = 'ds-verdict ok'; v.textContent = 'Reliable over ' + dtName + ' (R = ' + R.toFixed(3) + '), yet less available: each failure costs ' + dur(mttr) + ' of repair.'; }
+    else if (A >= 0.999) { v.className = 'ds-verdict ok'; v.textContent = 'Both available (' + pct(A) + ') and reliable over ' + dtName + ' (R = ' + R.toFixed(3) + ').'; }
+    else { v.className = 'ds-verdict bad'; v.textContent = 'Neither: failures are frequent relative to ' + dtName + ' and repairs are slow.'; }
+    [].forEach.call(document.querySelectorAll('#av-presets button'), function (b) {
+      b.setAttribute('aria-pressed', String(Math.abs(+b.dataset.f - mttf) < 1e-6 && Math.abs(+b.dataset.r - mttr) < 1e-6));
+    });
+  }
+  [].forEach.call(document.querySelectorAll('#av-presets button'), function (b) {
+    b.addEventListener('click', function () { mttf = +b.dataset.f; mttr = +b.dataset.r; update(false); });
+  });
+  fS.addEventListener('input', function () { update(true); });
+  rS.addEventListener('input', function () { update(true); });
+  dtS.addEventListener('change', function () { update(false); });
+  update(false);
+
+  if (!window.DSSpaceTime) return;
+  var P3 = [{ id: 'a', name: 'P0' }, { id: 'b', name: 'P1' }, { id: 'c', name: 'P2' }];
+
+  /* ---------- Instrument 2: global-state checker ---------- */
+  var GS = {
+    processes: P3,
+    events: [
+      { id: 'a1', p: 'a', x: 0.6 }, { id: 'a2', p: 'a', x: 1.5 }, { id: 'a3', p: 'a', x: 5.6 },
+      { id: 'b1', p: 'b', x: 0.9 }, { id: 'b2', p: 'b', x: 2.3 }, { id: 'b3', p: 'b', x: 4.2 }, { id: 'b4', p: 'b', x: 4.8 },
+      { id: 'c1', p: 'c', x: 0.6 }, { id: 'c2', p: 'c', x: 2.5 }, { id: 'c3', p: 'c', x: 3.4 }
+    ],
+    messages: [{ from: 'a2', to: 'b2', label: 'm0 $100' }, { from: 'b1', to: 'c2', label: 'm1' }, { from: 'c3', to: 'b3', label: 'm2' }, { from: 'b4', to: 'a3', label: 'm3' }]
+  };
+  var gsHost = document.getElementById('st-global');
+  var gs = DSSpaceTime.mount(gsHost, { processes: GS.processes, events: GS.events, messages: GS.messages, modes: ['none'], cut: true });
+  var SCEN = {
+    a: { a: 'a1', b: 'b2', c: 'c2' },
+    b: { a: 'a2', b: 'b2', c: 'c2' },
+    c: { a: 'a2', b: 'b1', c: 'c1' }
+  };
+  var scenBtns = document.querySelectorAll('#gs-scen button');
+  function scen(k) {
+    gs.setCut(SCEN[k]);
+    [].forEach.call(scenBtns, function (b) { b.setAttribute('aria-pressed', String(b.dataset.s === k)); });
+  }
+  [].forEach.call(scenBtns, function (b) { b.addEventListener('click', function () { scen(b.dataset.s); }); });
+  gsHost.addEventListener('click', function (e) {
+    if (e.isTrusted && e.target.closest && e.target.closest('.st-ev, .ds-seg')) [].forEach.call(scenBtns, function (b) { b.setAttribute('aria-pressed', 'false'); });
+  });
+  scen('a');
+
+  /* ---------- Instrument 3: domino effect vs recovery line ---------- */
+  var EV = [
+    { id: 'a1', p: 'a', x: 0.6 }, { id: 'a2', p: 'a', x: 2.8 }, { id: 'a3', p: 'a', x: 3.6 }, { id: 'a4', p: 'a', x: 5.8 }, { id: 'a5', p: 'a', x: 6.6 },
+    { id: 'b1', p: 'b', x: 1.3 }, { id: 'b2', p: 'b', x: 2.1 }, { id: 'b3', p: 'b', x: 4.3 }, { id: 'b4', p: 'b', x: 5.1 }, { id: 'b5', p: 'b', x: 7.3 }
+  ];
+  var MS = [{ from: 'a1', to: 'b1', label: 'm1' }, { from: 'b2', to: 'a2', label: 'm2' }, { from: 'a3', to: 'b3', label: 'm3' }, { from: 'b4', to: 'a4', label: 'm4' }, { from: 'a5', to: 'b5', label: 'm5' }];
+  var P2 = P3.slice(0, 2);
+  DSSpaceTime.mount('#st-domino', {
+    presets: {
+      'Uncoordinated checkpoints': { processes: P2, events: EV, messages: MS,
+        checkpoints: [{ p: 'a', x: 3.2, name: 'C0,1' }, { p: 'a', x: 6.2, name: 'C0,2' }, { p: 'b', x: 1.7, name: 'C1,1' }, { p: 'b', x: 4.7, name: 'C1,2' }] },
+      'Coordinated checkpoints': { processes: P2, events: EV, messages: MS,
+        checkpoints: [{ p: 'a', x: 1.6, name: 'C0,1' }, { p: 'a', x: 4.6, name: 'C0,2' }, { p: 'b', x: 1.6, name: 'C1,1' }, { p: 'b', x: 4.6, name: 'C1,2' }] }
+    },
+    modes: ['none'], cut: true
+  });
+})();
+</script>
+</body>
+</html>

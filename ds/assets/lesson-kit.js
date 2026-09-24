@@ -45,7 +45,7 @@
     var host = $(sel); if (!host || !opts || !opts.lines) return;
     host.classList.add('lk-acode'); host.innerHTML = '';
     var codeWrap = el('div', 'lk-ac-code');
-    var expl = el('div', 'lk-ac-expl', (opts.lines[0] && opts.lines[0][1]) || 'Seleziona una riga per la spiegazione.');
+    var expl = el('div', 'lk-ac-expl', (opts.lines[0] && opts.lines[0][1]) || 'Select a line to see its explanation.');
     var btns = [];
     opts.lines.forEach(function (ln, i) {
       var b = el('button', 'lk-ac-line', ln[0] != null ? ln[0] : '');
@@ -67,9 +67,9 @@
     var names = Object.keys(opts.states);
     var grid = el('div', 'lk-se-grid'); grid.setAttribute('role', 'group');
     var panel = el('div', 'lk-se-panel');
-    var curLine = el('p', 'lk-se-cur'); curLine.innerHTML = 'Stato corrente: <b></b>';
+    var curLine = el('p', 'lk-se-cur'); curLine.innerHTML = 'Current state: <b></b>';
     var curB = curLine.querySelector('b');
-    var title = el('h4'), desc = el('p'), transLbl = el('strong', null, 'Transizioni in uscita:');
+    var title = el('h4'), desc = el('p'), transLbl = el('strong', null, 'Outgoing transitions:');
     transLbl.style.fontSize = '.85rem';
     var trans = el('ul', 'lk-se-trans');
     panel.appendChild(curLine); panel.appendChild(title); panel.appendChild(desc); panel.appendChild(transLbl); panel.appendChild(trans);
@@ -85,7 +85,7 @@
       names.forEach(function (n) { nodes[n].setAttribute('aria-pressed', n === name ? 'true' : 'false'); });
       title.textContent = name; desc.textContent = s.desc || ''; trans.innerHTML = '';
       var to = s.to || [];
-      if (!to.length) { var li = el('li', null, 'Nessuna: stato finale.'); li.style.color = 'var(--lk-muted)'; trans.appendChild(li); }
+      if (!to.length) { var li = el('li', null, 'None: final state.'); li.style.color = 'var(--lk-muted)'; trans.appendChild(li); }
       to.forEach(function (tr) {
         var li = el('li'); var btn = el('button'); btn.type = 'button';
         btn.innerHTML = '<code></code> &rarr; <strong></strong>';
@@ -120,7 +120,7 @@
     var verdict = el('div', 'lk-step-verdict'); host.appendChild(verdict);
     var btns = el('div', 'lk-step-btns'); var stepBtns = {};
     keys.forEach(function (k) {
-      var b = el('button', null, 'Passo ' + (opts.threads[k].name || k)); b.type = 'button';
+      var b = el('button', null, 'Step ' + (opts.threads[k].name || k)); b.type = 'button';
       b.addEventListener('click', function () { doStep(k); });
       btns.appendChild(b); stepBtns[k] = b;
     });
@@ -150,7 +150,7 @@
       var allDone = keys.every(function (k) { return local[k].pc >= (opts.threads[k].steps || []).length; });
       var v = opts.verdict ? opts.verdict(S, allDone) : null;
       verdict.className = 'lk-step-verdict' + (v && v.status ? ' ' + v.status : '');
-      verdict.textContent = v && v.text ? v.text : (allDone ? 'Esecuzione completata.' : 'Scegli quale processo far avanzare.');
+      verdict.textContent = v && v.text ? v.text : (allDone ? 'Run complete.' : 'Choose which process to advance.');
     }
     reset();
   }
@@ -209,10 +209,14 @@
       if (overflow) {
         wrapper.tabIndex = 0;
         wrapper.setAttribute('role', 'region');
-        wrapper.setAttribute('aria-label', table.caption ? table.caption.textContent.trim() : 'Tabella scorribile / Scrollable table');
+        wrapper.setAttribute('aria-label', table.caption ? table.caption.textContent.trim() : 'Scrollable table');
       } else {
         wrapper.removeAttribute('tabindex'); wrapper.removeAttribute('role'); wrapper.removeAttribute('aria-label');
       }
+    });
+    document.querySelectorAll('.figure-diagram').forEach(function (fd) {
+      if (resize && !observed.has(fd)) { resize.observe(fd); observed.set(fd, fd); }
+      fd.classList.toggle('has-overflow', fd.clientWidth > 0 && fd.scrollWidth > fd.clientWidth + 2);
     });
     if (observer) observer.takeRecords(); // Do not loop on our own wrapper insertions.
   }

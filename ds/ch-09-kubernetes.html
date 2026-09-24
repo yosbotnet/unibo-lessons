@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Running It in Production: Kubernetes — Distributed Systems</title>
+<meta name="description" content="Containers, orchestration and Kubernetes: desired state, control loops, cluster architecture, objects, autoscaling, self-healing and rolling updates, from a Docker Compose app to a cluster.">
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/ds.css">
+<style>
+/* chapter 9: cluster simulator */
+.k8-bar{display:flex;flex-wrap:wrap;gap:.35rem .8rem;align-items:center;margin:.45rem 0;padding:.4rem 0;border-top:1px solid var(--lk-rule-soft)}
+.k8-bar .k8-tag{font:700 .68rem var(--lk-utility);letter-spacing:.1em;text-transform:uppercase;color:var(--lk-ink-soft);min-width:5.6rem}
+.k8-bar label{font:.8rem var(--lk-utility);color:var(--lk-ink-soft);display:inline-flex;gap:.35rem;align-items:center}
+.k8-bar select{font:.82rem var(--lk-utility);padding:.25rem .35rem;border:1px solid var(--lk-rule);border-radius:3px;background:var(--lk-paper)}
+.k8-bar output{font:600 .82rem var(--lk-mono);color:var(--lk-cobalt-dark);min-width:2rem;display:inline-block;text-align:center}
+.k8-bar .k8-tag.inl{min-width:0}
+.k8-rs{font:.78rem var(--lk-mono);color:var(--lk-ink-soft);margin:.5rem 0 .3rem;display:flex;flex-wrap:wrap;gap:.3rem .9rem}
+.k8-rs b{font-weight:600}
+.k8-pending{min-height:2rem;border:1px dashed var(--lk-rule-soft);border-radius:3px;padding:.3rem .45rem;margin:.3rem 0;display:flex;flex-wrap:wrap;gap:.3rem;align-items:center}
+.k8-pending>span{font:.7rem var(--lk-mono);color:var(--lk-ink-soft);margin-right:.3rem}
+.k8-nodes{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.5rem;margin:.3rem 0}
+.k8-node{border:1px solid var(--lk-rule);border-radius:3px;background:var(--lk-paper);padding:.35rem .45rem;min-height:6.2rem}
+.k8-node header{display:flex;justify-content:space-between;align-items:center;gap:.3rem;margin-bottom:.3rem}
+.k8-node header b{font:600 .78rem var(--lk-mono);color:var(--lk-ink)}
+.k8-node header small{font:.66rem var(--lk-mono);color:var(--lk-forest)}
+.k8-node.silent{border-style:dashed;border-color:var(--lk-vermilion)}
+.k8-node.silent header small,.k8-node.notready header small{color:var(--lk-vermilion)}
+.k8-node.notready{background:var(--lk-warnbg);border-color:var(--lk-vermilion)}
+.k8-node .ds-btn{padding:.12rem .45rem;font-size:.7rem}
+.k8-pods{display:flex;flex-wrap:wrap;gap:.3rem}
+.k8-pod{font:600 .68rem/1.25 var(--lk-mono);border:1.5px solid var(--lk-cobalt);border-radius:2px;padding:.15rem .3rem;background:var(--lk-hl);color:var(--lk-cobalt-dark);cursor:pointer;text-align:left}
+.k8-pod small{display:block;font-weight:400;font-size:.62rem;color:var(--lk-ink-soft)}
+.k8-pod.v2{border-color:var(--lk-forest);background:var(--lk-okbg);color:var(--lk-forest)}
+.k8-pod.v3{border-color:var(--lk-vermilion);background:var(--lk-warnbg);color:var(--lk-vermilion)}
+.k8-pod.Pending{border-style:dashed;background:var(--lk-paper-light)}
+.k8-pod.Creating,.k8-pod.Restarting{border-style:dotted;background:var(--lk-paper-light)}
+.k8-pod.Terminating{opacity:.45;text-decoration:line-through}
+.k8-pod.Lost{border-color:var(--lk-rule);background:var(--lk-paper-light);color:var(--lk-ink-soft)}
+.k8-log{list-style:none;margin:.5rem 0 0;padding:.4rem .6rem;border:1px solid var(--lk-rule-soft);border-radius:3px;background:var(--lk-paper);font:.74rem/1.5 var(--lk-mono);max-height:12.5rem;overflow-y:auto}
+.k8-log li{margin:0;padding:.08rem 0;border-bottom:1px dotted var(--lk-rule-soft);font-size:.74rem!important;overflow-wrap:anywhere}
+.k8-log li:last-child{border-bottom:0}
+.k8-log .who{color:var(--lk-cobalt-dark);font-weight:600}
+.k8-log .you{color:var(--lk-vermilion);font-weight:600}
+.k8-log .t{color:var(--lk-ink-soft)}
+#k8-manifest .lk-ac-code{max-height:24rem;overflow-y:auto}
+</style>
+</head>
+<body class="lk">
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-08-modelling.html">&larr; 8 · Modelling: architectures and process algebra</a>
+  <a href="index.html">Course index</a>
+  <a href="project.html">Project companion &rarr;</a>
+</nav>
+
+<header class="lk-header">
+  <div class="lk-kicker">Part III — Models and machinery · Chapter 9</div>
+  <h1>Running it in production: Kubernetes</h1>
+  <div class="lk-meta"><span>~25 min</span><span>2 instruments</span><span>A.Y. 2025/26 · Prof. Omicini</span></div>
+  <div class="ds-sources" aria-label="Source slide decks"><span><b>CX</b> Addressing production-ready distributed systems through Kubernetes (M. Matteini)</span></div>
+</header>
+
+<div class="ds-spine"><span class="ds-label">The question</span>
+<p>How do you keep a distributed application available, scaled and up to date while its containers and machines keep failing?</p></div>
+
+<div class="ds-thesis"><span class="ds-label">The argument in one paragraph</span>
+<p>Containers make a service easy to package and start. Production asks for more: survive dying containers and machines, follow the load, change version without downtime. You <em>declare</em> the state you want as objects in a replicated store, and independent <b>control loops</b> keep comparing it with the state they observe and act to close the gap. Self-healing, rolling updates and autoscaling are that one loop applied to different objects: a ReplicaSet counts Pods, a Deployment moves them from one version to the next, an autoscaler rewrites the count from measured load. The lecture's demo goes from a Docker Compose file to an autoscaled cluster.</p></div>
+
+<nav class="ds-contents" aria-label="In this chapter"><ol>
+<li><a href="#production">Production-ready</a></li>
+<li><a href="#containers">Containers and orchestration</a></li>
+<li><a href="#control-loop">Desired state and the control loop</a></li>
+<li><a href="#cluster">Cluster architecture</a></li>
+<li><a href="#objects">Objects</a></li>
+<li><a href="#demo">From Compose to Kubernetes</a></li>
+<li><a href="#scaling">Scaling, healing, rolling out</a></li>
+<li><a href="#observability">Observability</a></li>
+<li><a href="#oral">For the oral</a></li>
+</ol></nav>
+
+<!-- ============================================================ -->
+<section id="production">
+<h2>What “production-ready” asks for</h2>
+<p>The lecture opens with four motivations:</p>
+<ol class="ds-count">
+<li><b>Containerisation frameworks</b> such as Docker opened new ways to develop and deploy distributed systems.</li>
+<li><b>Most software systems</b> today are distributed, and complex.</li>
+<li><b>Non-functional requirements</b> (quality attributes) matter more and more in the design of these systems.</li>
+<li><b>Kubernetes</b> is now the de facto standard for container orchestration.</li>
+</ol>
+<p>“Production-ready” means those quality attributes, mostly the dependability attributes of <a class="xref" href="ch-04-failure-recovery.html#attributes">Ch. 4</a>. The lecture ties each feature to the ones it improves:</p>
+<table>
+<thead><tr><th>Attributes</th><th>Kubernetes feature</th></tr></thead>
+<tbody>
+<tr><td>Availability, scalability</td><td>autoscaling</td></tr>
+<tr><td>Recoverability, reliability</td><td>self-healing</td></tr>
+<tr><td>Configurability, maintainability</td><td>declarative configuration</td></tr>
+<tr><td>Observability</td><td>monitoring integrations</td></tr>
+</tbody></table>
+<p>Correctness of the application's state is not on the list: Kubernetes manages <em>processes</em>, not your algorithm.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="containers">
+<h2>Containers, and why they need orchestrating</h2>
+<div class="defn" id="def-containerisation"><div class="defn-term"><b>Containerisation</b><cite>[Matteini, 2025; Docker]</cite></div>
+<p>A lightweight form of virtualisation. It provides process and filesystem isolation by exploiting the Linux kernel, and it has replaced traditional virtual machines in many deployment scenarios. The most popular platform is Docker.</p></div>
+<p>A <dfn id="term-container">container</dfn> is a process sharing the host kernel, with an image that carries the application and its dependencies. Kernel <em>namespaces</em> restrict what it sees (PIDs, network, hostname, mounts); <em>cgroups</em> limit what it consumes. (Details: Giovanni Ciatto's lecture.)</p>
+<p>Many containers on many hosts raise this course's questions: where each runs, who restarts it, how clients find it after it moves, how to replace it while it serves. Answering them automatically is <dfn id="term-container-orchestration">container orchestration</dfn>.</p>
+
+<div class="defn" id="def-kubernetes"><div class="defn-term"><b>Kubernetes</b><cite>[Kubernetes docs]</cite></div>
+<p>A portable, extensible, open source platform for managing containerised workloads and services.</p></div>
+<p class="ds-count-head">What Kubernetes is not</p>
+<ol class="ds-count">
+<li><b>A containerisation platform</b> like Docker: it uses a runtime it does not implement.</li>
+<li><b>A Platform as a Service</b> like Heroku.</li>
+<li><b>A cloud provider</b>, though it works with them.</li>
+<li><b>A deployment tool.</b> CI/CD is defined by each organisation.</li>
+<li><b>A logging/monitoring tool</b>, though it offers integrations for them.</li>
+</ol>
+
+<h3>Kubernetes and Docker Swarm</h3>
+<table>
+<thead><tr><th></th><th>Docker Swarm</th><th>Kubernetes</th></tr></thead>
+<tbody>
+<tr><td>1 · what it is</td><td>Docker's native clustering and orchestration tool</td><td>open-source container orchestration platform</td></tr>
+<tr><td>2 · complexity</td><td>simpler, easier to set up</td><td>more complex, more feature-rich</td></tr>
+<tr><td>3 · fits</td><td>smaller clusters, less complex applications</td><td>larger clusters, more complex applications</td></tr>
+<tr><td>4 · scaling</td><td>users can handle resource allocation and scaling manually</td><td>scaling, load balancing and failover handled automatically</td></tr>
+<tr><td>5 · configuration</td><td><code>docker-compose.yml</code></td><td>YAML files (manifests)</td></tr>
+<tr><td>6 · access control</td><td>simple, TLS-based</td><td>Role-Based Access Control (RBAC)</td></tr>
+</tbody></table>
+
+<p class="ds-count-head">Five key features (slides)</p>
+<ol class="ds-count">
+<li><b>Immutability</b> (<a href="#control-loop">§3</a>)</li>
+<li><b>Declarative configuration</b> (<a href="#control-loop">§3</a>)</li>
+<li><b>Autoscaling</b> (<a href="#scaling">§7</a>)</li>
+<li><b>Self-healing</b> (<a href="#scaling">§7</a>)</li>
+<li><b>Container Runtime Interface</b> (<a href="#cluster">§4</a>)</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="control-loop">
+<h2>The one idea: desired state and the control loop</h2>
+<p>The first two key features are one design decision.</p>
+<p><b>Declarative configuration.</b> “Everything is an object”: many kinds of objects, written in YAML (or JSON), shape the environment and are managed with the declarative tool <code>kubectl</code> (<code>kubectl create -f file.yaml</code>). It improves configurability and maintainability.</p>
+<p><b>Immutability.</b> The slides: resources cannot be changed after creation; a change deletes the resource and creates a new one. Containers are ephemeral and stateless, so recreating them is routine. This ensures consistency and reliability, and changes produce new desired states rather than mutating existing ones.</p>
+<div class="slidefix"><span class="ds-label">Slide fix · what is immutable</span>
+<p>Too strong. What you never patch is a <em>running container</em>: you replace it. Objects are updated in place all the time: <code>kubectl scale</code> patches a Deployment's replica count, <code>kubectl apply</code> its template, which starts a rollout. Only some fields are immutable once set (a Deployment's selector, most of an existing Pod's spec); changing those means deleting and recreating the object. Also, <code>kubectl create</code> is imperative; <code>apply</code> is declarative.</p></div>
+
+<div class="defn" id="def-kubernetes-object"><div class="defn-term"><b>Kubernetes object</b><cite>[Matteini, 2025]</cite></div>
+<p>Objects are persistent entities that Kubernetes uses to represent the state of the cluster:</p>
+<ol class="ds-count" style="margin:.4rem 0">
+<li>what containerised applications are running, and on which nodes;</li>
+<li>the resources available to those applications;</li>
+<li>the policies for application behaviour, such as restarts and upgrades.</li>
+</ol>
+<p>An object is a <dfn id="term-record-of-intent">record of intent</dfn>. Once it is created, the system constantly works to ensure that it exists. Creating it tells Kubernetes what the cluster should look like: its <strong>desired state</strong>.</p></div>
+
+<div class="defn" id="def-spec-and-status"><div class="defn-term"><b>Spec and status</b><cite>[Matteini, 2025]</cite></div>
+<p>Almost every object has two nested fields. <dfn id="term-spec"><code>spec</code></dfn> describes the characteristics you want: the <em>desired state</em>. <dfn id="term-status"><code>status</code></dfn> describes the current state, supplied and updated by Kubernetes. The control plane continually manages every object's actual state to match the desired state.</p></div>
+
+<p>That last sentence is the whole machine. A <dfn id="term-controller">controller</dfn> runs a loop that never ends: <b>observe</b> spec and actual state, compute the <b>difference</b>, take an <b>action</b> that shrinks it (create a Pod, delete one, bind one to a node), <b>repeat</b>. This is the <dfn id="term-reconciliation">reconciliation loop</dfn>.</p>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 620 240" role="img" aria-label="Control loop: the controller reads desired state and observed state, acts on the cluster, and the cluster reports back its observed state">
+  <g font-family="var(--lk-utility)" font-size="12" fill="var(--lk-ink)">
+    <rect x="20" y="70" width="170" height="62" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+    <text x="105" y="94" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">Desired state</text>
+    <text x="105" y="112" text-anchor="middle" font-family="var(--lk-mono)" font-size="10.5">spec: replicas 3</text>
+    <text x="105" y="125" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">in etcd, via API server</text>
+    <rect x="430" y="70" width="170" height="62" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+    <text x="515" y="94" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">Observed state</text>
+    <text x="515" y="112" text-anchor="middle" font-family="var(--lk-mono)" font-size="10.5">status: 2 ready</text>
+    <text x="515" y="125" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">reported by kubelets</text>
+    <rect x="235" y="62" width="150" height="78" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+    <text x="310" y="86" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">Controller</text>
+    <text x="310" y="106" text-anchor="middle" font-family="var(--lk-mono)" font-size="10.5">observe → diff → act</text>
+    <text x="310" y="124" text-anchor="middle" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-vermilion)">diff = +1</text>
+    <rect x="235" y="180" width="150" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+    <text x="310" y="200" text-anchor="middle" font-weight="700">Cluster</text>
+    <text x="310" y="216" text-anchor="middle" font-family="var(--lk-mono)" font-size="10">Pods on nodes</text>
+    <text x="20" y="22" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)">you: kubectl apply -f deployment.yaml</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.6" fill="none">
+    <path d="M105 30 V70"/><path d="M190 101 H235"/><path d="M430 101 H385"/><path d="M310 140 V180"/>
+    <path d="M385 203 H515 V132"/>
+  </g>
+  <g fill="var(--lk-cobalt)"><path d="M100 64 L105 70 L110 64z"/><path d="M229 96 L235 101 L229 106z"/><path d="M391 96 L385 101 L391 106z"/><path d="M305 174 L310 180 L315 174z"/><path d="M510 138 L515 132 L520 138z"/></g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-ink-soft)">
+    <text x="318" y="165">act: create 1 Pod</text><text x="400" y="220">report</text>
+  </g>
+  <text x="20" y="232" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-vermilion)">repeat forever</text>
+</svg>
+<figcaption><b>Fig. 9.1</b> — The reconciliation loop. You write only the left box; controllers move the right one towards it.</figcaption>
+</figure>
+
+<p>Four consequences link this lecture to the rest of the course.</p>
+<ul>
+<li><b>Failures stop being special cases.</b> A controller does not react to the <em>event</em> “a Pod crashed”; it notices 2 running where 3 are wanted. Crash, lost node, deletion and first deployment are one case, “observed ≠ desired” (faults: <a class="xref" href="ch-04-failure-recovery.html#faults">Ch. 4</a>).</li>
+<li><b>Replication becomes a number.</b> A ReplicaSet keeps <var>n</var> identical Pods: replication for availability (<a class="xref" href="ch-05-replication-consistency.html#replication">Ch. 5</a>), but of <em>stateless</em> processes. The loop keeps a count, not consistency between replicas.</li>
+<li><b>The desired state must survive failures too.</b> It lives in etcd, replicated on the control-plane machines and kept consistent with Raft, a consensus protocol in the family of <a class="xref" href="ch-06-consensus.html#paxos">Ch. 6</a>'s Paxos.</li>
+<li><b>Controllers never talk to each other.</b> Each watches some objects through the API server and writes others (Deployments write ReplicaSets, ReplicaSets write Pods): a shared data-space (blackboard) architecture, in the sense of <a class="xref" href="ch-08-modelling.html#styles">Ch. 8</a>.</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="cluster">
+<h2>Cluster architecture</h2>
+<p>A Kubernetes cluster consists of a <dfn id="term-control-plane">control plane</dfn> plus a set of worker machines, called <dfn id="term-node">nodes</dfn>.</p>
+<p class="ds-count-head">Control plane: manages the cluster</p>
+<ol class="ds-count">
+<li><b>kube-apiserver</b> exposes the Kubernetes HTTP API. Every other component, and <code>kubectl</code>, talks only to it.</li>
+<li><b>etcd</b>: key-value database storing the cluster metadata (every object, spec and status).</li>
+<li><b>kube-scheduler</b> watches for newly created Pods with no assigned node and selects a node for them.</li>
+<li><b>kube-controller-manager</b> runs the controller processes (ReplicaSet, Deployment, node controller, …).</li>
+<li><b>cloud-controller-manager</b> embeds cloud-specific control logic (e.g. cloud load balancers).</li>
+</ol>
+<div class="slidefix"><span class="ds-label">Slide fix · what the scheduler watches</span>
+<p>The slide says it watches newly created <em>services</em> with no assigned node. Services are never assigned to nodes: the scheduler watches unscheduled <em>Pods</em> and binds each to a node with room for its resource requests.</p></div>
+<p class="ds-count-head">Worker node: runs the containerised applications</p>
+<ol class="ds-count">
+<li><b>kubelet</b> ensures that the containers of the Pods bound to its node are running, and reports their status: the node's local control loop.</li>
+<li><b>kube-proxy</b> maintains network rules so that traffic to a Service reaches one of its Pods.</li>
+<li><b>container runtime</b>: the software that runs containers (e.g. Docker).</li>
+</ol>
+
+<figure class="lk-fig"><div class="figure-diagram" style="overflow-x:auto">
+<svg viewBox="0 0 640 300" style="min-width:520px" role="img" aria-label="Cluster architecture: control plane with API server at the centre, etcd, scheduler and controller managers; two worker nodes with kubelet, kube-proxy, container runtime and pods, all talking to the API server">
+  <g font-family="var(--lk-utility)" font-size="11.5" fill="var(--lk-ink)">
+    <rect x="10" y="10" width="620" height="118" fill="none" stroke="var(--lk-cobalt)" stroke-dasharray="5 3"/>
+    <text x="20" y="27" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-cobalt)">CONTROL PLANE</text>
+    <rect x="245" y="44" width="150" height="40" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.6"/><text x="320" y="68" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">kube-apiserver</text>
+    <rect x="30" y="44" width="120" height="40" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="90" y="62" text-anchor="middle" font-weight="700">etcd</text><text x="90" y="76" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">replicated · Raft</text>
+    <rect x="30" y="92" width="120" height="28" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="90" y="110" text-anchor="middle">kube-scheduler</text>
+    <rect x="470" y="44" width="150" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="545" y="65" text-anchor="middle">controller-manager</text>
+    <rect x="470" y="86" width="150" height="34" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="545" y="107" text-anchor="middle">cloud-controller-mgr</text>
+    <rect x="10" y="170" width="300" height="120" fill="none" stroke="var(--lk-rule)"/>
+    <text x="20" y="187" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)">NODE 1</text>
+    <rect x="330" y="170" width="300" height="120" fill="none" stroke="var(--lk-rule)"/>
+    <text x="340" y="187" font-family="var(--lk-mono)" font-size="10.5" fill="var(--lk-ink-soft)">NODE 2</text>
+  </g>
+  <g font-family="var(--lk-utility)" font-size="11" fill="var(--lk-ink)">
+    <rect x="25" y="196" width="80" height="26" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="65" y="213" text-anchor="middle">kubelet</text>
+    <rect x="115" y="196" width="85" height="26" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="157" y="213" text-anchor="middle">kube-proxy</text>
+    <rect x="25" y="232" width="175" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="112" y="250" text-anchor="middle">container runtime</text><text x="112" y="266" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">via CRI</text>
+    <rect x="215" y="200" width="80" height="34" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="255" y="221" text-anchor="middle" font-family="var(--lk-mono)" font-size="10">Pod</text>
+    <rect x="215" y="242" width="80" height="34" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="255" y="263" text-anchor="middle" font-family="var(--lk-mono)" font-size="10">Pod</text>
+    <rect x="345" y="196" width="80" height="26" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="385" y="213" text-anchor="middle">kubelet</text>
+    <rect x="435" y="196" width="85" height="26" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="477" y="213" text-anchor="middle">kube-proxy</text>
+    <rect x="345" y="232" width="175" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="432" y="250" text-anchor="middle">container runtime</text><text x="432" y="266" text-anchor="middle" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">via CRI</text>
+    <rect x="535" y="220" width="80" height="34" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="575" y="241" text-anchor="middle" font-family="var(--lk-mono)" font-size="10">Pod</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.4" fill="none">
+    <path d="M150 64 H245"/><path d="M150 106 H200 V76 H245"/><path d="M470 61 H395"/><path d="M470 103 H430 V76 H395"/>
+    <path d="M65 196 V150 H290 V84"/><path d="M385 196 V150 H350 V84"/>
+  </g>
+  <text x="170" y="145" font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-vermilion)">watch / report</text>
+</svg></div>
+<figcaption><b>Fig. 9.2</b> — Hub and spokes: everything talks only to the API server, and only it touches etcd.</figcaption>
+</figure>
+
+<div class="defn" id="def-container-runtime-interface-cri"><div class="defn-term"><b>Container Runtime Interface (CRI)</b><cite>[Matteini, 2025]</cite></div>
+<p>A plugin interface that lets Kubernetes use a wide variety of container runtimes; one must be working on each node. Kubernetes is not tied to Docker: other supported runtimes are containerd, CRI-O and Mirantis Container Runtime.</p></div>
+<div class="beyond"><span class="ds-label">Beyond the slides · Docker images vs Docker Engine</span>
+<p>Kubernetes once drove Docker Engine through a built-in adapter, dockershim, which Kubernetes deprecated in v1.20 and removed in v1.24; Docker Engine now plugs in through the external cri-dockerd adapter. Images built with <code>docker build</code> are standard OCI images and run unchanged on containerd or CRI-O.</p></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="objects">
+<h2>Objects: Pods, ReplicaSets, Deployments, Services</h2>
+<p>Creating an object means writing its spec plus basic information such as a name, usually in a <dfn id="term-manifest">manifest</dfn>: a YAML file applied with <code>kubectl apply -f &lt;file&gt;</code> (the slides' first one is a single-container <code>nginx:1.14.2</code> Pod on port 80). Required fields:</p>
+<ol class="ds-count">
+<li><b><code>apiVersion</code></b>: the version of the Kubernetes API to use.</li>
+<li><b><code>kind</code></b>: the type of object.</li>
+<li><b><code>metadata</code></b>: data that uniquely identifies it (name, UID); labels too.</li>
+<li><b><code>spec</code></b>: the desired state, with a format specific to each kind.</li>
+</ol>
+
+<figure class="lk-fig">
+<svg viewBox="0 0 620 200" role="img" aria-label="Object ownership: HPA scales a Deployment, which owns a ReplicaSet, which owns three Pods labelled app=backend; a Service selects the same Pods by label">
+  <g font-family="var(--lk-utility)" font-size="12" fill="var(--lk-ink)">
+    <rect x="20" y="20" width="120" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="80" y="43" text-anchor="middle" font-weight="700">HPA</text>
+    <rect x="20" y="82" width="120" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="80" y="105" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">Deployment</text>
+    <rect x="190" y="82" width="120" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/><text x="250" y="105" text-anchor="middle" font-weight="700" fill="var(--lk-cobalt-dark)">ReplicaSet</text>
+    <rect x="480" y="82" width="120" height="36" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/><text x="540" y="105" text-anchor="middle" font-weight="700" fill="var(--lk-vermilion)">Service</text>
+  </g>
+  <g font-family="var(--lk-mono)" font-size="10" fill="var(--lk-cobalt-dark)">
+    <rect x="355" y="30" width="90" height="34" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="400" y="45" text-anchor="middle">Pod</text><text x="400" y="58" text-anchor="middle" font-size="9">app=backend</text>
+    <rect x="355" y="83" width="90" height="34" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="400" y="98" text-anchor="middle">Pod</text><text x="400" y="111" text-anchor="middle" font-size="9">app=backend</text>
+    <rect x="355" y="136" width="90" height="34" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="400" y="151" text-anchor="middle">Pod</text><text x="400" y="164" text-anchor="middle" font-size="9">app=backend</text>
+  </g>
+  <g stroke="var(--lk-cobalt)" stroke-width="1.5" fill="none"><path d="M80 56 V82"/><path d="M140 100 H190"/><path d="M310 100 H330 V47 H355"/><path d="M330 100 H355"/><path d="M330 100 V153 H355"/></g>
+  <g fill="var(--lk-cobalt)"><path d="M75 76 L80 82 L85 76z"/><path d="M184 95 L190 100 L184 105z"/><path d="M349 42 L355 47 L349 52z"/><path d="M349 95 L355 100 L349 105z"/><path d="M349 148 L355 153 L349 158z"/></g>
+  <g stroke="var(--lk-vermilion)" stroke-width="1.3" stroke-dasharray="4 3" fill="none"><path d="M480 92 L445 50"/><path d="M480 100 H445"/><path d="M480 108 L445 150"/></g>
+  <g font-family="var(--lk-mono)" font-size="9.5" fill="var(--lk-ink-soft)">
+    <text x="88" y="73">scales</text><text x="146" y="94">owns</text><text x="482" y="136">selects by label</text><text x="150" y="140">creates Pods from its template</text>
+  </g>
+</svg>
+<figcaption><b>Fig. 9.3</b> — Ownership runs down a chain of controllers; the Service finds the Pods by label.</figcaption>
+</figure>
+
+<h3>Pod</h3>
+<div class="defn" id="def-pod"><div class="defn-term"><b>Pod</b><cite>[Matteini, 2025]</cite></div>
+<p><dfn id="term-pod">Pods</dfn> are the smallest deployable units: a group of one or more containers with shared storage and network resources. The shared context is a set of Linux namespaces, cgroups and potentially other facets of isolation, as for a container.</p></div>
+<p class="ds-count-head">Two ways to use Pods</p>
+<ol class="ds-count">
+<li><b>One container</b>, the most common case: the Pod wraps it.</li>
+<li><b>Several co-located, tightly coupled containers</b>: an advanced use, for patterns like Sidecar, Ambassador and Adapter [Burns, 2024].</li>
+</ol>
+<p class="ds-count-head">Containers in a Pod share</p>
+<ol class="ds-count">
+<li><b>IP address and ports</b> (they reach each other on <code>localhost</code>).</li>
+<li><b>Hostname.</b></li>
+<li><b>Storage volumes.</b></li>
+<li><b>Process identifiers (PIDs).</b></li>
+</ol>
+<div class="slidefix"><span class="ds-label">Slide fix · PIDs are shared only on request</span>
+<p>Network and hostname are shared by default, volumes by the containers that mount them; the PID namespace only if the Pod sets <code>shareProcessNamespace: true</code>.</p></div>
+<p>A container spec gives <b>image</b>, <b>command</b>, exposed <b>port</b> and <b>protocol</b>. The <code>resources</code> field manages hardware: <dfn id="term-requests"><code>requests</code></dfn> is the CPU/memory Kubernetes guarantees to the container (the scheduler places Pods by it), <dfn id="term-limits"><code>limits</code></dfn> the maximum it can use. CPU is in millicpu (0.1 CPU = 10% = <code>100m</code>), memory in bytes.</p>
+<div class="slidefix"><span class="ds-label">Slide check · Mi is not MB</span>
+<p>The slide's “122Mi = 128MB” holds only approximately: <code>Mi</code> is a mebibyte (2<sup>20</sup> bytes), so 122Mi ≈ 127.9 MB. The manifests' <code>128Mi</code> is 134,217,728 bytes, about 134 MB. <code>M</code> (10<sup>6</sup>) is a different suffix.</p></div>
+
+<h3>ReplicaSet and Deployment</h3>
+<div class="defn" id="def-replicaset"><div class="defn-term"><b>ReplicaSet</b><cite>[Matteini, 2025]</cite></div>
+<p>A <dfn id="term-replicaset">ReplicaSet</dfn> manages the number of replicas of a Pod, scaling them up and down to guarantee the availability of a specified number of identical Pods. It creates new Pods from its <em>Pod template</em>, and is usually managed through a Deployment.</p></div>
+<div class="defn" id="def-deployment"><div class="defn-term"><b>Deployment</b><cite>[Matteini, 2025]</cite></div>
+<p>A <dfn id="term-deployment">Deployment</dfn> manages a set of Pods running an application workload. It provides declarative updates for Pods and ReplicaSets, <em>rollout</em> (current state → desired state, e.g. a new image version, avoiding downtime) and <em>rollback</em>, and is used to release new versions.</p></div>
+<p class="ds-count-head">Deployment spec</p>
+<ol class="ds-count">
+<li><b><code>replicas</code></b>: the number of desired Pod replicas.</li>
+<li><b><code>selector</code></b>: how the Deployment finds its Pods, by label.</li>
+<li><b><code>template</code></b>: the Pod specification for new Pods.</li>
+</ol>
+<p class="ds-count-head">Other workload objects</p>
+<ol class="ds-count">
+<li><b>Job</b>: short-lived, one-off tasks.</li>
+<li><b>CronJob</b>: regular scheduled actions (backups, reports).</li>
+<li><b>StatefulSet</b>: like a Deployment, but each Pod keeps a sticky identity.</li>
+<li><b>DaemonSet</b>: a copy of a Pod on all (or some) nodes, added and garbage-collected as nodes join and leave.</li>
+</ol>
+
+<h3 id="services">Service</h3>
+<div class="defn" id="def-service"><div class="defn-term"><b>Service</b><cite>[Matteini, 2025]</cite></div>
+<p>A <dfn id="term-service">Service</dfn> is an abstraction defining a logical set of Pods and a policy to access them: the entry point of the application. Pods are ephemeral, move between nodes and change IP; a Service gives a <strong>stable endpoint</strong> (IP address and DNS name) for the Pods matching its label selector.</p></div>
+<ol class="ds-count">
+<li><b>ClusterIP</b> (default): a cluster-internal IP.</li>
+<li><b>NodePort</b>: each node's IP, at a static port.</li>
+<li><b>LoadBalancer</b>: an external load balancer from a cloud provider (or MetalLB on-premise).</li>
+</ol>
+<p>In <a class="xref" href="ch-01-distribution.html#transparency">Ch. 1</a>'s terms: location, migration and replication transparency.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="demo">
+<h2>From Docker Compose to Kubernetes: the hit counter</h2>
+<p>A web application that counts visits: a <b>backend</b> (Python + Flask) and an in-memory key-value store (<b>Redis</b>), at <code>github.com/Mala1180/kubernetes-hpa-example</code>. Three phases:</p>
+<ol class="ds-count">
+<li><b>Development</b> with Docker Compose.</li>
+<li><b>Migration</b> to Kubernetes.</li>
+<li><b>Monitoring</b> with Prometheus and Grafana.</li>
+</ol>
+<p><b>The app.</b> <code>/</code> runs <code>cache.incr("hits")</code> on Redis and answers “This page has been visited <var>n</var> times” plus the hostname of the serving Pod. <code>/busy-wait</code> burns CPU. The Redis address comes from <code>REDIS_HOST</code> (default <code>redis</code>) and <code>REDIS_PORT</code> (6379), so the backend keeps no state of its own and can be replicated freely.</p>
+<p><b>Compose.</b> A Dockerfile (<code>python:3.12-slim</code>, pip/Poetry, <code>EXPOSE 3000</code>) builds the backend. The Compose file has <code>backend</code> (ports 3000:3000, the two variables, <code>depends_on: redis</code>) and <code>redis</code> (<code>redis:7-alpine</code>). <code>docker compose up -d --build</code>, then <code>localhost:3000</code>.</p>
+<p><b>Migration.</b> <em>For each Compose service, define a Deployment and a Service</em>, then add a HorizontalPodAutoscaler for the backend. The Service <code>redis</code> gets the DNS name <code>redis</code>, as in Compose, so the code does not change.</p>
+
+<div class="ds-inst" id="manifest">
+<header><b>Instrument 1</b><span>Anatomy of the backend manifest</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">The lecture's <code>backend-deployment.yaml</code> and <code>backend-service.yaml</code>. Click a line to see what it declares and who acts on it.</p>
+<div id="k8-manifest"></div>
+<noscript><p>Deployment <code>backend</code>: 1 replica, label <code>app: backend</code> in selector and template, port 3000, Redis env vars, requests 128Mi/100m, limits 256Mi/200m. Service <code>backend</code>: NodePort, 3000 → 3000, same selector.</p></noscript>
+</div></div>
+
+<p><b>The autoscaler</b> (<code>backend-hpa.yaml</code>, <code>autoscaling/v2</code>) targets Deployment <code>backend</code>, <code>minReplicas: 1</code>, <code>maxReplicas: 10</code>, with average utilisation targets of 50% <b>CPU</b> and 70% <b>memory</b> (<a href="#scaling">§7</a>).</p>
+<p><b>Kompose</b> converts Compose files into manifests, steered by labels in <code>compose.yml</code>: <code>kompose.service.type: nodeport</code>, <code>kompose.controller.type: deployment</code>, <code>kompose.image-pull-policy: always</code>. Then <code>kompose convert -f docker-compose.yml -o k8s</code>.</p>
+<p class="ds-count-head">Running it locally</p>
+<ol class="ds-count">
+<li><code>minikube start</code>: a local cluster.</li>
+<li><code>minikube addons enable metrics-server</code>: the HPA needs its readings.</li>
+<li><code>kubectl apply -f k8s</code>: apply the manifests.</li>
+<li><code>minikube service backend</code>, or <code>kubectl port-forward svc/backend 8080:3000</code> and <code>localhost:8080</code>.</li>
+<li><code>minikube dashboard</code>: monitor the system.</li>
+</ol>
+<p>Only the backend is replicated. The counter lives in one Redis Pod with no volume, a single point of failure. Making it highly available is a <a class="xref" href="ch-05-replication-consistency.html#replication">Ch. 5</a> problem, not a Deployment setting.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="scaling">
+<h2>Scaling, self-healing and rolling updates</h2>
+<p>The loop of <a href="#control-loop">§3</a> meets three kinds of change: more load, a failure, a new version.</p>
+
+<h3>Autoscaling</h3>
+<p>Kubernetes scales automatically on resource usage or other metrics, in two ways:</p>
+<ol class="ds-count">
+<li><b>Horizontal scaling</b>: more or fewer replicas of a resource.</li>
+<li><b>Vertical scaling</b>: more or less CPU/memory for a container.</li>
+</ol>
+<p>It improves availability and scalability. The <dfn id="term-hpa">HorizontalPodAutoscaler</dfn> is one more control loop whose output is another object's spec: it rewrites the Deployment's <code>replicas</code>. The slides say it triggers when CPU exceeds 50% or memory 70%; these are targets it steers towards, as percentages of each Pod's <em>request</em> (50% of <code>100m</code> = 50m per Pod on average), so an HPA needs requests; and it scales down as well as up.</p>
+<div class="beyond"><span class="ds-label">Beyond the slides · the HPA rule</span>
+<p>Per metric, desired = ⌈current replicas × current utilisation / target⌉, clamped to [min, max]; with several metrics the largest wins. Deviations within ~10% are ignored, and scale-down waits out a stabilisation window (5 minutes by default). The CPU limit caps what a Pod can report: at <code>200m</code>, 200% of its request.</p></div>
+<p class="ds-count-head">The stress test</p>
+<ol class="ds-count">
+<li>Run <code>stress-test.sh</code> against the backend.</li>
+<li>The page immediately becomes unresponsive.</li>
+<li>Within seconds the HPA starts new Pod replicas.</li>
+<li>The page responds again, and reloads show different Pod ids.</li>
+</ol>
+
+<h3>Self-healing</h3>
+<ol class="ds-count">
+<li><b>Failed containers are replaced</b> automatically.</li>
+<li><b>Volumes follow the workload</b>: if a node with an attached volume fails, the volume can be reattached to a new instance on another node.</li>
+<li><b>Traffic avoids failures</b>: if a container behind a Service fails, its route is removed and traffic goes to healthy instances.</li>
+</ol>
+<p>This improves recoverability and reliability, via two loops. The <b>kubelet</b> restarts a crashed container in place, with growing back-off. The <b>ReplicaSet controller</b> replaces Pods that disappear. A dead node stops sending heartbeats; after a grace period the node controller marks it <code>NotReady</code>, and after a further toleration (5 minutes by default) evicts its Pods. Only <em>those</em> Pods are recreated, wherever the scheduler finds room. Detection is by timeout, so a slow node looks like a dead one (partial failure, <a class="xref" href="ch-04-failure-recovery.html#faults">Ch. 4</a>), and until it fires the Service may still route to the silent node.</p>
+
+<h3>Rolling updates</h3>
+<p>Changing the image in the template (<code>kubectl set image</code>, or re-applying an edited manifest) starts a <dfn id="term-rollout">rollout</dfn>: the Deployment creates a new ReplicaSet and scales it up while scaling the old one down.</p>
+<div class="beyond"><span class="ds-label">Beyond the slides · how a rollout avoids downtime, and when it stops</span>
+<p><code>maxSurge</code> bounds how many Pods may exist above <code>replicas</code>, <code>maxUnavailable</code> how many may be missing (both default 25%, never both 0). Beyond <code>maxUnavailable</code>, old Pods go only as new ones become <em>ready</em>, as readiness probes report. If the new version never gets ready, the rollout stalls and after <code>progressDeadlineSeconds</code> (600 s) reports <code>ProgressDeadlineExceeded</code>. It does <strong>not</strong> roll back by itself: you run <code>kubectl rollout undo</code>.</p></div>
+
+<div class="ds-inst" id="cluster-sim">
+<header><b>Instrument 2</b><span>Reconciliation loop simulator</span></header>
+<div class="ds-inst-body">
+<p class="ds-inst-howto">The backend on three nodes (4 Pod slots each). Break something or change the spec, then <b>Step</b> (one reconciliation round) or <b>Run</b>; click a Pod to delete it. Try: fail a node · roll out v2 · roll out broken v3, wait, undo · HPA on, raise the load.</p>
+<div id="k8-sim"></div>
+<noscript><p>Simulator (requires JavaScript). A failed node loses only its own Pods, replaced after the grace period. A broken image stalls the rollout, old Pods still serving, until <code>kubectl rollout undo</code>. With the HPA, 400m of load settles at 8 replicas (50% of request).</p></noscript>
+</div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="observability">
+<h2>Observability</h2>
+<p>After scalability, availability and reliability, one more quality attribute: a production system will eventually go down, for whatever reason.</p>
+<div class="defn" id="def-observability"><div class="defn-term"><b>Observability</b><cite>[Matteini, 2025]</cite></div>
+<p>An <dfn id="term-observability">observable</dfn> system allows understanding what happened, or what is happening, inside it.</p></div>
+<p>Monitoring tools help achieve it. A monitoring system can:</p>
+<ol class="ds-count">
+<li><b>Collect and show</b> metrics.</li>
+<li><b>Alert</b> the system administrator.</li>
+<li><b>Log</b> events.</li>
+</ol>
+<p>The most common pair:</p>
+<ol class="ds-count">
+<li><b>Prometheus</b>: open-source systems monitoring and alerting toolkit.</li>
+<li><b>Grafana</b>: open-source web interface for analytics and monitoring.</li>
+</ol>
+<p>The lecture's Grafana dashboard shows Prometheus metrics during the stress test.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="oral" class="ds-oral">
+<h2>For the oral</h2>
+<details><summary>What does “declarative” buy over a deployment script?</summary>
+<p>A script encodes a path from a known state; a declaration encodes the target, and a loop converges to it from <em>any</em> state, so first deployment, crash and lost node share one code path.</p></details>
+<details><summary>A node hosting 2 of your 5 replicas dies. What happens?</summary>
+<p>Heartbeats stop; the node goes NotReady and, after a toleration period, its Pods are evicted. The ReplicaSet sees 3/5 and creates 2; the scheduler binds them where there is room (or they stay Pending); once ready, the Service routes to them. The other 3 are untouched.</p></details>
+<details><summary>Why can the backend scale to 10 but Redis cannot, just by changing a number?</summary>
+<p>The backend is stateless, so replicas are interchangeable. Several Redis Pods would be independent counters unless they replicate, and then Ch. 5's consistency choices and CAP apply. A StatefulSet gives identity and storage, not consistency.</p></details>
+<details><summary>Where is consensus in Kubernetes?</summary>
+<p>In etcd (Raft). Controllers never agree with each other: each reconciles its own objects through the API server, so only the stored desired state needs agreement.</p></details>
+</section>
+
+<div class="ds-project"><span class="ds-label">Project lens · Thunk</span>
+<ul>
+<li><b>Two levels of recovery.</b> Kubernetes restarts a crashed worker <em>process</em>; the tasks it held are gone. Recovering the <em>computation</em> is Thunk's re-execution of lost work, which purity makes safe.</li>
+<li><b>Peers need stable names.</b> BEAM nodes connect by name, but Deployment Pods get random names and changing IPs. A StatefulSet with a headless Service gives each worker a stable hostname.</li>
+<li><b>Two kinds of balancing.</b> A Service spreads client <em>requests</em>; work stealing balances <em>work</em>.</li>
+<li><b>Autoscaling fits work stealing.</b> A new worker starts idle and steals at once. Scale-down kills Pods that may hold tasks: hand them back on SIGTERM or rely on re-execution, and make termination detection tolerate the departure.</li>
+</ul></div>
+
+<details class="ds-coverage"><summary>Slide coverage: where each slide section went</summary>
+<table>
+<thead><tr><th>Slides</th><th>Content</th><th>Here</th></tr></thead>
+<tbody>
+<tr><td>CX · Motivations, Premises</td><td>Four motivations; containerisation</td><td><a href="#production">§1</a>, <a href="#containers">§2</a></td></tr>
+<tr><td>CX · Introduction, Swarm I–II</td><td>Is / is not; six-point comparison</td><td><a href="#containers">§2</a></td></tr>
+<tr><td>CX · Key features I–II</td><td>Immutability; declarative config</td><td><a href="#control-loop">§3</a></td></tr>
+<tr><td>CX · Key features III–IV</td><td>Autoscaling; self-healing</td><td><a href="#scaling">§7</a></td></tr>
+<tr><td>CX · Key features V</td><td>CRI</td><td><a href="#cluster">§4</a></td></tr>
+<tr><td>CX · Architecture I–II</td><td>Control plane; nodes</td><td><a href="#cluster">§4</a></td></tr>
+<tr><td>CX · Objects I–II</td><td>Record of intent; spec/status</td><td><a href="#control-loop">§3</a></td></tr>
+<tr><td>CX · Objects III … Pods IV</td><td>Manifests; Pods; resources</td><td><a href="#objects">§5</a></td></tr>
+<tr><td>CX · ReplicaSets … Services II</td><td>Workloads; Services</td><td><a href="#objects">§5</a></td></tr>
+<tr><td>CX · Example … Migrating VIII</td><td>Compose, manifests, HPA, Kompose, Minikube</td><td><a href="#demo">§6</a></td></tr>
+<tr><td>CX · Stress testing I–IV</td><td>Load test, HPA reaction</td><td><a href="#scaling">§7</a></td></tr>
+<tr><td>CX · System monitoring I–III</td><td>Observability; Prometheus, Grafana</td><td><a href="#observability">§8</a></td></tr>
+</tbody></table></details>
+
+<nav class="lk-chnav" aria-label="Chapter navigation">
+  <a href="ch-08-modelling.html">&larr; 8 · Modelling: architectures and process algebra</a>
+  <a href="index.html">Course index</a>
+  <a href="project.html">Project companion &rarr;</a>
+</nav>
+<footer class="lk-foot">Distributed Systems · University of Bologna · built from the slides of Andrea Omicini (DISI), A.Y. 2025/26. Personal study notes, not an official source.</footer>
+
+<script src="assets/lesson-kit.js"></script>
+<script>
+(function () {
+  'use strict';
+  /* ---------- Instrument 1: annotated manifest ---------- */
+  var D = 'Deployment metadata: the object\'s own name and labels. They identify the Deployment itself; they do not select anything.';
+  var T = 'Pod template: every Pod the ReplicaSet creates is stamped from this block. Changing anything in it (e.g. the image) creates a new ReplicaSet and starts a rollout.';
+  var C = 'Container spec: what the kubelet asks the container runtime (via the CRI) to run.';
+  var R = 'resources: requests are what the scheduler reserves on a node and what the HPA\'s utilisation percentages are relative to; limits are hard caps (CPU above the limit is throttled, memory above it gets the container OOM-killed).';
+  var E = 'Environment variables, the same two the Compose file set. "redis" resolves through cluster DNS to the Service named redis, so app.py needs no change.';
+  var S = 'Service ports: clients connect to port; traffic is forwarded to targetPort on a selected Pod. Here both are 3000, like the Compose mapping 3000:3000.';
+  if (window.LessonKit) LessonKit.annotatedCode('#k8-manifest', { lang: 'yaml', lines: [
+    ['apiVersion: apps/v1', 'Deployments live in the apps API group, version v1. Pods and Services are in the core group, written just v1.'],
+    ['kind: Deployment', 'The kind decides which controller acts on this object: the Deployment controller in kube-controller-manager.'],
+    ['metadata:', D], ['  name: backend', D], ['  labels:', D], ['    app: backend', D],
+    ['spec:', 'From here on: the desired state. Kubernetes fills a separate status field with what it observes; you never write status.'],
+    ['  replicas: 1', 'Desired number of Pods. The HPA overwrites this field at run time (min 1, max 10). If you re-apply the file with the HPA active, you reset it to 1 and the HPA scales it back up.'],
+    ['  selector:', 'How the Deployment (and its ReplicaSet) recognises its Pods: by label, not by name. Immutable after creation.'],
+    ['    matchLabels:', 'Every Pod carrying all these labels counts as one of ours.'],
+    ['      app: backend', 'Must match the template labels below, or the API server rejects the Deployment: it would create Pods it cannot count.'],
+    ['  template:', T], ['    metadata:', T], ['      labels:', T],
+    ['        app: backend', 'The label stamped on every Pod. The Deployment selector and the Service selector both find the Pods through it.'],
+    ['    spec:', 'The Pod spec: the same fields as a stand-alone Pod manifest.'],
+    ['      containers:', 'A list: one entry here, the most common use of a Pod.'],
+    ['        - name: backend', C],
+    ['          image: mala1180/kubernetes-example-backend:latest', 'The image pushed to Docker Hub from the Compose build. A moving tag like :latest has a catch: re-applying the same text changes nothing in the spec, so no rollout starts. Versioned tags make each release a new desired state.'],
+    ['          imagePullPolicy: Always', 'Pull the image every time a container starts, so :latest really is the latest. Kompose generates it from the label kompose.image-pull-policy: always.'],
+    ['          ports:', C], ['            - containerPort: 3000', 'The port Flask listens on (app.run(port=3000)). Informational for Kubernetes; the Service targetPort is what routes traffic.'],
+    ['          env:', E], ['            - name: REDIS_HOST', E], ['              value: "redis"', E], ['            - name: REDIS_PORT', E], ['              value: "6379"', 'Environment values are strings, hence the quotes around the number.'],
+    ['          resources:', R], ['            requests:', R],
+    ['              memory: "128Mi"', '128 mebibytes = 134,217,728 bytes (about 134 MB) reserved for the container.'],
+    ['              cpu: "100m"', '100 millicpu = 0.1 CPU reserved. The HPA target of 50% means 50m per Pod on average.'],
+    ['            limits:', R],
+    ['              memory: "256Mi"', 'Hard memory cap: exceed it and the container is OOM-killed, then restarted by the kubelet.'],
+    ['              cpu: "200m"', 'CPU cap: 0.2 CPU. Under /busy-wait a Pod saturates here, reporting 200% of its request, which is what drives the HPA to scale out.'],
+    ['---', 'YAML document separator: two objects in one file. kubectl apply -f accepts both.'],
+    ['apiVersion: v1', 'Services are in the core API group.'],
+    ['kind: Service', 'A stable name and virtual IP in front of a changing set of Pods. kube-proxy on every node implements the forwarding.'],
+    ['metadata:', 'The Service name becomes its DNS name inside the cluster: backend.'], ['  name: backend', 'The Service name becomes its DNS name inside the cluster: backend.'],
+    ['  labels:', 'Labels on the Service itself (for grouping and queries); not the selector.'], ['    app: backend', 'Labels on the Service itself (for grouping and queries); not the selector.'],
+    ['spec:', 'The desired state of the Service.'],
+    ['  type: NodePort', 'Exposed on a static port of every node, so it is reachable from outside the cluster (minikube service backend opens it). ClusterIP would be internal only; Redis needs no more than that.'],
+    ['  ports:', S], ['    - port: 3000', S], ['      targetPort: 3000', S], ['      protocol: TCP', S],
+    ['  selector:', 'Which Pods receive traffic: all ready Pods with these labels, whichever ReplicaSet or version created them. During a rollout both old and new Pods serve.'],
+    ['    app: backend', 'Matches the template label above. A typo here gives a Service with zero endpoints: it exists, and every request fails.']
+  ] });
+
+  /* ---------- Instrument 2: reconciliation loop simulator ---------- */
+  var host = document.getElementById('k8-sim');
+  if (!host) return;
+  var CAP = 4, REQ = 100, LIM = 200, TARGET = 50, HPA_MIN = 1, HPA_MAX = 10, GRACE = 2, DEADLINE = 6, DOWN_WINDOW = 3;
+  var HASH = { v1: '5d8f', v2: '7c4b', v3: '9e2a' };
+  var S2, timer = null, seed = 7;
+  function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
+  function sfx() { var c = 'abcdefghjkmnpqrstvwxz23456789', s = ''; for (var i = 0; i < 3; i++) s += c[Math.floor(rnd() * c.length)]; return s; }
+  function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function button(txt, cls) { var b = el('button', cls == null ? 'ds-btn' : cls, txt); b.type = 'button'; return b; }
+
+  function newPod(v, st, node) { return { id: 'backend-' + HASH[v] + '-' + sfx(), v: v, st: st, node: node, restarts: 0 }; }
+  function reset() {
+    seed = 7;
+    S2 = { t: 0, log: [],
+      nodes: [0, 1, 2].map(function (i) { return { name: 'node-' + (i + 1), up: true, ready: true, downAt: null }; }),
+      pods: [], rs: { v1: 3 }, dep: { replicas: 3, v: 'v1', prev: null, surge: 1, unav: 0, rolling: false, lastKey: '', lastProg: 0, stalled: false },
+      hpa: { on: false, load: 400, low: 0, note: '' } };
+    for (var i = 0; i < 3; i++) S2.pods.push(newPod('v1', 'Running', i));
+    say('sys', 'Deployment backend: 3 replicas of image v1, all Running.');
+  }
+  function say(who, msg) { S2.log.push({ t: S2.t, who: who, msg: msg }); if (S2.log.length > 60) S2.log.shift(); }
+  function live(p) { return p.st !== 'Terminating'; }
+  function podsOf(v) { return S2.pods.filter(function (p) { return p.v === v && live(p); }); }
+  function readyPods() { return S2.pods.filter(function (p) { return p.st === 'Running'; }); }
+  function onNode(i) { return S2.pods.filter(function (p) { return p.node === i; }); }
+
+  function tick() {
+    S2.t++;
+    var t = S2.t, N = S2.nodes;
+    // 1. kubelets (only on nodes that are up)
+    var gone = [];
+    S2.pods.forEach(function (p) {
+      if (p.node == null || !N[p.node].up) return;
+      if (p.st === 'Terminating') { gone.push(p); return; }
+      if (p.st === 'Creating') {
+        if (p.v === 'v3') { p.st = 'Crash'; p.restarts++; say('kubelet/' + N[p.node].name, p.id + ': container exits at start-up (CrashLoopBackOff). Never ready.'); }
+        else { p.st = 'Running'; say('kubelet/' + N[p.node].name, p.id + ' started and passes readiness: Running.'); }
+      } else if (p.st === 'Restarting') { p.st = 'Running'; say('kubelet/' + N[p.node].name, p.id + ': container restarted in place (restarts: ' + p.restarts + ').'); }
+      else if (p.st === 'Crash') { p.restarts++; }
+    });
+    S2.pods = S2.pods.filter(function (p) { return gone.indexOf(p) < 0; });
+    // 2. node controller
+    N.forEach(function (n, i) {
+      if (!n.up && n.ready) {
+        if (t - n.downAt >= GRACE) {
+          n.ready = false;
+          var ev = onNode(i);
+          S2.pods = S2.pods.filter(function (p) { return p.node !== i; });
+          say('node-controller', n.name + ': no heartbeat for ' + GRACE + ' rounds, marked NotReady; evicting its ' + ev.length + ' Pod(s) (the 5-minute eviction toleration is compressed here).');
+        } else say('node-controller', n.name + ': heartbeat missing; waiting out the grace period.');
+      }
+    });
+    // 3. scheduler
+    var unsched = 0;
+    S2.pods.forEach(function (p) {
+      if (p.st !== 'Pending') return;
+      var best = -1, load = 99;
+      N.forEach(function (n, i) { if (!n.ready || !n.up) return; var c = onNode(i).length; if (c < CAP && c < load) { best = i; load = c; } });
+      if (best < 0) { unsched++; return; }
+      p.node = best; p.st = 'Creating';
+      say('scheduler', 'bound ' + p.id + ' to ' + N[best].name + '.');
+    });
+    if (unsched) say('scheduler', unsched + ' Pod(s) unschedulable: no ready node has a free slot.');
+    // 4. HPA
+    if (S2.hpa.on) hpa();
+    // 5. Deployment controller
+    deployment();
+    // 6. ReplicaSet controller
+    Object.keys(S2.rs).forEach(function (v) {
+      var want = S2.rs[v], have = podsOf(v), diff = want - have.length;
+      if (diff > 0) {
+        for (var k = 0; k < diff; k++) S2.pods.push(newPod(v, 'Pending', null));
+        say('replicaset-controller', 'backend-' + HASH[v] + ': ' + have.length + '/' + want + ', created ' + diff + ' Pod(s).');
+      } else if (diff < 0) {
+        var order = { Pending: 0, Lost: 1, Crash: 2, Creating: 3, Restarting: 4, Running: 5 };
+        have.sort(function (a, b) { return order[a.st] - order[b.st]; });
+        for (k = 0; k < -diff; k++) { var p = have[k]; if (p.st === 'Pending' || p.st === 'Lost') S2.pods.splice(S2.pods.indexOf(p), 1); else p.st = 'Terminating'; }
+        say('replicaset-controller', 'backend-' + HASH[v] + ': ' + have.length + '/' + want + ', deleting ' + (-diff) + ' Pod(s).');
+      }
+    });
+    render();
+  }
+
+  function deployment() {
+    var d = S2.dep, v = d.v;
+    if (S2.rs[v] == null) S2.rs[v] = 0;
+    var olds = Object.keys(S2.rs).filter(function (k) { return k !== v; });
+    var oldLeft = olds.some(function (k) { return S2.rs[k] > 0 || podsOf(k).length; });
+    if (!oldLeft) {
+      if (S2.rs[v] !== d.replicas) { say('deployment-controller', 'scaled ReplicaSet backend-' + HASH[v] + ' to ' + d.replicas + '.'); S2.rs[v] = d.replicas; }
+      var newReady = readyPods().filter(function (p) { return p.v === v; }).length;
+      if (d.rolling && newReady >= d.replicas) { d.rolling = false; d.stalled = false; say('deployment-controller', 'rollout to ' + v + ' complete.'); }
+      return;
+    }
+    // rolling update
+    var all = 0; Object.keys(S2.rs).forEach(function (k) { all += S2.rs[k]; });
+    var maxTotal = d.replicas + d.surge;
+    if (all < maxTotal && S2.rs[v] < d.replicas) {
+      var up = Math.min(d.replicas - S2.rs[v], maxTotal - all);
+      S2.rs[v] += up; all += up;
+      say('deployment-controller', 'rollout: scaled new ReplicaSet backend-' + HASH[v] + ' up to ' + S2.rs[v] + ' (maxSurge ' + d.surge + ').');
+    }
+    var newReadyN = readyPods().filter(function (p) { return p.v === v; }).length;
+    var minAvail = d.replicas - d.unav;
+    var newUnavail = S2.rs[v] - newReadyN;
+    var canDown = all - minAvail - newUnavail;
+    // unhealthy old Pods never count as available: they can always go
+    olds.forEach(function (k) {
+      var bad = podsOf(k).filter(function (p) { return p.st !== 'Running'; }).length;
+      var healthy = podsOf(k).length - bad;
+      if (S2.rs[k] > healthy && bad) { var cut = Math.min(bad, S2.rs[k] - healthy); S2.rs[k] -= cut; all -= cut; canDown = all - minAvail - newUnavail; say('deployment-controller', 'rollout: dropped ' + cut + ' unready old Pod(s) of backend-' + HASH[k] + '.'); }
+    });
+    olds.forEach(function (k) {
+      if (canDown <= 0 || S2.rs[k] <= 0) return;
+      var down = Math.min(canDown, S2.rs[k]); S2.rs[k] -= down; canDown -= down;
+      say('deployment-controller', 'rollout: scaled old ReplicaSet backend-' + HASH[k] + ' down to ' + S2.rs[k] + ' (maxUnavailable ' + d.unav + ').');
+    });
+    var key = S2.rs[v] + ':' + newReadyN + ':' + olds.map(function (k) { return S2.rs[k]; }).join(',');
+    if (key !== d.lastKey) { d.lastKey = key; d.lastProg = S2.t; }
+    else if (!d.stalled && S2.t - d.lastProg >= DEADLINE) { d.stalled = true; say('deployment-controller', 'ProgressDeadlineExceeded: no progress for ' + DEADLINE + ' rounds. The rollout is stalled, not undone: run kubectl rollout undo.'); }
+  }
+
+  function hpa() {
+    var H = S2.hpa, r = readyPods().length, d = S2.dep;
+    if (!r) { H.note = 'No ready Pod reports metrics: the HPA waits.'; return; }
+    var per = Math.min(H.load / r, LIM), util = per / REQ * 100;
+    var want = Math.ceil(r * util / TARGET);
+    if (Math.abs(util / TARGET - 1) <= 0.1) want = r;
+    var clamped = Math.max(HPA_MIN, Math.min(HPA_MAX, want));
+    H.note = 'load ' + H.load + 'm over ' + r + ' ready Pod(s) → ' + Math.round(per) + 'm each' + (H.load / r > LIM ? ' (capped by the 200m limit)' : '') +
+      ' = ' + Math.round(util) + '% of the 100m request → desired ⌈' + r + ' × ' + Math.round(util) + ' / 50⌉ = ' + want + (clamped !== want ? ', clamped to ' + clamped : '') + '.';
+    if (clamped > d.replicas) { H.low = 0; say('hpa', 'CPU ' + Math.round(util) + '% > 50% target: replicas ' + d.replicas + ' → ' + clamped + '.'); d.replicas = clamped; }
+    else if (clamped < d.replicas) {
+      H.low++;
+      if (H.low >= DOWN_WINDOW) { H.low = 0; say('hpa', 'CPU ' + Math.round(util) + '% for ' + DOWN_WINDOW + ' rounds (stabilisation window): replicas ' + d.replicas + ' → ' + clamped + '.'); d.replicas = clamped; }
+    } else H.low = 0;
+  }
+
+  /* ---- UI ---- */
+  var ui = {};
+  function bar(tag) { var b = el('div', 'k8-bar'); b.appendChild(el('span', 'k8-tag', tag)); host.appendChild(b); return b; }
+  var b1 = bar('Loop');
+  ui.step = button('Step', 'ds-btn primary'); ui.run = button('Run'); ui.reset = button('Reset');
+  ui.tick = el('output'); b1.appendChild(ui.step); b1.appendChild(ui.run); b1.appendChild(ui.reset); b1.appendChild(el('span', 'k8-tag inl', 'round')); b1.appendChild(ui.tick);
+  var b2 = bar('Deployment');
+  ui.minus = button('−'); ui.plus = button('+'); ui.rep = el('output');
+  var lr = el('label'); lr.appendChild(document.createTextNode('replicas ')); lr.appendChild(ui.minus); lr.appendChild(ui.rep); lr.appendChild(ui.plus); b2.appendChild(lr);
+  function sel(label, opts, val) { var l = el('label', null, label + ' '), s = el('select'); opts.forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; s.appendChild(op); }); s.value = val; l.appendChild(s); return { l: l, s: s }; }
+  var img = sel('image', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3 (broken)']], 'v2'); b2.appendChild(img.l);
+  ui.setimg = button('kubectl set image'); ui.undo = button('kubectl rollout undo'); b2.appendChild(ui.setimg); b2.appendChild(ui.undo);
+  var su = sel('maxSurge', [['0', '0'], ['1', '1'], ['2', '2']], '1'), un = sel('maxUnavailable', [['0', '0'], ['1', '1'], ['2', '2']], '0');
+  b2.appendChild(su.l); b2.appendChild(un.l);
+  var b3 = bar('Failures');
+  ui.crash = button('Crash a container'); ui.del = button('Delete a Pod'); b3.appendChild(ui.crash); b3.appendChild(ui.del);
+  b3.appendChild(el('span', 'ds-muted', 'or use fail / restore on a node')).style.fontSize = '.78rem';
+  var b4 = bar('Autoscaler');
+  var seg = el('div', 'ds-seg'); ui.hoff = button('HPA off', ''); ui.hon = button('HPA on', ''); seg.appendChild(ui.hoff); seg.appendChild(ui.hon); b4.appendChild(seg);
+  var ll = el('label', null, 'busy-wait load '); ui.load = el('input'); ui.load.type = 'range'; ui.load.min = 0; ui.load.max = 1000; ui.load.step = 50; ui.load.value = 400; ui.loadv = el('output');
+  ll.appendChild(ui.load); ll.appendChild(ui.loadv); b4.appendChild(ll);
+  ui.verdict = el('div', 'ds-verdict'); ui.verdict.setAttribute('aria-live', 'polite'); host.appendChild(ui.verdict);
+  ui.rs = el('div', 'k8-rs'); host.appendChild(ui.rs);
+  ui.pending = el('div', 'k8-pending'); host.appendChild(ui.pending);
+  ui.nodes = el('div', 'k8-nodes'); host.appendChild(ui.nodes);
+  ui.out = el('div', 'ds-readout'); host.appendChild(ui.out);
+  ui.log = el('ol', 'k8-log'); ui.log.setAttribute('aria-label', 'Controller event log'); host.appendChild(ui.log);
+
+  function podChip(p) {
+    var b = button('', 'k8-pod ' + p.v + ' ' + p.st);
+    b.textContent = p.v + '·' + p.id.slice(-3);
+    var st = { Running: 'Running', Pending: 'Pending', Creating: 'Creating', Restarting: 'Restarting', Terminating: 'Terminating', Crash: 'CrashLoop', Lost: 'Unknown' }[p.st];
+    b.appendChild(el('small', null, st + (p.restarts ? ' ·r' + p.restarts : '')));
+    b.title = p.id + ' (' + st + '). Click to delete this Pod.';
+    b.setAttribute('aria-label', p.id + ', ' + st + ', click to delete');
+    b.addEventListener('click', function () { deletePod(p); });
+    return b;
+  }
+  function deletePod(p) {
+    if (!p || p.st === 'Terminating') return;
+    S2.pods.splice(S2.pods.indexOf(p), 1);
+    say('you', 'kubectl delete pod ' + p.id + '.');
+    render();
+  }
+  function render() {
+    var d = S2.dep, N = S2.nodes, rp = readyPods();
+    ui.tick.textContent = S2.t; ui.rep.textContent = d.replicas;
+    ui.minus.disabled = S2.hpa.on || d.replicas <= 0; ui.plus.disabled = S2.hpa.on || d.replicas >= 12;
+    ui.undo.disabled = !d.prev;
+    ui.hoff.setAttribute('aria-pressed', !S2.hpa.on); ui.hon.setAttribute('aria-pressed', S2.hpa.on);
+    ui.loadv.textContent = S2.hpa.load + 'm';
+    ui.rs.innerHTML = '';
+    Object.keys(S2.rs).forEach(function (v) {
+      var s = el('span'); s.innerHTML = 'ReplicaSet backend-' + HASH[v] + ' (' + v + '): <b>' + S2.rs[v] + '</b> wanted · ' + podsOf(v).length + ' exist · ' + rp.filter(function (p) { return p.v === v; }).length + ' ready';
+      ui.rs.appendChild(s);
+    });
+    ui.pending.innerHTML = ''; ui.pending.appendChild(el('span', null, 'unscheduled:'));
+    S2.pods.filter(function (p) { return p.node == null; }).forEach(function (p) { ui.pending.appendChild(podChip(p)); });
+    ui.nodes.innerHTML = '';
+    N.forEach(function (n, i) {
+      var box = el('div', 'k8-node' + (!n.up && n.ready ? ' silent' : '') + (!n.ready ? ' notready' : ''));
+      var hd = el('header'), nm = el('div'); nm.appendChild(el('b', null, n.name)); nm.appendChild(el('br'));
+      nm.appendChild(el('small', null, n.ready ? (n.up ? 'Ready · ' + onNode(i).length + '/' + CAP : 'no heartbeat…') : 'NotReady'));
+      var fb = button(n.up ? 'fail' : 'restore');
+      fb.setAttribute('aria-label', (n.up ? 'Fail ' : 'Restore ') + n.name);
+      fb.addEventListener('click', function () { n.up ? failNode(i) : restoreNode(i); });
+      hd.appendChild(nm); hd.appendChild(fb); box.appendChild(hd);
+      var pods = el('div', 'k8-pods'); onNode(i).forEach(function (p) { pods.appendChild(podChip(p)); }); box.appendChild(pods);
+      ui.nodes.appendChild(box);
+    });
+    // verdict
+    var live_ = S2.pods.filter(live).length, silent = S2.pods.filter(function (p) { return p.st === 'Lost'; }).length;
+    var converged = !d.rolling && rp.length === d.replicas && live_ === d.replicas && Object.keys(S2.rs).every(function (k) { return k === d.v || S2.rs[k] === 0; });
+    var vcls = 'ds-verdict', vtxt;
+    if (d.stalled) { vcls += ' bad'; vtxt = 'Rollout stalled (ProgressDeadlineExceeded): ' + rp.length + ' ready Pod(s) still serving. Nothing rolls back by itself.'; }
+    else if (converged) { vcls += ' ok'; vtxt = 'Converged: observed = desired (' + d.replicas + ' ready, image ' + d.v + ').'; }
+    else vtxt = 'Reconciling: desired ' + d.replicas + ' × ' + d.v + ', observed ' + rp.length + ' ready of ' + live_ + ' Pod(s)' + (d.rolling ? ' · rollout in progress' : '') + '.';
+    ui.verdict.className = vcls; ui.verdict.textContent = vtxt;
+    // readout: service + hpa
+    var ep = rp.length + silent, per = rp.length ? S2.hpa.load / rp.length : 0;
+    var txt = 'Service <code>backend</code> → <b>' + ep + '</b> endpoint(s)' + (silent ? ', of which <span class="bad">' + silent + ' on a silent node</span>: requests to them time out until the node controller reacts' : '') + '. ';
+    if (!rp.length) txt += '<span class="bad">No ready Pod: every request fails.</span> ';
+    else if (S2.hpa.load && per > LIM) txt += '<span class="bad">Saturated</span>: each ready Pod would need ' + Math.round(per) + 'm but is capped at 200m; requests queue and the page stops responding. ';
+    else if (S2.hpa.load) txt += '<span class="ok">Responsive</span>: ' + Math.round(per) + 'm CPU per ready Pod. ';
+    txt += S2.hpa.on ? '<br>HPA: ' + (S2.hpa.note || 'evaluates on the next round.') : '<br>HPA off: replicas stay where you put them.';
+    ui.out.innerHTML = txt;
+    ui.log.innerHTML = '';
+    S2.log.slice(-40).reverse().forEach(function (e) {
+      var li = el('li'); li.appendChild(el('span', 't', '[' + e.t + '] '));
+      li.appendChild(el('span', e.who === 'you' ? 'you' : 'who', e.who + ': ')); li.appendChild(document.createTextNode(e.msg)); ui.log.appendChild(li);
+    });
+  }
+  function failNode(i) {
+    var n = S2.nodes[i]; n.up = false; n.downAt = S2.t;
+    onNode(i).forEach(function (p) { p.st = 'Lost'; });
+    say('you', n.name + ' powered off. Its kubelet stops reporting; its Pods are now Unknown.'); render();
+  }
+  function restoreNode(i) {
+    var n = S2.nodes[i], wasReady = n.ready; n.up = true; n.ready = true; n.downAt = null;
+    onNode(i).forEach(function (p) { if (p.st === 'Lost') p.st = 'Running'; });
+    say('you', n.name + ' back online' + (wasReady ? ' within the grace period: its Pods resume, nothing was replaced.' : ' as an empty Ready node. Nothing moves back to it.')); render();
+  }
+  ui.step.addEventListener('click', tick);
+  ui.run.addEventListener('click', function () {
+    if (timer) { clearInterval(timer); timer = null; ui.run.textContent = 'Run'; }
+    else { timer = setInterval(tick, 900); ui.run.textContent = 'Pause'; tick(); }
+  });
+  ui.reset.addEventListener('click', function () { reset(); img.s.value = 'v2'; su.s.value = '1'; un.s.value = '0'; ui.load.value = 400; render(); });
+  ui.minus.addEventListener('click', function () { S2.dep.replicas--; say('you', 'kubectl scale deployment backend --replicas=' + S2.dep.replicas + '.'); render(); });
+  ui.plus.addEventListener('click', function () { S2.dep.replicas++; say('you', 'kubectl scale deployment backend --replicas=' + S2.dep.replicas + '.'); render(); });
+  ui.setimg.addEventListener('click', function () {
+    var v = img.s.value, d = S2.dep; if (v === d.v) { say('you', 'image is already ' + v + ': the spec is unchanged, so nothing happens.'); render(); return; }
+    d.prev = d.v; d.v = v; d.rolling = true; d.stalled = false; d.lastKey = ''; d.lastProg = S2.t;
+    say('you', 'kubectl set image deployment/backend backend=…:' + v + '. New desired state, new ReplicaSet backend-' + HASH[v] + '.'); render();
+  });
+  ui.undo.addEventListener('click', function () {
+    var d = S2.dep; if (!d.prev) return; var back = d.prev; d.prev = d.v; d.v = back; d.rolling = true; d.stalled = false; d.lastKey = ''; d.lastProg = S2.t;
+    img.s.value = back;
+    say('you', 'kubectl rollout undo deployment/backend: the template goes back to ' + back + '. The undo is itself a rollout.'); render();
+  });
+  function knobs(e) {
+    var s = +su.s.value, u = +un.s.value;
+    if (!s && !u) { say('sys', 'Rejected by the API server: maxSurge and maxUnavailable cannot both be 0 (the rollout could never make progress).'); su.s.value = S2.dep.surge; un.s.value = S2.dep.unav; render(); return; }
+    S2.dep.surge = s; S2.dep.unav = u; render();
+  }
+  su.s.addEventListener('change', knobs); un.s.addEventListener('change', knobs);
+  ui.crash.addEventListener('click', function () {
+    var rp = readyPods(); if (!rp.length) return; var p = rp[Math.floor(rnd() * rp.length)];
+    p.st = 'Restarting'; p.restarts++; say('you', 'container in ' + p.id + ' exited. The Pod object still exists, so this is the kubelet\'s job, not the ReplicaSet\'s.'); render();
+  });
+  ui.del.addEventListener('click', function () { var rp = readyPods(); if (rp.length) deletePod(rp[Math.floor(rnd() * rp.length)]); });
+  ui.hoff.addEventListener('click', function () { S2.hpa.on = false; S2.hpa.note = ''; say('you', 'HPA deleted. spec.replicas stays at ' + S2.dep.replicas + '.'); render(); });
+  ui.hon.addEventListener('click', function () { if (S2.hpa.on) return; S2.hpa.on = true; S2.hpa.low = 0; say('you', 'kubectl apply -f backend-hpa.yaml (min 1, max 10, CPU 50%). The HPA now owns spec.replicas.'); render(); });
+  ui.load.addEventListener('input', function () { S2.hpa.load = +ui.load.value; render(); });
+  reset(); render();
+})();
+</script>
+</body>
+</html>
