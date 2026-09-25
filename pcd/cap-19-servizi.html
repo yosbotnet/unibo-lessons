@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 19 — Oggetti distribuiti, servizi e middleware · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-18-algoritmi-distribuiti.html">&larr; Cap. 18 — Algoritmi distribuiti</a>
+    <a href="index.html">Indice</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte IV — Sistemi distribuiti · Capitolo 19</div>
+    <h1>Oggetti distribuiti, servizi e middleware</h1>
+    <div class="lk-meta"><span>~25 min di lettura</span><span>esempi Java RMI e RabbitMQ</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Middleware e trasparenza</a></li>
+      <li><a href="#s2">Perché la trasparenza non basta</a></li>
+      <li><a href="#s3">Java RMI</a></li>
+      <li><a href="#s4">Middleware orientati ai messaggi</a></li>
+      <li><a href="#s5">Servizi e architetture orientate ai servizi</a></li>
+      <li><a href="#s6">Web service: SOAP, WSDL e REST</a></li>
+      <li><a href="#s7">Microservizi e stili architetturali</a></li>
+      <li><a href="#s8">Cloud: dall'infrastruttura alle funzioni</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> Per programmare sistemi distribuiti si è prima cercato di nascondere la rete: chiamate di procedura remote, oggetti distribuiti, Java RMI. Ma guasti parziali e latenza non si nascondono, e l'idea di trasparenza è caduta. Sono rimasti i middleware, in particolare quelli a messaggi (MOM), che disaccoppiano i processi con code e publish/subscribe, e i servizi: componenti autonomi raggiungibili in rete tramite un contratto. Dai web service SOAP e REST si arriva ai microservizi, e il cloud offre infrastruttura, piattaforme, software e funzioni «as a service», pagando per l'uso invece di comprare in anticipo.</p>
+
+  <section id="s1">
+    <h2>1. Middleware e trasparenza</h2>
+
+    <p>Un <strong>middleware</strong> è uno strato software tra il sistema operativo e le applicazioni distribuite. Gira sui nodi con una vita propria, indipendente dalle applicazioni che lo usano, e offre loro servizi come la comunicazione, i nomi per trovare le risorse, la persistenza, così che le parti di un'applicazione interagiscano senza scendere al livello di socket e protocolli. Può essere a sua volta distribuito su un cluster, installato in casa o usato come servizio nel cloud.</p>
+
+    <p>Il modello canonico del <a href="cap-17-distribuiti.html#s1">capitolo 17</a> sono processi che si scambiano messaggi. La tentazione storica è stata continuare a programmare con il paradigma noto e lasciare al middleware il compito di rendere <strong>trasparente</strong> la distribuzione.</p>
+    <ul>
+      <li><strong>Remote Procedure Call</strong> (anni '80). Il programma chiama una procedura che si trova su un altro nodo come se fosse locale. Un <em>proxy</em> (o <em>stub</em>) lato client impacchetta i parametri (<em>marshalling</em>) e li spedisce via TCP o UDP; dall'altra parte uno <em>skeleton</em> li spacchetta, esegue la procedura e rimanda il risultato.</li>
+      <li><strong>Distributed object computing</strong> (anni '80–'90). Lo stesso schema con gli oggetti: si invocano metodi su oggetti che vivono in un altro processo. CORBA aggiunge l'interoperabilità tra linguaggi diversi, Microsoft propone DCOM, Java aggiunge <strong>RMI</strong> nel 1997, con il JDK 1.1.</li>
+    </ul>
+    <p>La comunicazione può essere <strong>transitoria</strong>, solo tra processi in esecuzione nello stesso momento (socket, RPC, RMI e CORBA, MPI), oppure <strong>persistente</strong>: i messaggi restano nel middleware finché il destinatario non li preleva, come nelle code dei MOM (<a href="#s4">sezione 4</a>).</p>
+
+    <h3>Write once, run anywhere?</h3>
+    <p>Lo slogan di Java promette una trasparenza simile rispetto alla piattaforma: il bytecode gira uguale su ogni JVM. Regge per il codice sequenziale, non con i thread. I thread Java poggiano su quelli del sistema operativo, quindi scheduling, priorità, numero massimo di thread e memoria dipendono dal sistema: un programma che crea molti thread può fermarsi su un sistema operativo e non su un altro. E l'interleaving cambia da macchina a macchina, per cui una race condition mai vista su un computer può comparire su un altro con più core o uno scheduler diverso. La correttezza di un programma concorrente non può dipendere dalla piattaforma su cui è stato provato (<a href="cap-10-java.html">capitolo 10</a>).</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Perché la trasparenza non basta</h2>
+
+    <p>L'articolo <em>A Note on Distributed Computing</em> (Waldo et al., 1994) spiega perché applicare l'OOP al distribuito astraendo dalla distribuzione non funziona. Gli argomenti sono due.</p>
+    <p><strong>I guasti parziali.</strong> Se durante una chiamata <code>c.inc()</code> la rete cade, il chiamante deve saperlo. Ma per il dominio <code>inc()</code> non ha motivo di sollevare eccezioni: bisogna aggiungerne una estranea al dominio (in Java <code>RemoteException</code>) e il codice per gestirla. Lo stesso codice non funziona quindi identico in locale e in remoto: il caso locale è un caso particolare del distribuito, non il contrario. Con gli attori il problema non si pone, perché <code>send</code> non ha mai promesso che il messaggio arrivi: se serve una conferma, fa parte del protocollo.</p>
+    <p><strong>La latenza.</strong> Una chiamata locale costa un microsecondo o meno, una remota da un millisecondo in LAN a centinaia nel cloud: almeno tre ordini di grandezza in più. Trattare allo stesso modo le interazioni tra oggetti vicini e tra oggetti su nodi diversi ignora il <strong>principio di località</strong>. E con chiamate tutte sincrone, catene di chiamate che attraversano i nodi e tornano indietro portano facilmente a deadlock.</p>
+    <p>Le Lab Notes sui MOM riassumono i problemi dell'RPC tradizionale in quattro punti: <strong>accoppiamento stretto</strong> (ogni cambio di interfaccia va propagato a tutti), <strong>affidabilità</strong> (il modello sincrono reagisce male ai guasti), <strong>scalabilità</strong> (le chiamate bloccanti pesano sulle prestazioni), <strong>disponibilità</strong> (entrambi i partecipanti devono essere attivi). La direzione è quindi il controllo decentralizzato e l'interazione asincrona: message passing, attori, middleware a messaggi. Hewitt pensò gli attori (1973) proprio per il distribuito; Ricci li paragona all'assembly del distribuito, una base su cui costruire astrazioni più alte. RMI resta utile come mattone per altri middleware, non come modello generale.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Java RMI</h2>
+
+    <p><strong>Java RMI</strong> (Remote Method Invocation) permette a un thread di una JVM di invocare un metodo su un oggetto che vive in un'altra JVM, anche su un altro nodo, con la sintassi di una chiamata locale. È il middleware del secondo esercizio dell'assignment 4, il tris distribuito, discusso nella <a href="prep-assignment-04.html">pagina di preparazione</a>.</p>
+    <ul>
+      <li>Un <strong>oggetto remoto</strong> implementa un'interfaccia che estende <code>java.rmi.Remote</code>, un'interfaccia marcatore vuota. <strong>Ogni metodo</strong> dell'interfaccia dichiara <code>throws RemoteException</code>, anche quando per il dominio non avrebbe senso: la trasparenza non è completa. L'implementazione è una classe normale.</li>
+      <li>Il server crea l'oggetto, lo <strong>esporta</strong> con <code>UnicastRemoteObject.exportObject</code>, che restituisce lo <strong>stub</strong> (il proxy per i client), e registra lo stub con un nome nel <strong>registry</strong>.</li>
+      <li>Il registry è il servizio di nomi: <code>rmiregistry</code> deve girare su ogni nodo che ospita oggetti remoti e vederne le classi (il modo più semplice è lanciarlo da <code>target/classes</code>), oppure si avvia dal programma con <code>LocateRegistry.createRegistry</code>. Se manca, la registrazione fallisce con <em>connection refused</em>.</li>
+      <li>Il client prende il registry dell'host remoto, fa <code>lookup</code> per nome e un cast all'interfaccia (nessun controllo di tipo alla registrazione), poi chiama i metodi come se l'oggetto fosse locale.</li>
+    </ul>
+<pre><code class="language-java">// Interfacce remote: estendono Remote, ogni metodo dichiara RemoteException
+public interface Counter extends Remote {
+  void inc() throws RemoteException;
+  int getValue() throws RemoteException;
+  void addListener(CounterListener l) throws RemoteException;
+}
+public interface CounterListener extends Remote {
+  void countIncremented(int value) throws RemoteException;
+}
+
+// Implementazione: una classe normale. Il runtime RMI la chiama da più thread.
+public class CounterImpl implements Counter {
+  private int value;
+  private final List&lt;CounterListener&gt; listeners = new ArrayList&lt;&gt;();
+
+  public void inc() {
+    int v; List&lt;CounterListener&gt; ls;
+    synchronized (this) { v = ++value; ls = List.copyOf(listeners); }
+    for (var l : ls) {                      // callback remote, fuori dal lock
+      try { l.countIncremented(v); } catch (RemoteException e) { /* client irraggiungibile */ }
+    }
+  }
+  public synchronized int getValue() { return value; }
+  public synchronized void addListener(CounterListener l) { listeners.add(l); }
+}
+
+// Server: esporta l'oggetto (ottiene lo stub) e lo registra con un nome
+var stub = (Counter) UnicastRemoteObject.exportObject(new CounterImpl(), 0);
+LocateRegistry.getRegistry().rebind("countObj", stub);
+
+// Client: cerca per nome, poi usa l'oggetto come se fosse locale
+class MyListener implements CounterListener {
+  public void countIncremented(int v) { System.out.println("nuovo valore: " + v); }
+}
+var c = (Counter) LocateRegistry.getRegistry(host).lookup("countObj");
+var me = (CounterListener) UnicastRemoteObject.exportObject(new MyListener(), 0);
+c.addListener(me);     // passa uno stub: il server potrà richiamare il client
+c.inc();               // sincrona: il thread aspetta la risposta dalla rete</code></pre>
+
+    <ul>
+      <li><strong>La chiamata è sincrona.</strong> Il thread del client resta bloccato finché il risultato non torna. Lo stub solleva <code>RemoteException</code> se il nodo non è raggiungibile, ma anche se la connessione cade a richiesta già partita.</li>
+      <li><strong>Il passaggio dei parametri.</strong> Un oggetto normale passa <em>per valore</em>: viene serializzato e dall'altra parte arriva una copia, che le modifiche remote non toccano. La sua classe deve implementare <code>Serializable</code>; se non lo fa, né il compilatore né il registry se ne accorgono e l'errore (<code>MarshalException</code>) arriva alla chiamata. Un oggetto <em>remoto</em> esportato passa invece <em>per riferimento</em>, perché viaggia il suo stub: così il server richiama il client (pattern observer), e nel tris un giocatore riceve la mossa dell'avversario.</li>
+      <li><strong>La concorrenza lato server.</strong> RMI serve le richieste con un pool di thread, che possono eseguire in parallelo metodi dello stesso oggetto. L'oggetto remoto è stato condiviso e va protetto come un <a href="cap-07-monitor.html">monitor</a>. È un componente passivo: il flusso di controllo viene dai thread dei client e di RMI.</li>
+    </ul>
+  </section>
+
+  <section id="s4">
+    <h2>4. Middleware orientati ai messaggi</h2>
+
+    <p>Un <strong>MOM</strong> (Message-Oriented Middleware) è qualunque infrastruttura middleware che offre messaggistica: i client inviano e ricevono messaggi da altri client, con garanzie di affidabilità, sicurezza e prestazioni. È un pilastro dei sistemi enterprise e può essere centralizzato o distribuito. Rispetto all'RPC rende i messaggi espliciti, l'interazione <strong>asincrona</strong> e la comunicazione <strong>persistente</strong>: il middleware sta in mezzo e disaccoppia i partecipanti.</p>
+
+    <details>
+      <summary>Dalle slide: concetti di base, interfaccia delle code e combinazioni di persistenza e sincronia</summary>
+      <p><strong>Concetti di base:</strong> <em>canali</em> (il mezzo di comunicazione), <em>messaggi</em> (i dati scambiati), <em>pipes and filters</em> (stadi di elaborazione dei messaggi), <em>routing</em> (composizione dei canali), <em>trasformazione</em> (conversione tra formati di dati eterogenei), <em>endpoint</em> (il collegamento di un'applicazione a un canale).</p>
+      <p><strong>Interfaccia di una coda persistente:</strong> <code>put</code> aggiunge un messaggio alla coda; <code>get</code> si blocca finché la coda è vuota, poi rimuove il primo messaggio; <code>poll</code> controlla la coda e rimuove il primo messaggio senza bloccarsi mai; <code>notify</code> installa un gestore chiamato quando arriva un messaggio.</p>
+      <p><strong>Persistenza e sincronia:</strong> (a) persistente asincrona; (b) persistente sincrona; (c) transitoria asincrona; (d) transitoria sincrona basata sulla ricevuta (il mittente riprende quando il messaggio è accettato dal sistema); (e) transitoria sincrona basata sulla consegna (riprende quando il messaggio è consegnato al destinatario); (f) transitoria sincrona basata sulla risposta (riprende quando arriva la risposta, come in RPC).</p>
+    </details>
+
+    <table>
+      <thead><tr><th>Benefici</th><th>Svantaggi</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Affidabilità</strong>, grazie alla persistenza dei messaggi nei nodi del MOM</td><td>interazioni asincrone più complesse da gestire</td></tr>
+        <tr><td><strong>Scalabilità</strong>: i sottosistemi si scalano indipendentemente, i picchi vengono assorbiti, il carico si bilancia</td><td>la coordinazione passa tutta per i messaggi</td></tr>
+        <tr><td><strong>Disponibilità</strong>: il sistema continua a funzionare anche se un partecipante è temporaneamente giù</td><td>garantire il corretto ordine degli eventi è responsabilità di chi usa il MOM</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Code, broker e modelli di messaggistica</h3>
+    <p>Il concetto fondamentale è la <strong>coda di messaggi</strong>, che conserva i messaggi sulla piattaforma. Le code si collegano tramite router oppure tramite <strong>broker</strong>, server che ricevono, conservano e smistano i messaggi. I modelli di messaggistica sono due:</p>
+    <ul>
+      <li><strong>Point-to-point</strong>: message passing asincrono puro; tipicamente più produttori depositano in una coda FIFO e ogni messaggio va a un solo consumatore.</li>
+      <li><strong>Publish/subscribe</strong>: diffusione tra produttori e consumatori che non si conoscono, uno-a-molti o molti-a-molti. I <em>publisher</em> pubblicano su un topic, i <em>subscriber</em> si abbonano ai topic che interessano, eventualmente con filtri.</li>
+    </ul>
+    <p>Il consumatore riceve in <strong>pull</strong>, interrogando il provider, o in <strong>push</strong>, facendosi inviare i messaggi appena arrivano. Il <strong>filtraggio</strong> seleziona i messaggi ricevuti da un canale; i <strong>namespace gerarchici</strong> permettono di abbonarsi al livello giusto di un albero di sotto-canali, utile con grandi volumi di messaggi. Come qualità del servizio un MOM offre le garanzie di consegna già viste per gli attori: at-least-once, at-most-once, exactly-once (<a href="cap-15-attori.html#s6">capitolo 15</a>).</p>
+
+    <h3>RabbitMQ</h3>
+    <p>Il laboratorio usa <strong>RabbitMQ</strong>, un broker open source (si avvia comodamente con Docker). Un produttore pubblica su un <em>exchange</em>, che smista i messaggi nelle code: l'exchange di default consegna alla coda con il nome indicato (point-to-point), <code>fanout</code> copia il messaggio in tutte le code collegate (publish/subscribe), <code>direct</code> instrada in base a una chiave esatta, <code>topic</code> anche con pattern come <code>kern.*</code>.</p>
+<pre><code class="language-java">var factory = new ConnectionFactory();
+factory.setHost("localhost");
+
+// Produttore: dichiara la coda e pubblica tramite l'exchange di default
+try (var conn = factory.newConnection(); var ch = conn.createChannel()) {
+  ch.queueDeclare("hello", false, false, false, null);
+  ch.basicPublish("", "hello", null, "Hello World!".getBytes(StandardCharsets.UTF_8));
+}
+
+// Consumatore (un altro processo): la connessione resta aperta,
+// la callback è eseguita da un thread del client RabbitMQ
+var conn = factory.newConnection();
+var ch = conn.createChannel();
+ch.queueDeclare("hello", false, false, false, null);
+DeliverCallback onMessage = (tag, delivery) ->
+    System.out.println(new String(delivery.getBody(), StandardCharsets.UTF_8));
+ch.basicConsume("hello", true, onMessage, tag -> {});   // autoAck = true</code></pre>
+    <p>Con più consumatori sulla stessa coda i messaggi si distribuiscono tra loro (<em>work queue</em>); con <code>autoAck = false</code> il consumatore conferma a mano con <code>basicAck</code> dopo aver elaborato, così un messaggio non confermato torna in coda se il consumatore cade. L'esercizio opzionale dell'assignment 4 chiede di costruire su un MOM un piccolo middleware per sezioni critiche distribuite, con gli algoritmi del <a href="cap-18-algoritmi-distribuiti.html#s2">capitolo 18</a>.</p>
+
+    <details>
+      <summary>Dalle slide: standard, implementazioni ed event broker</summary>
+      <p><strong>Implementazioni:</strong> WebSphere MQ (ex MQSeries), TIBCO, SonicMQ, Herald, Hermes, SIENA, Gryphon, JEDI, REBECCA, OpenJMS; open source: Apache ActiveMQ (supporta AMQP, MQTT, OpenWire, REST, RSS e Atom, Stomp, WSIF, WS Notification, XMPP), RabbitMQ, MQTT per l'IoT.</p>
+      <p><strong>Standard:</strong> AMQP (standard OASIS che definisce protocollo e formati, per implementazioni interoperabili), XMPP (protocollo per MOM basato su XML), JMS (Java Message Service), CORBA Event Service e Notification Service.</p>
+      <p><strong>Dai messaggi agli eventi.</strong> Un evento è la registrazione di qualcosa di rilevante accaduto nel business (una fattura ricevuta, una sala prenotata, un'assunzione). Un <em>message broker</em> cancella i messaggi dopo la conferma di consumo; un <em>event broker</em> mantiene invece un log ordinato, immutabile e append-only di fatti, conservati quanto serve, da cui ogni consumatore può rileggere da qualunque punto: una fonte unica di verità. Un event broker può fare da message broker, non il contrario. Gli event broker sono il cuore delle piattaforme di <em>event streaming</em>, per l'analisi dei dati sia batch sia in tempo reale; l'esempio è <strong>Apache Kafka</strong>, publish/subscribe con topic gestiti da broker organizzati in cluster, alta scalabilità e bassa latenza.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. Servizi e architetture orientate ai servizi</h2>
+
+    <p>I servizi sono oggi l'approccio principale ai sistemi distribuiti su Internet. Un <strong>servizio</strong> è un componente software fornito attraverso un endpoint raggiungibile in rete: un <strong>provider</strong> lo offre, dei <strong>consumer</strong> lo usano scambiando messaggi. Due visioni sono in concorrenza e in convergenza: la SOA dei «big» web service (lo stack WS-*), nata per l'enterprise, e i web service RESTful, che espongono risorse; a queste si aggiungono i microservizi.</p>
+
+    <p>Una <strong>SOA</strong> (Service-Oriented Architecture) separa le responsabilità scomponendo la logica di business in unità più piccole e distinte, che insieme formano una logica più grande, distribuita logicamente e fisicamente. I servizi sono <strong>autonomi</strong>, anche nei linguaggi e nelle tecnologie, e interoperano grazie a standard condivisi, interfacce e <strong>contratti</strong> tra chi offre e chi usa. La <strong>descrizione</strong> di un servizio serve a scoprirlo e funziona da contratto; la comunicazione avviene con messaggi, unità indipendenti.</p>
+
+    <p>La SOA è uno <strong>stile architetturale</strong>: definisce componenti, relazioni e vincoli su uso e interazioni. I componenti sono sei:</p>
+    <table>
+      <thead><tr><th>Componente</th><th>Che cos'è</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Servizio</strong></td><td>fornisce una funzione di business distinta, un blocco di logica a grana grossa, e implementa tutto ciò che promettono i contratti che espone</td></tr>
+        <tr><td><strong>Contratto</strong> (API)</td><td>l'insieme di tutti i messaggi supportati dal servizio</td></tr>
+        <tr><td><strong>Endpoint</strong></td><td>l'URI, l'indirizzo in cui il servizio si trova; a un endpoint si espone un contratto</td></tr>
+        <tr><td><strong>Messaggio</strong></td><td>l'unità di comunicazione: una richiesta HTTP, un messaggio SOAP…</td></tr>
+        <tr><td><strong>Policy</strong></td><td>termini e condizioni dinamici per usare il servizio, separati dalla logica e modificabili a run time: sicurezza (cifratura, autenticazione, autorizzazione), auditing, SLA</td></tr>
+        <tr><td><strong>Service consumer</strong></td><td>il componente che interagisce con il servizio tramite messaggi: un'applicazione client o un altro servizio</td></tr>
+      </tbody>
+    </table>
+
+    <p>Otto principi guidano il progetto. I servizi sono:</p>
+    <ul>
+      <li><strong>riusabili</strong>, progettati per il riuso anche se al momento non serve;</li>
+      <li><strong>legati da un contratto formale</strong>: per interagire non condividono nient'altro che un contratto che li descrive e fissa i termini dello scambio;</li>
+      <li><strong>debolmente accoppiati</strong>, senza dipendenze strette tra loro;</li>
+      <li><strong>astratti</strong>: dall'esterno si vede solo ciò che il contratto espone;</li>
+      <li><strong>componibili</strong>: un servizio può comporne altri, a più livelli di astrazione;</li>
+      <li><strong>autonomi</strong>: la loro logica sta dentro un confine esplicito, sotto il loro controllo;</li>
+      <li><strong>senza stato</strong> il più possibile, delegando lo stato altrove per restare disaccoppiati;</li>
+      <li><strong>scopribili</strong> (<em>discoverability</em>): la loro descrizione può essere trovata e capita da persone e da altri servizi che potrebbero usarli.</li>
+    </ul>
+
+    <p>Il beneficio principale è eliminare l'<strong>integrazione punto a punto</strong>. Le aziende crescono per sistemi isolati, uno per reparto, e ogni volta che due devono condividere dati nasce un collegamento ad hoc (database, file, ETL, chiamate dirette), fino a uno «spaghetti di integrazione» ingestibile. Con i servizi migliorano l'<strong>adattabilità</strong> (l'interno si cambia rispettando i contratti), la <strong>manutenibilità</strong> (team piccoli e dedicati) e la <strong>riusabilità</strong>, intesa come non buttare via tutto quando serve altro, non come «write once, integrate anywhere». I confini espliciti sostituiscono anche la «zuppa di oggetti». Per il business ne derivano sostituzione più facile dei componenti, time to market più breve, integrazione dei partner, meno downtime, SLA configurabili.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. Web service: SOAP, WSDL e REST</h2>
+
+    <h3>I «big» web service</h3>
+    <p>Un web service è una SOA con scelte tecnologiche precise: <strong>XML</strong>, <strong>SOAP</strong> e <strong>WSDL</strong>, più gli standard WS-* per sicurezza, affidabilità, trust e altre qualità del servizio. Obiettivo: interoperabilità tra middleware eterogenei e disaccoppiamento tra consumer e provider, che si scambiano documenti autocontenuti con pochissime ipotesi su chi li riceve. A differenza di RMI e CORBA non ci sono riferimenti a oggetti remoti, quindi nessun broker che gestisca uno spazio di indirizzi distribuito; si supportano sia lo stile RPC sia quello a messaggi.</p>
+    <ul>
+      <li><strong>SOAP</strong> è un linguaggio XML che definisce l'architettura e il formato dei <em>messaggi</em>: un elemento <code>Envelope</code> contiene un <code>Header</code> estensibile, per informazioni di infrastruttura come l'instradamento e la qualità del servizio (transazioni, sicurezza, affidabilità), e un <code>Body</code> con il contenuto. La struttura è descritta con XML Schema, così i motori SOAP ai due capi possono fare marshalling e unmarshalling.</li>
+      <li><strong>WSDL</strong> è il linguaggio XML che definisce l'<em>interfaccia</em>, cioè il contratto: il <code>portType</code> elenca le operazioni astratte con i loro messaggi di input e output, il <code>binding</code> le lega a un protocollo di trasporto e a un formato concreti, per esempio SOAP su HTTP. Gli endpoint si indicano con URI o con WS-Addressing.</li>
+    </ul>
+<pre><code class="language-xml">&lt;soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"&gt;
+  &lt;soap:Body&gt;
+    &lt;m:GetPrice xmlns:m="http://www.w3schools.com/prices"&gt;
+      &lt;m:Item&gt;Apples&lt;/m:Item&gt;
+    &lt;/m:GetPrice&gt;
+  &lt;/soap:Body&gt;
+&lt;/soap:Envelope&gt;</code></pre>
+    <p>Implementazioni: .NET WCF, la specifica JAX-WS (per esempio Apache Axis2), Eclipse Web Tools Platform.</p>
+
+    <h3>REST</h3>
+    <p><strong>REST</strong> (REpresentational State Transfer) è lo stile architetturale per sistemi ipermediali su larga scala introdotto da Roy Fielding nella tesi di dottorato: spiega la scalabilità di HTTP/1.0 e ha guidato il progetto di HTTP/1.1. Componenti debolmente accoppiati, indipendenti da tecnologie e piattaforme, comunicano tramite interfacce su protocolli web standard, con la semplicità come principio. Unendo architettura software e architettura di rete (banda, throughput, latenza) è adatto ai sistemi in cui conta la scalabilità, e i web service RESTful sono oggi lo standard di fatto delle API web.</p>
+    <p>In una SOA REST il <strong>contratto</strong> di un servizio si scompone in <strong>capability</strong>, una per funzione offerta, e tutti i servizi condividono un <strong>contratto uniforme</strong> di tre elementi:</p>
+    <ul>
+      <li><strong>sintassi degli identificatori di risorsa</strong>: gli URI HTTP, <code>{scheme}://{authority}{path}?{query}#{fragment}</code>, per esempio <code>http://customer.example.com/customer/C081</code>;</li>
+      <li><strong>metodi</strong>: quelli di HTTP, POST per creare una risorsa, GET per leggerne una rappresentazione, PUT per modificarla, DELETE per eliminarla;</li>
+      <li><strong>media type</strong>: il formato dei dati trasferiti, XML o JSON.</li>
+    </ul>
+    <table>
+      <thead><tr><th>Tipo di servizio</th><th>Confine funzionale</th><th>Esempio di capability</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Entity</strong></td><td>una o più entità di business (fattura, cliente…)</td><td><code>GET /invoice/{id}</code>, <code>PUT /invoice/{id}/date</code></td></tr>
+        <tr><td><strong>Task</strong></td><td>un compito di business; il nome contiene un verbo, poche capability per controllarlo</td><td><code>POST /start/{timesheet}</code> di ValidateTimesheet</td></tr>
+        <tr><td><strong>Utility</strong></td><td>capability correlate anche molto ampie, per esempio l'involucro di un sistema legacy</td><td><code>GET /employee/{id}</code> di HRSystem</td></tr>
+      </tbody>
+    </table>
+    <p>Basta qualunque libreria HTTP, ma esistono API dedicate come JAX-RS (implementata per esempio da Jersey e RESTEasy; Spring e Vert.x, citati nelle slide, offrono API REST proprie). Le interfacce si specificano con <strong>OpenAPI</strong>, nato da Swagger, che genera anche stub client e skeleton server; alternative sono RAML e Restlet. <strong>GraphQL</strong> lascia al client descrivere query flessibili, così le API evolvono più facilmente. Le API web sono ormai attese da ogni applicazione, anche perché permettono ai fornitori di sapere chi usa i servizi e di farsi pagare a chiamata.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Microservizi e stili architetturali</h2>
+
+    <p>I <strong>microservizi</strong> sono uno stile architetturale in cui una singola applicazione è una suite di piccoli servizi, ognuno nel proprio processo, che comunicano con meccanismi leggeri (API REST o messaggistica leggera). Sono costruiti attorno alle <strong>capacità di business</strong>, si rilasciano <strong>indipendentemente</strong> con deploy automatizzato, hanno una gestione centralizzata minima e possono usare linguaggi e database diversi. Anche i <strong>big web service</strong> sono servizi, ma standardizzano l'interoperabilità tra sistemi enterprise con uno stack pesante (SOAP, WSDL, WS-*); i microservizi scompongono <em>una</em> applicazione in servizi piccoli, con protocolli leggeri, deploy e dati indipendenti.</p>
+
+    <h3>Stili architetturali</h3>
+    <p>L'architettura di un sistema è l'insieme delle strutture necessarie per ragionarci: elementi software, relazioni e proprietà di entrambi (Bass et al.); serve a dividere il lavoro tra team e a soddisfare i requisiti di qualità. Uno <strong>stile architetturale</strong> definisce una famiglia di sistemi con lo stesso schema: il vocabolario di componenti e connettori e i vincoli su come combinarli (Garlan e Shaw). Le slide ne confrontano quattro:</p>
+    <table>
+      <thead><tr><th>Stile</th><th>Idea</th><th>Nota</th></tr></thead>
+      <tbody>
+        <tr><td><strong>A strati</strong></td><td>ogni strato ha responsabilità precise e dipende solo da quello sotto (o da quelli sotto); tipicamente presentazione, logica di business, persistenza</td><td>difetti: un solo strato di presentazione e uno di persistenza, mentre un'applicazione ha più client e più database; la logica dipende dalla persistenza e non si testa senza database</td></tr>
+        <tr><td><strong>Esagonale</strong></td><td>la logica di business al centro, con <em>porte</em> (in Java, interfacce) in ingresso (le API che espone) e in uscita (come chiama l'esterno); <em>adattatori</em> in ingresso e in uscita collegano il mondo esterno</td><td>la logica non dipende dagli adattatori, sono loro a dipendere da lei</td></tr>
+        <tr><td><strong>Monolitico</strong></td><td>la vista di implementazione è un solo componente, un unico eseguibile o WAR</td><td>la vista logica può comunque essere esagonale</td></tr>
+        <tr><td><strong>A microservizi</strong></td><td>la vista di implementazione è un insieme di componenti: i servizi; i connettori sono i protocolli di comunicazione</td><td>ogni servizio ha la propria architettura logica, tipicamente esagonale</td></tr>
+      </tbody>
+    </table>
+
+    <h3>API e interazioni</h3>
+    <p>L'API di un servizio espone <strong>comandi</strong>, <strong>query</strong> ed <strong>eventi</strong>. Tutta l'interazione passa da lì, e questo rende i servizi debolmente accoppiati: l'implementazione può cambiare senza toccare i client. Le interazioni si classificano su due assi:</p>
+    <table>
+      <thead><tr><th></th><th>uno a uno</th><th>uno a molti</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">sincrona</th><td>request/response: il client aspetta, magari bloccato; tende ad accoppiare strettamente i servizi</td><td>—</td></tr>
+        <tr><th scope="row">asincrona</th><td>request/response asincrona (il client non si blocca); notifica one-way, senza risposta</td><td>publish/subscribe; publish/async responses (si pubblica una richiesta e si raccolgono le risposte per un certo tempo)</td></tr>
+      </tbody>
+    </table>
+    <p>Le tecnologie di comunicazione sono REST, usato come trasporto per chiamate RPC (che accoppia) o in stile davvero RESTful (che disaccoppia), eventualmente con WebSocket per gli eventi; i messaggi su MOM, asincroni e disaccoppianti; gRPC e GraphQL tra le più recenti.</p>
+
+    <h3>Come si organizzano</h3>
+    <p>I servizi sono componenti <strong>fuori processo</strong>, a differenza delle librerie chiamate in memoria. Si rilasciano e scalano uno per uno, purché i contratti evolvano con giudizio, e hanno un confine di modulo netto, mentre in un monolite spesso solo la disciplina protegge l'incapsulamento. Il prezzo: le chiamate remote costano molto di più, quindi le API devono essere a grana più grossa.</p>
+    <p>La scomposizione è <strong>per capacità di business</strong>, non per tecnologia. Se i team si dividono per strato (interfaccia, logica, database), anche una modifica semplice diventa un progetto tra team; con i microservizi ogni servizio copre un'area dall'interfaccia ai dati, con un team <strong>cross-funzionale</strong>. Il riferimento è il <strong>Domain-Driven Design</strong> (Evans): un modello del dominio con il vocabolario del team (<em>ubiquitous language</em>), diviso in <strong>sottodomini</strong>; l'ambito di un modello è un <strong>bounded context</strong>, che diventa un servizio o un gruppo di servizi. L'approccio <strong>API-first</strong> scrive prima l'interfaccia con un IDL (OpenAPI, RAML), la rivede con i client e solo dopo implementa.</p>
+
+    <table>
+      <thead><tr><th>Pro dei microservizi</th><th>Contro e sfide</th></tr></thead>
+      <tbody>
+        <tr><td>rilascio e scalabilità indipendenti per servizio</td><td>richiedono di progettare un sistema distribuito</td></tr>
+        <tr><td>team autonomi, organizzati per area di business</td><td>latenza di rete su ogni interazione</td></tr>
+        <tr><td>libertà di linguaggi e tecnologie di memorizzazione</td><td>comunicazione tra processi complessa; la comunicazione sincrona riduce la disponibilità</td></tr>
+        <tr><td>confini espliciti, manutenibilità e testabilità</td><td>mantenere i dati consistenti tra servizi</td></tr>
+        <tr><td>un guasto resta confinato al servizio</td><td>ottenere una vista consistente dei dati</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="s8">
+    <h2>8. Cloud: dall'infrastruttura alle funzioni</h2>
+
+    <p>Il <strong>cloud computing</strong> è una delle scelte principali per le applicazioni distribuite su larga scala, per scalabilità, apertura ed eterogeneità, disponibilità. È un cambio di paradigma nell'erogazione dei servizi informatici: servizi, calcolo e dati si spostano, per costo e convenienza, <em>off-premise</em>, in un impianto centralizzato e trasparente rispetto alla posizione, invece che <em>on-premise</em>. Lo hanno trainato Google, Yahoo, Amazon, che hanno insegnato al mondo a costruire architetture massivamente scalabili. I dati nel cloud sono più facili da raggiungere, costano meno e si prestano a collaborazione e analisi; restano da valutare prestazioni e sicurezza.</p>
+
+    <h3>Da CapEx a OpEx</h3>
+    <p>Prima, lanciare un servizio richiedeva una grande <strong>CapEx</strong> (spesa in conto capitale): comprare in anticipo l'infrastruttura per il picco di domanda. Il cloud fa seguire le spese all'uso effettivo delle risorse, e quindi agli incassi, in tre modi: trasforma la CapEx in <strong>OpEx</strong> (spesa operativa); elimina buona parte del personale che amministra i server; rende facile crescere in caso di successo, senza costose modifiche architetturali. Con costi di lancio bassi si provano più servizi senza rischiare investimenti in infrastruttura che potrebbe non servire.</p>
+
+    <h3>I modelli di servizio</h3>
+    <table>
+      <thead><tr><th>Modello</th><th>Che cosa offre</th><th>Esempi delle slide</th></tr></thead>
+      <tbody>
+        <tr><td><strong>IaaS</strong>, Infrastructure as a Service</td><td>infrastruttura di calcolo e memorizzazione, centralizzata e trasparente rispetto alla posizione</td><td>Amazon EC2, Google Compute Engine, OpenStack</td></tr>
+        <tr><td><strong>PaaS</strong>, Platform as a Service</td><td>gli elementi di base per sviluppare nuove applicazioni</td><td>Google App Engine, Windows Azure</td></tr>
+        <tr><td><strong>SaaS</strong>, Software as a Service</td><td>applicazioni complete accessibili in rete</td><td>Google Apps, Salesforce, WebEx</td></tr>
+      </tbody>
+    </table>
+    <p>Salendo da IaaS a SaaS il fornitore gestisce sempre più livelli e il cliente sempre meno. I principali fornitori sono Amazon AWS, Google Cloud Platform, Microsoft Azure, Heroku; Cloud Foundry è una PaaS open source. Le PaaS hanno in comune un'architettura a servizi (REST, GraphQL, gRPC) e un insieme di servizi di base: memorizzare e recuperare dati, eseguire e gestire attività di lunga durata, comunicare, configurare e gestire le applicazioni.</p>
+
+    <h3>FaaS e serverless</h3>
+    <p>Il <strong>FaaS</strong> (Function as a Service) porta nel cloud codice organizzato in <em>funzioni</em>, attivate da eventi definiti dallo sviluppatore. È simile a una PaaS ma più leggero: più reattivo e con scalabilità automatica. Esempi: AWS Lambda, Google Cloud Functions. Oggi si parla di <strong>serverless computing</strong>, che ha quattro caratteristiche:</p>
+    <ul>
+      <li>nessun server né sistema operativo da configurare o gestire;</li>
+      <li>fatturazione per invocazione;</li>
+      <li>scalabilità automatica con l'uso;</li>
+      <li>disponibilità e tolleranza ai guasti incorporate.</li>
+    </ul>
+    <p>È adatto a problemi scomponibili in parti <strong>senza stato</strong>, piccole e dal comportamento prevedibile. Le funzioni sono effimere, con una durata nota e limiti di tempo imposti dalla piattaforma, e non conservano stato tra un'invocazione e l'altra: se l'applicazione ha uno stato, sta in un data store.</p>
+
+    <details>
+      <summary>Dalle slide: oltre questa panoramica</summary>
+      <ul>
+        <li>Progettare sistemi e infrastrutture su larga scala: pattern per microservizi (event sourcing, circuit breaker, CQRS, API gateway, saga), architetture event-driven e microservizi event-driven, cloud e applicazioni distribuite data-intensive; metodologie come DDD e DevOps.</li>
+        <li>Sistemi situati: architetture per Internet of Things e Web of Things, che interagiscono con il mondo fisico; il pattern del Digital Twin.</li>
+        <li>Sistemi autonomi: modelli e tecnologie per integrare l'intelligenza artificiale, agenti autonomi e sistemi multi-agente.</li>
+      </ul>
+    </details>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Che cos'è un middleware? E un MOM?</summary>
+        <p>Un middleware è uno strato software tra sistema operativo e applicazioni distribuite, con vita propria, che offre servizi come comunicazione e nomi. Un MOM è un middleware che offre messaggistica: code, publish/subscribe, persistenza e garanzie di consegna, disaccoppiando nel tempo e nello spazio chi invia da chi riceve.</p>
+      </details>
+      <details>
+        <summary>Perché la trasparenza di RPC e oggetti distribuiti non funziona?</summary>
+        <p>Perché chiamate locali e remote differiscono in modo sostanziale: le remote possono fallire parzialmente (serve <code>RemoteException</code>) e costano ordini di grandezza in più, quindi la località conta. Catene di chiamate sincrone tra nodi portano anche a deadlock.</p>
+      </details>
+      <details>
+        <summary>In Java RMI i parametri passano per valore o per riferimento?</summary>
+        <p>Gli oggetti normali per valore, serializzati: devono implementare <code>Serializable</code>, altrimenti l'errore arriva a run time. Gli oggetti remoti esportati per riferimento, perché viaggia il loro stub: così il server può richiamare il client.</p>
+      </details>
+      <details>
+        <summary>Perché un oggetto remoto RMI va sincronizzato?</summary>
+        <p>Perché il runtime RMI serve le chiamate con un pool di thread e più client possono invocare metodi dello stesso oggetto in parallelo: l'oggetto è stato condiviso e va protetto come un monitor.</p>
+      </details>
+      <details>
+        <summary>Perché i thread fanno venir meno il principio «write once, run anywhere»?</summary>
+        <p>I thread Java poggiano su quelli del sistema operativo: scheduling, limiti sul numero di thread e memoria dipendono dalla piattaforma, e l'interleaving cambia da una macchina all'altra. Un programma con una race condition può funzionare su un computer e fallire su un altro.</p>
+      </details>
+      <details>
+        <summary>Point-to-point o publish/subscribe?</summary>
+        <p>Point-to-point: produttori depositano in una coda e ogni messaggio va a un solo consumatore. Publish/subscribe: i messaggi pubblicati su un topic arrivano a tutti gli abbonati, che non conoscono i produttori.</p>
+      </details>
+      <details>
+        <summary>Che cos'è il contratto di un servizio e che cosa si intende per discoverability?</summary>
+        <p>Il contratto è l'insieme di tutti i messaggi che il servizio supporta, cioè la sua API; con REST si scompone in capability e poggia su un contratto uniforme (URI, metodi HTTP, media type). Discoverability significa che la descrizione del servizio può essere trovata e capita da persone e da altri servizi.</p>
+      </details>
+      <details>
+        <summary>SOAP e WSDL: chi fa che cosa?</summary>
+        <p>SOAP definisce il formato dei messaggi (envelope con header e body, in XML). WSDL definisce l'interfaccia del servizio: operazioni astratte (portType) e il loro legame con un protocollo concreto (binding).</p>
+      </details>
+      <details>
+        <summary>Pro e contro dei microservizi?</summary>
+        <p>Pro: rilascio e scalabilità indipendenti, team autonomi per area di business, libertà tecnologica, confini espliciti. Contro: tutto diventa un sistema distribuito, con latenza, comunicazione complessa, disponibilità ridotta dalle chiamate sincrone e dati da mantenere consistenti tra servizi.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra IaaS, PaaS, SaaS e FaaS?</summary>
+        <p>IaaS offre calcolo e memorizzazione, PaaS una piattaforma per sviluppare applicazioni, SaaS applicazioni pronte. FaaS esegue singole funzioni attivate da eventi, senza server da gestire, con scalabilità automatica e pagamento per invocazione: è il serverless.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Slide [module-4.1] (modello canonico e limiti dei paradigmi tradizionali), [module-4.3] <em>Service-Oriented Computing – An Overview</em> e [Lab Notes] <em>Message-Oriented Middlewares</em> · 23 febbraio 2026 (osservazione su «write once, run anywhere» e thread) · 8 maggio (§ RPC, oggetti distribuiti e perché la trasparenza non funziona) · 18 maggio (assignment 4 e Java RMI; esempi della lab activity 13). Il modulo 4.3 è stato presentato nell'ultima lezione, di cui non c'è trascrizione: quella parte segue le slide. La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-18-algoritmi-distribuiti.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+    </nav>
+    <p>Fonti: lezioni del 23 febbraio, 8 e 18 maggio 2026 · J. Waldo et al., <em>A Note on Distributed Computing</em> (1994) · E. Curry, <em>Message-Oriented Middleware</em> · T. Erl, <em>Service-Oriented Architecture</em> · C. Richardson, <em>Microservices Patterns</em> (2019) · J. Lewis, M. Fowler, <em>Microservices</em> · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+</body>
+</html>

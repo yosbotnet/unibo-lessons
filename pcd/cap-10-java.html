@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 10 — Concorrenza in Java: thread, sincronizzazione, task ed executor · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+.plab {border:1px solid #C9C3B6;background:#FAF7EF;padding:1rem;margin:1.5rem 0;font-family:var(--lk-utility);font-size:.9rem}
+.plab button,.plab select,.plab input {font:inherit;max-width:100%;white-space:normal;text-align:left;background:#F3EFE3;color:#1546B8;border:1px solid #1546B8;padding:5px 10px;cursor:pointer}
+.plab input {width:4.5rem;cursor:text}
+.plab button:disabled {color:#6E7068;border-color:#C9C3B6;cursor:default}
+.plab-row {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:.5rem 0}
+.plab-lbl {font-weight:600}
+.plab-q {font-family:var(--lk-mono);font-size:.82rem;margin:.6rem 0 .3rem;overflow-wrap:anywhere}
+.plab-workers {display:grid;grid-template-columns:repeat(auto-fill,minmax(10.5rem,1fr));gap:6px;margin:.4rem 0}
+.plab-w {border:1px solid #C9C3B6;background:#F3EFE3;padding:.3rem .5rem;font-family:var(--lk-mono);font-size:.78rem}
+.plab-w.wait {background:#F5E6E1;border-color:#B83D2D}
+.plab-w.idle {color:#6E7068}
+.plab-out {font-family:var(--lk-mono);font-size:.82rem;overflow-wrap:anywhere}
+.plab-status {font-weight:600;margin:.5rem 0}
+.plab-status.bad {color:#B83D2D}
+.plab-status.ok {color:#1F5A49}
+.plab-log {font-family:var(--lk-mono);font-size:.78rem}
+.plab-log ol {max-height:14rem;overflow:auto;margin:.3rem 0}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-09-formalismi-visuali.html">&larr; Cap. 9 — Formalismi visuali: reti di Petri e statechart</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-11-verifica.html">Cap. 11 — Verifica formale e model checking &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte I — Concorrenza a memoria condivisa · Capitolo 10</div>
+    <h1>Concorrenza in Java: thread, sincronizzazione, task ed executor</h1>
+    <div class="lk-meta"><span>~35 min di lettura</span><span>1 laboratorio: un thread pool che va in deadlock</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Come si crea e si controlla un thread</a></li>
+      <li><a href="#s2">Come si protegge lo stato condiviso: synchronized e lock</a></li>
+      <li><a href="#s3">Che cosa garantisce volatile</a></li>
+      <li><a href="#s4">Come si coordinano i thread: wait/notify e i sincronizzatori</a></li>
+      <li><a href="#s5">Perché ragionare per task: executor e thread pool</a></li>
+      <li><a href="#s6">Come si ottiene il risultato di un task: Callable e Future</a></li>
+      <li><a href="#s7">Perché un task non deve aspettare un altro task</a></li>
+      <li><a href="#s8">Quanti thread: prestazioni e dimensionamento del pool</a></li>
+      <li><a href="#s9">Come si ferma un thread o un task</a></li>
+      <li><a href="#s10">Task che generano task: Fork/Join e structured concurrency</a></li>
+      <li><a href="#s11">Chi esegue il codice di una GUI: l'Event Dispatch Thread</a></li>
+      <li><a href="#s12">Virtual thread</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> Java è stato il primo linguaggio diffuso con la concorrenza nel linguaggio stesso, e l'ha aggiunta senza uscire dagli oggetti: la classe <code>Thread</code> crea flussi di controllo, <code>synchronized</code> e <code>volatile</code> danno mutua esclusione e visibilità, <code>wait</code>/<code>notify</code> servono a sincronizzare. La libreria <code>java.util.concurrent</code> aggiunge lock espliciti, collezioni concorrenti, sincronizzatori e soprattutto i <strong>task</strong>: unità di lavoro indipendenti che si consegnano a un <em>executor</em>, il quale le esegue in modo asincrono su un pool di thread e restituisce una <code>Future</code>. Il capitolo copre anche il dimensionamento del pool, la cancellazione, Fork/Join, le GUI e i virtual thread.</p>
+
+  <section id="s1">
+    <h2>1. Come si crea e si controlla un thread</h2>
+
+    <p>I meccanismi del linguaggio sono pochi. <code>Thread</code> e <code>Runnable</code> creano e controllano le attività; <code>synchronized</code> e <code>volatile</code> regolano il codice eseguito da più thread (sezioni <a href="#s2">2</a> e <a href="#s3">3</a>); <code>wait</code>, <code>notify</code> e <code>notifyAll</code> di <code>Object</code> li coordinano (<a href="#s4">sezione 4</a>). Sopra ci sono la libreria <code>java.util.concurrent</code> e, da JDK 21, i virtual thread (<a href="#s12">sezione 12</a>). Un thread normale, o <em>platform thread</em>, corrisponde uno a uno a un thread del sistema operativo.</p>
+
+    <p>Un thread si definisce estendendo <code>Thread</code> e ridefinendo <code>run</code>, oppure passando al costruttore di <code>Thread</code> un <code>Runnable</code>, di solito una lambda. <code>run</code> contiene il comportamento; il thread termina quando <code>run</code> finisce.</p>
+
+<pre><code class="language-java">public class MyWorker extends Thread {
+  public MyWorker(String name) { super(name); }
+  @Override public void run() {
+    System.out.println(getName() + ": al lavoro");   // comportamento attivo
+  }
+}
+
+public static void main(String[] args) throws InterruptedException {
+  Thread a = new MyWorker("worker-A");
+  Thread b = new Thread(() -&gt; System.out.println("worker-B: al lavoro"), "worker-B");
+  a.start();        // ritorna subito: da qui ci sono tre flussi (main, A, B)
+  b.start();
+  a.join();         // main si sospende finché A non termina
+  b.join();
+  System.out.println("entrambi terminati");
+}</code></pre>
+
+    <p><strong><code>start</code>, non <code>run</code>.</strong> <code>start</code> fa nascere un nuovo thread che esegue <code>run</code>, e ritorna subito. Chiamare <code>run</code> direttamente è una normale chiamata di metodo: gira nel thread chiamante, in sequenza. Un <code>Thread</code> si avvia una sola volta (un secondo <code>start</code> lancia <code>IllegalThreadStateException</code>), e ogni programma ha almeno il <em>main thread</em>.</p>
+
+    <table>
+      <thead><tr><th>Metodo di <code>Thread</code></th><th>Effetto</th></tr></thead>
+      <tbody>
+        <tr><td><code>Thread(String name)</code>, <code>getName()</code></td><td>crea un thread con un nome; ne restituisce il nome</td></tr>
+        <tr><td><code>static sleep(long ms)</code></td><td>sospende il thread corrente per <var>ms</var> millisecondi</td></tr>
+        <tr><td><code>join()</code></td><td>sospende il chiamante finché quel thread non termina: la prima forma di sincronizzazione</td></tr>
+        <tr><td><code>interrupt()</code></td><td>fa terminare <code>sleep</code>, <code>wait</code> o <code>join</code> con <code>InterruptedException</code></td></tr>
+        <tr><td><code>static currentThread()</code></td><td>il thread che sta eseguendo il codice</td></tr>
+      </tbody>
+    </table>
+
+    <p><code>stop</code>, <code>suspend</code>, <code>resume</code> e <code>destroy</code> sono deprecati: fermare un thread dall'esterno può coglierlo a metà di un aggiornamento o con un lock in mano. Si usano schemi cooperativi (<a href="#s9">sezione 9</a>).</p>
+
+    <p><strong><code>Thread</code> o <code>Runnable</code>?</strong> Il funzionamento è identico. <code>Runnable</code> serve quando la classe deve già estendere un'altra classe, perché Java non ha ereditarietà multipla. Ricci preferisce una classe con un nome quando il thread è un concetto del progetto (<code>SortingWorker</code>, <code>MergingWorker</code>): la lambda è più corta, ma lo nasconde. Il corso chiede anche una disciplina. Un thread è un <em>oggetto attivo</em>: i suoi metodi li esegue solo lui, quindi ha pochi metodi pubblici, e interagisce con gli altri tramite oggetti <em>passivi</em> condivisi, non chiamando i loro metodi (<a href="cap-08-progettazione.html">capitolo 8</a>).</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Perché i thread incrinano il «write once, run anywhere»? Perché i platform thread sono thread del sistema operativo, e ognuno riserva uno stack dell'ordine del megabyte. Il loro numero massimo dipende dal sistema: l'esperimento <code>HowMany</code> sulla macchina di Ricci si ferma con <code>OutOfMemoryError: unable to create native thread</code> dopo 7.000–9.000 thread, su altre macchine va molto oltre. Nemmeno lo scheduling è specificato dal linguaggio (<a href="#s2">sezione 2</a>).</p></div>
+
+    <details>
+      <summary>Laboratorio: sorgenti Java completi per questo capitolo</summary>
+      <p>Sorgenti completi e compilabili con Java 17 (l'ultimo solo con JDK 20); alcuni demo verificano da soli, con controlli interni, il comportamento che descrivono. Sono ricostruzioni, non i sorgenti originali del corso.</p>
+      <ul>
+        <li><a href="assets/examples/ThreadStartDemo.java" download>ThreadStartDemo.java</a>: <code>run</code> diretto contro <code>start</code>, <code>join</code>, secondo <code>start</code> vietato (sezione 1).</li>
+        <li><a href="assets/examples/BoundedCounter.java" download>BoundedCounter.java</a> e <a href="assets/examples/LockSemanticsDemo.java" download>LockSemanticsDemo.java</a>: il contatore limitato con <code>tryInc</code>/<code>tryDec</code> atomici; <code>lock</code>, <code>lockInterruptibly</code> e <code>tryLock</code> messi alla prova con un thread interrotto (sezione 2).</li>
+        <li><a href="assets/examples/PrimeProducer.java" download>PrimeProducer.java</a> e <a href="assets/examples/ExecutorLifecycleDemo.java" download>ExecutorLifecycleDemo.java</a>: cancellazione per interruzione; <code>shutdown</code>, <code>shutdownNow</code> e <code>cancel</code> a confronto su un pool reale (sezione 9).</li>
+        <li><a href="assets/examples/SumTask.java" download>SumTask.java</a>, <a href="assets/examples/MergeSortTask.java" download>MergeSortTask.java</a>, <a href="assets/examples/ForkJoinExamples.java" download>ForkJoinExamples.java</a>: somma e merge sort con Fork/Join (sezione 10).</li>
+        <li><a href="assets/examples/StructuredFetch20.java" download>StructuredFetch20.java</a>: l'esempio di structured concurrency delle slide, solo per JDK 20 con il modulo incubator (sezione 10).</li>
+      </ul>
+    </details>
+
+    <details>
+      <summary>Dalle slide: strumenti per osservare i thread</summary>
+      <p><strong>JConsole</strong> (console JMX della JVM: mostra i thread, compresi quelli della JVM come il garbage collector) · <strong>VisualVM</strong> (profiler: CPU per metodo e per thread, tempo bloccato o in esecuzione) · <strong>Java Flight Recorder</strong> con <strong>JDK Mission Control</strong> (raccolta continua di eventi della JVM e analisi a posteriori, anche in produzione).</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. Come si protegge lo stato condiviso: synchronized e lock</h2>
+
+    <p>Una classe è <strong>thread-safe</strong> se resta corretta, cioè conforme alla sua specifica (invarianti e postcondizioni), quando più thread la usano, con qualunque interleaving e senza sincronizzazione aggiuntiva da parte del chiamante. Il problema è lo <strong>stato condiviso e mutabile</strong>. I rimedi sono tre: non condividerlo, renderlo immutabile, oppure sincronizzare <em>ogni</em> accesso. Un oggetto senza stato è sempre thread-safe.</p>
+
+    <p>Una <strong>race condition</strong> si ha quando la correttezza dipende dai tempi relativi dei thread. I due casi tipici sono <strong>azioni composte</strong> eseguite senza atomicità:</p>
+    <ul>
+      <li><strong>lost update</strong>: un leggi-modifica-scrivi come <code>count++</code>. Due thread leggono 5, entrambi scrivono 6, un incremento si perde. Con 100 incrementi per thread esce quasi sempre 200; con 10.000 esce un valore diverso a ogni esecuzione. Un test che vede 200 non dimostra nulla (<a href="cap-11-verifica.html">capitolo 11</a>);</li>
+      <li><strong>check-and-act</strong>: una decisione presa su un'osservazione che, al momento dell'azione, può essere vecchia. «Se il file non esiste, crealo»; oppure il singleton pigro, di cui due thread creano due istanze.</li>
+    </ul>
+
+    <h3>synchronized: il lock intrinseco</h3>
+    <p>Ogni oggetto ha un <strong>lock intrinseco</strong>. <code>synchronized (obj) { … }</code> lo prende all'ingresso e lo rilascia all'uscita, anche per eccezione; se è occupato, il thread si sospende nell'<strong>entry set</strong>. Al rilascio uno dei thread in attesa riparte, ma <strong>non è specificato quale</strong>: l'entry set è un insieme, non una coda, e la starvation è possibile. L'esclusione vale solo tra blocchi sullo <em>stesso</em> oggetto. Un metodo <code>synchronized</code> equivale a <code>synchronized (this)</code>; per un metodo <code>static</code> il lock è l'oggetto <code>Class</code>. Rendere <code>synchronized</code> tutti i metodi pubblici è l'<strong>idioma del monitor</strong> (<a href="cap-07-monitor.html">capitolo 7</a>).</p>
+
+<pre><code class="language-java">class Counter {                        // NON thread-safe
+  private int count;
+  public void inc() { count++; }       // leggi, somma, scrivi: tre passi
+  public int get() { return count; }
+}
+
+class SafeCounter {                    // thread-safe: idioma del monitor
+  private int count;
+  public synchronized void inc() { count++; }    // = synchronized (this) { count++; }
+  public synchronized int get() { return count; } // anche la lettura: visibilità (sezione 3)
+}</code></pre>
+
+    <p>L'idioma rende atomico ogni metodo, <strong>non una sequenza di chiamate</strong>. Nel laboratorio un <code>BoundedCounter</code> tra 0 e 1, con tutti i metodi <code>synchronized</code>, va in underflow: due worker leggono 1 ed entrambi decrementano. La coppia va resa atomica con un blocco sullo stesso lock, o con un metodo apposito.</p>
+
+<pre><code class="language-java">if (counter.getVal() &gt; 0) counter.dec();        // SBAGLIATO: check-and-act non atomico
+
+synchronized (counter) {                         // stesso lock usato dai metodi della classe
+  if (counter.getVal() &gt; 0) counter.dec();      // getVal e dec riprendono il lock: rientranza
+}                                                // (meglio: un metodo synchronized tryDec())</code></pre>
+
+    <p><strong>Rientranza.</strong> Un lock è rientrante se è acquisito <em>per thread</em> e non <em>per invocazione</em>: chi lo possiede già può riprenderlo senza bloccarsi, e lo libera dopo un rilascio per ogni acquisizione. I lock intrinseci e <code>ReentrantLock</code> lo sono; i mutex dei Pthread e i semafori no. Senza rientranza il blocco qui sopra, o un <code>LoggingWidget</code> il cui metodo <code>synchronized</code> chiama <code>super.doSomething()</code>, anch'esso <code>synchronized</code>, si bloccherebbe su se stesso.</p>
+
+    <p><strong>Costo.</strong> Un lock non conteso costa poco. Uno conteso richiede di sospendere il thread nel sistema operativo: in laboratorio, un miliardo di incrementi con due thread in competizione diventa più lento di uno o due ordini di grandezza. Regola: tenere il lock il meno possibile, ma mai a scapito della correttezza.</p>
+
+    <h3>Lock espliciti</h3>
+    <p><code>Lock</code>, implementata da <code>ReentrantLock</code>, offre <code>lock</code>, <code>unlock</code>, <code>lockInterruptibly</code>, <code>tryLock()</code>, <code>tryLock(timeout, unit)</code> e <code>newCondition()</code>.</p>
+
+<pre><code class="language-java">lock.lock();          // fuori dal try: se l'acquisizione fallisce non c'è nulla da rilasciare
+try {
+  count++;
+} finally {
+  lock.unlock();      // sempre, anche se il corpo lancia un'eccezione
+}</code></pre>
+
+    <table>
+      <thead><tr><th></th><th><code>synchronized</code></th><th><code>ReentrantLock</code></th></tr></thead>
+      <tbody>
+        <tr><td>Rilascio</td><td>automatico: la struttura a blocco la impone il compilatore</td><td>manuale: dimenticare <code>unlock</code> blocca gli altri per sempre</td></tr>
+        <tr><td>Attesa interrompibile</td><td>no</td><td>sì (<code>lockInterruptibly</code>)</td></tr>
+        <tr><td>Attesa limitata</td><td>no</td><td>sì (<code>tryLock</code>): utile per evitare deadlock, come nel <code>transferMoney</code> delle slide (<a href="cap-06-deadlock.html">capitolo 6</a>)</td></tr>
+        <tr><td>Variabili condizione</td><td>una, implicita</td><td>quante se ne vogliono</td></tr>
+      </tbody>
+    </table>
+    <p>Quanto alle prestazioni, in Java 5 <code>ReentrantLock</code> rendeva circa 4 volte di più; da Java 6 le due soluzioni si equivalgono.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Che cosa garantisce volatile</h2>
+
+    <p>Oltre all'atomicità c'è la <strong>visibilità</strong>. Senza sincronizzazione nulla garantisce che un thread veda le scritture di un altro, né in che ordine: il compilatore JIT può tenere una variabile in un registro, la CPU nella cache, ed entrambi riordinano. Un thread che cicla su <code>while (!stopped)</code> può non vedere mai <code>stopped = true</code>.</p>
+
+    <p>Su un campo <code>volatile</code> ogni lettura vede l'ultima scrittura. In più la scrittura <em>happens-before</em> le letture successive: chi legge il nuovo valore vede anche tutto ciò che lo scrittore aveva scritto prima, quindi <code>volatile</code> vieta anche i riordinamenti attorno all'accesso. Le slide dicono che il valore «viene letto e scritto in memoria a ogni accesso»: un'approssimazione che coglie l'effetto.</p>
+
+<pre><code class="language-java">class Clock extends Thread {
+  private volatile boolean stopped;     // senza volatile il ciclo potrebbe non vedere mai true
+  @Override public void run() {
+    while (!stopped) { tick(); }
+  }
+  public void notifyStop() { stopped = true; }   // chiamato da un altro thread
+}</code></pre>
+
+    <div class="callout warn"><span class="callout-label">volatile non rende atomico count++</span><p>Su un campo <code>volatile</code> <code>count++</code> resta leggi-modifica-scrivi e perde incrementi. <code>volatile</code> dà visibilità e ordinamento, non atomicità: per le azioni composte servono <code>synchronized</code>, un lock o <code>AtomicInteger</code> (il cui <code>incrementAndGet</code> usa il compare-and-swap del <a href="cap-04-sezione-critica.html#s5">capitolo 4</a>). Il model checker del <a href="cap-11-verifica.html#s4">capitolo 11</a> trova proprio questo errore.</p></div>
+
+    <p>Leggere o scrivere un <code>int</code>, un <code>boolean</code> o un riferimento è comunque atomico. Per <code>long</code> e <code>double</code> non <code>volatile</code> la specifica ammette una scrittura in due metà da 32 bit; <code>volatile</code> la rende atomica. Anche <code>synchronized</code> dà visibilità, perché il rilascio di un lock <em>happens-before</em> la successiva acquisizione dello stesso lock: per questo in <code>SafeCounter</code> anche <code>get</code> è sincronizzato. <code>volatile</code> basta quando un thread scrive e gli altri leggono, senza decisioni che combinano lettura e scrittura: flag di stop e di cancellazione, pubblicazione di un riferimento, le variabili di Peterson (<a href="cap-04-sezione-critica.html#s3">capitolo 4</a>).</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. Come si coordinano i thread: wait/notify e i sincronizzatori</h2>
+
+    <p><code>wait</code>, <code>notify</code> e <code>notifyAll</code> realizzano un monitor con una sola variabile condizione implicita, l'oggetto stesso. Si chiamano solo tenendo il lock dell'oggetto, altrimenti si ottiene <code>IllegalMonitorStateException</code>. <code>wait()</code> rilascia il lock e sospende il thread. <code>notify()</code> risveglia <strong>un</strong> thread in attesa, scelto arbitrariamente, e se non c'è nessuno la notifica si perde; <code>notifyAll()</code> li risveglia tutti. Chi si risveglia deve riprendere il lock, e intanto la condizione può essere tornata falsa.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Java usa <strong>signal and continue</strong>: chi segnala continua e tiene il lock, il risvegliato riparte dopo. <code>notify</code> sveglia un solo thread, non tutti. Per questo si scrive sempre <code>while (!condizione) wait();</code>, mai <code>if</code>: il <code>while</code> copre anche i risvegli spuri. Teoria e altre discipline sono nel <a href="cap-07-monitor.html">capitolo 7</a>.</p></div>
+
+    <p><strong>Quando viene lanciata <code>InterruptedException</code>?</strong> Quando un thread è sospeso in un'attesa interrompibile e un altro thread chiama <code>interrupt()</code> su di esso, oppure se l'interruzione era già stata chiesta prima dell'attesa. Il metodo lancia l'eccezione e lo stato di interruzione viene azzerato. Sono interrompibili <code>sleep</code>, <code>wait</code>, <code>join</code> e i metodi bloccanti della libreria (<code>BlockingQueue.put</code>/<code>take</code>, <code>lockInterruptibly</code>, <code>Future.get</code>, <code>await</code> di latch e barriere, <code>Semaphore.acquire</code>). Non lo sono l'attesa di un blocco <code>synchronized</code> e <code>Lock.lock()</code>. Che cosa fare dell'eccezione è nella <a href="#s9">sezione 9</a>.</p>
+
+    <h3>I mattoni della libreria</h3>
+    <ul>
+      <li><strong>Collezioni sincronizzate</strong> (<code>Collections.synchronizedList</code>…): ogni metodo è sincronizzato, ma le azioni composte (iterazione, «inserisci se assente») richiedono un lock lato client sulla collezione, e tenerlo a lungo blocca tutti.</li>
+      <li><strong>Collezioni concorrenti</strong> (<code>ConcurrentHashMap</code>, <code>CopyOnWriteArrayList</code>, code): pensate per l'accesso concorrente, scalano molto meglio.</li>
+      <li><strong><code>BlockingQueue</code></strong>: <code>put</code> si blocca se la coda è piena, <code>take</code> se è vuota (<code>offer</code> e <code>poll</code> con timeout). Limitata, è il mattone del produttore-consumatore e frena chi produce più lavoro di quanto il sistema smaltisca. <code>LinkedBlockingQueue</code>, <code>ArrayBlockingQueue</code>, <code>PriorityBlockingQueue</code>.</li>
+      <li><strong>Deque e work stealing</strong> (<code>ArrayDeque</code>, <code>LinkedBlockingDeque</code>): ogni consumatore ha la sua deque, e quando è vuota ruba lavoro dalla coda di quella di un altro. Scala meglio di una coda unica, perché di solito ognuno tocca solo la propria.</li>
+    </ul>
+
+    <p>Un <strong>sincronizzatore</strong> è un oggetto passivo che coordina i thread in base al proprio stato: lo stato decide chi passa e chi aspetta, alcuni metodi lo modificano, altri aspettano che diventi quello voluto. La libreria ne ha quattro tipi: i <strong>lock</strong> (<a href="#s2">sezione 2</a>); i <strong>semafori</strong> (<code>Semaphore</code>, con permessi, <code>acquire</code>/<code>release</code> e fairness opzionale, <a href="cap-05-semafori.html">capitolo 5</a>); i <strong>latch</strong> (<code>CountDownLatch</code>, un cancello che si apre quando i <code>countDown</code> portano il conteggio a zero e resta aperto per sempre); le <strong>barriere</strong> (<code>CyclicBarrier</code>, in cui ognuno aspetta finché non sono arrivati tutti, e poi la barriera si riarma). Come dicono le slide, <em>i latch aspettano eventi, le barriere aspettano altri thread</em>.</p>
+
+<pre><code class="language-java">CountDownLatch ready = new CountDownLatch(services.size());
+for (Service s : services)
+  new Thread(() -&gt; { s.start(); ready.countDown(); }).start();
+ready.await();                  // passa quando il conteggio è 0; il cancello resta aperto
+
+CyclicBarrier phase = new CyclicBarrier(nWorkers, () -&gt; System.out.println("fase finita"));
+// in ogni worker, a ogni iterazione:
+computeStep();
+phase.await();                  // tutti aspettano tutti, poi la barriera si riarma</code></pre>
+    <p>Come si costruiscono una barriera e un latch con un monitor, esercizio del laboratorio, è nel <a href="cap-07-monitor.html">capitolo 7</a>.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Perché ragionare per task: executor e thread pool</h2>
+
+    <p>Un <strong>task</strong> è un'unità di lavoro astratta, discreta e indipendente, con un inizio e una fine. Non è un ciclo infinito: i componenti che vivono per sempre, come un server o un agente, restano thread. Il thread diventa il <em>meccanismo</em> che esegue i task in modo asincrono, e il livello logico (i task, che vengono dal problema) si separa da quello fisico (i thread, che dipendono dalla macchina). Le slide chiamano la strategia <strong>Division of Labor</strong>: si individuano i task come attività che non dipendono da stato, risultati o effetti di altri task, e si sceglie una <strong>politica di esecuzione</strong> che dia buon throughput, buona reattività e degrado graduale sotto carico. Come scomporre un problema in task è il tema del <a href="cap-08-progettazione.html">capitolo 8</a>.</p>
+
+    <table>
+      <thead><tr><th>Web server</th><th>Pro</th><th>Contro</th></tr></thead>
+      <tbody>
+        <tr><td>Sequenziale: un ciclo accetta e serve una richiesta alla volta</td><td>semplice</td><td>throughput, reattività e uso delle risorse scarsi</td></tr>
+        <tr><td>Un thread per task: <code>new Thread(task).start()</code> per ogni richiesta</td><td>reattività e throughput migliori</td><td>creazione costosa, memoria per thread, limite al numero: regge in prova e crolla sotto carico</td></tr>
+        <tr><td>Pool: i task vanno a un executor con pochi thread</td><td>prestazioni e stabilità sotto carico</td><td>i task non devono aspettarsi (<a href="#s7">sezione 7</a>)</td></tr>
+      </tbody>
+    </table>
+
+<pre><code class="language-java">class TaskExecutionWebServer {
+  private static final int NTHREADS = Runtime.getRuntime().availableProcessors() + 1;
+  private static final Executor exec = Executors.newFixedThreadPool(NTHREADS);
+
+  public static void main(String[] args) throws IOException {
+    ServerSocket socket = new ServerSocket(80);
+    while (true) {
+      Socket connection = socket.accept();
+      exec.execute(() -&gt; handleRequest(connection));   // consegna il task e torna ad accettare
+    }
+  }
+}</code></pre>
+
+    <p>L'<strong>Executor framework</strong> (JDK 5) separa la sottomissione di un task dalla sua esecuzione. Dentro c'è un produttore-consumatore: chi sottomette produce task, i thread del pool li consumano con un ciclo «prendi il prossimo, eseguilo, torna ad aspettare». È l'architettura <strong>master-worker</strong> con una <strong>bag of tasks</strong>: il master scompone il lavoro e mette i task in una struttura condivisa (un monitor, come un bounded buffer), da cui i worker li prelevano. Il master non sa quanti worker ci sono, e i thread restano nascosti nella politica dell'executor. Nel prodotto di due matrici <var>n</var>&times;<var>n</var> ci sono <var>n</var>² task, uno per elemento, ma solo <var>N</var><sub>cpu</sub>+1 thread.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Il master sottomette i task a una coda; i thread del pool li prelevano ed eseguono; i risultati tornano al master tramite Future">
+      <svg viewBox="0 0 640 250" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="#1546B8" stroke-width="1.6">
+          <rect x="10" y="80" width="120" height="60" rx="6"/>
+          <rect x="180" y="88" width="200" height="44"/>
+          <line x1="220" y1="88" x2="220" y2="132"/><line x1="260" y1="88" x2="260" y2="132"/>
+          <line x1="300" y1="88" x2="300" y2="132"/><line x1="340" y1="88" x2="340" y2="132"/>
+          <rect x="430" y="14" width="200" height="196" rx="8"/>
+          <rect x="450" y="56" width="160" height="34" rx="4"/>
+          <rect x="450" y="100" width="160" height="34" rx="4"/>
+          <rect x="450" y="144" width="160" height="34" rx="4"/>
+          <line x1="130" y1="110" x2="172" y2="110"/>
+          <line x1="380" y1="110" x2="422" y2="110"/>
+        </g>
+        <path d="M 530 210 L 530 236 L 70 236 L 70 148" fill="none" stroke="#B83D2D" stroke-width="1.6" stroke-dasharray="6 4"/>
+        <g fill="#1546B8">
+          <polygon points="172,105 180,110 172,115"/>
+          <polygon points="422,105 430,110 422,115"/>
+        </g>
+        <polygon points="65,148 70,140 75,148" fill="#B83D2D"/>
+        <g font-family="sans-serif" font-size="15" fill="#1546B8" text-anchor="middle">
+          <text x="70" y="106">master</text>
+          <text x="70" y="127" font-size="13">submit(task)</text>
+          <text x="280" y="76">coda dei task</text>
+          <text x="200" y="115" font-size="13">t9</text><text x="240" y="115" font-size="13">t8</text>
+          <text x="280" y="115" font-size="13">t7</text><text x="320" y="115" font-size="13">t6</text><text x="360" y="115" font-size="13">t5</text>
+          <text x="530" y="40">pool di N thread</text>
+          <text x="530" y="78" font-size="14">W1 esegue t1</text>
+          <text x="530" y="122" font-size="14">W2 esegue t2</text>
+          <text x="530" y="166" font-size="14">W3 esegue t3</text>
+          <text x="530" y="200" font-size="14">…</text>
+        </g>
+        <text x="300" y="229" font-family="sans-serif" font-size="14" fill="#B83D2D" text-anchor="middle">risultati: Future.get()</text>
+      </svg>
+      <figcaption><b>Fig. 1</b> — Un executor con thread pool è un master-worker con una bag of tasks. Il master consegna e prosegue, senza sapere quale thread eseguirà il task.</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>Tipo</th><th>Ruolo</th></tr></thead>
+      <tbody>
+        <tr><td><code>Executor</code></td><td>il solo <code>execute(Runnable)</code></td></tr>
+        <tr><td><code>ExecutorService</code></td><td>+ ciclo di vita (<code>shutdown</code>, <code>shutdownNow</code>, <code>awaitTermination</code>, …) e task con risultato (<code>submit</code>)</td></tr>
+        <tr><td><code>ScheduledExecutorService</code></td><td>+ task ritardati e periodici (<code>schedule</code>, <code>scheduleAtFixedRate</code>); sostituisce <code>Timer</code></td></tr>
+        <tr><td><code>Executors.newFixedThreadPool(n)</code></td><td><var>n</var> thread costanti, rimpiazzati se muoiono: per i compiti CPU-bound</td></tr>
+        <tr><td><code>Executors.newCachedThreadPool()</code></td><td>crea thread quando servono ed elimina quelli inattivi, senza limite: solo con carico sotto controllo</td></tr>
+        <tr><td><code>Executors.newSingleThreadExecutor()</code></td><td>un solo worker: task eseguiti uno alla volta, nell'ordine della coda (lo schema dell'EDT, <a href="#s11">sezione 11</a>)</td></tr>
+        <tr><td><code>Executors.newScheduledThreadPool(n)</code></td><td>pool fisso per task ritardati e periodici</td></tr>
+      </tbody>
+    </table>
+
+    <details>
+      <summary>Dalle slide: le cinque domande di una politica di esecuzione</summary>
+      <ol>
+        <li>Quando verrà eseguito un task, e da quale thread?</li>
+        <li>In che ordine (FIFO, LIFO, priorità…)?</li>
+        <li>Quanti task possono essere eseguiti in modo concorrente?</li>
+        <li>Se un task va rifiutato per sovraccarico, quale scegliere come vittima?</li>
+        <li>Quali azioni eseguire prima o dopo un task?</li>
+      </ol>
+      <p>La politica ottima dipende dalle risorse disponibili e dai requisiti di qualità del servizio.</p>
+    </details>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Perché un approccio a task è asincrono? Perché <code>execute</code> e <code>submit</code> non aspettano il task: lo consegnano e ritornano subito. Il task girerà più tardi, su un altro thread, in modo asincrono rispetto a chi l'ha sottomesso, e il master raccoglierà i risultati dopo, tramite le <code>Future</code>. Le chiamate asincrone si riconoscono proprio da questo: restituiscono una <code>Future</code>, o nulla. Callback e promise sono nel <a href="cap-12-async.html">capitolo 12</a>.</p></div>
+
+    <h3>Ciclo di vita</h3>
+    <p>Un <code>ExecutorService</code> nasce <strong>running</strong>. <code>shutdown()</code> lo porta in <strong>shutting down</strong> in modo graduale: niente task nuovi, ma quelli già sottomessi, anche in coda, vengono eseguiti. <code>shutdownNow()</code> è brusco: interrompe i task in esecuzione, non avvia quelli in coda e li restituisce. I task sottomessi dopo la chiusura vanno al <em>rejected execution handler</em> (per default, <code>RejectedExecutionException</code>). Finiti tutti i task, l'executor è <strong>terminated</strong>. Per aspettare questo momento si usa <code>awaitTermination</code>. Creare un executor crea i suoi thread, quindi si crea una volta e si riusa: mai dentro un ciclo, e mai nel game loop dell'assignment.</p>
+
+<pre><code class="language-java">exec.shutdown();                                   // niente nuovi task, finisci i vecchi
+if (!exec.awaitTermination(1, TimeUnit.MINUTES))   // sospende il chiamante (al massimo un minuto)
+  exec.shutdownNow();                              // non hanno finito: interrompi</code></pre>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Da Java 19 <code>ExecutorService</code> è <code>AutoCloseable</code>: in un <code>try (var exec = …) { … }</code> la <code>close()</code> finale fa <code>shutdown</code> e aspetta la terminazione (esempio nella <a href="#s12">sezione 12</a>).</p></div>
+  </section>
+
+  <section id="s6">
+    <h2>6. Come si ottiene il risultato di un task: Callable e Future</h2>
+
+    <p>Un task con risultato è un <strong><code>Callable&lt;V&gt;</code></strong>: <code>call()</code> restituisce un <code>V</code> e può lanciare eccezioni. Si sottomette con <code>submit</code>, che restituisce subito una <strong><code>Future&lt;V&gt;</code></strong>: un oggetto che rappresenta un risultato non ancora disponibile. <code>isDone()</code> e <code>isCancelled()</code> ne dicono lo stato; <code>get()</code> <strong>blocca</strong> finché il risultato non c'è e lo restituisce, oppure lancia <code>ExecutionException</code> (che avvolge l'eccezione del task), <code>CancellationException</code> o <code>InterruptedException</code>; <code>get(timeout, unit)</code> aspetta al massimo un certo tempo; <code>cancel(mayInterruptIfRunning)</code> cancella il task. Una <code>Future</code> è thread-safe, ma attenzione al check-and-act: se <code>isDone()</code> dice sì la risposta resta vera, se dice no un istante dopo il risultato può già esserci.</p>
+
+    <p>Lo schema tipico, nell'esempio del laboratorio sull'integrale definito calcolato con i trapezi, ha due fasi. Nell'<strong>espansione</strong> il master sottomette tutti i task senza bloccarsi e raccoglie le <code>Future</code>; nell'<strong>aggregazione</strong> chiama <code>get</code> su ciascuna. Non serve chiudere l'executor: ogni <code>get</code> sincronizza il master con la fine di quel task.</p>
+
+<pre><code class="language-java">record ComputeAreaTask(DoubleUnaryOperator f, double x0, double dx) implements Callable&lt;Double&gt; {
+  public Double call() { return (f.applyAsDouble(x0) + f.applyAsDouble(x0 + dx)) * dx / 2; }
+}
+
+double integrate(ExecutorService exec, DoubleUnaryOperator f, double a, double b, int n)
+    throws InterruptedException, ExecutionException {
+  double dx = (b - a) / n;
+  List&lt;Future&lt;Double&gt;&gt; parts = new ArrayList&lt;&gt;();
+  for (int i = 0; i &lt; n; i++)                        // espansione: submit non blocca
+    parts.add(exec.submit(new ComputeAreaTask(f, a + i * dx, dx)));
+  double sum = 0;
+  for (Future&lt;Double&gt; p : parts) sum += p.get();     // aggregazione: get blocca su quel task
+  return sum;
+}</code></pre>
+
+    <p>In alternativa i task possono depositare i risultati in un monitor. Se il monitor si limita a sommare, il master non sa quando i task hanno finito e deve chiudere l'executor e aspettarne la terminazione. Se invece conta i contributi e la sua <code>getResult()</code> sospende il master finché non sono arrivati tutti, l'executor resta riutilizzabile. Il task può attendere il lock del monitor, ma per poco, perché nessuno lo tiene aspettando altro. Ricci consiglia comunque le <code>Future</code>.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>La <code>Future</code> di Java è bloccante. <code>CompletableFuture</code>, le promise e le future di Vert.x registrano invece una callback che parte all'arrivo del risultato (<a href="cap-12-async.html">capitolo 12</a>).</p></div>
+  </section>
+
+  <section id="s7">
+    <h2>7. Perché un task non deve aspettare un altro task</h2>
+
+    <p>Le slide sono esplicite: <strong>nell'Executor framework i task devono essere indipendenti</strong>, e un task non può aspettare un altro task. Un task che si sospende su un semaforo, una barriera o la <code>get</code> di un'altra <code>Future</code> non sospende se stesso: sospende <strong>il thread del pool che lo esegue</strong>. Se si sospendono tutti i thread del pool, i task che li sbloccherebbero restano in coda senza nessuno che li esegua: è un deadlock, detto <em>thread starvation deadlock</em>.</p>
+
+    <p>È l'esempio che Ricci usa all'orale. Cento task eseguono ciascuno due operazioni atomiche, <code>a</code> e poi <code>b</code>, che stampano qualcosa. Una nuova specifica chiede che tutte le <code>b</code> vengano dopo tutte le <code>a</code>, e si aggiunge una barriera per 100 tra le due. Il pool è fisso, di 4 thread.</p>
+
+<pre><code class="language-java">ExecutorService exec = Executors.newFixedThreadPool(4);
+CyclicBarrier allA = new CyclicBarrier(100);
+for (int i = 0; i &lt; 100; i++) {
+  int id = i;
+  exec.execute(() -&gt; {
+    System.out.println("a" + id);
+    try { allA.await(); }          // sospende il THREAD del pool, non solo il task
+    catch (InterruptedException | BrokenBarrierException e) { return; }
+    System.out.println("b" + id);
+  });
+}</code></pre>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Che cosa stampa? <strong>Quattro <code>a</code></strong>, in un ordine qualsiasi, e poi nulla. I 4 thread prendono i primi 4 task, stampano <code>a</code> e si fermano sulla barriera, che aspetta 100 arrivi. Gli altri 96 task restano in coda senza un thread libero: nessuna <code>b</code>, nessuna eccezione, e il programma non termina. Con 16 thread si vedono 16 <code>a</code>. L'errore non è la barriera, sono i task che si aspettano a vicenda.</p></div>
+
+    <p>Un pool di 100 thread lo «risolve», ma Ricci la chiama <em>barare</em>: il numero di thread torna a dipendere dal problema (con 10.000 task, 10.000 thread), proprio l'accoppiamento che l'executor doveva togliere. La correzione giusta è togliere l'attesa dai task, qui dividendo il lavoro in due fasi e lasciando l'attesa al master:</p>
+
+<pre><code class="language-java">List&lt;Future&lt;?&gt;&gt; phaseA = new ArrayList&lt;&gt;();
+for (int i = 0; i &lt; 100; i++) { int id = i; phaseA.add(exec.submit(() -&gt; System.out.println("a" + id))); }
+for (Future&lt;?&gt; f : phaseA) f.get();      // l'attesa è nel master, fuori dal pool
+for (int i = 0; i &lt; 100; i++) { int id = i; exec.execute(() -&gt; System.out.println("b" + id)); }</code></pre>
+
+    <p>Una breve sezione critica dentro un task invece va bene: il lock viene preso e rilasciato senza aspettare altri task. Se i task devono davvero aspettare i propri sottotask, si usa Fork/Join (<a href="#s10">sezione 10</a>).</p>
+
+    <h3>Laboratorio: il pool che si blocca</h3>
+    <p>Una coda FIFO di task e <var>T</var> thread: a ogni passo un thread libero prende un task, esegue <code>a</code>, arriva alla barriera o esegue <code>b</code>. Prova i cinque scenari. Con una barriera ciclica da 4 su 4 thread le stampe procedono a gruppi (<code>a0 a1 a2 a3 b0 b1 b2 b3 a4 …</code>) e tutto termina; con una da 5 si torna al blocco. Cambia i numeri e trova la regola.</p>
+    <div id="pool-lab"></div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Quanti thread: prestazioni e dimensionamento del pool</h2>
+
+    <p>Più thread migliorano l'uso delle risorse e la reattività, ma costano: coordinazione (lock, segnalazioni, sincronizzazione della memoria), cambi di contesto, creazione e distruzione, scheduling. Un programma è <em>CPU-bound</em>, <em>I/O-bound</em> o <em>DB-bound</em> secondo la risorsa che lo limita. Le misure sono tre: <strong>throughput</strong> (task completati per unità di tempo), <strong>reattività</strong> o latenza (tempo tra richiesta e completamento di un'azione), <strong>scalabilità</strong> (quanto cresce il throughput aggiungendo risorse, di solito CPU).</p>
+
+    <p>Gli obiettivi sono usare bene le risorse esistenti e poter sfruttare quelle aggiunte. In pratica: <strong>tenere le CPU occupate con lavoro utile</strong>, perché un core fermo mentre c'è lavoro è capacità sprecata. Da qui la domanda su quanti thread mettere in un pool. La risposta dipende dal tipo di task e dal sistema, e non va scritta nel codice: si parte da <code>Runtime.getRuntime().availableProcessors()</code>.</p>
+
+    <h3>Task CPU-bound: N<sub>cpu</sub> + 1</h3>
+    <p>Con task di solo calcolo, <var>N</var><sub>cpu</sub> processori raggiungono di solito l'utilizzo ottimo con <strong><var>N</var><sub>cpu</sub> + 1</strong> thread. Quello in più serve perché anche un thread di calcolo ogni tanto si ferma, ad esempio per un <em>page fault</em>: la pagina che gli serve non è in memoria e il sistema operativo lo sospende per caricarla, una forma implicita di I/O. In quel momento il thread in più tiene il core occupato. Con 16 core, 17 thread.</p>
+
+    <h3>Task con I/O o attese</h3>
+    <p>Se i task si bloccano, il pool deve essere più grande, perché in ogni istante una parte dei thread non può usare la CPU. Il numero si trova in modo empirico, provando pool di dimensioni diverse sotto un carico di benchmark e osservando l'utilizzo della CPU, oppure con la formula</p>
+    <p style="text-align:center;font-size:1.15rem"><var>N</var><sub>threads</sub> = <var>N</var><sub>cpu</sub> · <var>U</var><sub>cpu</sub> · (1 + <var>W</var>/<var>C</var>)</p>
+    <p>dove <var>U</var><sub>cpu</sub> è l'utilizzo di CPU voluto (tra 0 e 1) e <var>W</var>/<var>C</var> il rapporto tra tempo di attesa e tempo di calcolo di un task, stimato con un profiler. Con 8 core, CPU al 100% e task che aspettano 30 ms ogni 10 ms di calcolo (<var>W</var>/<var>C</var> = 3), servono 8 · 1 · 4 = 32 thread. Con <var>W</var>/<var>C</var> = 0 la formula dà <var>N</var><sub>cpu</sub>; il «+1» è il margine empirico.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Domande fatte: perché <var>N</var><sub>cpu</sub>+1, e se con molto I/O conviene aumentare i thread. Sì, e lo dice la formula: più un task aspetta (<var>W</var>/<var>C</var> grande), più thread servono per tenere occupati i core. L'assignment 1 è CPU-bound, il 2 fa I/O su file. In entrambi il pool resta separato dal numero di task: <var>n</var>² task per il prodotto di matrici, <var>N</var><sub>cpu</sub>+1 thread.</p></div>
+
+    <h3>Serializzazioni e contesa</h3>
+    <p>Le parti serializzate limitano lo speed-up (legge di Amdahl, <a href="cap-01-introduzione.html">capitolo 1</a>) e spesso sono nascoste nelle librerie: una <code>LinkedList</code> sincronizzata serializza gli accessi, una <code>ConcurrentLinkedQueue</code> no. Un cambio di contesto costa 5.000–10.000 cicli, qualche microsecondo (dato delle slide, 2008). La sincronizzazione non contesa resta nella JVM ed è veloce; quella contesa può coinvolgere il sistema operativo, ed è lì che si ottimizza. La contesa si riduce tenendo i lock per meno tempo (ambito più stretto, granularità più fine), chiedendoli meno spesso, oppure sostituendo i lock esclusivi con meccanismi più permissivi come i lock lettori-scrittori. Una tecnica tipica è il <em>lock splitting</em> o <em>striping</em>: lock diversi per variabili di stato indipendenti.</p>
+
+    <details>
+      <summary>Dalle slide: misurare le prestazioni</summary>
+      <ul>
+        <li><strong>Test di throughput e di reattività</strong>: il primo guarda la media («quanto dura in media un'operazione?»), il secondo la varianza («che percentuale finisce sotto XX ms?»).</li>
+        <li><strong>Quanto veloce e quanto</strong>: tempo di servizio e latenza misurano la velocità su un'unità di lavoro, capacità e throughput la quantità di lavoro con certe risorse; la scalabilità riguarda il «quanto». Ottimizzare le prestazioni vuol dire fare lo stesso lavoro con meno sforzo (da <var>O</var>(<var>n</var>²) a <var>O</var>(<var>n</var> log <var>n</var>)); ottimizzare la scalabilità, fare più lavoro con più risorse. Il primo conta di più nel desktop, il secondo nei server.</li>
+        <li><strong>Niente ottimizzazioni premature</strong>: prima corretto, poi veloce se serve, e mai la correttezza in cambio di prestazioni.</li>
+        <li><strong>Misurare, non indovinare</strong>: che cosa vuol dire «più veloce», con quale carico e quali dati, quanto spesso capitano quelle condizioni. Si misura con <code>System.nanoTime()</code> (intervalli) o <code>currentTimeMillis()</code> e con profiler come VisualVM, JProfiler, Java Mission Control.</li>
+        <li><strong>Trappole dei benchmark</strong>: garbage collector e compilazione dinamica (servono esecuzioni lunghe; <code>-XX:+PrintCompilation</code>), cammini del codice e grado di contesa non realistici, eliminazione del codice morto da parte dell'ottimizzatore.</li>
+      </ul>
+    </details>
+  </section>
+
+  <section id="s9">
+    <h2>9. Come si ferma un thread o un task</h2>
+
+    <p>Un'attività è <strong>cancellabile</strong> se codice esterno può farla terminare prima del tempo. Le slide elencano cinque motivi: richiesta dell'utente, limite di tempo, eventi applicativi (è stata trovata la prima soluzione), errori, spegnimento dell'applicazione. Fermare un thread dall'esterno in un punto qualsiasi, cioè l'approccio asincrono dei metodi deprecati, rompe la consistenza dello stato. Java adotta l'approccio <strong>cooperativo</strong>: si segnala la richiesta e il task la gestisce secondo la sua <em>politica di cancellazione</em>, che dice come si chiede lo stop, quando il task lo controlla e che cosa fa.</p>
+
+    <p>La forma più semplice è un flag <code>volatile</code>, come nel <code>PrimeGenerator</code> delle slide, che controlla <code>cancelled</code> a ogni iterazione. Ma se il generatore mette i primi in un buffer limitato e il buffer è pieno, il thread resta bloccato in <code>put</code> e il flag non viene più letto. Serve l'<strong>interruzione</strong>:</p>
+    <ul>
+      <li>ogni thread ha uno stato di interruzione: <code>interrupt()</code> lo imposta, <code>isInterrupted()</code> lo legge, <code>Thread.interrupted()</code> lo legge e lo azzera;</li>
+      <li>le attese interrompibili (<a href="#s4">sezione 4</a>) si sbloccano, azzerano lo stato e lanciano <code>InterruptedException</code>;</li>
+      <li><code>interrupt</code> non ferma nulla: consegna la richiesta. La <strong>politica di interruzione</strong> del thread ha quattro elementi: uno stato di shutdown esplicito, un metodo <code>cancel</code>, il controllo dell'interruzione nel ciclo, la gestione di <code>InterruptedException</code>.</li>
+    </ul>
+
+<pre><code class="language-java">class PrimeProducer extends Thread {
+  private final BlockingQueue&lt;BigInteger&gt; queue;
+  PrimeProducer(BlockingQueue&lt;BigInteger&gt; queue) { this.queue = queue; }
+
+  @Override public void run() {
+    try {
+      BigInteger p = BigInteger.ONE;
+      while (!isInterrupted()) {
+        p = p.nextProbablePrime();
+        queue.put(p);                  // a coda piena si blocca, ma interrupt() lo sblocca
+      }
+    } catch (InterruptedException e) {
+      // politica di questo thread: uscire
+    }
+  }
+  public void cancel() { interrupt(); }
+}</code></pre>
+
+    <p>Un'alternativa è la <strong>poison pill</strong>: un oggetto riconoscibile, ad esempio un elemento «stop», messo nel buffer per dire al consumatore di terminare. Negli executor, <code>shutdownNow()</code> e <code>Future.cancel(true)</code> fermano i task in corso interrompendone i thread: la <code>Future</code> risulta subito cancellata, ma il corpo del task esce solo quando reagisce all'interruzione.</p>
+
+    <div class="callout warn"><span class="callout-label">Attese che interrupt non sblocca</span><p>L'I/O sincrono su socket di <code>java.io</code> e l'acquisizione di un lock intrinseco. Per l'I/O si usa <code>java.nio</code> (canali e selettori interrompibili), per i lock <code>java.util.concurrent</code> con <code>lockInterruptibly</code>.</p></div>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Il codice che riceve <code>InterruptedException</code> senza possedere il thread, come un task eseguito da un pool, non deve ingoiarla: la rilancia, oppure ripristina lo stato con <code>Thread.currentThread().interrupt()</code>.</p></div>
+  </section>
+
+  <section id="s10">
+    <h2>10. Task che generano task: Fork/Join e structured concurrency</h2>
+
+    <p>Negli algoritmi map-reduce o divide et impera si dividono i dati in pezzi indipendenti e si combinano i risultati parziali. Se la struttura dei dati è nota in anticipo, come nella somma di un array, bastano executor e <code>Callable</code>. Se non lo è, come in un albero, un grafo o un file system, un task deve creare sottotask e aspettarli; con un executor normale occuperebbe un thread senza fare nulla, fino al deadlock della <a href="#s7">sezione 7</a>.</p>
+
+    <p>Per questo Java SE 7 ha il framework <strong>Fork/Join</strong>. Un <code>ForkJoinPool</code> esegue <code>ForkJoinTask</code>: <code>fork()</code> lancia un sottotask sullo stesso pool, <code>join()</code> lo aspetta e ne restituisce il risultato, <code>invokeAll</code> lancia un gruppo e aspetta tutti. <code>RecursiveAction</code> non ha risultato, <code>RecursiveTask&lt;V&gt;</code> sì. Quando un task aspetta e ci sono task pendenti, il thread non resta fermo ma ruba lavoro dalla deque di un altro worker (work stealing): la <code>join</code> blocca il task, non il pool.</p>
+
+    <p>L'esempio del laboratorio, tratto dall'articolo di Julien Ponge su Oracle Technology Network, conta le occorrenze di una parola nei documenti di una cartella e delle sue sottocartelle. Il <code>FolderSearchTask</code> di una cartella crea con <code>fork</code> un <code>FolderSearchTask</code> per ogni sottocartella e un <code>DocumentSearchTask</code> per ogni documento, poi somma i risultati con <code>join</code>. Il task di un documento, quindi, non lo crea un master centrale ma il task della cartella che lo contiene: sia l'espansione sia l'aggregazione sono ricorsive e distribuite.</p>
+
+<pre><code class="language-java">class FolderSearchTask extends RecursiveTask&lt;Long&gt; {
+  private final Folder folder; private final String word;
+  FolderSearchTask(Folder folder, String word) { this.folder = folder; this.word = word; }
+
+  @Override protected Long compute() {
+    List&lt;RecursiveTask&lt;Long&gt;&gt; forks = new ArrayList&lt;&gt;();
+    for (Folder sub : folder.getSubFolders()) {
+      FolderSearchTask t = new FolderSearchTask(sub, word);
+      forks.add(t); t.fork();                         // sottotask ricorsivo
+    }
+    for (Document doc : folder.getDocuments()) {
+      DocumentSearchTask t = new DocumentSearchTask(doc, word);
+      forks.add(t); t.fork();                         // un task per documento
+    }
+    long count = 0;
+    for (RecursiveTask&lt;Long&gt; t : forks) count += t.join();   // aggregazione
+    return count;
+  }
+}
+// avvio: long n = new ForkJoinPool().invoke(new FolderSearchTask(root, "java"));</code></pre>
+
+    <h3>Structured concurrency</h3>
+    <p>Estensione recente dell'approccio a task (JEP 437, JDK 20, in incubazione), per conservare leggibilità e osservabilità del codice sequenziale. Il principio: <em>se un task si divide in sottotask concorrenti, questi tornano tutti allo stesso punto, il blocco di codice del task</em>. <code>StructuredTaskScope</code> tratta i sottotask come un'unità: ognuno gira nel proprio thread (virtuale), si avviano uno per uno, si aspettano e se serve si cancellano insieme, e il padre raccoglie risultati ed eccezioni. La loro vita è confinata nel blocco.</p>
+
+<pre><code class="language-java">Response handle() throws ExecutionException, InterruptedException {   // versione delle slide (JDK 20)
+  try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    Future&lt;String&gt;  user  = scope.fork(() -&gt; findUser());
+    Future&lt;Integer&gt; order = scope.fork(() -&gt; fetchOrder());
+    scope.join();            // aspetta entrambi i sottotask
+    scope.throwIfFailed();   // se uno è fallito propaga l'errore (e l'altro viene cancellato)
+    return new Response(user.resultNow(), order.resultNow());
+  }                          // all'uscita dal blocco nessun sottotask è ancora vivo
+}</code></pre>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>L'API cambia a ogni anteprima: da JDK 21 <code>fork</code> restituisce un <code>Subtask</code> (con <code>get()</code>), in JDK 25 lo scope si apre con <code>StructuredTaskScope.open()</code> e la politica di fallimento è un <code>Joiner</code>. Il principio resta; serve ancora <code>--enable-preview</code>.</p></div>
+  </section>
+
+  <section id="s11">
+    <h2>11. Chi esegue il codice di una GUI: l'Event Dispatch Thread</h2>
+
+    <p>Quasi tutti i framework grafici (Swing, Qt, Cocoa, X Window…) sono <strong>single-threaded</strong>: un thread dedicato, in Java l'<strong>Event Dispatch Thread</strong> (EDT), preleva gli eventi da una coda e li consegna agli handler. È un event loop. Le GUI multithread sono un «sogno fallito»: le azioni dell'utente <em>risalgono</em> dal sistema operativo al listener, quelle dell'applicazione <em>scendono</em> dal componente al sistema che disegna, ed entrambe prendono lock in ordine opposto, con race condition e deadlock.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Gli eventi del sistema operativo e le richieste invokeLater dei worker entrano nella coda degli eventi; l'EDT li preleva uno alla volta ed esegue gli handler come actionPerformed">
+      <svg viewBox="0 0 640 210" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="#1546B8" stroke-width="1.6">
+          <rect x="10" y="20" width="150" height="50" rx="6"/>
+          <rect x="10" y="130" width="150" height="50" rx="6"/>
+          <rect x="220" y="75" width="190" height="50"/>
+          <line x1="258" y1="75" x2="258" y2="125"/><line x1="296" y1="75" x2="296" y2="125"/>
+          <line x1="334" y1="75" x2="334" y2="125"/><line x1="372" y1="75" x2="372" y2="125"/>
+          <rect x="470" y="60" width="160" height="80" rx="8"/>
+          <path d="M 160 45 L 212 90"/><path d="M 160 155 L 212 110"/>
+          <line x1="410" y1="100" x2="462" y2="100"/>
+        </g>
+        <g fill="#1546B8">
+          <polygon points="205,84 214,92 202,93"/>
+          <polygon points="202,107 214,108 205,116"/>
+          <polygon points="462,95 470,100 462,105"/>
+        </g>
+        <g font-family="sans-serif" font-size="15" fill="#1546B8" text-anchor="middle">
+          <text x="85" y="42">sistema operativo</text>
+          <text x="85" y="61" font-size="13">clic, tasti, repaint</text>
+          <text x="85" y="152">thread worker</text>
+          <text x="85" y="171" font-size="13">invokeLater(r)</text>
+          <text x="315" y="63">coda degli eventi</text>
+          <text x="550" y="92">EDT</text>
+          <text x="550" y="114" font-size="13">un evento alla volta:</text>
+          <text x="550" y="131" font-size="13">actionPerformed(…)</text>
+        </g>
+        <text x="320" y="196" font-family="sans-serif" font-size="14" fill="#B83D2D" text-anchor="middle">un handler lento blocca tutta la coda: la GUI si congela</text>
+      </svg>
+      <figcaption><b>Fig. 2</b> — L'EDT è l'unico thread che tocca i componenti Swing; gli altri thread gli consegnano lavoro con <code>invokeLater</code>.</figcaption>
+    </figure>
+
+    <p>La thread-safety si ottiene per <strong>confinamento</strong>: i componenti Swing e i loro modelli (<code>TableModel</code>, <code>TreeModel</code>) si usano solo dall'EDT. Fanno eccezione pochi metodi thread-safe: <code>SwingUtilities.isEventDispatchThread()</code>; <code>invokeLater(r)</code>, che accoda <code>r</code> per l'EDT e ritorna subito; <code>invokeAndWait(r)</code>, che aspetta l'esecuzione e non si può chiamare dall'EDT; le richieste di <code>repaint</code> e <code>revalidate</code>; l'aggiunta e la rimozione di listener, che però vengono sempre invocati nell'EDT.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>L'evento di un pulsante si gestisce in <code>actionPerformed(ActionEvent e)</code> di <code>ActionListener</code>, e lo esegue l'<strong>EDT</strong>, non il main (nel debugger il thread si chiama <code>AWT-EventQueue-0</code>). Il main costruisce la finestra e può anche terminare; gli eventi arrivano dalla coda dell'EDT. Perciò un handler deve <strong>ritornare in fretta</strong>: finché gira, l'EDT non serve nessun altro evento, nemmeno «Stop» o il ridisegno.</p></div>
+
+    <p>Un task breve si esegue nell'EDT. Uno lungo va a un altro thread, meglio se di un pool che creato al volo; se deve aggiornare l'interfaccia, riconsegna l'aggiornamento all'EDT:</p>
+
+<pre><code class="language-java">button.addActionListener(e -&gt; {              // actionPerformed: lo esegue l'EDT
+  button.setEnabled(false);
+  label.setText("busy");
+  exec.execute(() -&gt; {                        // il lavoro lungo va a un thread del pool
+    try {
+      doBigComputation();
+    } finally {
+      SwingUtilities.invokeLater(() -&gt; {      // l'aggiornamento torna all'EDT
+        button.setEnabled(true);
+        label.setText("idle");
+      });
+    }
+  });
+});</code></pre>
+
+    <h3>Esempio: il cronometro che non risponde</h3>
+    <p>Nel cronometro MVC sbagliato del laboratorio (<code>CronoMVCNotReactivePlusRace</code>) il clic su Start arriva ad <code>actionPerformed</code>, che chiama <code>notifyStarted()</code> sul controller. Il controller entra in un ciclo: incrementa il modello e aspetta un secondo, finché un flag <code>volatile</code> non segnala lo stop. Il contatore avanza, come mostra il log, ma il display resta fermo e Stop non funziona. Il ciclo gira nell'EDT, perché è l'EDT che ha chiamato il controller. La <code>setText</code> del display accoda un ridisegno che l'EDT non eseguirà mai, e il clic su Stop resta in coda.</p>
+    <p>Nella versione corretta (<code>CronoMVCReactiveNoRaces</code>) l'EDT riceve solo i comandi. A Start il controller crea un <strong>agente</strong>, cioè un thread con il ciclo, e gli passa un flag di stop condiviso; a Stop alza il flag. Il modello, letto dall'agente e dalla view, è un monitor. La view riceve le notifiche dal thread dell'agente e riconsegna l'aggiornamento all'EDT:</p>
+
+<pre><code class="language-java">public void notifyStarted() {                      // chiamato dall'EDT: deve ritornare subito
+  stopFlag.reset();
+  new CounterAgent(counter, stopFlag).start();     // il ciclo vive nel suo thread
+}
+public void notifyStopped() { stopFlag.set(); }    // l'EDT è libero, quindi Stop viene servito
+
+// nella view, osservatore del modello: la chiama il thread dell'agente
+public void counterChanged(int value) {
+  SwingUtilities.invokeLater(() -&gt; display.setText(String.valueOf(value)));
+}</code></pre>
+
+    <p>È il progetto proposto dalle slide per un MVC concorrente: il controllo negli <strong>agenti</strong> (componenti attivi), il <strong>modello</strong> fatto di componenti passivi condivisi che incapsulano la mutua esclusione, la <strong>view</strong> fatta di componenti passivi più un componente attivo, l'EDT.</p>
+
+    <details>
+      <summary>Dalle slide: SwingWorker (un progetto discutibile)</summary>
+      <p><code>SwingWorker&lt;T,V&gt;</code> (Java 6) supporta i task lunghi che interagiscono con la GUI. <code>doInBackground()</code> è il corpo del task, eseguito fuori dall'EDT; <code>done()</code> aggiorna la GUI alla fine, nell'EDT; <code>publish(V...)</code>, chiamato dal corpo, consegna risultati intermedi che arrivano a <code>process(List&lt;V&gt;)</code> nell'EDT. Si usano direttamente <code>execute()</code>, <code>cancel(mayInterruptIfRunning)</code> e <code>setProgress(int)</code>. Nell'esempio delle slide un <code>CounterTask</code> somma i numeri da 0 a 9, uno al secondo, pubblica ogni passo e aggiorna una barra di avanzamento.</p>
+    </details>
+
+    <details>
+      <summary>Laboratorio: gli esempi GUI completi (cronometro, Sketch, palline)</summary>
+      <p>Programmi Swing completi per Java 17, ricostruiti e verificati; non sono i sorgenti del corso e non servono per l'esame.</p>
+      <ul>
+        <li><strong>Cronometro</strong> (<a href="assets/examples/StopwatchModel.java" download>StopwatchModel.java</a>, <a href="assets/examples/ConcurrentStopwatch.java" download>ConcurrentStopwatch.java</a>): modello monitor con metodi brevi; un solo thread campionatore pubblica snapshot immutabili con <code>invokeLater</code>.</li>
+        <li><strong>Sketch</strong> (<a href="assets/examples/SketchCounter.java" download>SketchCounter.java</a>): un conteggio che avanza da solo e si modifica con i tasti I e R. Con lavoro breve si può confinare tutto nell'EDT, usando un <code>javax.swing.Timer</code> invece di un thread.</li>
+        <li><strong>Palline che rimbalzano</strong> (<a href="assets/examples/ParticleModel.java" download>ParticleModel.java</a>, <a href="assets/examples/BouncingBallsDemo.java" download>BouncingBallsDemo.java</a>): un worker possiede e aggiorna i modelli, la view legge uno snapshot immutabile pubblicato tramite <code>AtomicReference</code>. È la separazione tra modello e rendering chiesta dall'assignment 1.</li>
+      </ul>
+    </details>
+  </section>
+
+  <section id="s12">
+    <h2>12. Virtual thread</h2>
+
+    <p>Un <strong>platform thread</strong> costa: il suo stack è un blocco unico di circa un megabyte, allocato alla creazione e non ridimensionabile (più piccolo si rischia <code>StackOverflowError</code>). Per questo i thread non possono essere tanti, e il modello più naturale per un server, un thread per richiesta, regge 1.000 richieste concorrenti ma non un milione, anche se CPU e banda basterebbero.</p>
+
+    <p>I <strong>virtual thread</strong> (Project Loom; JEP 425 in anteprima, definitivi con la JEP 444 in JDK 21) sono un'altra implementazione di <code>java.lang.Thread</code>. Gli stack frame stanno nello heap: partono da poche centinaia di byte e crescono o si riducono da soli. Come le pagine virtuali condividono la poca memoria fisica, i virtual thread, economici e numerosi, condividono i pochi platform thread, e gli stack di quelli inattivi sono «paginati» nello heap. Somigliano alle goroutine di Go e ai processi di Erlang, con la semantica dei thread Java.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Molti virtual thread vengono montati a turno su pochi carrier thread, che sono platform thread del sistema operativo; un virtual thread bloccato viene smontato e il suo stack torna nello heap">
+      <svg viewBox="0 0 640 250" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <rect x="10" y="10" width="620" height="82" rx="8" fill="#F3EFE3" stroke="#C9C3B6"/>
+        <g fill="none" stroke="#1546B8" stroke-width="1.4">
+          <rect x="30" y="40" width="62" height="32" rx="4"/><rect x="104" y="40" width="62" height="32" rx="4"/>
+          <rect x="178" y="40" width="62" height="32" rx="4"/><rect x="252" y="40" width="62" height="32" rx="4"/>
+          <rect x="326" y="40" width="62" height="32" rx="4"/><rect x="400" y="40" width="62" height="32" rx="4"/>
+          <rect x="474" y="40" width="62" height="32" rx="4"/>
+          <rect x="120" y="150" width="130" height="40" rx="6"/>
+          <rect x="390" y="150" width="130" height="40" rx="6"/>
+          <line x1="61" y1="72" x2="170" y2="144"/><line x1="283" y1="72" x2="410" y2="144"/>
+        </g>
+        <g fill="#1546B8"><polygon points="170,144 160,142 165,136"/><polygon points="410,144 400,143 404,136"/></g>
+        <line x1="505" y1="148" x2="505" y2="80" stroke="#B83D2D" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <polygon points="500,82 505,74 510,82" fill="#B83D2D"/>
+        <g font-family="sans-serif" font-size="14" fill="#1546B8" text-anchor="middle">
+          <text x="320" y="30">heap: centinaia di migliaia di virtual thread (VT)</text>
+          <text x="61" y="61">VT1</text><text x="135" y="61">VT2</text><text x="209" y="61">VT3</text><text x="283" y="61">VT4</text>
+          <text x="357" y="61">VT5</text><text x="431" y="61">VT6</text><text x="505" y="61">VT7</text><text x="585" y="61">…</text>
+          <text x="92" y="118" font-size="13">monta</text><text x="318" y="130" font-size="13">monta</text>
+          <text x="185" y="175">carrier 1</text><text x="455" y="175">carrier 2</text>
+          <text x="320" y="228">pochi carrier thread (ForkJoinPool, uno per core) = platform thread del SO</text>
+        </g>
+        <text x="515" y="118" font-family="sans-serif" font-size="13" fill="#B83D2D">si blocca: smonta</text>
+      </svg>
+      <figcaption><b>Fig. 3</b> — Il sistema operativo vede solo i carrier. La JVM monta un virtual thread su un carrier per eseguirlo e lo smonta quando si blocca, liberando il carrier per un altro.</figcaption>
+    </figure>
+
+    <p>Il sistema operativo conosce solo i platform thread. Per eseguire un virtual thread la JVM lo <strong>monta</strong> su un platform thread, il <strong>carrier</strong>, copiandone i frame sullo stack del carrier. Quando il virtual thread si bloccherebbe (I/O, un lock, una <code>take</code>, una <code>sleep</code>), viene <strong>smontato</strong>: i frame tornano nello heap e il carrier esegue un altro virtual thread. Quando l'operazione può finire, lo scheduler, un <code>ForkJoinPool</code> con un carrier per core, lo rimonta in ordine FIFO, magari su un altro carrier. Tutto è invisibile al codice: <code>Thread.currentThread()</code> restituisce il virtual thread e i lock vedono un'identità coerente.</p>
+
+    <p>L'API nuova è piccola: <code>Thread.ofVirtual()</code> (con <code>start</code> o <code>unstarted</code>) e <code>Executors.newVirtualThreadPerTaskExecutor()</code>. Dopo la creazione sono normali <code>Thread</code>: <code>ThreadLocal</code>, interruzione e stack walking funzionano come prima.</p>
+
+<pre><code class="language-java">Thread t = Thread.ofVirtual().name("vt-1").start(() -&gt; System.out.println("ciao"));
+
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {   // un virtual thread per task
+  IntStream.range(0, 100_000).forEach(i -&gt;
+      executor.submit(() -&gt; {
+        Thread.sleep(Duration.ofSeconds(1));   // simula I/O: il virtual thread viene smontato
+        return i;
+      }));
+}   // close() implicita: aspetta tutti i task</code></pre>
+
+    <p><strong>Quando servono.</strong> Non sono più veloci: un virtual thread non calcola di più, e non ce ne possono essere più <em>in esecuzione</em> che core. Ma ce ne possono essere moltissimi <em>inattivi</em>, e una richiesta a un server passa quasi tutto il tempo ad aspettare rete, file o database. La <strong>legge di Little</strong> lega throughput <var>T</var>, task concorrenti <var>N</var> e latenza <var>d</var>: <var>T</var> = <var>N</var>/<var>d</var>. Se la latenza non scende, il throughput sale solo aumentando <var>N</var>, e con i platform thread <var>N</var> è limitato. Nell'esempio qui sopra 100.000 task che dormono un secondo finiscono in circa 1,1–1,6 s con i virtual thread. Con un cached pool il programma rischia <code>OutOfMemoryError</code>. Con un pool fisso di 1.000 thread la legge prevede 100 s.</p>
+
+    <p><strong>Limiti.</strong> Alcune operazioni bloccanti non smontano, ma <em>catturano</em> il carrier; la JVM compensa aggiungendo temporaneamente un platform thread. Un virtual thread che esegue un metodo nativo, una funzione esterna o codice dentro un blocco <strong><code>synchronized</code></strong> è <strong>pinned</strong>, inchiodato al carrier, e non si smonta; in questo caso non viene aggiunto nulla. Il programma resta corretto ma scala peggio, e per questo le slide consigliano di scrivere i monitor per i virtual thread con <code>ReentrantLock</code> e <code>Condition</code>. Lo scheduler, poi, non fa preemption: un virtual thread che calcola senza mai bloccarsi tiene il carrier per sé.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Da JDK 24 (JEP 491) <code>synchronized</code> e <code>wait()</code> non causano più pinning; restano pinned i metodi nativi e le funzioni esterne. Il consiglio delle slide vale per JDK 21–23.</p></div>
+
+    <p>Per Ricci i virtual thread sono la risposta di Java alla programmazione asincrona: il codice resta sincrono, senza callback né <code>await</code>, perché ogni chiamata bloccante diventa da sola un punto di smontaggio. Possono rappresentare componenti attivi che non terminano, come il ciclo di un server, in qualunque numero; un task resta un'unità di lavoro delimitata. Il confronto con event loop e programmazione reattiva, i tre approcci dell'assignment 2, è nel <a href="cap-12-async.html">capitolo 12</a>.</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Che differenza c'è tra chiamare <code>start()</code> e chiamare <code>run()</code> su un <code>Thread</code>?</summary>
+        <p><code>start()</code> crea un nuovo flusso di controllo che esegue <code>run()</code> e ritorna subito al chiamante. <code>run()</code> chiamato direttamente è una normale chiamata di metodo: gira nel thread chiamante, in sequenza, e non nasce nessun thread.</p>
+      </details>
+      <details>
+        <summary>Se dichiaro <code>volatile</code> il contatore, <code>count++</code> diventa sicuro?</summary>
+        <p>No. <code>volatile</code> garantisce che ogni lettura veda l'ultima scrittura e vieta i riordinamenti (happens-before), ma <code>count++</code> resta leggi-modifica-scrivi e due thread possono perdere un incremento. Servono <code>synchronized</code>, un lock o <code>AtomicInteger</code>.</p>
+      </details>
+      <details>
+        <summary>Che cos'è un lock rientrante e perché serve?</summary>
+        <p>Un lock acquisito per thread: chi lo possiede già può riacquisirlo senza bloccarsi, e deve rilasciarlo una volta per ogni acquisizione. Senza rientranza un metodo <code>synchronized</code> che chiama un altro metodo <code>synchronized</code> sullo stesso oggetto (come <code>super.doSomething()</code> in <code>LoggingWidget</code>) si bloccherebbe su se stesso.</p>
+      </details>
+      <details>
+        <summary>Tutti i metodi di una classe sono <code>synchronized</code>: il codice che la usa è sicuramente corretto?</summary>
+        <p>No: ogni metodo è atomico, ma una sequenza di chiamate no. Un check-and-act come <code>if (c.getVal() &gt; 0) c.dec();</code> può fallire, perché un altro thread agisce tra le due chiamate. La coppia va resa atomica, con un blocco <code>synchronized</code> sull'oggetto o con un metodo apposito.</p>
+      </details>
+      <details>
+        <summary>Che cosa fa <code>notify()</code>, e perché l'attesa va scritta con <code>while</code>?</summary>
+        <p><code>notify()</code> risveglia un solo thread in attesa sull'oggetto, scelto arbitrariamente (<code>notifyAll()</code> li risveglia tutti). Java usa signal and continue: il thread risvegliato deve riacquisire il lock e nel frattempo la condizione può essere tornata falsa. Si ricontrolla quindi con un <code>while</code>, che protegge anche dai risvegli spuri.</p>
+      </details>
+      <details>
+        <summary>Pool fisso di 4 thread, 100 task: ognuno stampa <code>a</code>, aspetta su una barriera per 100 e poi stampa <code>b</code>. Che cosa si vede?</summary>
+        <p>Quattro <code>a</code> e poi nulla: i 4 thread del pool si sospendono sulla barriera e i 96 task in coda non verranno mai eseguiti. Un task che aspetta sospende il thread che lo esegue: nell'Executor framework i task devono essere indipendenti.</p>
+      </details>
+      <details>
+        <summary>Come si dimensiona un pool per task CPU-bound, e per task che fanno molto I/O?</summary>
+        <p>Per task CPU-bound, <var>N</var><sub>cpu</sub>+1 thread: quello in più copre le pause, come i page fault. Con I/O o attese servono più thread, secondo <var>N</var><sub>threads</sub> = <var>N</var><sub>cpu</sub> · <var>U</var><sub>cpu</sub> · (1 + <var>W</var>/<var>C</var>), dove <var>W</var>/<var>C</var> è il rapporto tra il tempo di attesa e quello di calcolo.</p>
+      </details>
+      <details>
+        <summary>Come si ottiene il risultato di un task sottomesso a un executor?</summary>
+        <p>Il task si scrive come <code>Callable&lt;V&gt;</code> e si sottomette con <code>submit</code>, che restituisce subito una <code>Future&lt;V&gt;</code>. La <code>get()</code> blocca finché il risultato non è pronto e lo restituisce. In alternativa i task possono depositare i risultati in un monitor condiviso.</p>
+      </details>
+      <details>
+        <summary>Perché <code>actionPerformed</code> non deve contenere un calcolo lungo?</summary>
+        <p>Perché lo esegue l'Event Dispatch Thread, l'unico thread che gestisce gli eventi e il ridisegno della GUI. Finché l'handler non ritorna, la finestra non si aggiorna e non reagisce a nessun altro evento. Il lavoro lungo va a un altro thread, che riconsegna gli aggiornamenti con <code>SwingUtilities.invokeLater</code>.</p>
+      </details>
+      <details>
+        <summary>Un virtual thread è più veloce di un platform thread? Quando conviene?</summary>
+        <p>Non è più veloce: il calcolo resta limitato dai core. Conviene quando ci sono moltissimi task che passano il tempo ad aspettare I/O, perché un virtual thread bloccato viene smontato dal carrier e costa solo un po' di heap. Fino a JDK 23 un virtual thread dentro <code>synchronized</code> resta inchiodato al carrier (pinning).</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Lab Notes: <em>Multithreaded Programming in Java – Overview</em>, <em>Thread Safety</em>, <em>Thread Coordination in Java – Library Support</em>, <em>Task-Oriented Programming in Java</em>, <em>GUI Frameworks and Concurrency</em>, <em>Performance of Concurrent Programs</em>, <em>Virtual Threads</em>. Lezioni: 16 febbraio 2026, seconda parte (§8: thread in Java, <code>join</code>, flag <code>volatile</code>) · 23 febbraio (sorting worker, regola <var>N</var>+1, esperimento <code>HowMany</code>, anticipo dei virtual thread) · 2 marzo (§4–8: synchronized, lock, lost update, thread safety, check-and-act) · 16 marzo (wait/notify, <code>InterruptedException</code>, laboratorio su barriera e latch) · 20 marzo (§1–9: task, master-worker, executor, Future, l'esempio dei 100 task, GUI ed EDT, cronometro, Fork/Join, structured concurrency) · 30 marzo (§11–15: executor in laboratorio, quadratura, deadlock nel pool, conteggio parole con Fork/Join, virtual thread). La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-09-formalismi-visuali.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-11-verifica.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: Lab Notes del corso (sette moduli su Java) · lezioni del 16 e 23 febbraio, 2, 16, 20 e 30 marzo 2026 · B. Goetz et al., <em>Java Concurrency in Practice</em> · B. Goetz, D. Bryant, <em>Virtual Threads: New Foundations for High-Scale Java Applications</em> · JEP 437, 444, 491 · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/pool-lab.js"></script>
+  <script>PoolLab.mount('#pool-lab');</script>
+</body>
+</html>

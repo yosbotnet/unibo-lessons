@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 11 — Verifica formale e model checking · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-10-java.html">&larr; Cap. 10 — Concorrenza in Java: thread, sincronizzazione, task ed executor</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-12-async.html">Cap. 12 — Programmazione asincrona &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte I — Concorrenza a memoria condivisa · Capitolo 11</div>
+    <h1>Verifica formale e model checking</h1>
+    <div class="lk-meta"><span>~20 min di lettura</span><span>verifiche eseguite con JPF, SPIN, TLC e Z3</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Perché il testing non basta</a></li>
+      <li><a href="#s2">Safety o liveness: che cosa si verifica e come</a></li>
+      <li><a href="#s3">Model checking</a></li>
+      <li><a href="#s4">Java PathFinder</a></li>
+      <li><a href="#s5">SPIN e Promela, TLA+ e PlusCal</a></li>
+      <li><a href="#s6">Dimostrazioni induttive di invarianti</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> In un programma concorrente lo stesso input può dare risultati diversi a seconda dell'interleaving, e un test esercita solo alcuni scenari: può mostrare un errore, non la sua assenza. La correttezza si stabilisce verificando le proprietà su <em>tutti</em> gli scenari, con due tecniche formali. Il <strong>model checking</strong> genera tutti gli stati raggiungibili di un modello e controlla le proprietà, restituendo un controesempio se ne trova uno violato. La <strong>dimostrazione induttiva</strong> prova un invariante sullo stato iniziale e su ogni passo. Il corso usa Java PathFinder, che esplora tutti gli interleaving di un programma Java; SPIN e TLA+ sono le alternative classiche.</p>
+
+  <section id="s1">
+    <h2>1. Perché il testing non basta</h2>
+
+    <p>In un programma sequenziale rieseguire con lo stesso input dà lo stesso risultato: si scrive un test, si trova il difetto, si corregge, si riesegue. In un programma concorrente lo stesso input può dare output diversi a seconda dello scenario, e ogni esecuzione probabilmente ne segue uno diverso. Non si può fare debugging nel modo solito. Due thread che incrementano 100 volte un contatore non protetto danno quasi sempre 200, e un test che controlla 200 passa migliaia di volte; lo scenario che perde un incremento è improbabile, ma esiste, e per la legge di Murphy prima o poi si presenta.</p>
+
+    <table>
+      <thead><tr><th>Attività</th><th>Domanda</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Testing</strong></td><td>cerca malfunzionamenti eseguendo il sistema su scenari scelti: rivela la presenza di errori, non la loro assenza</td></tr>
+        <tr><td><strong>Verifica</strong></td><td>il sistema soddisfa la sua specifica? «Abbiamo costruito il sistema nel modo giusto?» Una proprietà deve valere per <em>tutti</em> gli scenari possibili</td></tr>
+        <tr><td><strong>Validazione</strong></td><td>il sistema soddisfa le aspettative del cliente? «Abbiamo costruito il sistema giusto?»</td></tr>
+      </tbody>
+    </table>
+
+    <p>Le slide usano la terminologia classica dell'ingegneria del software. L'<em>errore</em> è l'azione umana che produce un risultato sbagliato. Il <em>fault</em> (difetto) è la manifestazione di un errore nel sistema. Il <em>failure</em> (malfunzionamento) avviene quando il sistema, incontrando un fault, si comporta in modo scorretto. Un failure può avere più fault come causa, e un fault può causare più failure.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Nella letteratura sull'affidabilità (Avizienis, Laprie e altri) le parole hanno un altro ordine: <em>fault</em> è la causa, <em>error</em> la parte sbagliata dello stato interno, <em>failure</em> la deviazione del servizio osservata dall'esterno. All'esame conviene usare quella delle slide e, se serve, dire quale si sta usando.</p></div>
+
+    <p>Anche i test si dividono come le proprietà. I <strong>test di safety</strong> controllano che il comportamento resti conforme alla specifica, di solito con asserzioni sugli invarianti. I <strong>test di liveness</strong> controllano il progresso, e sono più difficili da impostare: quanto aspettare prima di concludere che qualcosa non accadrà mai? I limiti restano due: un test copre solo un sottoinsieme degli scenari, e il codice di test può introdurre ritardi o sincronizzazioni che cambiano lo scheduling e nascondono il difetto (<em>heisenbug</em>). Anche le stampe su standard output, usate per «vedere» l'ordine delle azioni, sono soggette all'interleaving.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Safety o liveness: che cosa si verifica e come</h2>
+
+    <p>Le proprietà di correttezza di un programma concorrente, che può anche non terminare, riguardano le sue computazioni e devono valere in ogni scenario. Sono di due tipi, e si scrivono in logica temporale lineare (LTL), introdotta nel <a href="cap-03-correttezza.html">capitolo 3</a>.</p>
+    <ul>
+      <li>Una proprietà di <strong>safety</strong> dice che <em>non succede mai niente di male</em>: una condizione vale in ogni stato, <code>□P</code>. Una violazione si vede in un <strong>prefisso finito</strong>: basta raggiungere uno stato cattivo, e nessuna continuazione può rimediare.</li>
+      <li>Una proprietà di <strong>liveness</strong> dice che <em>prima o poi succede qualcosa di buono</em>: <code>◇P</code>, o <code>□(richiesta → ◇risposta)</code>. Nessun prefisso finito la smentisce, perché la cosa buona potrebbe ancora arrivare. Una violazione è un comportamento <strong>infinito</strong>: in un modello finito, un cammino che finisce in un ciclo che si ripete per sempre senza che la cosa buona accada.</li>
+    </ul>
+
+    <figure class="lk-fig">
+      <img src="assets/diagrams/pcd-temporal-counterexamples.svg" width="332" height="444" style="display:block;max-width:100%;height:auto;margin:0 auto" alt="In alto s0, s1, s2: in s2 P e Q sono entrambi in CS. In basso r0, r1, r2 e ritorno a r1: P richiede ma non entra mai, mentre Q alterna ingresso e uscita.">
+      <figcaption><b>Fig. 1</b> — Due controesempi. In alto, per la safety <code>□¬(p3 ∧ q3)</code>, basta il prefisso finito s0 s1 s2: in s2 entrambi sono in sezione critica. In basso, per la liveness <code>□(tryp → ◇p3)</code>, serve un ciclo: da r1 a r2 e di nuovo a r1, per sempre, P chiede di entrare e non entra mai.</figcaption>
+    </figure>
+
+    <p>Per questo, dicono le slide, la safety è più facile da verificare: basta esaminare gli stati uno per uno e fermarsi al primo che viola la proprietà. Per la liveness non basta guardare gli stati: bisogna esaminare gli scenari, e servono teoria e strumenti più complessi. Inoltre una liveness vale spesso solo sotto un'ipotesi di <strong>fairness</strong> (<a href="cap-03-correttezza.html">capitolo 3</a>): senza, lo scheduler potrebbe non far mai avanzare un processo pronto, e quasi nessuna liveness sarebbe vera.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Ricci chiede di classificare le proprietà scritte per l'assignment (anche quelle controllate su una rete di Petri con Tina). La prova è chiedersi: <em>una violazione si può mostrare con un'esecuzione finita?</em> Se sì è safety, se serve un'esecuzione infinita è liveness.</p></div>
+
+    <table>
+      <thead><tr><th>Proprietà</th><th>Tipo</th><th>Perché</th></tr></thead>
+      <tbody>
+        <tr><td>Mai due thread in sezione critica</td><td>safety</td><td>lo stato con entrambi dentro è un controesempio finito</td></tr>
+        <tr><td>Il buffer non ha mai più di <var>N</var> elementi, né meno di 0</td><td>safety</td><td>invariante di stato</td></tr>
+        <tr><td>Se il programma termina, il contatore vale 200</td><td>safety</td><td>un'esecuzione che termina con 199 lo smentisce</td></tr>
+        <tr><td>Il programma termina</td><td>liveness</td><td>solo un'esecuzione infinita lo smentisce</td></tr>
+        <tr><td>Chi chiede la sezione critica prima o poi entra (niente starvation)</td><td>liveness</td><td>il controesempio è un ciclo infinito di attesa</td></tr>
+        <tr><td>Chi chiede la sezione critica viene sorpassato al più <var>k</var> volte</td><td>safety</td><td>il (<var>k</var>+1)-esimo sorpasso si vede in un prefisso finito; non garantisce da solo che si entri</td></tr>
+        <tr><td>Nessuno stato raggiungibile in cui tutti i thread sono bloccati</td><td>safety</td><td>è un invariante sugli stati: è il deadlock che controlla JPF</td></tr>
+        <tr><td>Se qualcuno vuole entrare, prima o poi qualcuno entra</td><td>liveness</td><td>è l'«assenza di deadlock» del problema della sezione critica (<a href="cap-04-sezione-critica.html#s1">capitolo 4</a>)</td></tr>
+        <tr><td>Nessun worker supera la barriera prima che arrivino tutti</td><td>safety</td><td>un passaggio anticipato è un evento finito</td></tr>
+        <tr><td>Se arrivano tutti, prima o poi tutti superano la barriera</td><td>liveness</td><td>un'attesa infinita lo smentisce</td></tr>
+        <tr><td>Rete di Petri limitata; somma di token costante su certi posti (invariante di posto); nessuna marcatura morta raggiungibile</td><td>safety</td><td>proprietà di ogni marcatura raggiungibile (<a href="cap-09-formalismi-visuali.html">capitolo 9</a>)</td></tr>
+        <tr><td>Rete <em>viva</em>: ogni transizione può sempre tornare abilitata</td><td>tipo liveness</td><td>riguarda ciò che potrà accadere; non si esprime in LTL, perché parla di possibilità e non di tutte le esecuzioni</td></tr>
+      </tbody>
+    </table>
+    <p>La stessa parola può indicare proprietà di tipo diverso: «assenza di deadlock» è safety se significa «nessuno stato bloccato è raggiungibile», liveness se significa «il sistema continua a progredire». All'esame conviene dire quale delle due si intende.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Model checking</h2>
+
+    <p>Il <strong>model checking</strong> è la tecnica più usata per controllare in modo automatico le proprietà di un sistema concorrente. Si costruisce un modello del sistema: con il modello a interleaving del <a href="cap-02-modellazione.html">capitolo 2</a>, un sistema di transizioni i cui stati sono le combinazioni di contatori di programma e variabili. Il model checker esplora <strong>in modo esaustivo</strong> lo spazio degli stati e verifica le proprietà, espresse come predicati sugli stati o come formule di logica temporale. Se il sistema le soddisfa, risponde con una conferma. Altrimenti produce un <strong>controesempio</strong>, la traccia che porta alla violazione, ed è quindi utile anche per trovare i bug, non solo per dimostrare la correttezza. La verifica si fa sul <em>modello</em>, non sul programma: da qui il nome.</p>
+
+    <p>La tecnica si applica a qualunque sistema dinamico: hardware e software, e nel software a requisiti, progetto e programmi. Intel l'ha adottata dopo il bug della divisione del Pentium (1994), la NASA per il software critico dopo la perdita del Mars Polar Lander (1999). Il <em>program model checking</em> la applica all'implementazione finale.</p>
+
+    <p>Il problema è l'<strong>esplosione dello spazio degli stati</strong>. Il numero di interleaving cresce in modo combinatorio (<a href="cap-02-modellazione.html">capitolo 2</a>), e gli stati sono il prodotto dei valori di tutte le variabili e di tutti i contatori di programma. Le slide citano tre tecniche per contenerlo:</p>
+    <ul>
+      <li><strong>ridurre il numero di stati</strong> con opportune regole, ad esempio modellando le variabili con pochi valori;</li>
+      <li><strong>costruire il grafo in modo incrementale</strong>: esplorare solo gli stati raggiungibili, controllando la proprietà mentre si costruisce il grafo e fermandosi al primo stato che la viola;</li>
+      <li><strong>model checking simbolico</strong>: lavorare su insiemi di stati descritti in modo intensivo, invece che uno per uno.</li>
+    </ul>
+    <p>Anche il modellista contribuisce, astraendo ciò che non serve. Per verificare la mutua esclusione, ad esempio, sezione critica e non critica si possono ridurre a una sola istruzione ciascuna, come nei diagrammi di stato del <a href="cap-04-sezione-critica.html">capitolo 4</a>. La riduzione deve però conservare la proprietà che si vuole verificare, altrimenti si verifica un altro problema.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. Java PathFinder</h2>
+
+    <p><strong>Java PathFinder</strong> (JPF) è il model checker usato nel corso. È stato sviluppato alla NASA per il software Java critico, dopo un problema su Marte che nessun test aveva previsto, ed è oggi un progetto open source. Ha una particolarità: <strong>non serve scrivere un modello</strong>. JPF è una Java Virtual Machine, scritta in Java, che esegue il bytecode del programma lungo <em>tutti</em> i cammini possibili invece che lungo uno solo. A ogni punto in cui lo scheduler potrebbe scegliere un thread diverso, JPF memorizza lo stato, prova un'alternativa, torna indietro (<em>backtracking</em>) e prova le altre, riconoscendo gli stati già visti. Fa in modo automatico ciò che alla lavagna si fa costruendo a mano il grafo degli interleaving, con la granularità delle istruzioni bytecode.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Il programma Java compilato e il file di configurazione entrano nella JVM di JPF, che esplora gli interleaving con backtracking; l'esito è una violazione con traccia, una ricerca completa senza errori, oppure una ricerca interrotta da un limite, che non è conclusiva">
+      <svg viewBox="0 0 640 200" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <g fill="none" stroke="#1546B8" stroke-width="1.6">
+          <rect x="10" y="60" width="145" height="80" rx="6"/>
+          <rect x="195" y="15" width="250" height="170" rx="8"/>
+          <rect x="485" y="75" width="150" height="50" rx="6"/>
+          <rect x="485" y="135" width="150" height="50" rx="6"/>
+          <line x1="155" y1="100" x2="187" y2="100"/>
+          <line x1="445" y1="100" x2="477" y2="100"/>
+          <line x1="445" y1="160" x2="477" y2="160"/>
+        </g>
+        <rect x="485" y="15" width="150" height="50" rx="6" fill="none" stroke="#B83D2D" stroke-width="1.6"/>
+        <line x1="445" y1="40" x2="477" y2="40" stroke="#B83D2D" stroke-width="1.6"/>
+        <polygon points="477,35 485,40 477,45" fill="#B83D2D"/>
+        <g fill="#1546B8">
+          <polygon points="187,95 195,100 187,105"/>
+          <polygon points="477,95 485,100 477,105"/>
+          <polygon points="477,155 485,160 477,165"/>
+        </g>
+        <g font-family="sans-serif" fill="#1546B8" text-anchor="middle">
+          <text x="82" y="94" font-size="14">programma Java</text>
+          <text x="82" y="116" font-size="13">+ file .jpf</text>
+          <text x="320" y="42" font-size="15" font-weight="bold">JVM di JPF</text>
+          <text x="320" y="72" font-size="13">esegue il bytecode passo passo</text>
+          <text x="320" y="94" font-size="13">memorizza gli stati già visti</text>
+          <text x="320" y="116" font-size="13">a ogni scelta dello scheduler</text>
+          <text x="320" y="138" font-size="13">prova tutte le alternative</text>
+          <text x="320" y="160" font-size="13">tornando indietro (backtracking)</text>
+          <text x="560" y="97" font-size="13">ricerca completa:</text>
+          <text x="560" y="115" font-size="13">nessun errore</text>
+          <text x="560" y="157" font-size="13">limite raggiunto:</text>
+          <text x="560" y="175" font-size="13">non conclusivo</text>
+        </g>
+        <g font-family="sans-serif" fill="#B83D2D" text-anchor="middle" font-size="13">
+          <text x="560" y="37">violazione:</text>
+          <text x="560" y="55">traccia dell'errore</text>
+        </g>
+      </svg>
+      <figcaption><b>Fig. 2</b> — Come lavora JPF, e i tre esiti possibili. «No errors detected» vale come verifica solo se la ricerca è stata completa.</figcaption>
+    </figure>
+
+    <p><strong>Che cosa controlla.</strong> Di base JPF verifica due proprietà: l'assenza di <strong>deadlock</strong>, cioè stati in cui nessun thread può proseguire, e l'assenza di <strong>eccezioni non catturate</strong>, compresi gli <code>AssertionError</code> degli <code>assert</code>. Con il listener <code>PreciseRaceDetector</code> trova anche le race condition di basso livello: accessi concorrenti allo stesso campo, almeno uno in scrittura, senza sincronizzazione. JPF non accetta formule LTL. Le proprietà specifiche del programma si scrivono con degli <code>assert</code>, eventualmente appoggiandosi a variabili aggiunte apposta, come si fa in JUnit, con una differenza essenziale: in JUnit l'asserzione è controllata in <em>uno</em> scenario, in JPF in <em>tutti</em>. Per proprietà più complesse JPF è estendibile: i listener vengono chiamati a ogni passo dell'esplorazione e possono eseguire controlli propri. In pratica con JPF si verificano soprattutto proprietà di safety e l'assenza di deadlock.</p>
+
+    <p><strong>Un esempio eseguito.</strong> <code>JpfCounter</code> avvia due thread che incrementano un campo <code>volatile</code>, aspetta che finiscano e controlla con un <code>assert</code> che il valore sia 2. Con l'argomento <code>safe</code> l'incremento è protetto da <code>synchronized</code>.</p>
+
+<pre><code class="language-java">public final class JpfCounter {
+  private static volatile int value;
+  private static boolean safe;
+
+  private static void increment() {
+    if (safe) {
+      synchronized (JpfCounter.class) { value = value + 1; }
+    } else {
+      value = value + 1;                 // volatile: visibile, ma non atomico
+    }
+  }
+
+  public static void main(String[] args) throws InterruptedException {
+    safe = args[0].equals("safe");
+    Thread first = new Thread(JpfCounter::increment, "first");
+    Thread second = new Thread(JpfCounter::increment, "second");
+    first.start(); second.start();
+    first.join(); second.join();
+    assert value == 2 : "Lost update: value=" + value;
+  }
+}</code></pre>
+
+    <p>La configurazione è un file <code>.jpf</code>: la classe con il <code>main</code> (<code>target</code>) e i suoi argomenti, il classpath dei <code>.class</code> da verificare, le proprietà da controllare, la strategia di ricerca e che cosa stampare. Con un progetto Maven il classpath è <code>target/classes</code>.</p>
+
+<pre><code class="language-properties">target = JpfCounter
+target.args = unsafe
+classpath = ${config_path}
+vm.enable_assertions = *
+search.class = gov.nasa.jpf.search.DFSearch
+search.properties = gov.nasa.jpf.vm.NotDeadlockedProperty,gov.nasa.jpf.vm.NoUncaughtExceptionsProperty
+report.console.property_violation = error,trace
+# per le race condition di basso livello:
+# listener = gov.nasa.jpf.listener.PreciseRaceDetector</code></pre>
+
+    <table>
+      <thead><tr><th>Esecuzione</th><th>Esito di JPF</th><th>Che cosa si può concludere</th></tr></thead>
+      <tbody>
+        <tr><td>incremento non protetto</td><td>1 violazione, con la traccia: entrambi leggono 0, entrambi scrivono 1</td><td>controesempio: il lost update esiste</td></tr>
+        <tr><td>incremento <code>synchronized</code> (<code>+target.args=safe</code>)</td><td>nessun errore, ricerca completa</td><td>la proprietà vale in tutti gli interleaving di questo programma</td></tr>
+        <tr><td>non protetto, ma <code>+search.depth_limit=1</code></td><td>«no errors detected», con «depth limit reached»</td><td>nulla: la ricerca si è fermata prima della violazione</td></tr>
+        <tr><td>classe target inesistente</td><td>la ricerca non parte</td><td>nulla: non è né una verifica né un controesempio</td></tr>
+      </tbody>
+    </table>
+    <p>Esiti ottenuti con jpf-core (revisione <code>ee18da5</code>) e OpenJDK 11; sorgenti e risultati: <a href="assets/examples/JpfCounter.java" download>JpfCounter.java</a>, <a href="assets/examples/jpf-counter.jpf" download>jpf-counter.jpf</a>, <a href="assets/examples/jpf-results.json" download>jpf-results.json</a>. Il primo caso è anche la prova che <code>volatile</code> non rende atomico un incremento (<a href="cap-10-java.html#s3">capitolo 10</a>).</p>
+
+    <h3>Come usarlo su un assignment</h3>
+    <p>JPF esplora tutti gli interleaving, quindi su un programma vero, con molti thread, GUI, file e cicli lunghi, lo spazio degli stati esplode. Si verifica allora un <strong>modello ridotto</strong> del programma, come si fa alla lavagna. Si tengono i componenti con la logica di sincronizzazione, cioè i monitor e i thread che li usano, con 2 o 3 thread e pochi cicli. Si tolgono la GUI e l'I/O, sostituendo ad esempio i file con dati generati in memoria. Si traducono le proprietà in <code>assert</code>, lasciando a JPF il controllo del deadlock. Conviene provare anche una <strong>versione volutamente sbagliata</strong>, ad esempio senza un <code>synchronized</code>: se JPF non trova l'errore, la verifica non sta controllando ciò che si crede. E un «no errors detected» si legge insieme alle statistiche, per essere sicuri che la ricerca sia stata completa.</p>
+
+    <details>
+      <summary>Laboratorio: installare ed eseguire JPF</summary>
+      <p>JPF non funziona con le JDK più recenti: fino a poco tempo fa accettava solo bytecode Java 8, oggi Java 11. Il programma da verificare va quindi compilato per Java 11 (nel progetto Maven del laboratorio lo imposta il <code>pom.xml</code>). Il modo più semplice di avere l'ambiente giusto è il container Docker del repository <code>jpf-core</code>.</p>
+      <ol>
+        <li>Clonare <code>https://github.com/javapathfinder/jpf-core</code>, entrare nella cartella ed eseguire <code>docker compose build</code>: costruisce un'immagine basata su Eclipse Temurin 11.</li>
+        <li>Avviare il container montando la cartella con i propri sorgenti: <code>docker compose run --rm -v /percorso/pcd-jpf:/pcd-jpf jpf-dev</code>.</li>
+        <li>Solo la prima volta, dentro il container, compilare JPF con <code>./gradlew clean build</code> (la test suite richiede diversi minuti; <code>./gradlew buildJars</code> costruisce solo i jar). Su Windows, se <code>gradlew</code> non parte, il file ha fine riga CRLF: va convertito, ad esempio con <code>sed -i 's/\r$//' gradlew</code>.</li>
+        <li>Eseguire: <code>java -jar build/RunJPF.jar /pcd-jpf/esempio.jpf</code>. Le opzioni sulla riga di comando, come <code>+target.args=safe</code>, prevalgono sul file.</li>
+      </ol>
+      <p>Con Visual Studio Code si può usare direttamente il <em>dev container</em> del repository, senza costruire l'immagine a mano. Per un programma sequenziale JPF trova un solo scenario; con due thread che eseguono due azioni ciascuno stampa l'output di tutti gli interleaving, poi «no errors detected» e le statistiche (stati, memoria).</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. SPIN e Promela, TLA+ e PlusCal</h2>
+
+    <p><strong>SPIN</strong> è uno dei model checker più diffusi, nella ricerca e nell'industria, ed è molto efficiente: è stato tra i primi a introdurre le ottimizzazioni che permettono di gestire spazi di stati enormi. È usato per modellare e progettare sistemi concorrenti e distribuiti. Il modello si scrive in <strong>Promela</strong>, un linguaggio con pochi costrutti pensati per descrivere processi concorrenti, vicino allo pseudocodice del corso. Le proprietà si scrivono in LTL.</p>
+
+    <details>
+      <summary>Esempio: Dekker in Promela, verificato con SPIN</summary>
+<pre><code class="language-plaintext">bool want[2];
+byte turn = 0;
+byte in_cs = 0;                     /* osservatore: conta chi è in sezione critica */
+
+active [2] proctype Dekker() {      /* active [2]: avvia due istanze, _pid = 0 e 1 */
+    byte me = _pid;
+    byte other = 1 - _pid;
+    do
+    :: true -&gt;
+request:
+        want[me] = true;
+        do
+        :: want[other] -&gt;
+            if
+            :: turn == other -&gt;
+                want[me] = false;
+                (turn == me);       /* un'espressione come istruzione: attende che sia vera */
+                want[me] = true
+            :: else -&gt; skip
+            fi
+        :: else -&gt; break
+        od;
+cs:
+        in_cs++;
+        assert(in_cs == 1);         /* mutua esclusione */
+        in_cs--;
+        turn = other;
+        want[me] = false
+    od
+}
+
+ltl response_p { [] (Dekker[0]@request -&gt; &lt;&gt; Dekker[0]@cs) }</code></pre>
+      <table>
+        <thead><tr><th>Controllo (SPIN 6.5.1)</th><th>Esito</th></tr></thead>
+        <tbody>
+          <tr><td>asserzione di mutua esclusione e stati finali non validi</td><td>ricerca completa, nessun errore (204 stati)</td></tr>
+          <tr><td><code>response_p</code> con weak fairness (<code>pan -a -f</code>)</td><td>ricerca completa, nessun errore</td></tr>
+          <tr><td><code>response_p</code> senza fairness</td><td>controesempio: P resta fermo mentre Q continua</td></tr>
+          <tr><td>variante errata, senza protocollo d'ingresso</td><td>controesempio: l'asserzione fallisce</td></tr>
+        </tbody>
+      </table>
+      <p>Sorgente e risultati: <a href="assets/examples/Dekker.pml" download>Dekker.pml</a>, <a href="assets/examples/formal-results.json" download>formal-results.json</a>. Comandi: <code>spin -a Dekker.pml</code>, poi compilare <code>pan.c</code> con <code>gcc</code> ed eseguire <code>./pan</code> (safety) o <code>./pan -a -f -N response_p</code> (liveness con fairness).</p>
+    </details>
+
+    <p><strong>TLA+</strong> (<em>Temporal Logic of Actions</em>) è il linguaggio di specifica di Leslie Lamport, basato su matematica discreta semplice: insiemi e predicati. È usato per specificare e verificare sistemi reali complessi; Amazon Web Services, ad esempio, lo usa per i protocolli dei suoi servizi cloud. Una specifica TLA+ descrive l'<strong>insieme di tutti i comportamenti ammessi</strong> (tracce di esecuzione) di un sistema. Può descrivere sia le proprietà desiderate (il <em>che cosa</em>) sia il progetto del sistema (il <em>come</em>), e lo scopo è mostrare che il progetto implementa le proprietà. Lo si fa con un ragionamento matematico, oppure con il model checker <strong>TLC</strong>, che controlla le proprietà su tutte le tracce. Poiché TLA+ è molto matematico e poco procedurale, Lamport ha affiancato <strong>PlusCal</strong> (già +CAL): un linguaggio algoritmico, simile a un linguaggio di programmazione, che viene tradotto in una specifica TLA+ verificabile con TLC. In PlusCal un'azione atomica va da un'etichetta alla successiva.</p>
+
+<pre><code class="language-plaintext">Not(i) == 1 - i                                   \* l'altro processo
+
+--algorithm Peterson {
+  variables flag = [i \in {0,1} |-&gt; FALSE], turn = 0;
+  process (proc \in {0,1}) {
+    a0: while (TRUE) {
+    a1:   flag[self] := TRUE;
+    a2:   turn := Not(self);
+    a3a:  if (flag[Not(self)]) { goto a3b } else { goto cs };
+    a3b:  if (turn = Not(self)) { goto a3a } else { goto cs };
+    cs:   skip;                                   \* sezione critica
+    a4:   flag[self] := FALSE;
+    }
+  }
+}
+MutualExclusion == ~(pc[0] = "cs" /\ pc[1] = "cs")          \* pc: le etichette correnti</code></pre>
+
+    <table>
+      <thead><tr><th>Controllo con TLC</th><th>Esito</th></tr></thead>
+      <tbody>
+        <tr><td><code>MutualExclusion</code> come invariante</td><td>ricerca completa, nessuna violazione: 58 stati distinti</td></tr>
+        <tr><td><code>StarvationFreedom</code> (<code>pc[i] = "a1" ~&gt; pc[i] = "cs"</code>) con weak fairness per ogni processo</td><td>ricerca completa, nessuna violazione</td></tr>
+        <tr><td><code>StarvationFreedom</code> senza fairness</td><td>controesempio: un prefisso seguito da <em>stuttering</em> infinito</td></tr>
+        <tr><td>variante errata: <code>a2: turn := self</code></td><td>controesempio in 10 stati: entrambi in <code>cs</code></td></tr>
+      </tbody>
+    </table>
+    <p>Sorgenti e configurazioni: <a href="assets/examples/Peterson.tla" download>Peterson.tla</a>, <a href="assets/examples/Peterson.cfg" download>Peterson.cfg</a>, <a href="assets/examples/PetersonFair.cfg" download>PetersonFair.cfg</a>, <a href="assets/examples/PetersonUnfair.cfg" download>PetersonUnfair.cfg</a>; eseguiti con TLC 2.19. Il paper di Lamport da cui viene l'esempio delle slide riporta 146 stati raggiungibili: il conteggio dipende dalla traduzione e dalla granularità della specifica, non è una costante dell'algoritmo.</p>
+
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p><strong>Stuttering</strong> (letteralmente «balbettare») è un passo in cui lo stato non cambia. In TLA+ ogni specifica ammette per costruzione questi passi: il passo della specifica si scrive <code>[Next]_vars</code>, cioè «un passo di <code>Next</code>, oppure nessun cambiamento delle variabili», come nella dimostrazione della <a href="#s6">sezione 6</a>. Serve a confrontare specifiche con livelli di dettaglio diversi, in cui un passo di quella astratta corrisponde a più passi di quella dettagliata. Il prezzo è che, senza ipotesi di fairness, un comportamento può «balbettare» per sempre: il sistema resta fermo anche se un processo potrebbe avanzare. È il controesempio che TLC trova a <code>StarvationFreedom</code> senza fairness. Aggiungendo <code>WF_vars(proc(i))</code>, cioè weak fairness per ogni processo, questi comportamenti vengono esclusi e la proprietà vale.</p></div>
+  </section>
+
+  <section id="s6">
+    <h2>6. Dimostrazioni induttive di invarianti</h2>
+
+    <p>La seconda tecnica formale non esplora gli stati: li <em>ragiona</em>. Un <strong>invariante</strong> è una formula che deve essere vera in ogni punto di ogni computazione, come <code>□¬(p3 ∧ q3)</code>. Si dimostra per induzione sugli stati:</p>
+    <ol>
+      <li><strong>caso base</strong>: la formula <var>A</var> è vera nello stato iniziale;</li>
+      <li><strong>passo induttivo</strong>: supposto <var>A</var> vero in un generico stato <var>S</var>, si dimostra che è vero in tutti gli stati successivi a <var>S</var>.</li>
+    </ol>
+    <p>Questa tecnica non soffre dell'esplosione degli stati, e vale anche per sistemi infiniti o parametrici, per ogni <var>N</var>. In cambio richiede di trovare la formula giusta. Il passo induttivo parte da un <em>qualsiasi</em> stato che soddisfa <var>A</var>, anche uno irraggiungibile, quindi spesso la proprietà che interessa va <strong>rafforzata</strong> in un invariante più forte, detto induttivo. Le dimostrazioni si possono automatizzare con i <strong>sistemi deduttivi</strong>, software di dimostrazione automatica di teoremi. In TLA+ la dimostrazione che Peterson garantisce la mutua esclusione ha proprio questa forma: trovato un invariante induttivo <code>Inv</code>, si dimostrano <code>Init ⇒ Inv</code> (base), <code>Inv ∧ [Next]_vars ⇒ Inv′</code> (passo) e <code>Inv ⇒ MutualExclusion</code>.</p>
+
+    <p><strong>Esempio: un invariante vero ma non induttivo.</strong> Un contatore parte da <code>x = 0</code> e, finché <code>x &lt; n</code> (con <var>n</var> pari), aggiunge 2. Vogliamo che non valga mai <code>x = n + 1</code>. È vero in ogni stato raggiungibile, ma non è induttivo: con <var>n</var> = 10, lo stato <code>x = 9</code> soddisfa la proprietà e il passo successivo porta a 11. Quello stato è irraggiungibile, ma il passo induttivo non lo sa. Si rafforza allora la proprietà in <code>Inv: 0 ≤ x ≤ n ∧ x pari</code>. <code>Inv</code> vale all'inizio; se vale e <code>x &lt; n</code>, essendo entrambi pari <code>x ≤ n − 2</code> e quindi <code>x + 2 ≤ n</code>, ancora pari; infine <code>Inv</code> implica <code>x ≠ n + 1</code>. La dimostrazione vale per ogni <var>n</var>, cosa che un model checker non può fare.</p>
+
+    <details>
+      <summary>Gli stessi obblighi controllati con un solver (Z3)</summary>
+      <p>Ogni obbligo si verifica chiedendo al solver SMT Z3 un controesempio, cioè la sua negazione: <code>unsat</code> significa che il controesempio non esiste, per ogni valore di <var>n</var>.</p>
+      <table>
+        <thead><tr><th>Obbligo</th><th>Controesempio cercato</th><th>Esito (Z3 4.13.3)</th></tr></thead>
+        <tbody>
+          <tr><td>base</td><td><code>x = 0 ∧ ¬Inv(x)</code></td><td>unsat</td></tr>
+          <tr><td>passo</td><td><code>Inv(x) ∧ Next(x, x′) ∧ ¬Inv(x′)</code></td><td>unsat</td></tr>
+          <tr><td>implicazione</td><td><code>Inv(x) ∧ x = n + 1</code></td><td>unsat</td></tr>
+          <tr><td>la proprietà da sola è induttiva?</td><td><code>x ≠ n+1 ∧ Next ∧ x′ = n+1</code></td><td>sat: <var>n</var> = 10, <var>x</var> = 9, <var>x′</var> = 11</td></tr>
+        </tbody>
+      </table>
+      <p>Sorgente e output: <a href="assets/examples/EvenCounter.smt2" download>EvenCounter.smt2</a>, <a href="assets/examples/proof-results.json" download>proof-results.json</a>; si esegue con <code>z3 EvenCounter.smt2</code>.</p>
+    </details>
+
+    <p>Capire perché un algoritmo è corretto, e non solo osservare che funziona, è per Ricci una competenza essenziale dell'ingegnere, tanto più quando il codice lo genera uno strumento automatico: bisogna saper giudicare se la soluzione proposta è corretta.</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Perché testare un programma concorrente non basta a dimostrarne la correttezza?</summary>
+        <p>Perché lo stesso input può produrre scenari diversi e un test ne esercita solo alcuni: rivela la presenza di errori, non l'assenza. In più il codice di test può cambiare lo scheduling e nascondere il difetto (heisenbug).</p>
+      </details>
+      <details>
+        <summary>Che cos'è il model checking?</summary>
+        <p>Una tecnica che esplora in modo esaustivo tutti gli stati raggiungibili di un modello del sistema e controlla su ciascuno le proprietà di correttezza. Se una è violata produce un controesempio, la traccia che porta all'errore; il suo limite è l'esplosione dello spazio degli stati.</p>
+      </details>
+      <details>
+        <summary>Che cos'è JPF e che cosa controlla?</summary>
+        <p>Java PathFinder, un model checker della NASA per Java: una JVM che esegue il bytecode lungo tutti gli interleaving, con backtracking. Di base cerca deadlock ed eccezioni non catturate, compresi gli <code>assert</code> falliti; con <code>PreciseRaceDetector</code> trova le race condition. Le proprietà si esprimono con <code>assert</code>, non in LTL.</p>
+      </details>
+      <details>
+        <summary>JPF stampa «no errors detected»: il programma è corretto?</summary>
+        <p>Solo se la ricerca è stata completa, e solo per le proprietà controllate e per il programma verificato, di solito un modello ridotto. Se è intervenuto un limite, ad esempio di profondità, il risultato non è conclusivo.</p>
+      </details>
+      <details>
+        <summary>«Il buffer non contiene mai più di N elementi» e «ogni elemento prodotto viene prima o poi consumato»: safety o liveness?</summary>
+        <p>La prima è safety: una violazione è uno stato raggiungibile, visibile in un'esecuzione finita. La seconda è liveness: la smentisce solo un'esecuzione infinita in cui l'elemento non viene mai consumato.</p>
+      </details>
+      <details>
+        <summary>Perché la safety è più facile da verificare della liveness?</summary>
+        <p>Per la safety basta esaminare gli stati uno per uno e fermarsi al primo che viola la proprietà. Per la liveness bisogna considerare gli scenari infiniti, cioè cercare cicli in cui la cosa buona non accade mai, e di solito tenere conto di un'ipotesi di fairness.</p>
+      </details>
+      <details>
+        <summary>Che cos'è TLA+, e che cos'è PlusCal?</summary>
+        <p>TLA+ è il linguaggio di specifica di Lamport, basato su insiemi e predicati, che descrive l'insieme dei comportamenti ammessi di un sistema; il model checker TLC ne verifica le proprietà. PlusCal è un linguaggio algoritmico che viene tradotto in TLA+.</p>
+      </details>
+      <details>
+        <summary>Che cosa significa stuttering?</summary>
+        <p>Un passo in cui lo stato non cambia. Le specifiche TLA+ lo ammettono sempre (<code>[Next]_vars</code>). Per questo, senza fairness, un comportamento che resta fermo per sempre è lecito e smentisce le proprietà di liveness, come la starvation freedom di Peterson.</p>
+      </details>
+      <details>
+        <summary>Come si dimostra un invariante per induzione, e perché a volte va rafforzato?</summary>
+        <p>Si prova che vale nello stato iniziale e che, se vale in uno stato qualsiasi, vale in tutti i successori. Il passo parte anche da stati irraggiungibili, e se da uno di questi si esce dalla proprietà bisogna rafforzarla in un invariante induttivo che li escluda.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Slide <em>[module-1.2] Modeling Concurrent Program Execution</em>, parte finale (correttezza, testing e verifica, model checking, SPIN, JPF, dimostrazioni induttive, TLA+ e PlusCal). Lezioni: 20 febbraio 2026 (§16 e §18: perché il testing non basta, model checking, anticipo di TLA+) · 23 febbraio (§18) · 27 febbraio (§12 e §14: verifica e test, model checking, SPIN e Promela) · 2 marzo (§1–3 e §17: installazione e primo uso di JPF, proprietà con <code>assert</code>) · 6 marzo (§22: riepilogo, JPF, TLA+ e PlusCal, dimostrazioni induttive) · 13 marzo (§7–8: ripasso) · 16 marzo (§21–22) · 20 marzo (§18). La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-10-java.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-12-async.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 20, 23 e 27 febbraio e del 2, 6, 13, 16 e 20 marzo 2026 · M. Ben-Ari, <em>Principles of Concurrent and Distributed Programming</em>, cap. 4 · L. Lamport, <em>Specifying Systems</em> · documentazione di Java PathFinder (jpf-core) e di SPIN · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+</body>
+</html>

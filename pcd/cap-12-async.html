@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 12 — Programmazione asincrona · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+.ell {border:1px solid #C9C3B6;background:#FAF7EF;padding:1rem;margin:1.5rem 0;font-family:var(--lk-utility);font-size:.9rem}
+.ell button,.ell select {font:inherit;max-width:100%;white-space:normal;text-align:left;background:#F3EFE3;color:#1546B8;border:1px solid #1546B8;padding:5px 10px;cursor:pointer}
+.ell button:disabled {color:#6E7068;border-color:#C9C3B6;cursor:default}
+.ell h5 {margin:.2rem 0 .35rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em}
+.ell-row {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:.5rem 0}
+.ell-note {margin:.4rem 0 .6rem;color:#45463F}
+.ell-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:12px;margin:.75rem 0}
+.ell-col {border:1px solid #C9C3B6;background:#F3EFE3;padding:.6rem .8rem;min-width:0}
+.ell-col ol {margin:0 0 .5rem;padding-left:1.4rem;font-family:var(--lk-mono);font-size:.78rem;overflow-wrap:anywhere}
+.ell-frame {border:1px dashed #6E7068;padding:.4rem .5rem;margin-bottom:.5rem;opacity:.75}
+.ell-frame.on {border-style:solid;border-color:#1546B8;opacity:1}
+.ell-fname {margin:0 0 .2rem;font-weight:600}
+.ell-frame ol {white-space:pre-wrap}
+.ell-frame li.done {color:#6E7068}
+.ell-frame li.next {background:#E3E8F4;outline:1px solid #1546B8}
+.ell-empty {margin:0 0 .5rem;color:#6E7068}
+.ell-state {font-family:var(--lk-mono);font-size:.82rem}
+.ell-state p {margin:.25rem 0;overflow-wrap:anywhere}
+.ell-status {border-top:1px solid #C9C3B6;padding-top:.4rem;margin:.5rem 0}
+.ell-log {font-family:var(--lk-mono);font-size:.78rem}
+.ell-log ol {max-height:14rem;overflow:auto;margin:.3rem 0}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-11-verifica.html">&larr; Cap. 11 — Verifica formale e model checking</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-13-reattiva.html">Cap. 13 — Programmazione reattiva &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte II — Programmazione asincrona e reattiva · Capitolo 12</div>
+    <h1>Programmazione asincrona</h1>
+    <div class="lk-meta"><span>~25 min di lettura</span><span>1 laboratorio: un event loop passo per passo</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Eventi invece di thread: l'event loop</a></li>
+      <li><a href="#s2">La regola del never-blocking</a></li>
+      <li><a href="#s3">Callback e continuation-passing style</a></li>
+      <li><a href="#s4">Il prezzo delle callback: callback hell</a></li>
+      <li><a href="#s5">Promise</a></li>
+      <li><a href="#s6">Task e microtask</a></li>
+      <li><a href="#s7">async/await</a></li>
+      <li><a href="#s8">Coroutine e fibre</a></li>
+      <li><a href="#s9">L'event loop in Java: Vert.x</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> La programmazione asincrona è il modo «a eventi» di fare concorrenza, duale a quello a thread. Un solo flusso di controllo, l'event loop, estrae eventi da una coda ed esegue gli handler uno alla volta, fino in fondo. Per questo non ci sono race condition, ma nessun handler deve mai bloccarsi. Le operazioni lente vanno a thread in background, e il loro risultato torna come evento. Callback, promise e async/await sono tre modi via via più comodi di scrivere il seguito di un'operazione asincrona. Sotto il motore resta sempre lo stesso.</p>
+
+  <section id="s1">
+    <h2>1. Eventi invece di thread: l'event loop</h2>
+
+    <p>Un sistema <strong>reattivo</strong> deve rispondere prontamente a stimoli che arrivano in momenti imprevedibili: click, richieste di rete, letture di sensori, risposte a richieste precedenti. Storicamente le risposte sono state due, i thread e gli eventi. Il panorama asincrono di oggi ha quattro famiglie, che il capitolo attraversa nell'ordine:</p>
+
+    <table>
+      <thead><tr><th>Famiglia</th><th>Idea</th></tr></thead>
+      <tbody>
+        <tr><td>Programmazione event-driven</td><td>architettura a event loop, pattern reactor</td></tr>
+        <tr><td>Funzioni asincrone e CPS</td><td>gli handler diventano continuazioni (callback); poi le promise</td></tr>
+        <tr><td>async/await</td><td>meccanismo del linguaggio che imita lo stile sincrono restando asincrono</td></tr>
+        <tr><td>Concorrenza a coroutine</td><td>thread leggeri, cooperativi</td></tr>
+      </tbody>
+    </table>
+    <p>È un campo ancora in evoluzione: Microsoft è passata dall'<em>Asynchronous Programming Model</em> (APM) all'<em>Event-based Asynchronous Pattern</em> (EAP, .NET 2.0) e poi al <em>Task-based Asynchronous Pattern</em> (TAP, .NET 4.5), deprecando ogni volta il precedente.</p>
+
+    <details>
+      <summary>Dalle slide: il dibattito eventi contro thread</summary>
+      <ul>
+        <li>J. Ousterhout, <em>Why threads are a bad idea (for most purposes)</em>, USENIX 1996.</li>
+        <li>E. Lee, <em>The Problem with Threads</em>, IEEE Computer, 2006.</li>
+        <li>R. von Behren, J. Condit, E. Brewer, <em>Why events are a bad idea (for high-concurrency servers)</em>, HotOS 2003.</li>
+        <li>A. Adya et al., <em>Cooperative Task Management without Manual Stack Management, or, Event-driven Programming is Not the Opposite of Threaded Programming</em>, USENIX 2002.</li>
+      </ul>
+      <p>Ogni approccio ha pro e contro: la vera sfida è metterli insieme.</p>
+    </details>
+
+    <h3>Programmi fatti di handler</h3>
+    <p>Un programma <strong>event-driven</strong> è una collezione di routine, gli <strong>handler</strong>, eseguite quando si verifica l'evento a cui sono associate. Il flusso di controllo lo decidono gli eventi, non il programmatore, quindi l'esecuzione è non deterministica. Un sistema a eventi deve stabilire come si associano gli handler agli eventi, come si ricevono e si gestiscono gli eventi e come si eseguono gli handler. Il modello di esecuzione di riferimento è l'<strong>event loop</strong>: un solo flusso di controllo e una coda di eventi, prodotti dall'ambiente o dagli handler stessi.</p>
+<pre><code class="language-plaintext">loop {
+  Event ev = waitForEvent(eventQueue)     // l'unico punto in cui il loop si blocca
+  Handler handler = selectHandler(ev)
+  execute(handler)                        // fino in fondo, senza interruzioni
+}</code></pre>
+    <p>Gli handler sono eseguiti <strong>atomicamente</strong>: un evento che arriva durante un handler resta in coda finché l'handler non è terminato. Alla fine di ogni handler lo stack è vuoto, senza chiamate pendenti: per questo si parla di «programmazione senza call stack». La coda può avere priorità, ma gli eventi si servono comunque uno alla volta.</p>
+
+    <figure class="lk-fig" role="img" aria-label="L'ambiente e i worker in background inseriscono eventi nella coda; l'event loop li estrae uno alla volta ed esegue l'handler associato; un handler che deve fare un'operazione lenta la affida a un worker, che al termine produce un evento di completamento">
+      <svg viewBox="0 0 640 230" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1546B8"/></marker></defs>
+        <g font-family="sans-serif" font-size="13" text-anchor="middle">
+          <rect x="10" y="30" width="120" height="56" rx="6" fill="none" stroke="#6E7068" stroke-width="1.4"/>
+          <text x="70" y="54" fill="#171813">ambiente</text>
+          <text x="70" y="72" fill="#45463F" font-size="11">rete, GUI, timer</text>
+          <rect x="175" y="30" width="150" height="56" rx="6" fill="none" stroke="#1546B8" stroke-width="1.6"/>
+          <g stroke="#1546B8" stroke-width="1.2"><line x1="205" y1="44" x2="205" y2="72"/><line x1="235" y1="44" x2="235" y2="72"/><line x1="265" y1="44" x2="265" y2="72"/><line x1="295" y1="44" x2="295" y2="72"/></g>
+          <text x="250" y="22" fill="#1546B8">coda degli eventi</text>
+          <rect x="370" y="22" width="120" height="72" rx="36" fill="none" stroke="#B83D2D" stroke-width="2"/>
+          <text x="430" y="54" fill="#B83D2D" font-weight="bold">event loop</text>
+          <text x="430" y="72" fill="#B83D2D" font-size="11">1 thread</text>
+          <rect x="530" y="30" width="100" height="56" rx="6" fill="none" stroke="#1546B8" stroke-width="1.6"/>
+          <text x="580" y="54" fill="#1546B8">handler</text>
+          <text x="580" y="72" fill="#45463F" font-size="11">fino in fondo</text>
+          <rect x="300" y="160" width="230" height="56" rx="6" fill="none" stroke="#1F5A49" stroke-width="1.6" stroke-dasharray="5 3"/>
+          <text x="415" y="184" fill="#1F5A49">worker in background</text>
+          <text x="415" y="202" fill="#1F5A49" font-size="11">I/O e chiamate bloccanti</text>
+          <text x="588" y="150" fill="#45463F" font-size="11" text-anchor="start">delega</text>
+          <text x="242" y="150" fill="#45463F" font-size="11" text-anchor="end">evento di completamento</text>
+        </g>
+        <g stroke="#1546B8" stroke-width="1.4" fill="none" marker-end="url(#ah)">
+          <line x1="130" y1="58" x2="171" y2="58"/>
+          <line x1="325" y1="58" x2="366" y2="58"/>
+          <line x1="490" y1="58" x2="526" y2="58"/>
+          <path d="M 580 86 L 580 188 L 534 188"/>
+          <path d="M 300 188 L 250 188 L 250 90"/>
+        </g>
+      </svg>
+      <figcaption><b>Fig. 1</b> — L'event loop coordina, i worker in background fanno il lavoro lento. Solo l'event loop esegue handler, quindi solo lui tocca lo stato.</figcaption>
+    </figure>
+
+    <p><strong>Due handler possono essere eseguiti insieme?</strong> Non nello stesso event loop: li esegue un solo thread, uno dopo l'altro. Per questo, a questo livello, <strong>non ci sono race condition</strong> e non servono lock: lo stato lo tocca solo l'event loop. Con più consumatori sulla stessa coda gli handler potrebbero interferire, quindi il loop di una coda è uno solo. Un sistema può però avere <strong>più event loop</strong>, uno per componente attivo, ciascuno con coda e stato propri: i loro handler girano in parallelo, non condividono memoria e comunicano generando eventi (l'event bus di Vert.x, <a href="#s9">sezione 9</a>). Da qui nascono gli <a href="cap-15-attori.html">attori</a>.</p>
+
+    <h3>Il pattern reactor</h3>
+    <p>Nella letteratura sui pattern (Schmidt, <em>POSA</em> vol. 2, 2000) l'event loop è il <strong>reactor</strong>, che separa il demultiplexing e il dispatching degli eventi dalla logica applicativa. I partecipanti sono cinque:</p>
+    <ul>
+      <li><strong>Handle</strong>: identifica una sorgente di eventi gestita dal sistema operativo, ad esempio una socket;</li>
+      <li><strong>Synchronous Event Demultiplexer</strong>: attende, bloccandosi, che uno degli handle diventi «pronto» (come <code>select()</code>);</li>
+      <li><strong>Initiation Dispatcher</strong>: registra gli handler e, quando un handle è pronto, lo usa come chiave per trovare l'handler e chiamarne il metodo hook;</li>
+      <li><strong>Event Handler</strong>: l'interfaccia con il metodo hook (<code>handle_event</code>);</li>
+      <li><strong>Concrete Event Handler</strong>: l'implementazione con la logica applicativa.</li>
+    </ul>
+    <p>È l'architettura che sta sotto JavaScript nei browser, Node.js, Vert.x e le GUI.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. La regola del never-blocking</h2>
+
+    <p>Dal modello discende la regola su cui si regge tutto: <strong>un handler non deve mai bloccarsi e deve sempre terminare</strong>. Una chiamata bloccante o un ciclo infinito imprigionano l'event loop, gli eventi in coda non vengono più serviti e il sistema smette di essere reattivo. Anche un handler solo lungo ritarda tutti gli altri eventi.</p>
+    <p>Una chiamata bloccante va sostituita da una <strong>richiesta asincrona</strong>: l'handler affida il lavoro e prosegue. Il lavoro lo fanno thread in background, che il programmatore di solito non vede. Quando hanno finito, non toccano lo stato dell'event loop: accodano un evento con il risultato o con l'errore. In un web server a eventi le richieste sono coordinate in sequenza da un solo thread, ma l'I/O procede concorrentemente: è uno schema master-worker in cui l'event loop fa il master. Un handler, quindi:</p>
+    <ul>
+      <li>è eseguito dall'event loop quando arriva l'evento a cui è associato, anche registrato dinamicamente;</li>
+      <li>va fino in fondo senza interruzioni (atomicità) e deve terminare presto;</li>
+      <li>non contiene chiamate bloccanti né attese attive: ogni operazione lenta diventa asincrona;</li>
+      <li>può generare nuovi eventi, che il loop vedrà solo dopo che l'handler è finito;</li>
+      <li>accede solo allo stato del proprio event loop.</li>
+    </ul>
+
+    <p>Un esempio classico di errore in JavaScript è aspettare una risposta HTTP con un ciclo:</p>
+<pre><code class="language-javascript">const req = new XMLHttpRequest();
+req.open('GET', url);
+req.send();
+while (req.readyState !== XMLHttpRequest.DONE) {}   // SBAGLIATO: non esce mai</code></pre>
+    <p>Lo stato di <code>req</code> cambia solo quando l'event loop elabora l'evento di risposta, e l'event loop è bloccato proprio in quel ciclo. Si registra invece un handler, <code>req.onload = () =&gt; { … }</code>, anche <em>dopo</em> <code>send()</code>: la risposta non verrà elaborata prima che l'handler corrente sia finito.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Callback e continuation-passing style</h2>
+
+    <p>Se un handler non può aspettare un risultato, come lo elabora? Passando alla funzione asincrona, come ultimo argomento, una <strong>callback</strong> da eseguire quando il risultato sarà pronto: un handler registrato dinamicamente per l'evento «l'operazione è finita». Gli eventi spariscono dal codice, ma sotto ci sono sempre.</p>
+<pre><code class="language-javascript">// sincrono (bloccante)               // asincrono
+r = syncTask(p);                      asyncTask(p, (r) => {
+s = r + 1;                              s = r + 1;          // eseguita quando r è pronto
+                                      });</code></pre>
+
+    <h3>Il CPS in generale</h3>
+    <p>Questo stile è il <strong>continuation-passing style</strong> (CPS), introdotto da Sussman e Steele nel 1975 per Scheme. Non nasce per la concorrenza: è un modo di scrivere qualsiasi programma passando il controllo in avanti, in forma esplicita, come <strong>continuazione</strong>.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame — domanda chiesta</span>
+      <p><strong>Che cosa vuol dire CPS? Spiegalo con <code>sum</code>.</strong> In stile diretto <code>sum(a, b)</code> restituisce un valore, che il chiamante usa dopo il ritorno. In CPS la funzione diventa <code>sum(a, b, k)</code>: non restituisce nulla (<code>void</code>), calcola <code>a + b</code> e lo «restituisce» chiamando <code>k(a + b)</code>. Il chiamante non riceve un valore: passa il resto del proprio calcolo sotto forma di funzione.</p>
+<pre><code class="language-java">int sum(int a, int b) { return a + b; }              // stile diretto
+System.out.println(sum(1, 3));
+
+void sum(int a, int b, Consumer&lt;Integer&gt; k) {         // CPS
+  k.accept(a + b);                                    // passa il risultato in avanti
+}
+sum(1, 3, res -&gt; System.out.println(res));           // la continuazione: "poi stampalo"</code></pre>
+      <p>Poiché non si torna mai indietro, lo stack non serve: il CPS è programmazione <em>stackless</em>, ed è un formato intermedio diffuso nei compilatori funzionali (esprime bene i costrutti di controllo, facilita la tail-call optimization). Nella programmazione asincrona la continuazione si chiama callback e non viene chiamata subito: la chiama l'event loop quando arriva l'evento di completamento.</p>
+    </div>
+
+    <p>Le callback sono di solito <strong>closure</strong>: una funzione insieme al suo ambiente, cioè ai binding delle variabili libere nel momento in cui è stata creata. Così la callback, eseguita più tardi, vede ancora le variabili del contesto che l'ha creata. È lo stesso meccanismo della domanda su <code>var</code> e <code>let</code> (<a href="#s6">sezione 6</a>).</p>
+
+    <h3>Chi esegue la callback?</h3>
+    <p>Potrebbe eseguirla <strong>il thread che ha svolto il lavoro</strong>, appena ha il risultato: sembra più reattivo, ma la callback girerebbe in concorrenza con l'event loop, e tornerebbero le race. Oppure la esegue <strong>l'event loop</strong>, il flusso di controllo che ha fatto la richiesta, e il worker genera solo l'evento. È il modello delle web app moderne, lato client (JavaScript, Dart) e lato server (Node.js, Vert.x).</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame — domanda chiesta</span>
+<pre><code class="language-javascript">x = 0                          // L1
+asynctask(x, (res) => {
+  x = x + res                  // L2
+});
+x = x + 1                      // L3</code></pre>
+      <p><strong>L'ordine di L1, L2, L3 è determinato?</strong> Sì: <strong>L1, L3, L2</strong>, sempre. L1, la chiamata ad <code>asynctask</code> e L3 appartengono allo stesso handler, che l'event loop esegue per intero. <code>asynctask</code> non esegue la callback: affida il lavoro a un thread in background e registra L2 come handler del completamento. L2 viene eseguita in un ciclo successivo del loop, dopo L3. E potrebbe non essere eseguita mai: se il task fallisce o non termina, l'evento di successo non arriva.</p>
+      <p><strong>E se il risultato è pronto prima di L3?</strong> Non cambia nulla, perché non c'è preemption: il worker può solo accodare l'evento, e l'event loop lo guarda solo quando l'handler corrente è finito. Per questo non ci sono race su <code>x</code>: la scrive sempre lo stesso thread. Se la callback la eseguisse il worker, L2 e L3 potrebbero sovrapporsi, come con le callback di <code>CompletableFuture</code> (<a href="#s5">sezione 5</a>).</p>
+    </div>
+
+    <h3>Laboratorio: un event loop passo per passo</h3>
+    <p>Fai avanzare l'event loop un passo alla volta e guarda stack, code e lavoro in background. Nello scenario «Callback» decidi tu quando finisce il worker: prova prima di L3, oppure mai. Gli altri scenari riprendono l'esempio con promise e async/await, e le domande della <a href="#s6">sezione 6</a>.</p>
+    <div id="event-loop-lab"></div>
+
+    <h3>Vantaggi e flussi di controllo</h3>
+    <p>In sintesi, un solo thread coordina molte operazioni eseguite da thread esterni, con poca memoria rispetto a un thread (e uno stack) per richiesta. Non ci sono race a basso livello, perché lo stato lo tocca un solo thread, né deadlock a basso livello, perché gli handler non si bloccano. Sequenza e parallelo si scrivono così:</p>
+<pre><code class="language-javascript">// sequenza: task2 parte quando task1 è finito
+asyncTask1(a, (res1) => {
+  asyncTask2(res1, (res2) => { … });
+});
+
+// parallelo: partono entrambi nello stesso ciclo
+asyncTask1(a, (res1) => { … });
+asyncTask2(b, (res2) => { … });</code></pre>
+    <p>Nel caso parallelo l'ordine delle due callback <strong>non</strong> è determinato: dipende da quale task finisce prima, cioè dall'ordine in cui arrivano gli eventi.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. Il prezzo delle callback: callback hell</h2>
+
+    <p>Il CPS ha due problemi noti, riassunti come <strong>callback hell</strong>:</p>
+    <ul>
+      <li><strong>Spaghetti asincrono</strong>: il calcolo si frammenta in tanti handler, e la struttura e la modularità del programma ne soffrono.</li>
+      <li><strong>Pyramid of doom</strong>: comporre in sequenza operazioni asincrone significa annidare callback. Il codice cresce verso destra invece che verso il basso ed è difficile da leggere, riusare ed estendere. Nel web server Node.js delle slide, per esempio, <code>path.exists</code> ha una callback che chiama <code>fs.readFile</code>, che ha una sua callback, e così via.</li>
+    </ul>
+<pre><code class="language-javascript">step1((result1) => {
+  step2(result1, (result2) => {
+    step3(result2, (result3) => {
+      // e così via…
+    });
+  });
+});</code></pre>
+    <p>«I love async, but I can't code like this», scriveva uno sviluppatore sul gruppo di Node.js. Le risposte, promise e poi async/await, cambiano il modo di scrivere, non il motore.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Promise</h2>
+
+    <p>Una <strong>promise</strong> (Friedman e Wise, 1976) rappresenta il risultato, non ancora disponibile, di una singola operazione asincrona. La funzione asincrona non riceve più la callback, che le toglieva la firma naturale: restituisce subito una promise, e il chiamante la <em>configura</em> con <code>then</code>.</p>
+    <p>Una promise è in uno di tre <strong>stati</strong>: <em>pending</em> alla creazione, <em>fulfilled</em> (o <em>resolved</em>) se l'operazione termina bene, <em>rejected</em> se termina con un errore. Quando non è più pending si dice <em>settled</em>: una promise si risolve o si rigetta <strong>una sola volta</strong>, e da quel momento stato e valore non cambiano più.</p>
+<pre><code class="language-javascript">function delayWithRandom(t, p) {            // funzione asincrona: restituisce una promise
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const r = Math.random();
+      if (r > p) resolve(r); else reject(r);
+    }, t);
+  });
+}
+
+delayWithRandom(1000, 0.5).then(
+  (r) => console.log('success:', r),       // onComplete
+  (r) => console.log('fail:', r));         // onError (facoltativa)</code></pre>
+    <p>Chi <em>usa</em> una libreria asincrona riceve promise già fatte e le configura. Chi la <em>scrive</em> crea la promise con il costruttore, che passa le due continuazioni <code>resolve</code> e <code>reject</code>; riscrivere così una vecchia API a callback si dice <em>promisificare</em>. <code>then</code> non esegue nulla, registra una reazione: anche se l'operazione è già finita, la callback verrà eseguita dall'event loop <em>dopo</em> il codice corrente. Per questo non importa in che punto dell'handler si configura una promise.</p>
+
+    <h3>Il chaining appiattisce la piramide</h3>
+    <p><code>then</code> restituisce una <strong>nuova promise</strong>, che si risolve con il valore restituito dalla callback. Se la callback restituisce a sua volta una promise, la nuova promise ne segue l'esito. Una sequenza di operazioni asincrone diventa una catena lineare, che si legge dall'alto in basso:</p>
+<pre><code class="language-javascript">findUserById('john')
+  .then((user) => findPic(user.picId))      // restituire la promise è ciò che appiattisce
+  .then((pic) => ui.show(pic));</code></pre>
+    <p>Due <code>then</code> sulla <em>stessa</em> promise danno invece il flusso parallelo: entrambe le callback ricevono lo stesso valore. Per comporre più promise indipendenti ci sono <code>Promise.all</code>, che si risolve quando tutte sono risolte (con l'array dei valori) e si rigetta appena una è rigettata, e <code>Promise.race</code>, che si conclude con la prima promise che si risolve o si rigetta.</p>
+    <p>Gli errori seguono regole simili alle eccezioni. Un handler che restituisce un valore passa un successo alla promise successiva (anche se è un handler di errore), uno che lancia un'eccezione le passa un rigetto. Un rigetto senza handler scorre lungo la catena finché ne trova uno (<code>.catch</code>), poi l'elaborazione riprende normalmente.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame — domande chieste</span>
+      <p><strong>Appiattisci con le promise il codice L1–L3.</strong></p>
+<pre><code class="language-javascript">x = 0;                                   // L1
+const p = asyncTask(x);                  // restituisce subito una promise pending
+p.then((res) => { x = x + res; });       // L2: registrata, non eseguita
+x = x + 1;                               // L3   → l'ordine resta L1, L3, L2</code></pre>
+      <p><strong>E il caso annidato?</strong></p>
+<pre><code class="language-javascript">// CPS                                   // promise
+x = 0;                                   x = 0;
+asyncTask1(x, (res1) => {                asyncTask1(x)
+  asyncTask2(x + res1, (res2) => {         .then((res1) => asyncTask2(x + res1))
+    console.log(res2);                     .then((res2) => console.log(res2));
+  });                                    x = x + 1;
+});
+x = x + 1;</code></pre>
+      <p>Il segreto è che la prima callback <em>restituisce</em> la promise di <code>asyncTask2</code>: il secondo <code>then</code> si aggancia a quella, e l'annidamento sparisce. Nota che <code>x + res1</code> si valuta quando la callback viene eseguita, cioè dopo <code>x = x + 1</code>: in entrambe le versioni lì <code>x</code> vale già 1.</p>
+    </div>
+
+    <h3>Promise e future</h3>
+    <p>Entrambe rappresentano un risultato che arriverà, ma vivono in mondi diversi.</p>
+    <ul>
+      <li><strong>La <code>Future</code> di Java</strong>, restituita da <code>submit</code> di un executor, vive nel mondo a thread: si interroga (<code>isDone</code>) o ci si <strong>blocca</strong> con <code>get()</code>. Executor e future sono nel <a href="cap-10-java.html">capitolo 10</a>.</li>
+      <li><strong>La promise</strong> vive nel mondo a eventi: <strong>non ha una get bloccante</strong>, si configura con callback eseguite dall'event loop.</li>
+      <li>Alcune librerie dividono la promise in due facce. Vert.x chiama <code>Promise</code> il lato di chi produce il risultato (<code>complete</code>, <code>fail</code>) e <code>Future</code> il lato in sola lettura del cliente (<code>onSuccess</code>, <code>compose</code>), che non ha <code>get</code>: non è la <code>Future</code> di Java.</li>
+    </ul>
+    <p><strong><code>CompletableFuture</code> e <code>supplyAsync</code>.</strong> <code>CompletableFuture.supplyAsync(supplier)</code> esegue il <code>Supplier</code> su un thread del <code>ForkJoinPool.commonPool()</code>, o sull'executor passato come secondo argomento, e restituisce subito una <code>CompletableFuture</code>. Vi si attaccano callback (<code>thenApply</code>, <code>thenAccept</code>, <code>thenCompose</code>), ma resta una future Java con <code>get()</code> e <code>join()</code> bloccanti: per Ricci è un ibrido che mescola i due paradigmi. Va bene per lanciare calcoli o I/O su un pool di thread. Ma le callback non passano da un event loop: le esegue il thread che completa lo stadio precedente, o il chiamante se è già completo. Se toccano stato condiviso tornano le race, quindi in un framework a eventi non va usata come una promise.</p>
+<pre><code class="language-java">CompletableFuture.supplyAsync(() -> loadReport(dir))     // su un thread del common pool
+    .thenApply(Report::summary)                          // su un thread del pool, non su un event loop
+    .thenAccept(System.out::println);</code></pre>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>In Vert.x, <code>Future.fromCompletionStage(cf, context)</code> riporta il risultato di una <code>CompletableFuture</code> sull'event loop del verticle, così le callback tornano a girare lì.</p></div>
+
+    <h3>I limiti delle promise</h3>
+    <ul>
+      <li><strong>Eagerness e parametri di <code>then</code>.</strong> Una promise lavora appena è costruita, e a <code>then</code> si passa una funzione, senza parametri. <code>.then(delay(1000))</code> chiama <code>delay</code> subito, mentre si configura la catena, e i due ritardi partono insieme; serve <code>.then(() =&gt; delay(1000))</code>.</li>
+      <li><strong>Cicli.</strong> <code>for (let i = 0; i &lt; 3; i++) delay(1000).then(() =&gt; console.log(i))</code> crea le tre promise nello stesso ciclo: dopo un secondo arrivano insieme 0, 1, 2, non una stampa al secondo. Serve la ricorsione.</li>
+      <li><strong>Cancellazione.</strong> Una promise non si può annullare: non c'è controllo sul task, e le risorse possono andare sprecate.</li>
+    </ul>
+  </section>
+
+  <section id="s6">
+    <h2>6. Task e microtask</h2>
+
+    <p>Nel mondo JavaScript e web la coda degli eventi (<em>dispatch queue</em>) contiene due tipi di elementi. I <strong>task</strong> (I/O, timer, input dell'utente) sono serviti uno alla volta, ciascuno fino in fondo, eventualmente con priorità. I <strong>microtask</strong> sono task leggeri con una garanzia in più: <strong>vengono eseguiti tutti prima che inizi il task successivo</strong>. Le reazioni delle promise sono microtask, e <code>Promise.resolve().then(() =&gt; { … })</code> ne accoda uno esplicitamente, che gira subito dopo il codice corrente. Il rovescio: mentre l'event loop svuota i microtask, l'app non disegna, non risponde ai click e non reagisce all'I/O (esempio da Dart). Un microtask che ne accoda sempre un altro affama l'intera applicazione.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Le slide dicono che la coda dei microtask «è elaborata dopo l'inizio di ogni task». Più precisamente è svuotata <em>alla fine</em> di ogni task, quando lo stack è vuoto: nel laboratorio, scenario «Task e microtask», <code>A, D, C, B</code>.</p></div>
+
+    <h3>Due domande su setTimeout</h3>
+    <p><code>setTimeout(callback, t)</code> registra un handler per l'evento «il timer è scaduto». Anche con <code>t = 0</code> la callback è un task: non verrà mai eseguita prima che l'handler corrente sia terminato.</p>
+<pre><code class="language-javascript">for (var i = 0; i &lt; 3; i++) {             for (let i = 0; i &lt; 3; i++) {
+  setTimeout(() => console.log(i), 0);       setTimeout(() => console.log(i), 0);
+}                                         }
+// stampa 3, 3, 3                         // stampa 0, 1, 2</code></pre>
+    <p>L'event loop spiega solo <em>quando</em> girano le callback: in entrambi i casi dopo la fine del <code>for</code>, in tre task successivi. La differenza tra gli output la fanno le <strong>closure</strong>. Con <code>var</code> la variabile ha visibilità di funzione: esiste <strong>un solo binding</strong> <code>i</code>, condiviso dalle tre closure, che quando vengono eseguite vale 3. Con <code>let</code> il <code>for</code> crea <strong>un binding nuovo a ogni iterazione</strong>, copiando il valore prima dell'incremento: ogni closure cattura il suo, che nessuno modifica più. Gli scenari «var» e «let» del laboratorio mostrano quale closure cattura quale binding. L'esempio delle slide, con <code>let i = 1 … 3</code>, stampa i tre «setting timer…» e poi 1, 2, 3.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. async/await</h2>
+
+    <p>Con <code>async</code> e <code>await</code> il codice asincrono si scrive in stile sincrono, senza callback né catene di <code>then</code>, mentre il nucleo resta asincrono. Ci sono in JavaScript da ES2017, in C# con il TAP di .NET (prima ancora, dal 2012), in Python, Dart e altri linguaggi. Sono parole chiave, non una libreria: cambiano il modello di esecuzione del linguaggio.</p>
+    <ul>
+      <li><strong><code>await p</code></strong> <strong>sospende la funzione</strong>, non il thread: la funzione salva il proprio stato, il controllo torna al chiamante, e l'event loop la riprende quando <code>p</code> si risolve. <code>await</code> trasforma la promise nel suo valore, o in un'eccezione se è rigettata, come una chiamata sincrona.</li>
+      <li><strong><code>async</code></strong> delimita il codice che un <code>await</code> può sospendere: <code>await</code> si usa solo dentro una funzione <code>async</code>. Una funzione <code>async</code> restituisce sempre una promise, anche senza <code>await</code>, e chiamarla esegue subito il corpo, nello stesso ciclo, fino al primo <code>await</code>.</li>
+    </ul>
+<pre><code class="language-javascript">async function pause(t) {
+  console.log('before');
+  await new Promise((resolve) => setTimeout(resolve, t));
+  console.log('after');
+}
+console.log('before call');
+pause(1000);                // senza await: before call, before, after call, after
+console.log('after call');
+// dentro una funzione async, con "await pause(1000)":  before call, before, after, after call</code></pre>
+    <p>Sotto, <code>await</code> è un <em>return che si può riprendere</em>, realizzato con le coroutine (<a href="#s8">sezione 8</a>). L'eagerness non è più un problema, perché le istruzioni si eseguono nell'ordine in cui sono scritte, e un <code>await</code> dentro un <code>for</code> aspetta davvero a ogni giro.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame — domande chieste</span>
+      <p><strong>Riscrivi L1–L3 e il caso annidato con async/await.</strong></p>
+<pre><code class="language-javascript">async function f() {                     async function run() {
+  const res = await asyncTask(x);          const res1 = await asyncTask1(x);
+  x = x + res;               // L2         const res2 = await asyncTask2(x + res1);
+}                                          console.log(res2);
+x = 0;                       // L1       }
+f();                                     x = 0;
+x = x + 1;                   // L3       run();
+                                         x = x + 1;</code></pre>
+      <p><code>f()</code> parte subito, chiama <code>asyncTask(x)</code> con <code>x = 0</code> e si sospende all'<code>await</code>; il chiamante esegue L3, e L2 arriva quando la promise è risolta. L'ordine resta <strong>L1, L3, L2</strong>, e in <code>run</code> <code>x + res1</code> si valuta dopo <code>x = x + 1</code>: è cambiata la forma del codice, non il motore.</p>
+    </div>
+
+    <h3>I problemi che restano</h3>
+    <ul>
+      <li><code>await</code> non si usa al livello più esterno: serve almeno una funzione <code>main</code> asincrona. E l'<code>async</code> si propaga: chi fa <code>await</code> deve essere a sua volta <code>async</code>.</li>
+      <li>Una funzione sospesa non riprende finché il thread è occupato con altri handler: la semantica dell'event loop resta quella.</li>
+      <li><strong>I blocchi <code>{…}</code> non sono più atomici.</strong> Un blocco può estendersi su più iterazioni dell'event loop, e tra un <code>await</code> e l'altro altri handler possono modificare lo stesso stato: non race di basso livello, ma race condition logiche.</li>
+      <li>Per comporre serve ancora l'API delle promise, ad esempio <code>await Promise.all([f(), g()])</code>: le promise non spariscono, si integrano.</li>
+    </ul>
+    <p>Resta infine uno <strong>scontro di progetto</strong> tra sincrono e asincrono: mescolarli richiede disciplina, e mancano concetti di più alto livello per progettare. Ne soffre la modularità: una <code>g</code> non <code>async</code> che chiama una <code>async function f</code> stampa «started g», «started f», «done g» e solo dopo «done f». Per aspettare <code>f</code> anche <code>g</code> deve diventare <code>async</code> e fare <code>await f()</code>, quindi il chiamante deve sapere se ciò che chiama è asincrono.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Dal 2022 JavaScript ammette l'<code>await</code> al livello più esterno, ma solo nei moduli ES.</p></div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Coroutine e fibre</h2>
+
+    <p>Una <strong>coroutine</strong> (Conway, 1963) generalizza la subroutine: l'esecuzione si può <strong>sospendere e riprendere</strong>. Invece di tornare sempre al chiamante, una coroutine può cedere il controllo a un'altra (<em>yield</em>), che più tardi glielo restituirà nel punto in cui si era fermata. È <strong>multitasking cooperativo</strong>, non preemptive: nessuno toglie il controllo a una coroutine, è lei a cederlo. Non ha a che fare con gli eventi: serve per costruire task cooperativi, eccezioni, event loop, iteratori, liste infinite e pipe.</p>
+<pre><code class="language-plaintext">var q := new queue
+coroutine produce                       coroutine consume
+  loop                                    loop
+    while q is not full                     while q is not empty
+      create some new items                   remove some items from q
+      add the items to q                      use the items
+    yield to consume                        yield to produce</code></pre>
+    <ul>
+      <li>Un'istanza di coroutine ha uno stato che persiste tra un'invocazione e l'altra, e della stessa coroutine possono esistere più istanze.</li>
+      <li>Una subroutine è il caso particolare di una coroutine che non fa mai <em>yield</em>.</li>
+      <li>È facile da realizzare in linguaggi con continuazioni native, ma non come semplice libreria sopra un linguaggio che ha solo subroutine e metodi.</li>
+    </ul>
+    <p>Nate in assembly, presenti in Simula, Smalltalk e Modula-2, le coroutine sono tornate con la programmazione asincrona in Ruby, Lua, Julia, Go e Kotlin. Sono il mattone dei <strong>thread leggeri</strong>: un thread ospita molte coroutine ma ne esegue <strong>una alla volta</strong>, e crearle o scambiarle non richiede context switch del sistema operativo. Possono quindi girare tutte su un solo thread. È un meccanismo di basso livello: usarlo direttamente per passarsi il controllo tra handler assomiglia a un <code>goto</code>, e rompe la modularità allo stesso modo.</p>
+
+    <h3>In Kotlin: le funzioni sospendibili</h3>
+    <ul>
+      <li><strong>Computazioni sospendibili</strong>: si sospendono <em>senza bloccare il thread</em>, che nel frattempo esegue altro. Sono le <em>suspending function</em>, marcate <code>suspend</code>, e le <em>suspending lambda</em>, che possono chiamare funzioni sospendibili.</li>
+      <li><strong>Dispatcher</strong>: decidono su quale thread una coroutine parte o riprende.</li>
+      <li><strong>Builder</strong>: creano una coroutine da una suspending lambda. <code>async</code> quando serve un risultato, <code>launch</code> quando non serve, <code>runBlocking</code> come ponte tra codice bloccante e sospendibile.</li>
+    </ul>
+<pre><code class="language-kotlin">fun main() = runBlocking {
+    println("before async call")
+    val result = async {
+        println("inside the async call")
+        delay(1000)
+        println("exiting the async call")
+        100
+    }
+    println("after the async call, before greet")
+    greetDelayed(200)
+    println("after greet trigger")
+    println("${result.await()}")
+}
+
+suspend fun greetDelayed(delayMillis: Long) {
+    delay(delayMillis)          // sospende greetDelayed, non il thread
+    println("Hello, World!")
+}
+// before async call · after the async call, before greet · inside the async call
+// Hello, World! · after greet trigger · exiting the async call · 100</code></pre>
+    <p>Tutto gira sul thread di <code>runBlocking</code>: il blocco di <code>async</code> parte quando <code>main</code> si sospende in <code>delay(200)</code>, e le due coroutine si alternano a ogni sospensione.</p>
+
+    <h3>Fibre e virtual thread</h3>
+    <p>Una <strong>fibra</strong> è un thread leggero che condivide lo spazio di indirizzi ma fa multitasking cooperativo: è la fibra a cedere il controllo, quindi tutte possono girare su un solo thread. La coroutine è un costrutto del linguaggio, una forma di controllo del flusso; la fibra è un costrutto di sistema, un thread che non gira in parallelo agli altri, e può implementare le coroutine o farne da base. Esistono in vari sistemi (ad esempio Windows); in Java sono i <strong>virtual thread</strong>, nel <a href="cap-10-java.html">capitolo 10</a>. Virtual thread o programmazione asincrona? Per Brian Goetz (2022) i virtual thread modularizzano meglio i flussi di controllo, ma, come i thread fisici, non trattano eventi e computazioni reattive come concetti di prima classe. Il dibattito è aperto.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. L'event loop in Java: Vert.x</h2>
+
+    <p><strong>Vert.x</strong> (Eclipse) è un framework per applicazioni reattive sulla JVM: il nucleo realizza il reactor con più event loop («multi-reactor») e tutte le API sono asincrone, basate su promise. È il framework di riferimento del corso per l'<a href="prep-assignment-02.html">assignment 2</a> (che si può svolgere anche in JavaScript o Python, purché con un event loop vero). Ogni componente attivo è un <strong>verticle</strong> con il proprio event loop: il codice della classe gira su quel loop, e i suoi campi li tocca solo lui. Le funzioni asincrone restituiscono una <code>Future</code> di Vert.x, il lato cliente di una promise, che si configura con <code>onComplete</code>, <code>onSuccess</code> e <code>onFailure</code>.</p>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Verticle</button>
+        <button class="lk-tab">Composizione</button>
+        <button class="lk-tab">Un metodo asincrono</button>
+        <button class="lk-tab">Bloccante ed event bus</button>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-java">class MyReactiveAgent extends VerticleBase {
+  private int cycle = 0;                          // stato del verticle: solo il suo event loop lo tocca
+
+  @Override
+  public Future&lt;?&gt; start() {
+    FileSystem fs = vertx.fileSystem();
+    fs.readFile("hello.md").onSuccess(b -&gt; log(++cycle + ": hello.md"));
+    fs.readFile("pom.xml").onSuccess(b -&gt; log(++cycle + ": pom.xml"));
+    return Future.succeededFuture();              // start è finito: le letture continuano in background
+  }
+}
+
+Vertx.vertx().deployVerticle(new MyReactiveAgent());   // anch'esso asincrono: restituisce una Future</code></pre>
+        <p>Le due letture partono nello stesso ciclo e procedono in parallelo sui worker; l'ordine delle callback dipende da quale finisce prima. Entrambe incrementano <code>cycle</code> senza lock: le esegue lo stesso event loop.</p>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-java">fs.readFile("hello.md")
+  .compose(md -&gt; fs.readFile("pom.xml"))          // compose = then che restituisce una promise
+  .compose(pom -&gt; fs.readDir("src"))
+  .onSuccess(files -&gt; log(files.size() + " file in src"))
+  .onFailure(Throwable::printStackTrace);
+
+Future.all(fs.readFile("hello.md"), fs.readFile("pom.xml"))   // join: entrambe completate
+  .onSuccess(cf -&gt; log("lette " + cf.size()));
+// Future.any: la prima che si completa con successo</code></pre>
+        <p>Fare la nuova chiamata dentro <code>onSuccess</code> e configurarne la future con un'altra callback riporta la piramide: la catena resta piatta solo se la lambda di <code>compose</code> <em>restituisce</em> la nuova future.</p>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-java">Future&lt;Double&gt; getDelayedRandom(long delay) {
+  Promise&lt;Double&gt; p = Promise.promise();          // lato produttore
+  vertx.setTimer(delay, id -&gt; p.complete(Math.random()));
+  return p.future();                              // lato cliente: niente complete, niente get
+}
+
+getDelayedRandom(1000).onSuccess(v -&gt; log("valore: " + v));</code></pre>
+        <p>Lo schema di ogni metodo asincrono: si crea una <code>Promise</code>, si restituisce subito la sua <code>future()</code> e la si completa (<code>complete</code> o <code>fail</code>) a lavoro finito.</p>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-java">vertx.executeBlocking(() -&gt; {                     // gira su un worker thread, non sull'event loop
+        Thread.sleep(5000);                       // qui si può bloccare
+        return 100;                               // ma NON toccare i campi del verticle
+      }, false)                                   // false: esecuzione non ordinata
+     .onSuccess(v -&gt; log("risultato " + v));     // di nuovo sull'event loop
+
+vertx.eventBus().consumer("news", msg -&gt; log("ricevuto " + msg.body()));   // in un verticle
+vertx.eventBus().publish("news", "ciao");                                  // in un altro</code></pre>
+        <p><code>executeBlocking</code> è la via d'uscita per il codice bloccante senza equivalente asincrono. Per default è <em>ordinato</em>: i blocchi chiesti dallo stesso verticle girano uno dopo l'altro. Con <code>false</code> possono girare in parallelo, su un pool di worker dimensionabile nelle <code>DeploymentOptions</code>. Per compiti molto lunghi o infiniti (Vert.x segnala i worker occupati troppo a lungo) conviene un thread proprio che completa una <code>Promise</code>. I verticle comunicano solo con l'<strong>event bus</strong>: <code>publish</code> consegna a tutti i consumer di un indirizzo, <code>send</code> a uno solo.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Come funziona l'event loop?</summary>
+        <p>Un solo thread aspetta un evento sulla coda, sceglie l'handler associato e lo esegue fino in fondo, poi torna ad aspettare. Gli eventi che arrivano nel frattempo, dall'ambiente o dai worker in background, restano in coda.</p>
+      </details>
+      <details>
+        <summary>Perché in un event loop non ci sono race condition, e dove possono ricomparire?</summary>
+        <p>Perché gli handler li esegue un solo thread, uno alla volta, e solo quel thread tocca lo stato. Ricompaiono se una callback viene eseguita da un altro thread (come con <code>CompletableFuture</code>) o, a livello logico, con async/await, perché un blocco può essere spezzato su più cicli.</p>
+      </details>
+      <details>
+        <summary>Che cosa fa un handler che deve leggere un file?</summary>
+        <p>Chiama la versione asincrona della lettura, che affida il lavoro a un thread in background, e termina. Il risultato arriva come evento, e lo elabora la callback, o la reazione della promise, in un ciclo successivo.</p>
+      </details>
+      <details>
+        <summary>Che cos'è il pattern reactor?</summary>
+        <p>L'event loop come pattern architetturale (Schmidt). Un demultiplexer sincrono attende che gli handle diventino pronti, un dispatcher trova l'handler registrato per l'handle e ne chiama il metodo hook. Il meccanismo degli eventi resta separato dalla logica applicativa.</p>
+      </details>
+      <details>
+        <summary>In quali stati può trovarsi una promise?</summary>
+        <p>Pending, fulfilled (resolved) o rejected; quando non è più pending è settled. Si risolve una volta sola, e poi stato e valore non cambiano.</p>
+      </details>
+      <details>
+        <summary>Perché <code>then</code> appiattisce la pyramid of doom?</summary>
+        <p>Perché restituisce una nuova promise che segue l'esito del valore restituito dalla callback. Se la callback restituisce la promise della prossima operazione, il <code>then</code> successivo si aggancia a quella, e la sequenza diventa una catena lineare.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra un task e un microtask?</summary>
+        <p>I task si servono uno per ciclo. I microtask, come le reazioni delle promise, vengono eseguiti tutti appena lo stack si svuota, prima del task successivo. Una catena infinita di microtask blocca quindi l'intera applicazione.</p>
+      </details>
+      <details>
+        <summary><code>await</code> blocca il thread?</summary>
+        <p>No. Sospende la funzione <code>async</code> che lo contiene, salvandone lo stato, e restituisce il controllo al chiamante. L'event loop riprende la funzione quando la promise si risolve.</p>
+      </details>
+      <details>
+        <summary>Che cos'è una coroutine, e quanti thread servono?</summary>
+        <p>Una routine che si può sospendere e riprendere, con multitasking cooperativo: è lei a cedere il controllo. Molte coroutine possono stare su un solo thread, che ne esegue una alla volta. È il meccanismo di basso livello sotto async/await e i thread leggeri.</p>
+      </details>
+      <details>
+        <summary>Che cos'è una suspending function in Kotlin?</summary>
+        <p>Una funzione marcata <code>suspend</code>, che può sospendersi (ad esempio in <code>delay</code>) senza bloccare il thread, che intanto esegue altre coroutine. Si può chiamare solo da un'altra funzione sospendibile o da un builder come <code>launch</code>, <code>async</code> o <code>runBlocking</code>.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Slide <em>[module-2.1] Asynchronous Programming</em> · 16 febbraio 2026 (panoramica iniziale) · 27 marzo (§5–14: motivazioni, event loop, reactor, never-blocking, CPS, la domanda L1–L3, callback hell) · 30 marzo (§1–11: event loop in JavaScript, <code>setTimeout</code>, promise; primi passi in Vert.x) · 10 aprile (§2–10: ripasso, promise, <code>all</code> e <code>race</code>, limiti delle promise, async/await, coroutine) · 13 aprile (§15: Vert.x, <code>Future.all</code>/<code>any</code>, <code>Promise</code>, <code>executeBlocking</code>, event bus) · 27 aprile (§12–13: i tre tipi di future). La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-11-verifica.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-13-reattiva.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 27 e 30 marzo, 10, 13 e 27 aprile 2026 · slide [module-2.1] Asynchronous Programming · D. Schmidt, <em>Reactor</em> (POSA vol. 2) · documentazione di Vert.x e di Kotlin coroutines · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/event-loop-lab.js"></script>
+  <script>EventLoopLab.mount('#event-loop-lab', { start: 'callback' });</script>
+</body>
+</html>

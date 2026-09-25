@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 13 — Programmazione reattiva · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-12-async.html">&larr; Cap. 12 — Programmazione asincrona</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-14-message-passing.html">Cap. 14 — Message passing e canali &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte II — Programmazione asincrona e reattiva · Capitolo 13</div>
+    <h1>Programmazione reattiva</h1>
+    <div class="lk-meta"><span>~20 min di lettura</span><span>esempi in RxJava 3</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Dall'assegnamento alla relazione</a></li>
+      <li><a href="#s2">Event stream e behaviour</a></li>
+      <li><a href="#s3">Come si propaga il cambiamento: push, pull, glitch</a></li>
+      <li><a href="#s4">Lifting e composizione</a></li>
+      <li><a href="#s5">Reactive Extensions: l'Observer fatto bene</a></li>
+      <li><a href="#s6">RxJava: creare, trasformare, osservare</a></li>
+      <li><a href="#s7">Su quali thread: gli scheduler</a></li>
+      <li><a href="#s8">Hot e cold</a></li>
+      <li><a href="#s9">Backpressure</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> Callback e promise gestiscono un risultato che arriva una volta sola. Molte applicazioni però devono gestire <em>flussi</em> di dati e di eventi asincroni. La programmazione reattiva li tratta come valori che variano nel tempo e che si possono comporre. Il programmatore dichiara le relazioni tra i valori, e il linguaggio o il framework propaga i cambiamenti, senza callback e senza stati inconsistenti (<em>glitch</em>). Le Reactive Extensions portano l'idea nei linguaggi di tutti i giorni: flussi osservabili, operatori per comporli, scheduler per scegliere i thread e backpressure quando il consumatore è più lento del produttore.</p>
+
+  <section id="s1">
+    <h2>1. Dall'assegnamento alla relazione</h2>
+
+    <p>La programmazione a eventi ha problemi che le promise e async/await non eliminano. In un'applicazione asincrona l'ordine di arrivo degli eventi esterni non si può prevedere né controllare, e il controllo salta da un handler all'altro. È l'<strong>inversione del controllo</strong>: il flusso lo guidano gli eventi, non un ordine scelto dal programmatore. Quando un dato cambia, il programmatore deve aggiornare a mano tutto ciò che ne dipende, ed è facile farlo nel momento sbagliato o nell'ordine sbagliato. Tanti frammenti di codice isolati manipolano gli stessi dati in un ordine imprevedibile (lo spaghetti asincrono). E poiché le callback di solito non restituiscono nulla, possono agire solo con effetti collaterali sullo stato.</p>
+    <p>La <strong>programmazione reattiva</strong> (RP) è un paradigma orientato ai flussi di dati e alla <strong>propagazione del cambiamento</strong>. Il programma resta una reazione a eventi esterni, ma è il linguaggio a gestire lo scorrere del tempo e le dipendenze tra dati e calcoli. Il programmatore scrive <em>che cosa</em> fare, e il sistema decide <em>quando</em>: si astrae dalla gestione del tempo come il garbage collector astrae dalla gestione della memoria. Nell'esempio delle slide</p>
+<pre><code class="language-plaintext">var1 = 1
+var2 = 2
+var3 = var1 + var2</code></pre>
+    <p><code>var3</code> <strong>dipende</strong> da <code>var1</code> e <code>var2</code>: ogni volta che una delle due cambia, <code>var3</code> viene ricalcolata automaticamente.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame — domanda chiesta</span>
+      <p><strong>Che differenza c'è tra una variabile imperativa e una reattiva?</strong> Dopo <code>x = 1; y = x + 1; x = 2</code>, in un linguaggio imperativo <code>y</code> vale 2. L'assegnamento dà un nome al valore di <code>x + 1</code> <em>in quel momento</em>, e i cambiamenti successivi di <code>x</code> non lo toccano. In un linguaggio reattivo <code>y</code> vale 3. L'assegnamento dichiara una <strong>relazione</strong>, come l'uguale della matematica: <code>y</code> deve valere <code>x + 1</code> in ogni istante. Allo stesso modo, <code>a = b + c</code> viene rivalutata ogni volta che cambia <code>b</code> o <code>c</code>.</p>
+      <p>La variabile reattiva è un valore che varia nel tempo, un flusso, e il sistema mantiene il grafo delle dipendenze e propaga i cambiamenti. Senza RP lo si farebbe a eventi: <code>x</code> come sorgente di eventi, un handler che a ogni cambiamento ricalcola <code>y</code>. Ma allora aggiornamenti concorrenti e consistenza (<a href="#s3">sezione 3</a>) sarebbero un problema del programmatore.</p>
+    </div>
+
+    <p>Le radici sono nella ricerca. La maggior parte del lavoro sulla RP discende da <strong>Fran</strong> (Elliott e Hudak, 1997), un linguaggio funzionale per la grafica e le animazioni interattive. Da lì viene la <strong>Functional Reactive Programming</strong> (FRP), basata sul paradigma synchronous dataflow (Lee e Messerschmitt, 1987) con vincoli real-time più rilassati. Il riferimento del corso è il survey di Bainomugisha e colleghi (ACM Computing Surveys, 2013). Nata negli anni '90, oggi la RP si usa per le app web reattive e per i big data.</p>
+    <details>
+      <summary>Dalle slide: linguaggi e framework reattivi</summary>
+      <p>FrTime (basato su Scheme) · le Reactive Extensions (Rx) di Microsoft · per JavaScript Flapjax, Bacon.js e AngularJS · Reactive Dart · Scala.React · RxJava.</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. Event stream e behaviour</h2>
+
+    <p>La RP rappresenta come astrazioni i valori che variano nel tempo. Sono <strong>valori di prima classe</strong>: si passano ad altre funzioni e si compongono. Le astrazioni sono di due tipi:</p>
+    <ul>
+      <li><strong>Event stream</strong>: valori <em>discreti</em> (o sparsi) nel tempo. Sono astrazioni asincrone di un flusso progressivo di dati intermittenti e sequenziali, generati da un evento ricorrente. Esempi: i click del mouse, un oggetto che passa su un nastro trasportatore.</li>
+      <li><strong>Behaviour</strong> (o <strong>signal</strong>): valori <em>continui</em> nel tempo, un flusso ininterrotto di dati da una sorgente costante, che ha un valore in ogni istante. Esempi: un timer, la temperatura letta da un sensore, anche se sotto viene campionata.</li>
+    </ul>
+    <p>Un esempio in Flapjax, una libreria reattiva per JavaScript: un elemento della pagina che mostra i secondi trascorsi.</p>
+<pre><code class="language-javascript">var timer   = timerB(100);                          // behaviour: il tempo, aggiornato ogni 100 ms
+var seconds = liftB(function (time) {               // behaviour derivato da timer
+                return Math.floor(time / 1000);
+              }, timer);
+insertDomB(seconds, 'timer-div');                   // l'elemento della pagina segue seconds</code></pre>
+    <p>Non ci sono callback né listener. <code>seconds</code> si ottiene da <code>timer</code> come <code>map</code> ottiene una lista da un'altra: per ogni valore di <code>timer</code> c'è il valore corrispondente di <code>seconds</code>. La pagina si aggiorna da sola. Tutto è dichiarativo.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Come si propaga il cambiamento: push, pull, glitch</h2>
+
+    <p>Il <strong>modello di valutazione</strong> di un linguaggio reattivo stabilisce come i cambiamenti si propagano lungo il grafo delle dipendenze. Per il programmatore la propagazione è automatica. Chi progetta il linguaggio deve però decidere chi la avvia.</p>
+    <ul>
+      <li><strong>Pull</strong>: chi ha bisogno di un valore lo «tira» dalla sorgente. La propagazione è guidata dalla domanda (<em>demand-driven</em>) e si realizza naturalmente in linguaggi lazy come Haskell.</li>
+      <li><strong>Push</strong>: quando la sorgente ha un dato nuovo, lo «spinge» ai calcoli che ne dipendono. La propagazione è guidata dalla disponibilità di dati (<em>data-driven</em>) e si realizza in linguaggi eager, come Flapjax (JavaScript) e Scala.React.</li>
+    </ul>
+    <p>In entrambi i casi i dati vanno dal produttore al consumatore: cambia chi prende l'iniziativa.</p>
+
+    <h3>I glitch</h3>
+    <p>Un <strong>glitch</strong> è un'inconsistenza temporanea durante la propagazione. Un calcolo viene eseguito prima che siano state valutate tutte le espressioni da cui dipende, e combina valori nuovi con valori vecchi (Cooper e Krishnamurthi, 2006). Riguarda solo il modello push. L'esempio delle slide:</p>
+<pre><code class="language-plaintext">var1 = 1
+var2 = var1 * 1        // deve valere sempre quanto var1
+var3 = var1 + var2     // deve valere sempre il doppio di var1</code></pre>
+
+    <figure class="lk-fig" role="img" aria-label="Tre istantanee del grafo delle dipendenze. Prima: var1 = 1, var2 = 1, var3 = 2. Durante il glitch: var1 = 2, var2 ancora 1, var3 = 3. Dopo: var1 = 2, var2 = 2, var3 = 4">
+      <svg viewBox="0 0 640 200" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="gh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1546B8"/></marker></defs>
+        <g font-family="sans-serif" font-size="13" text-anchor="middle">
+          <g>
+            <circle cx="50" cy="45" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="50" y="42" fill="#171813" font-size="11">var1</text><text x="50" y="57" fill="#171813" font-weight="bold">1</text>
+            <circle cx="50" cy="135" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="50" y="132" fill="#171813" font-size="11">var2</text><text x="50" y="147" fill="#171813" font-weight="bold">1</text>
+            <circle cx="160" cy="90" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="160" y="87" fill="#171813" font-size="11">var3</text><text x="160" y="102" fill="#171813" font-weight="bold">2</text>
+            <text x="105" y="190" fill="#1F5A49">t₁: consistente</text>
+          </g>
+          <g>
+            <circle cx="265" cy="45" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="265" y="42" fill="#171813" font-size="11">var1</text><text x="265" y="57" fill="#171813" font-weight="bold">2</text>
+            <circle cx="265" cy="135" r="24" fill="none" stroke="#6E7068" stroke-width="1.6" stroke-dasharray="4 3"/><text x="265" y="132" fill="#6E7068" font-size="11">var2</text><text x="265" y="147" fill="#6E7068" font-weight="bold">1</text>
+            <circle cx="375" cy="90" r="24" fill="#F5E6E1" stroke="#B83D2D" stroke-width="2"/><text x="375" y="87" fill="#B83D2D" font-size="11">var3</text><text x="375" y="102" fill="#B83D2D" font-weight="bold">3</text>
+            <text x="320" y="190" fill="#B83D2D">t₂: glitch</text>
+          </g>
+          <g>
+            <circle cx="480" cy="45" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="480" y="42" fill="#171813" font-size="11">var1</text><text x="480" y="57" fill="#171813" font-weight="bold">2</text>
+            <circle cx="480" cy="135" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="480" y="132" fill="#171813" font-size="11">var2</text><text x="480" y="147" fill="#171813" font-weight="bold">2</text>
+            <circle cx="590" cy="90" r="24" fill="none" stroke="#1546B8" stroke-width="1.6"/><text x="590" y="87" fill="#171813" font-size="11">var3</text><text x="590" y="102" fill="#171813" font-weight="bold">4</text>
+            <text x="535" y="190" fill="#1F5A49">t₃: consistente</text>
+          </g>
+          <g font-size="11" fill="#45463F"><text x="38" y="92">×1</text><text x="253" y="92">×1</text><text x="468" y="92">×1</text></g>
+        </g>
+        <g stroke="#1546B8" stroke-width="1.3" fill="none" marker-end="url(#gh)">
+          <line x1="50" y1="69" x2="50" y2="109"/><line x1="72" y1="56" x2="137" y2="81"/><line x1="72" y1="124" x2="137" y2="99"/>
+          <line x1="265" y1="69" x2="265" y2="109"/><line x1="287" y1="56" x2="352" y2="81"/><line x1="287" y1="124" x2="352" y2="99"/>
+          <line x1="480" y1="69" x2="480" y2="109"/><line x1="502" y1="56" x2="567" y2="81"/><line x1="502" y1="124" x2="567" y2="99"/>
+        </g>
+        <g stroke="#6E7068" stroke-width="1" stroke-dasharray="3 4"><line x1="212" y1="15" x2="212" y2="175"/><line x1="427" y1="15" x2="427" y2="175"/></g>
+      </svg>
+      <figcaption><b>Fig. 1</b> — var1 passa da 1 a 2. Un'implementazione ingenua ricalcola <code>var1 + var2</code> prima di <code>var1 * 1</code>, e per un istante var3 vale 3, un valore che non corrisponde a nessuno stato consistente.</figcaption>
+    </figure>
+
+    <p>Rendere osservabile lo stato di t₂ vuol dire mostrare al mondo esterno uno stato che, secondo le relazioni dichiarate, non è mai esistito. Per evitarlo (<strong>glitch avoidance</strong>) le librerie costruiscono il grafo delle dipendenze e aggiornano un nodo solo dopo tutti quelli da cui dipende, in ordine topologico. Gli aggiornamenti diventano così atomici rispetto all'osservatore. Le implementazioni recenti evitano i glitch su un solo computer. Nei programmi reattivi <strong>distribuiti</strong> è ancora un problema aperto, per via di guasti, ritardi di rete e assenza di un orologio globale (Salvaneschi et al. 2014, Mogk et al. 2018): la RP distribuita, insieme alla tolleranza ai guasti, è una delle direzioni di ricerca attuali.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. Lifting e composizione</h2>
+
+    <p>Un valore che dipende da valori reattivi deve essere reattivo a sua volta: una variabile a cui si assegna un'espressione con behaviour o event stream diventa reattiva. Il <strong>lifting</strong> è la conversione di una variabile, o di una funzione, normale in una reattiva. <code>liftB</code> nell'esempio del timer applica la funzione ordinaria <code>time =&gt; Math.floor(time / 1000)</code> a un behaviour. È il lifting a registrare le dipendenze: per ricalcolare correttamente tutte le espressioni, la libreria costruisce dietro le quinte il grafo delle dipendenze. Quando <code>timer</code> cambia, il grafo sa che va rivalutata la funzione, poi aggiornato <code>seconds</code> e poi la pagina.</p>
+    <p>Il lifting può essere di tre tipi:</p>
+    <ul>
+      <li><strong>implicito</strong>: lo fa la libreria (Bacon.js);</li>
+      <li><strong>esplicito</strong>: lo fa il programmatore (React.js);</li>
+      <li><strong>entrambi</strong>: Flapjax usato come libreria richiede il lifting esplicito, usato come compilatore trasforma il codice e lo rende implicito.</li>
+    </ul>
+
+    <p>La <strong>composizione</strong> di astrazioni reattive è ciò che evita l'incubo delle callback. Tre callback separate per click, movimento e rilascio del mouse diventano un solo event stream che risponde a tutti e tre. Bacon.js compone i behaviour con <code>combine</code>, Flapjax gli event stream con <code>mergeE</code>:</p>
+<pre><code class="language-javascript">var saveTimer   = timerE(10000);                          // un evento ogni 10 secondi
+var saveClicked = extractEventE('save-button', 'click');  // un evento a ogni click su Save
+var save        = mergeE(saveTimer, saveClicked);         // l'uno o l'altro
+save.mapE(doSave);                                        // salva a ogni evento di save</code></pre>
+    <p>«Salva ogni 10 secondi o quando l'utente preme Save» diventa quattro righe dichiarative, senza gestire né il tempo né il pulsante.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Reactive Extensions: l'Observer fatto bene</h2>
+
+    <p>Nei linguaggi mainstream la RP arriva come libreria: le <strong>Reactive Extensions</strong> (Rx), un'API per la programmazione asincrona con flussi osservabili; <strong>Reactive Streams</strong>, uno standard per flussi asincroni con backpressure non bloccante (JVM e JavaScript); <strong>Project Reactor</strong>, una libreria per la JVM basata su Reactive Streams. Rx nasce su .NET dalla ricerca sulla FRP e oggi esiste per quasi ogni linguaggio (RxJS, RxJava, RxScala, RxPY…), con la stessa semantica; Angular la usa nel frontend e nel backend. Si presenta come «l'Observer fatto bene», una combinazione delle idee migliori del pattern <strong>Observer</strong>, del pattern <strong>Iterator</strong> e della programmazione funzionale (E. Meijer, <em>Your mouse is a database</em>, 2012).</p>
+    <p>Nel <strong>pattern Observer</strong> un oggetto osservabile (il <em>subject</em>) tiene una lista di osservatori e li notifica con un push quando accade qualcosa, senza conoscere chi li usa. Rx estende l'idea: una sorgente emette una <em>sequenza</em> di valori e ne segnala la fine o l'errore, le sequenze si compongono con operatori come le collezioni, e una sottoscrizione si può annullare.</p>
+<pre><code class="language-csharp">interface IObservable&lt;T&gt; { IDisposable Subscribe(IObserver&lt;T&gt; observer); }
+interface IObserver&lt;T&gt;   { void OnNext(T value); void OnError(Exception error); void OnCompleted(); }
+interface IDisposable    { void Dispose(); }      // annulla la sottoscrizione</code></pre>
+    <p>Le proprietà fondamentali di Rx sono tre:</p>
+    <ul>
+      <li><strong>asincrona e a eventi</strong>: semplificare questi modelli di programmazione è la missione di Rx, ed è la chiave per interfacce, web app e cloud app reattive;</li>
+      <li><strong>composizione</strong>: comporre facilmente calcoli asincroni;</li>
+      <li><strong>collezioni osservabili</strong>: i calcoli asincroni sono sorgenti di dati da interrogare come con LINQ. Il mouse «diventa un database di movimenti e click», da filtrare, proiettare, unire (join) e trattare nel tempo.</li>
+    </ul>
+    <p>Per le slide, in .NET la <code>Subscribe</code> è asincrona: il chiamante non resta bloccato fino alla fine della sequenza, che può girare su un altro thread. Rx si integra con i flussi sincroni (<code>IEnumerable&lt;T&gt;</code>) e con i calcoli asincroni a valore singolo (<code>Task&lt;T&gt;</code>), e gli operatori LINQ trasformano (aggregazione, proiezione), compongono (<code>Zip</code>, <code>SelectMany</code>) e interrogano (<code>Where</code>, <code>Any</code>). <code>Concat</code> di due <code>Range(1, 3)</code> dà 1, 2, 3, 1, 2, 3, perché la seconda parte solo quando la prima è finita; <code>Merge</code> le rende attive insieme, e l'esempio delle slide dà 1, 1, 2, 2, 3, 3.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>L'interleaving di <code>Merge</code> dipende dallo scheduler delle sorgenti. In RxJava <code>Observable.range</code> emette in modo sincrono durante la sottoscrizione, quindi <code>range(1, 3).mergeWith(range(1, 3))</code> stampa 1, 2, 3, 1, 2, 3.</p></div>
+
+    <h3>Quattro idee comuni</h3>
+    <p>La documentazione di Project Reactor riassume ciò che hanno in comune queste librerie:</p>
+    <ul>
+      <li><strong>Componibilità e leggibilità.</strong> Componibilità è saper orchestrare più task asincroni, usando i risultati dei precedenti come input dei successivi. Va di pari passo con la leggibilità: con molti livelli asincroni il codice diventa difficile da comporre e da leggere, come nel callback hell.</li>
+      <li><strong>Dati come flusso, con un ricco vocabolario di operatori.</strong> Come in una catena di montaggio, la materia prima esce da una sorgente (il <em>Publisher</em>), passa per le stazioni di lavoro (gli operatori) e arriva al consumatore (il <em>Subscriber</em>). Ogni operatore avvolge il Publisher precedente in uno nuovo che aggiunge un comportamento.</li>
+      <li><strong>Nulla accade finché non ci si sottoscrive.</strong> Costruire la catena è solo una <em>configurazione</em>. La <code>subscribe</code> lega un Publisher a un Subscriber e fa scorrere i dati: la richiesta del Subscriber risale la catena fino alla sorgente.</li>
+      <li><strong>Backpressure</strong>: il consumatore può segnalare al produttore che il ritmo è troppo alto (<a href="#s9">sezione 9</a>).</li>
+    </ul>
+  </section>
+
+  <section id="s6">
+    <h2>6. RxJava: creare, trasformare, osservare</h2>
+
+    <p><strong>RxJava</strong> è Rx per la JVM: estende il pattern Observer alle sequenze di dati ed eventi e aggiunge operatori per comporle, nascondendo thread, sincronizzazione, strutture dati concorrenti e I/O non bloccante. La 1.x era Rx sopra Java, la 2.x (2017) si è allineata a Reactive Streams, e le slide indicano la 4.x (2026) come ultima major release; gli esempi usano l'API di RxJava 3. I flussi sono <code>Observable</code>, leggero e senza backpressure, e <code>Flowable</code>, più costoso, per grandi quantità di dati e con backpressure; per il resto sono equivalenti.</p>
+<pre><code class="language-java">Flowable.range(1, 20)                          // creazione: i numeri da 1 a 20
+    .map(v -&gt; v * v)                           // trasformazione: i quadrati
+    .filter(v -&gt; v % 3 == 0)                   // filtro: solo i multipli di 3
+    .subscribe(System.out::println);           // 9, 36, 81, 144, 225, 324
+
+Observable&lt;Integer&gt; source = Observable.create(emitter -&gt; {   // un flusso scritto a mano
+    for (int i = 0; i &lt; 3; i++) emitter.onNext(i);
+    emitter.onComplete();                      // chiude il flusso
+});
+Disposable d = source.subscribe(
+    v -&gt; log("ricevuto " + v),                 // onNext
+    err -&gt; log("errore " + err),               // onError: gli operatori propagano, gestisce il subscriber
+    () -&gt; log("completato"));                  // onComplete
+// d.dispose() annulla la sottoscrizione (in RxJava 1 era subscription.unsubscribe())</code></pre>
+    <p>Ogni operatore crea un flusso <strong>nuovo</strong>: nessun flusso viene modificato e non ci sono effetti collaterali, il che rende questi sistemi efficienti anche in concorrenza. La catena non contiene elementi, sa come generarli. Senza scheduler la <code>subscribe</code> è <strong>sincrona</strong>: il thread chiamante (qui il <code>main</code>) genera gli elementi ed esegue le lambda. Le eccezioni di un operatore non si gestiscono lì: arrivano all'<code>onError</code> del subscriber.</p>
+    <p>Per creare flussi: <code>just</code>, <code>fromArray</code>, <code>fromIterable</code> e <code>range</code> fanno lifting di dati esistenti; <code>create</code> riceve una lambda che chiama <code>onNext</code> sull'<em>emitter</em>; <code>fromCallable</code> dà il risultato di un calcolo; <code>interval</code> emette un intero a ogni periodo. Un flusso generalizza la programmazione asincrona a più risultati nel tempo, dove una promise ne ha uno solo. <code>flatMap</code> trasforma ogni elemento in un flusso e li fonde in uno solo. <code>zipWith</code> accoppia gli elementi di due flussi a due a due, qualunque sia il momento in cui arrivano:</p>
+<pre><code class="language-java">Flowable.just("the", "quick", "brown", "fox")
+    .zipWith(Flowable.range(1, 5), (w, n) -&gt; n + ". " + w)
+    .subscribe(System.out::println);           // 1. the, 2. quick, 3. brown, 4. fox</code></pre>
+    <p>Ogni operatore è documentato da un <strong>marble diagram</strong>: flusso d'ingresso su una linea del tempo, operatore, flusso d'uscita. <code>doOnNext</code> lascia passare gli elementi eseguendo un'azione, utile per il debug; operatori temporali come <code>debounce</code>, <code>sample</code> e <code>buffer</code> esprimono dichiarativamente comportamenti legati al tempo (<a href="#s8">sezione 8</a>).</p>
+    <details>
+      <summary>Dalle slide: le famiglie di operatori (liste complete)</summary>
+      <p><strong>Famiglie</strong>: creazione · trasformazione · filtro · combinazione · condizionali e booleani · matematici e di aggregazione · backpressure.</p>
+      <p><strong>Trasformazione</strong>: <em>Map</em> applica una funzione a ogni elemento · <em>Scan</em> applica una funzione cumulativa ed emette ogni valore intermedio · <em>FlatMap</em> trasforma gli elementi in flussi e ne fonde le emissioni · <em>Buffer</em> raccoglie periodicamente gli elementi in pacchetti · <em>GroupBy</em> divide il flusso in più flussi per chiave · <em>Window</em> suddivide periodicamente il flusso in finestre, che sono flussi.</p>
+      <p><strong>Filtro</strong>: <em>Filter</em> (predicato) · <em>Skip</em> (primi n) · <em>Take</em> (solo i primi n) · <em>Debounce</em> (emette un elemento solo se è passato un intervallo senza altre emissioni) · <em>Distinct</em> (niente duplicati) · <em>ElementAt</em> (l'n-esimo) · <em>First</em> (il primo, o il primo che soddisfa una condizione) · <em>IgnoreElements</em> (nessun elemento, solo la terminazione) · <em>Last</em> · <em>Sample</em> (l'elemento più recente a intervalli regolari) · <em>SkipLast</em> · <em>TakeLast</em>.</p>
+      <p><strong>Combinazione</strong>: <em>Merge</em> (fonde le emissioni) · <em>Zip</em> (combina gli elementi a due a due con una funzione) · <em>And/Then/When</em> (combina insiemi di elementi tramite Pattern e Plan) · <em>Join</em> (combina un elemento di un flusso con quelli dell'altro emessi in una finestra temporale) · <em>CombineLatest</em> (a ogni emissione combina l'ultimo elemento di ciascun flusso) · <em>StartWith</em> (premette una sequenza) · <em>Switch</em> (da un flusso di flussi, segue solo il più recente).</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. Su quali thread: gli scheduler</h2>
+
+    <p>In RxJava non si creano thread: si dichiara su quale <strong>scheduler</strong>, un'astrazione simile a un executor, deve girare una parte della catena.</p>
+    <ul>
+      <li><code>subscribeOn(s)</code> sposta su <code>s</code> l'esecuzione dell'intera catena, dalla sorgente in giù, e non importa in che punto della catena lo si scrive. Stacca il lavoro dal thread che chiama <code>subscribe</code>.</li>
+      <li><code>observeOn(s)</code> sposta su <code>s</code> solo gli stadi <em>a valle</em> del punto in cui compare, fino al subscriber. Si può usare più volte per cambiare thread in punti diversi della catena.</li>
+    </ul>
+    <p>Gli scheduler predefiniti sono tre. <code>Schedulers.computation()</code> è per il lavoro CPU-bound, su un numero fisso di thread dedicati, ed è il default della maggior parte degli operatori asincroni. <code>Schedulers.io()</code> è per l'I/O e le operazioni bloccanti, su un insieme di thread che cresce e cala. <code>Schedulers.single()</code> esegue tutto su un solo thread, in ordine FIFO. Con <code>Schedulers.from(executor)</code> si avvolge un executor esistente, ad esempio per avere un pool fisso più grande.</p>
+<pre><code class="language-java">Flowable.fromCallable(() -&gt; { Thread.sleep(1000); return "Done"; })   // calcolo costoso o I/O bloccante
+    .subscribeOn(Schedulers.io())                  // …su un thread di I/O
+    .observeOn(Schedulers.single())                // il risultato si elabora su un altro thread (es. la GUI)
+    .subscribe(System.out::println, Throwable::printStackTrace);
+
+Flowable.range(1, 10)
+    .flatMap(v -&gt; Flowable.just(v)
+        .subscribeOn(Schedulers.computation())     // ogni sottoflusso su un thread del pool
+        .map(w -&gt; w * w))
+    .blockingSubscribe(v -&gt; log("sub " + v));      // osservati dal thread chiamante, uno alla volta</code></pre>
+    <p>Il secondo esempio è lo schema del <strong>parallelismo</strong>. <code>subscribeOn</code> su una catena sola la sposta su <em>un</em> altro thread, ma non ne divide gli stadi. Dentro <code>flatMap</code>, invece, ogni sottoflusso ha il suo <code>subscribeOn</code>, e i quadrati sono calcolati in parallelo su thread diversi del pool, arrivando fuori ordine. <code>blockingSubscribe</code> riporta l'osservazione su un solo thread, quello che la chiama. Così gli elementi calcolati in parallelo si elaborano in sequenza, senza lock. Conviene prima far funzionare la catena senza scheduler e solo dopo inserire <code>subscribeOn</code> e <code>observeOn</code> dove serve parallelizzare: la logica non cambia.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Se una catena contiene più <code>subscribeOn</code>, vale quello più vicino alla sorgente.</p></div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Hot e cold</h2>
+
+    <p>La famiglia Rx distingue due categorie di flussi, secondo come reagiscono ai subscriber.</p>
+    <ul>
+      <li>Un flusso <strong>cold</strong> fa partire un flusso nuovo per ogni subscriber, sorgente compresa, e ogni subscriber riceve tutti gli elementi, qualunque sia il momento in cui si è sottoscritto. Emette solo se c'è almeno un subscriber: è <em>lazy</em>, e le lab notes lo associano al modello pull. Sono cold i flussi creati da strutture dati (<code>just</code>, <code>range</code>, <code>fromIterable</code>) e da <code>create</code>. Nell'esempio con due subscriber e un thread creato dentro <code>create</code>, i thread diventano due: ogni sottoscrizione rimette in moto il generatore.</li>
+      <li>Un flusso <strong>hot</strong> non riparte per ogni subscriber: chi arriva tardi riceve solo i segnali emessi dopo la propria sottoscrizione. Emette al proprio ritmo, anche se nessuno ascolta, ed è l'eccezione a «nulla accade finché non ci si sottoscrive». È il modello push: produttore e consumatori sono del tutto disaccoppiati, e tocca agli osservatori tenere il passo. Alcuni flussi hot memorizzano e rigiocano la storia delle emissioni, tutta o in parte. Esempi: sensori, dati dalla rete, eventi della GUI.</li>
+    </ul>
+<pre><code class="language-java">ConnectableObservable&lt;Long&gt; hot = Observable.interval(10, TimeUnit.MILLISECONDS).publish();
+hot.connect();                                     // parte subito, anche senza subscriber
+Thread.sleep(100);
+hot.subscribe(v -&gt; log("A " + v));                 // vede solo gli elementi da qui in poi</code></pre>
+    <p>In questa forma di base, il thread che genera gli elementi di un flusso hot è anche quello che esegue gli osservatori: un osservatore lento rallenta la sorgente. Per disaccoppiarli si usa <code>observeOn</code>.</p>
+
+    <h3>PublishSubject: un ponte con il codice non reattivo</h3>
+    <p>Nei flussi creati con <code>create</code> gli elementi li genera la lambda passata alla creazione. Un <code>PublishSubject</code> invece è un flusso hot che fa anche da canale: chiunque, da qualsiasi thread, può chiamare <code>onNext</code> per inserirvi elementi (non da più thread contemporaneamente: un subject non è thread-safe, e per questo esiste <code>toSerialized()</code>), e chiunque può sottoscriversi. È il modo più semplice di collegare codice legacy o una GUI al mondo reattivo. Va però usato con giudizio, perché permette di scrivere codice poco leggibile. Un esempio classico: rilevare i «multi-click», cioè almeno due click separati da meno di 250 ms.</p>
+<pre><code class="language-java">PublishSubject&lt;Integer&gt; clicks = PublishSubject.create();
+button.addActionListener(e -&gt; clicks.onNext(1));          // Swing produce elementi nel flusso
+
+clicks.buffer(clicks.debounce(250, TimeUnit.MILLISECONDS))  // raggruppa i click fino a 250 ms di silenzio
+      .map(List::size)
+      .filter(n -&gt; n &gt;= 2)
+      .subscribe(n -&gt; System.out.println("multi-click: " + n));</code></pre>
+    <p><code>debounce</code> emette un elemento solo dopo 250 ms senza altri click, e segna così la fine di ogni raffica. <code>buffer</code> usa quei segnali come confini per raggruppare i click. Il resto è <code>map</code> e <code>filter</code>. Senza operatori, la stessa logica richiederebbe timer, stato e callback.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Backpressure</h2>
+
+    <p>Ogni stadio di una catena consuma ciò che produce il precedente, e gli stadi possono avere velocità molto diverse. In un produttore-consumatore classico il buffer pieno blocca il produttore; qui bloccare non si può, e gli elementi in eccesso si accumulano in buffer sempre più grandi o vanno scartati. La <strong>backpressure</strong> è un controllo di flusso in cui ogni stadio dichiara quanti elementi è pronto a elaborare: il segnale che una stazione lenta della catena di montaggio manda a monte per limitare il flusso.</p>
+    <p>Un subscriber può lavorare in modalità <em>unbounded</em>, lasciando che la sorgente spinga i dati alla massima velocità. Oppure può usare il meccanismo di <strong>request</strong>: chiede al massimo <var>n</var> elementi. Il modello push diventa un <strong>ibrido push-pull</strong>. Il consumatore tira <var>n</var> elementi se sono già disponibili; se non lo sono, la sorgente li spinge appena li produce. Nel caso cold il problema quasi non si pone, perché è il subscriber a tirare gli elementi. Nel caso hot è il generatore a spingerli. In RxJava la backpressure c'è solo per <code>Flowable</code>, ed è obbligatoria nello standard Reactive Streams.</p>
+<pre><code class="language-java">Flowable.interval(5, TimeUnit.MILLISECONDS)                     // un elemento ogni 5 ms
+    .observeOn(Schedulers.single())
+    .subscribe(v -&gt; { Thread.sleep(100); log("consumo " + v); },  // ne consuma uno ogni 100 ms
+               err -&gt; log("errore: " + err));                     // MissingBackpressureException</code></pre>
+    <p>Dopo poco il buffer interno si riempie e RxJava segnala un errore: non può emettere un valore perché nessuno lo ha richiesto. Le strategie per evitarlo sono di due tipi. Si può <strong>ridurre il flusso</strong> con operatori: <code>buffer(n)</code> raggruppa gli elementi in pacchetti, <code>window(n)</code> li raggruppa in lotti che sono flussi, e <code>sample(t)</code>, <code>debounce(t)</code> e <code>throttleFirst(t)</code> ne saltano una parte. Oppure si può dire che cosa fare quando il buffer si riempie:</p>
+<pre><code class="language-java">source.onBackpressureBuffer(5000,                                // un buffer più grande…
+        () -&gt; log("buffer pieno"),                              // …con una reazione al riempimento
+        BackpressureOverflowStrategy.DROP_OLDEST);              // ERROR, DROP_OLDEST o DROP_LATEST
+source.onBackpressureDrop();                                     // scarta tutto ciò che è in eccesso
+Flowable.create(emitter -&gt; { /* onNext… */ }, BackpressureStrategy.BUFFER);   // o la strategia scelta alla creazione</code></pre>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Nelle lab notes le strategie di overflow compaiono con i nomi di RxJava 1 (<code>ON_OVERFLOW_ERROR</code>, <code>ON_OVERFLOW_DROP_LATEST</code>, <code>ON_OVERFLOW_DROP_OLDEST</code>); in RxJava 3 sono le costanti di <code>BackpressureOverflowStrategy</code> qui sopra. Cold non significa sempre «si può tirare»: <code>interval</code> è cold (ogni subscriber ha il suo timer) ma produce a tempo, e con un consumatore lento ha bisogno di backpressure come un flusso hot.</p></div>
+
+    <h3>Nessuna pallottola d'argento</h3>
+    <p>Né la RP né Rx sono il modello generale per la programmazione asincrona. Sono efficaci per gestire flussi di dati e di eventi in stile funzionale, e il loro vantaggio si vede solo se la logica del problema si esprime come composizione di flussi. Usare Rx solo per sottoscrivere lambda, come un Observer qualsiasi, non è programmazione reattiva. Resta aperta la sfida di integrare gli approcci: sincrono e asincrono, push e pull, concorrenza con più event loop che comunicano (cioè gli <a href="cap-15-attori.html">attori</a>), e modelli che funzionino anche nei sistemi distribuiti. Le domande su come l'assignment 2 usa la programmazione reattiva e le promise sono nella <a href="prep-assignment-02.html">pagina di preparazione</a>.</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Che cos'è la programmazione reattiva?</summary>
+        <p>Un paradigma orientato ai flussi di dati e alla propagazione del cambiamento. Si dichiarano le relazioni tra valori che variano nel tempo, e il linguaggio o la libreria aggiorna automaticamente tutto ciò che dipende da un valore quando questo cambia.</p>
+      </details>
+      <details>
+        <summary>Quali sono le due astrazioni reattive di base?</summary>
+        <p>Gli event stream, valori discreti nel tempo come i click, e i behaviour o signal, valori continui con un valore in ogni istante, come un timer o una temperatura.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra valutazione push e pull?</summary>
+        <p>In pull chi ha bisogno di un valore lo chiede alla sorgente (demand-driven, lazy). In push la sorgente, quando ha un dato nuovo, lo manda a chi ne dipende (data-driven, eager).</p>
+      </details>
+      <details>
+        <summary>Che cos'è un glitch e come si evita?</summary>
+        <p>Un'inconsistenza temporanea della propagazione push: un valore viene ricalcolato combinando dati nuovi e vecchi, come <code>var3 = 3</code> invece di 4. Si evita aggiornando i nodi del grafo delle dipendenze in ordine topologico; nei sistemi distribuiti è un problema aperto.</p>
+      </details>
+      <details>
+        <summary>Che cos'è il lifting?</summary>
+        <p>La conversione di una variabile o funzione normale in una reattiva, che registra la dipendenza nel grafo. Può essere implicito (Bacon.js), esplicito (React.js) o entrambi (Flapjax).</p>
+      </details>
+      <details>
+        <summary>Che cosa succede prima e dopo la <code>subscribe</code>?</summary>
+        <p>Prima si costruisce solo la descrizione della catena di operatori, e nessun dato scorre. La <code>subscribe</code> collega il subscriber, e la sua richiesta risale fino alla sorgente e fa partire il flusso. Un flusso hot è l'eccezione, perché emette comunque.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra <code>subscribeOn</code> e <code>observeOn</code>?</summary>
+        <p><code>subscribeOn</code> sceglie lo scheduler dell'intera catena, dalla sorgente, ovunque sia scritto. <code>observeOn</code> cambia scheduler solo per gli stadi che lo seguono.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra un flusso hot e uno cold?</summary>
+        <p>Un cold riparte da capo per ogni subscriber, che riceve tutti gli elementi, ed emette solo se qualcuno è sottoscritto. Un hot emette al proprio ritmo anche senza subscriber, e chi arriva tardi riceve solo gli elementi successivi.</p>
+      </details>
+      <details>
+        <summary>Che cos'è la backpressure?</summary>
+        <p>Un controllo di flusso in cui il consumatore dice al produttore quanti elementi è pronto a ricevere (<code>request(n)</code>), trasformando il push in un ibrido push-pull. In RxJava c'è solo su <code>Flowable</code>, con strategie di buffer, scarto e campionamento.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Slide <em>[module-2.2] Reactive Programming</em> e <em>[Lab Notes] Reactive Programming in Java — RxJava</em> · 10 aprile 2026 (§11–17: dall'assegnamento alla relazione, propagazione, behaviour ed event stream, push e pull, glitch, lifting, Flapjax, operatori) · 13 aprile (§1–14, 16–17: RxJava in laboratorio: creazione, operatori, cold e hot, <code>PublishSubject</code> e GUI, scheduler, <code>flatMap</code> e parallelismo) · 20 aprile (§14–15: hot e cold, operatori temporali, backpressure). La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-12-async.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-14-message-passing.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 10, 13 e 20 aprile 2026 · E. Bainomugisha et al., <em>A Survey on Reactive Programming</em>, ACM CSUR 2013 · E. Meijer, <em>Your Mouse is a Database</em>, CACM 2012 · documentazione di ReactiveX, RxJava e Project Reactor · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+</body>
+</html>

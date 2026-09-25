@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 8 — Progettare programmi concorrenti · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-07-monitor.html">&larr; Cap. 7 — Monitor e variabili condizione</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-09-formalismi-visuali.html">Cap. 9 — Formalismi visuali: reti di Petri e statechart &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte I — Concorrenza a memoria condivisa · Capitolo 8</div>
+    <h1>Progettare programmi concorrenti</h1>
+    <div class="lk-meta"><span>~15 min di lettura</span><span>4 schemi di architettura</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Dal problema all'architettura in due passi</a></li>
+      <li><a href="#s2">Componenti attivi e passivi</a></li>
+      <li><a href="#s3">L'analisi: decomporre e trovare le dipendenze</a></li>
+      <li><a href="#s4">Tre modi di pensare il parallelismo</a></li>
+      <li><a href="#s5">Le architetture concorrenti</a></li>
+      <li><a href="#s6">Come si capisce che il lavoro è finito</a></li>
+      <li><a href="#s7">Model-View-Controller in un programma concorrente</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> Progettare un programma concorrente vuol dire passare dal problema a un'architettura in due passi. Nell'analisi si trovano i task, scomponendo il lavoro o i dati, e le dipendenze tra loro, guardando il problema e non la soluzione. Nel progetto si affidano i task a componenti attivi, gli agenti, che interagiscono solo attraverso componenti passivi, i monitor. Tre classi concettuali (parallelismo del risultato, degli specialisti, dell'agenda) orientano la scelta. Quattro architetture di riferimento la portano verso il codice: master-workers, filter-pipeline, spazio condiviso e announcer-listeners.</p>
+
+  <section id="s1">
+    <h2>1. Dal problema all'architettura in due passi</h2>
+
+    <p>I capitoli precedenti hanno dato i meccanismi. Resta la domanda dell'ingegnere: dato un problema, come si organizza il programma? Il metodo del corso ha due passi.</p>
+    <ol>
+      <li><strong>Analisi.</strong> Si cerca la concorrenza che il problema offre: quali <strong>task</strong> ci sono, come si possono scomporre il lavoro e i dati, quali <strong>dipendenze</strong> legano i task. Si guarda il problema, non la soluzione. È la parte più difficile, perché viene spontaneo analizzare pensando già a come implementare.</li>
+      <li><strong>Progetto.</strong> Si sceglie un'<strong>architettura concorrente</strong>. I task vengono assegnati ad <strong>agenti</strong>, componenti attivi che ne sono responsabili e ne incapsulano la logica e il controllo. Per lavorare insieme gli agenti usano componenti <strong>passivi</strong> condivisi, di due tipi: risorse che raccolgono il risultato del loro lavoro, e <em>mezzi di coordinazione</em> che danno forma alla loro interazione e gestiscono le dipendenze tra i task.</li>
+    </ol>
+    <p>I due passi non sono una cascata: analisi, progetto e implementazione si ripetono a spirale, come nei metodi agili. Ma non c'è buon progetto senza una buona analisi.</p>
+
+    <p>Un <strong>task</strong> è, in senso operativo, una sequenza di istruzioni che operano insieme come un gruppo e corrispondono a una parte logica del programma; in senso più astratto, un lavoro da svolgere come responsabilità di un agente. In entrambi i casi è un'unità di lavoro logica che inizia e finisce, non un thread: il thread, o l'agente, è ciò che lo esegue.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Componenti attivi e passivi</h2>
+
+    <p>Un oggetto incapsula stato e comportamento, ma non il flusso di controllo: i suoi metodi sono eseguiti dal thread che li chiama, e leggendo la classe non si sa quale sarà. La disciplina del corso aggiunge l'<strong>incapsulamento del flusso di controllo</strong>, con una partizione netta dei componenti in due tipi.</p>
+
+    <table>
+      <thead><tr><th></th><th>Componente attivo (agente)</th><th>Componente passivo</th></tr></thead>
+      <tbody>
+        <tr><td>Incapsula</td><td>un proprio flusso di controllo, oltre a stato e comportamento</td><td>stato e operazioni, con le politiche di mutua esclusione e sincronizzazione</td></tr>
+        <tr><td>Si progetta a partire da</td><td>i compiti che deve svolgere</td><td>il servizio che offre</td></tr>
+        <tr><td>Nella parte I si realizza come</td><td>thread</td><td>monitor (<a href="cap-07-monitor.html">capitolo 7</a>)</td></tr>
+        <tr><td>Esempi</td><td>master, worker, produttore, consumatore, controller attivo</td><td>bounded buffer, bag of tasks, contatore condiviso, latch, barriera</td></tr>
+      </tbody>
+    </table>
+
+    <p>Le regole sono tre:</p>
+    <ul>
+      <li><strong>Gli agenti non hanno interfaccia pubblica.</strong> Nessun altro può chiamare i loro metodi, quindi il loro codice è eseguito solo dal loro flusso di controllo. Un metodo di un agente chiamato da un altro thread è una violazione: qualcun altro esegue il «mio» codice.</li>
+      <li><strong>Ogni interazione tra agenti passa per componenti passivi condivisi</strong>, progettati come monitor. Nella parte III gli agenti diventano attori, che interagiscono invece scambiandosi messaggi (<a href="cap-15-attori.html">capitolo 15</a>).</li>
+      <li><strong>Niente entità ibride.</strong> Un'entità che ha un proprio thread e insieme offre metodi ad altri thread va scomposta in uno o più componenti attivi e passivi. Una sottoclasse di <code>Thread</code> con metodi pubblici <code>synchronized</code> chiamati da altri thread diventa un agente più un monitor.</li>
+    </ul>
+    <p>Un <strong>agente</strong> è quindi un componente attivo, che porta avanti un compito di sua iniziativa, sia esso un thread, un event loop o un attore. Monitor, buffer e future sono passivi: agiscono solo quando un agente li chiama.</p>
+
+    <p>In Java un agente estende <code>Thread</code>: il costruttore riceve la configurazione e i componenti passivi da usare, il comportamento sta in <code>run</code>, e i metodi privati o protetti sono le sue «abilità», che un sottotipo eredita. <code>run</code> è pubblico solo perché lo impone <code>Thread</code>. Nell'ordinamento concorrente del corso i worker ordinano ciascuno una parte dell'array e un merger le fonde; qui le parti si raccolgono in un monitor:</p>
+
+<pre><code class="language-java">// Componente passivo: raccoglie le parti ordinate e sa quando ci sono tutte
+class SortedParts {
+  private final List&lt;int[]&gt; parts = new ArrayList&lt;&gt;();
+  private final int expected;
+  SortedParts(int expected) { this.expected = expected; }
+
+  public synchronized void add(int[] part) { parts.add(part); notifyAll(); }
+
+  public synchronized List&lt;int[]&gt; awaitAll() throws InterruptedException {
+    while (parts.size() &lt; expected) wait();
+    return List.copyOf(parts);
+  }
+}
+
+// Componente attivo: nessun metodo pubblico oltre a run(), imposto da Thread
+class SortingWorker extends Thread {
+  private final int[] slice;
+  private final SortedParts out;
+  SortingWorker(int[] slice, SortedParts out) { this.slice = slice; this.out = out; }
+
+  @Override public void run() { Arrays.sort(slice); out.add(slice); }
+}
+
+class MergingWorker extends Thread {
+  private final SortedParts in;
+  MergingWorker(SortedParts in) { this.in = in; }
+
+  @Override public void run() {
+    try { int[] all = merge(in.awaitAll()); /* usa il risultato */ }
+    catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+  }
+  // abilità privata: a ogni passo prende il più piccolo tra i primi elementi delle parti
+  private int[] merge(List&lt;int[]&gt; parts) {
+    int[] out = new int[parts.stream().mapToInt(p -&gt; p.length).sum()];
+    int[] next = new int[parts.size()];          // indice del prossimo elemento di ogni parte
+    for (int k = 0; k &lt; out.length; k++) {
+      int best = -1;
+      for (int i = 0; i &lt; parts.size(); i++)
+        if (next[i] &lt; parts.get(i).length
+            &amp;&amp; (best &lt; 0 || parts.get(i)[next[i]] &lt; parts.get(best)[next[best]])) best = i;
+      out[k] = parts.get(best)[next[best]++];
+    }
+    return out;
+  }
+}</code></pre>
+    <p>Si vede a colpo d'occhio chi fa cosa, e <code>merge</code>, privato, lo esegue solo il merger. Dare un nome esplicito a ruoli e componenti, invece di nasconderli in una lambda, rende visibile il progetto nel codice.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. L'analisi: decomporre e trovare le dipendenze</h2>
+
+    <p>L'analisi ha due fasi: la decomposizione in task e dati, poi l'analisi delle dipendenze. Per la decomposizione ci sono due pattern, che differiscono per il punto di partenza.</p>
+    <table>
+      <thead><tr><th></th><th>Task decomposition</th><th>Data decomposition</th></tr></thead>
+      <tbody>
+        <tr><td>Quando</td><td>il problema si scompone in modo naturale, <em>divide et impera</em>, in task indipendenti o quasi</td><td>i dati si dividono in unità su cui si può lavorare in modo relativamente indipendente</td></tr>
+        <tr><td>Ordine</td><td>prima i task, poi come dividere i dati: la decomposizione dei dati segue quella dei task</td><td>prima le unità di dati, poi i task che lavorano su ciascuna: la decomposizione dei task segue</td></tr>
+        <tr><td>Requisito o vantaggio</td><td>i task devono essere abbastanza indipendenti che gestire le dipendenze costi una piccola parte del tempo totale</td><td>scala bene con il numero di processori</td></tr>
+        <tr><td>Esempio</td><td>produttori e consumatori; un web server con un task per richiesta</td><td>prodotto di matrici: ogni elemento del risultato è il prodotto di una riga per una colonna, quindi n² task indipendenti</td></tr>
+      </tbody>
+    </table>
+    
+    <p>L'<strong>analisi delle dipendenze</strong> esamina le relazioni tra i task per raggrupparli e ordinarli, in modo da massimizzare le prestazioni. Le dipendenze sono di due tipi:</p>
+    <ul>
+      <li><strong>temporali</strong>: un task può iniziare solo dopo che un altro è finito. Il merge viene dopo tutti gli ordinamenti; il passo <var>k</var> + 1 di una simulazione viene dopo il passo <var>k</var>;</li>
+      <li><strong>sui dati o sulle risorse</strong>: un task usa dati prodotti da un altro, o più task condividono una struttura o una risorsa che va protetta.</li>
+    </ul>
+    <p>Task del tutto indipendenti vanno ad agenti che non si coordinano. Dove ci sono dipendenze, gli agenti si coordinano con un componente passivo: una barriera o un latch per l'ordine, un monitor per i dati condivisi. Malone e Crowston (1993) classificano le dipendenze nei problemi di coordinazione, un tema interdisciplinare.</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>In <em>Patterns for Parallel Programming</em> (Mattson et al.), da cui vengono questi pattern, l'analisi delle dipendenze ha tre passi: <em>group tasks</em> (raggruppare i task con vincoli comuni), <em>order tasks</em> (fissare l'ordine tra i gruppi) e <em>data sharing</em> (stabilire come i task condividono i dati).</p></div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Tre modi di pensare il parallelismo</h2>
+
+    <p>Per passare dall'analisi al progetto, Carriero e Gelernter (1989) propongono tre <strong>classi architetturali</strong> concettuali. L'esempio è costruire una casa.</p>
+    <table>
+      <thead><tr><th>Classe</th><th>Si progetta attorno a</th><th>Ogni agente…</th><th>Strutture condivise</th><th>La casa</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Result parallelism</strong></td><td>la struttura dati o la risorsa che costituisce il risultato; si calcolano tutti i suoi elementi insieme. È legata alla data decomposition</td><td>produce un pezzo del risultato</td><td>strutture che contengono il risultato in costruzione e ne incapsulano mutua esclusione e sincronizzazione</td><td>si costruiscono in parallelo le parti (muri, fondamenta, tetto) e si assemblano man mano che sono pronte</td></tr>
+        <tr><td><strong>Specialist parallelism</strong></td><td>un insieme di specialisti collegati in una rete logica, tutti attivi insieme</td><td>svolge un solo tipo di compito</td><td>mezzi di coordinazione tra specialisti: caselle di messaggi, blackboard, servizi di eventi</td><td>una squadra con uno specialista per mestiere (scavatore, carpentiere, copritetto); all'inizio molti aspettano, poi lavorano in tanti insieme</td></tr>
+        <tr><td><strong>Agenda parallelism</strong></td><td>un'agenda di attività: molti agenti su ogni passo, eventualmente più passi insieme (un workflow)</td><td>aiuta nel punto corrente dell'agenda</td><td>strutture per i dati prodotti e consumati dalle attività, come i bounded buffer</td><td>si segue l'agenda (fondamenta, struttura, tetto) con una squadra di generalisti che lavorano tutti sulla fase corrente</td></tr>
+      </tbody>
+    </table>
+    <p>In tutte e tre gli agenti lavorano in parallelo fin dove lo consentono i vincoli del problema. Risultato e specialisti sono approcci opposti: il primo divide il prodotto, il secondo i mestieri, e lì pesa la coordinazione tra i lavoratori, per esempio in pipeline.</p>
+    <p>I confini tra le tre classi <strong>non sono rigidi</strong>. Un lavoro reale mescola spesso più approcci: un progetto a specialisti può assegnare una squadra di lavoratori a una specialità, e quella squadra lavora ad agenda. Restano però tre modi di pensare nettamente distinti. Il risultato guarda alla forma del prodotto finito, gli specialisti alla composizione della squadra, l'agenda alla lista delle cose da fare. L'approccio si può applicare ricorsivamente, seguendo la decomposizione. Il metodo suggerito ha tre passi:</p>
+    <ol>
+      <li>scegliere la classe concettuale più naturale per il problema;</li>
+      <li>scrivere il programma con il metodo più naturale per quella classe;</li>
+      <li>se il programma non è abbastanza efficiente, trasformarlo metodicamente in una versione più efficiente.</li>
+    </ol>
+  </section>
+
+  <section id="s5">
+    <h2>5. Le architetture concorrenti</h2>
+
+    <p>Tra la classe concettuale e l'implementazione fanno da ponte quattro architetture di riferimento, tratte da Magee e Kramer e da Ortega-Arjona: <strong>master-workers</strong> (con i framework a task e la variante fork-join), <strong>filter-pipeline</strong> (pattern a flussi), <strong>shared-space</strong> o blackboard (coordinazione tramite uno spazio) e <strong>announcer-listeners</strong> (coordinazione a eventi). Nelle figure i cerchi sono agenti e i rettangoli componenti passivi.</p>
+
+    <h3>Master-workers</h3>
+    <p>Un agente <strong>master</strong> e un insieme di agenti <strong>worker</strong>, anche dinamico, interagiscono attraverso un mezzo di coordinazione che funziona da <strong>bag of tasks</strong>, di solito una blackboard o un bounded buffer. Il master scompone il task globale in sottotask, li assegna inserendone la descrizione nel bag e raccoglie i risultati. Ogni worker preleva un task dal bag, lo esegue e ne comunica il risultato. In una variante i risultati si aggregano in un monitor apposito. Esempio: la quadratura, cioè l'integrale definito calcolato come somma delle aree di tanti trapezi, uno per task.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Il master inserisce task nel bag of tasks, tre worker li prelevano e depositano i risultati, che tornano al master">
+      <svg viewBox="0 0 440 180" width="440" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="mw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#45463F"/></marker></defs>
+        <g stroke="#45463F" stroke-width="1.4" fill="none" marker-end="url(#mw-a)">
+          <line x1="74" y1="80" x2="98" y2="80"/>
+          <line x1="202" y1="70" x2="246" y2="38"/>
+          <line x1="202" y1="80" x2="243" y2="80"/>
+          <line x1="202" y1="90" x2="246" y2="122"/>
+          <line x1="284" y1="38" x2="320" y2="66"/>
+          <line x1="287" y1="80" x2="318" y2="80"/>
+          <line x1="284" y1="122" x2="320" y2="94"/>
+          <path d="M 370 107 L 370 158 L 46 158 L 46 110"/>
+        </g>
+        <circle cx="46" cy="80" r="28" fill="#E3E8F4" stroke="#1546B8" stroke-width="1.6"/>
+        <g fill="#E3E8F4" stroke="#1546B8" stroke-width="1.6">
+          <circle cx="266" cy="30" r="20"/><circle cx="266" cy="80" r="20"/><circle cx="266" cy="130" r="20"/>
+        </g>
+        <g fill="#E4EEE9" stroke="#1F5A49" stroke-width="1.6">
+          <rect x="100" y="55" width="100" height="50" rx="6"/>
+          <rect x="320" y="55" width="100" height="50" rx="6"/>
+        </g>
+        <g font-family="sans-serif" font-size="14" text-anchor="middle">
+          <text x="46" y="85" fill="#1546B8">master</text>
+          <text x="266" y="35" fill="#1546B8">W</text><text x="266" y="85" fill="#1546B8">W</text><text x="266" y="135" fill="#1546B8">W</text>
+          <text x="150" y="77" fill="#1F5A49">bag</text><text x="150" y="95" fill="#1F5A49">of tasks</text>
+          <text x="370" y="85" fill="#1F5A49">risultati</text>
+          <text x="208" y="175" fill="#45463F" font-size="13">il master raccoglie e aggrega</text>
+        </g>
+      </svg>
+      <figcaption><b>Fig. 1</b> — Master-workers. Il bag disaccoppia il master dai worker: il master non sa quanti sono.</figcaption>
+    </figure>
+
+    <p>Nella variante semplice il master conosce i worker e crea ciascuno con la sua parte, come nell'ordinamento della sezione 2. In quella generale il bag disaccoppia master e worker, il cui numero dipende dall'hardware e non dai task: il prodotto di due matrici 1000 × 1000 genera un milione di task, ma su 16 core un compito CPU-bound vuole 17 worker.</p>
+
+    <h3>I framework a task sono master-workers</h3>
+    <p>Un <strong>executor</strong> è un master-workers di cui il programmatore scrive solo il master: il bag (di solito un bounded buffer) e il pool di worker, cioè la politica di esecuzione, sono nascosti in un componente passivo. <code>submit</code> ritorna subito, e il task è eseguito in modo <strong>asincrono</strong> rispetto a chi lo sottomette. I risultati si raccolgono in un bag dei risultati, in un monitor aggregatore, oppure con le <strong>future</strong>: oggetti restituiti subito che rappresentano il risultato futuro, e permettono di controllare se è pronto, di bloccarsi fino al suo arrivo, di cancellare il task e di intercettarne gli errori. Task e future sono asincroni ma ammettono ancora attese bloccanti, a differenza della programmazione a eventi (<a href="cap-12-async.html">capitolo 12</a>).</p>
+    <p>I task di un executor devono essere <strong>indipendenti</strong>: bloccare un task significa bloccare il thread del pool che lo esegue. Cento task che attendono tutti su una barriera da 100, con un pool di 16 thread, vanno in deadlock: i primi 16 occupano tutti i thread in attesa, e gli altri 84 non partono mai. Le sezioni critiche brevi invece vanno bene, perché il lock prima o poi si rilascia.</p>
+    <p>La domanda d'orale su questo caso (pool da 4 thread, 100 task) è svolta, con un laboratorio, nel <a href="cap-10-java.html#s7">capitolo 10</a>.</p>
+    <p>Le slide collegano ai task anche i <strong>virtual thread</strong>, thread logici gestiti dalla JVM e slegati da quelli del sistema operativo, e la <strong>structured concurrency</strong>, che tratta un gruppo di task correlati come un'unica unità di lavoro per semplificare errori e cancellazione (<a href="cap-10-java.html">capitolo 10</a>).</p>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>Le slide citano per entrambi la JEP 425, che riguarda solo i virtual thread (definitivi in Java 21 con la JEP 444). La structured concurrency nasce con la JEP 428 ed è ancora in anteprima in Java 25.</p></div>
+
+    <h3>Fork-join</h3>
+    <p>È il master-workers applicato <strong>ricorsivamente</strong>: i worker sono a loro volta master, che producono sottotask e ne raccolgono i risultati. Realizza in concorrenza il <em>divide et impera</em>: un worker con un compito troppo grande lo divide, finché i pezzi si possono eseguire direttamente. Si realizza con un bag of tasks in cui anche i worker inseriscono task, oppure direttamente. Esempi: la quadratura adattiva e il merge sort. In Java c'è <code>ForkJoinPool</code>, dove un task può attendere i propri sottotask con <code>join</code> (il thread in attesa esegue altri task invece di restare fermo), cosa che negli executor normali rischia il deadlock descritto sopra.</p>
+
+    <h3>Filter-pipeline</h3>
+    <p>Una catena lineare di agenti collegati da <strong>pipe</strong>: bounded buffer o canali. Il <strong>generatore</strong> apre la catena e produce i dati da elaborare. Ogni <strong>filtro</strong> intermedio consuma dalla pipe in ingresso e produce nella pipe in uscita. Il <strong>sink</strong> chiude la catena e raccoglie i risultati. Esempio: l'elaborazione di immagini, con uno stadio per ogni trasformazione. Il parallelismo viene dal fatto che gli stadi lavorano insieme su elementi diversi del flusso.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Generatore, due filtri e sink in fila, collegati da tre pipe">
+      <svg viewBox="-10 0 420 100" width="420" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="fp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#45463F"/></marker></defs>
+        <g stroke="#45463F" stroke-width="1.4" fill="none" marker-end="url(#fp-a)">
+          <line x1="59" y1="45" x2="70" y2="45"/><line x1="112" y1="45" x2="122" y2="45"/>
+          <line x1="172" y1="45" x2="183" y2="45"/><line x1="225" y1="45" x2="235" y2="45"/>
+          <line x1="285" y1="45" x2="296" y2="45"/><line x1="338" y1="45" x2="348" y2="45"/>
+        </g>
+        <g fill="#E3E8F4" stroke="#1546B8" stroke-width="1.6">
+          <circle cx="35" cy="45" r="24"/><circle cx="148" cy="45" r="24"/><circle cx="261" cy="45" r="24"/><circle cx="374" cy="45" r="24"/>
+        </g>
+        <g fill="#E4EEE9" stroke="#1F5A49" stroke-width="1.6">
+          <rect x="72" y="33" width="40" height="24" rx="3"/><rect x="185" y="33" width="40" height="24" rx="3"/><rect x="298" y="33" width="40" height="24" rx="3"/>
+        </g>
+        <g stroke="#1F5A49" stroke-width="1">
+          <line x1="85" y1="33" x2="85" y2="57"/><line x1="98" y1="33" x2="98" y2="57"/>
+          <line x1="198" y1="33" x2="198" y2="57"/><line x1="211" y1="33" x2="211" y2="57"/>
+          <line x1="311" y1="33" x2="311" y2="57"/><line x1="324" y1="33" x2="324" y2="57"/>
+        </g>
+        <g font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">
+          <text x="35" y="50">G</text><text x="148" y="50">F</text><text x="261" y="50">F</text><text x="374" y="50">S</text>
+        </g>
+        <g font-family="sans-serif" font-size="13" text-anchor="middle" fill="#45463F">
+          <text x="35" y="90">generatore</text><text x="148" y="90">filtro</text><text x="261" y="90">filtro</text><text x="374" y="90">sink</text>
+          <text x="92" y="24" fill="#1F5A49">pipe</text><text x="205" y="24" fill="#1F5A49">pipe</text><text x="318" y="24" fill="#1F5A49">pipe</text>
+        </g>
+      </svg>
+      <figcaption><b>Fig. 2</b> — Filter-pipeline. Ogni pipe è un bounded buffer (o un canale) tra due stadi consecutivi.</figcaption>
+    </figure>
+
+    <h3>Shared-space (blackboard)</h3>
+    <p>Gli agenti interagiscono <strong>indirettamente</strong> attraverso uno spazio condiviso che funziona da lavagna (<em>blackboard</em>). Lo spazio offre operazioni per aggiungere informazioni e per cercarle, leggerle o rimuoverle, spesso con sincronizzazione: una lettura può sospendersi finché l'informazione cercata non c'è. La coordinazione è quindi <strong>guidata dai dati</strong>, perché un agente reagisce a ciò che compare nello spazio e non a chi lo ha scritto, e c'è <strong>disaccoppiamento temporale</strong>: chi scrive e chi legge non devono esistere nello stesso momento. Il riferimento classico sono gli spazi di tuple del linguaggio di coordinazione Linda (Gelernter, 1985).</p>
+
+    <figure class="lk-fig" role="img" aria-label="Quattro agenti attorno a uno spazio condiviso di tuple: due inseriscono, uno legge, uno preleva">
+      <svg viewBox="0 0 440 180" width="440" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ss-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#45463F"/></marker></defs>
+        <g stroke="#45463F" stroke-width="1.4" fill="none" marker-end="url(#ss-a)">
+          <line x1="72" y1="52" x2="138" y2="72"/>
+          <line x1="138" y1="112" x2="74" y2="130"/>
+          <line x1="302" y1="72" x2="366" y2="52"/>
+          <line x1="366" y1="130" x2="302" y2="112"/>
+        </g>
+        <rect x="140" y="30" width="160" height="120" rx="10" fill="#E4EEE9" stroke="#1F5A49" stroke-width="1.6"/>
+        <g fill="#E3E8F4" stroke="#1546B8" stroke-width="1.6">
+          <circle cx="50" cy="45" r="24"/><circle cx="50" cy="137" r="24"/><circle cx="390" cy="45" r="24"/><circle cx="390" cy="137" r="24"/>
+        </g>
+        <g font-family="sans-serif" font-size="14" text-anchor="middle">
+          <text x="220" y="52" fill="#1F5A49">spazio condiviso</text>
+          <text x="50" y="50" fill="#1546B8">A</text><text x="50" y="142" fill="#1546B8">A</text><text x="390" y="50" fill="#1546B8">A</text><text x="390" y="142" fill="#1546B8">A</text>
+        </g>
+        <g font-family="monospace" font-size="13" text-anchor="middle" fill="#45463F">
+          <text x="220" y="82">⟨task, 7⟩</text><text x="220" y="104">⟨area, 3, 0.25⟩</text><text x="220" y="126">⟨task, 8⟩</text>
+        </g>
+        <g font-family="sans-serif" font-size="13" text-anchor="middle" fill="#45463F">
+          <text x="108" y="52">aggiunge</text><text x="108" y="138">preleva</text><text x="334" y="52">legge</text><text x="334" y="138">aggiunge</text>
+        </g>
+      </svg>
+      <figcaption><b>Fig. 3</b> — Shared-space. Gli agenti non si conoscono: si coordinano sul contenuto dello spazio.</figcaption>
+    </figure>
+    <div class="callout note"><span class="callout-label">Oltre le slide</span><p>In Linda <code>out(t)</code> inserisce una tupla, <code>in(p)</code> preleva una tupla che corrisponde al modello <var>p</var> sospendendosi finché non c'è, <code>rd(p)</code> la legge senza toglierla. Il bag of tasks del master-workers è uno spazio di questo tipo.</p></div>
+
+    <h3>Announcer-listeners</h3>
+    <p>Un agente <strong>announcer</strong> e un insieme dinamico di agenti <strong>listener</strong> interagiscono attraverso un <strong>servizio di eventi</strong>. L'announcer annuncia sul servizio che un evento è accaduto. I listener si registrano sul servizio per essere avvisati degli eventi che li interessano. Il servizio disaccoppia i due ruoli, raccoglie gli eventi e li smista. Esempio: parallelizzare un'applicazione a eventi eseguendo in parallelo i suoi gestori di eventi.</p>
+
+    <figure class="lk-fig" role="img" aria-label="L'announcer pubblica un evento sul servizio di eventi, che lo notifica a tre listener registrati">
+      <svg viewBox="0 0 440 180" width="440" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="al-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#45463F"/></marker></defs>
+        <g stroke="#45463F" stroke-width="1.4" fill="none" marker-end="url(#al-a)">
+          <line x1="80" y1="90" x2="136" y2="90"/>
+          <line x1="272" y1="78" x2="362" y2="40"/>
+          <line x1="272" y1="90" x2="358" y2="90"/>
+          <line x1="272" y1="102" x2="362" y2="140"/>
+        </g>
+        <circle cx="50" cy="90" r="28" fill="#E3E8F4" stroke="#1546B8" stroke-width="1.6"/>
+        <rect x="138" y="60" width="132" height="60" rx="6" fill="#E4EEE9" stroke="#1F5A49" stroke-width="1.6"/>
+        <g fill="#E3E8F4" stroke="#1546B8" stroke-width="1.6">
+          <circle cx="382" cy="32" r="20"/><circle cx="382" cy="90" r="20"/><circle cx="382" cy="148" r="20"/>
+        </g>
+        <g font-family="sans-serif" font-size="14" text-anchor="middle">
+          <text x="50" y="95" fill="#1546B8">A</text>
+          <text x="204" y="86" fill="#1F5A49">servizio</text><text x="204" y="104" fill="#1F5A49">di eventi</text>
+          <text x="382" y="37" fill="#1546B8">L</text><text x="382" y="95" fill="#1546B8">L</text><text x="382" y="153" fill="#1546B8">L</text>
+        </g>
+        <g font-family="sans-serif" font-size="13" text-anchor="middle" fill="#45463F">
+          <text x="108" y="80">annuncia</text><text x="318" y="48">notifica</text>
+          <text x="50" y="138">announcer</text>
+        </g>
+      </svg>
+      <figcaption><b>Fig. 4</b> — Announcer-listeners. I listener si sono registrati prima sul servizio, e l'announcer non sa chi riceverà l'evento.</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>Architettura</th><th>Agenti</th><th>Componente passivo di coordinazione</th><th>Più vicina a</th></tr></thead>
+      <tbody>
+        <tr><td>Master-workers</td><td>master, worker generalisti</td><td>bag of tasks, raccoglitore dei risultati</td><td>agenda o risultato</td></tr>
+        <tr><td>Fork-join</td><td>worker che sono anche master</td><td>bag of tasks, oppure nessuno</td><td>come master-workers, in modo ricorsivo</td></tr>
+        <tr><td>Filter-pipeline</td><td>generatore, filtri, sink</td><td>pipe (bounded buffer, canali)</td><td>specialisti</td></tr>
+        <tr><td>Shared-space</td><td>agenti anonimi</td><td>spazio condiviso (blackboard, spazio di tuple)</td><td>specialisti o agenda</td></tr>
+        <tr><td>Announcer-listeners</td><td>announcer, listener</td><td>servizio di eventi</td><td>specialisti</td></tr>
+      </tbody>
+    </table>
+    <p>L'ultima colonna è indicativa: le slide citano blackboard e servizi di eventi tra i mezzi degli specialisti, e la pipeline come loro strategia di lavoro.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. Come si capisce che il lavoro è finito</h2>
+
+    <p>Il master deve sapere quando tutti i task sono stati eseguiti, per aggregare i risultati, passare alla fase successiva o terminare. La tecnica dipende da come nascono i task.</p>
+    <ul>
+      <li><strong>Numero di task noto in anticipo.</strong> Si contano i completamenti. Un monitor aggregatore attende finché non ha <var>N</var> risultati, come <code>SortedParts</code> nella sezione 2. Oppure un <strong>latch</strong> (il «cancello») inizializzato a <var>N</var>: ogni worker fa <code>countDown</code> e il master aspetta su <code>await</code>. Se ogni worker ha un solo task, basta la <code>join</code> sui thread.</li>
+      <li><strong>Con un executor.</strong> Si conservano le future restituite da <code>submit</code> e si chiama <code>get</code> su ciascuna, o si usa <code>invokeAll</code>. Se l'executor non serve più, si chiama <code>shutdown</code> e poi <code>awaitTermination</code>, che ritorna quando tutti i task sono finiti.</li>
+      <li><strong>Lavoro a fasi</strong>, come i passi di una simulazione. Il lavoro di ogni passo è noto, e si usa una barriera o un latch per passo: il passo <var>k</var> + 1, o il rendering, parte solo quando tutti i worker hanno finito il passo <var>k</var>.</li>
+      <li><strong>Task generati dinamicamente</strong>, come nel fork-join o in una visita di directory. Un bag vuoto <em>non</em> vuol dire lavoro finito, perché un worker ancora attivo può inserire sottotask. Serve un contatore dei task pendenti, incrementato a ogni inserimento e decrementato quando un task è completato (dopo che ha inserito i suoi sottotask): il lavoro è finito quando arriva a zero.</li>
+    </ul>
+
+<pre><code class="language-java">interface Task { void execute(BagOfTasks&lt;Task&gt; bag); }
+
+class BagOfTasks&lt;T&gt; {
+  private final Deque&lt;T&gt; tasks = new ArrayDeque&lt;&gt;();
+  private int pending;                          // inseriti e non ancora completati
+
+  public synchronized void put(T task) { tasks.addLast(task); pending++; notifyAll(); }
+
+  /** Il prossimo task, oppure empty quando tutto il lavoro è finito. */
+  public synchronized Optional&lt;T&gt; take() throws InterruptedException {
+    while (tasks.isEmpty() &amp;&amp; pending &gt; 0) wait();
+    return Optional.ofNullable(tasks.pollFirst());
+  }
+
+  /** Il worker lo chiama dopo aver completato un task e inserito i suoi sottotask. */
+  public synchronized void done() { if (--pending == 0) notifyAll(); }
+
+  public synchronized void awaitCompletion() throws InterruptedException {
+    while (pending &gt; 0) wait();
+  }
+}
+
+// ciclo di ogni worker
+for (Optional&lt;Task&gt; t = bag.take(); t.isPresent(); t = bag.take()) {
+  try { t.get().execute(bag); }                 // può chiamare bag.put(sottotask)
+  finally { bag.done(); }
+}</code></pre>
+    <p>Il master inserisce i task iniziali prima di avviare i worker e poi aspetta con <code>awaitCompletion</code>. A zero, <code>take</code> restituisce <code>empty</code> a tutti i worker, che terminano. Se i worker leggono da un semplice bounded buffer, il modo classico per fermarli è la <strong>poison pill</strong>: un elemento speciale, uno per worker, che significa «fine» (<a href="cap-10-java.html">capitolo 10</a>).</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Ricci ha annunciato che chiederà come fate a capire, nel vostro assignment 1, che tutti i task sono finiti. Dite quale di questi casi si applica, quale componente passivo lo realizza (contatore in un monitor, latch, barriera, future, <code>awaitTermination</code>) e perché è corretto. Allo stesso modo sappiate descrivere come agenti e monitor si coordinano tra una fase e l'altra.</p></div>
+  </section>
+
+  <section id="s7">
+    <h2>7. Model-View-Controller in un programma concorrente</h2>
+
+    <p>Model-View-Controller separa il dominio (model), la presentazione (view), che osserva il model con il pattern observer, e la gestione dell'input (controller). Con componenti attivi e passivi diventa:</p>
+    <ul>
+      <li>il <strong>controllo</strong> sta negli agenti, i componenti attivi che incapsulano la logica di controllo;</li>
+      <li>il <strong>model</strong> è fatto di componenti passivi condivisi, usati dagli agenti. Sono monitor che incapsulano la mutua esclusione, e ne fanno parte anche i mezzi di coordinazione;</li>
+      <li>la <strong>view</strong> è fatta di componenti passivi condivisi che rendono possibile e mediano l'interazione con l'utente. Gli agenti la osservano e la usano, e la view può leggere lo stato dal model.</li>
+    </ul>
+    <p>Due questioni restano aperte:</p>
+    <ol>
+      <li><strong>Le GUI hanno un solo componente attivo.</strong> I toolkit grafici affidano tutta la GUI a un thread, in Swing l'<em>event dispatch thread</em>, e i componenti non sono thread-safe. Quindi un listener non esegue logica di controllo lunga, che bloccherebbe l'EDT, ma la passa a un agente; e un agente aggiorna la view passando l'aggiornamento all'EDT con <code>SwingUtilities.invokeLater</code>, per evitare race condition, non per la reattività. Dettagli ed esempio del cronometro nel <a href="cap-10-java.html">capitolo 10</a>.</li>
+      <li><strong>L'observer originale è sincrono</strong> e accoppia i flussi di controllo: notificare vuol dire chiamare il metodo dell'osservatore nel thread di chi notifica. In un sistema concorrente lo si ripensa come <strong>produttore-consumatore</strong>. Un bounded buffer fa da coda di eventi, chi genera gli eventi (per esempio la view, a ogni tasto premuto) è il produttore, e un agente che li preleva e reagisce, un <em>controller attivo</em>, è il consumatore. La coda è un componente passivo a sé, non un metodo pubblico del controller: altrimenti il controller sarebbe un'entità ibrida.</li>
+    </ol>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Quali sono i due passi per progettare un programma concorrente?</summary>
+        <p>L'analisi, che individua i task, la decomposizione di task e dati e le loro dipendenze guardando il problema. Poi il progetto, che sceglie un'architettura concorrente assegnando i task ad agenti coordinati da componenti passivi.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra componenti attivi e passivi? Fai degli esempi.</summary>
+        <p>Un componente attivo, o agente, incapsula un proprio flusso di controllo, non ha interfaccia pubblica e si progetta a partire dai suoi compiti: worker, produttori, consumatori, attori. Un componente passivo incapsula stato e sincronizzazione ed è usato dagli agenti: monitor come bounded buffer, bag of tasks, latch.</p>
+      </details>
+      <details>
+        <summary>Che cos'è un agente? È attivo o passivo? E perché non si ammettono entità ibride?</summary>
+        <p>È un componente attivo responsabile di uno o più task, di cui incapsula la logica e il controllo. Un'entità ibrida, con un proprio thread e metodi chiamati da altri thread, farebbe eseguire il proprio codice ad altri flussi di controllo. Va scomposta in agenti e monitor.</p>
+      </details>
+      <details>
+        <summary>Che differenza c'è tra task decomposition e data decomposition?</summary>
+        <p>Nella prima si individuano prima i task (per esempio produttori e consumatori) e la divisione dei dati segue. Nella seconda si dividono prima i dati in unità indipendenti (per esempio gli elementi del prodotto di matrici) e i task seguono; scala bene con il numero di processori.</p>
+      </details>
+      <details>
+        <summary>Che cosa si intende per dipendenze tra task?</summary>
+        <p>Vincoli temporali (un task deve venire dopo un altro) o sui dati e sulle risorse (un task usa dati di un altro, o più task condividono una risorsa). L'analisi delle dipendenze serve a raggruppare e ordinare i task, e dice dove gli agenti dovranno coordinarsi.</p>
+      </details>
+      <details>
+        <summary>Quali sono le tre classi architetturali, e i loro confini sono rigidi?</summary>
+        <p>Result parallelism (attorno alla forma del risultato), specialist parallelism (attorno alla squadra di specialisti) e agenda parallelism (attorno alla lista di attività). I confini non sono rigidi: spesso si mescolano, ma restano tre modi distinti di pensare il problema.</p>
+      </details>
+      <details>
+        <summary>Quali sono le architetture concorrenti di riferimento?</summary>
+        <p>Master-workers, con le varianti dei framework a task e del fork-join; filter-pipeline; shared-space o blackboard; announcer-listeners.</p>
+      </details>
+      <details>
+        <summary>In che senso un executor è un master-workers? Che vincolo hanno i suoi task?</summary>
+        <p>L'executor nasconde il bag of tasks e il pool di worker, e il programmatore scrive solo il master che sottomette i task. I task devono essere indipendenti: se uno aspetta un altro blocca un thread del pool, e con abbastanza attese si arriva al deadlock.</p>
+      </details>
+      <details>
+        <summary>Come fa il master a sapere che tutti i task sono finiti, se i task ne generano altri?</summary>
+        <p>Non basta che il bag sia vuoto, perché un worker attivo può ancora inserire sottotask. Si tiene un contatore dei task pendenti, incrementato a ogni inserimento e decrementato a ogni completamento: il lavoro è finito quando arriva a zero.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Slide <em>[module-1.4] Elements of Concurrent Program Design</em>, con le slide di laboratorio <em>Task-Oriented Programming in Java</em> per le poison pill · 20 febbraio 2026 (incapsulamento del flusso di controllo) · 23 febbraio (§3: la disciplina dei componenti attivi nell'ordinamento concorrente) · 13 marzo (modulo 1.4: analisi, classi architetturali, master-workers) · 16 marzo (latch e barriera) · 20 marzo (§1–4: analisi e task, master-workers, executor, future, fork-join, MVC concorrente) · 30 marzo (§12: executor e attesa della terminazione) · 17 aprile (componenti attivi e passivi, ripresi per il message passing). La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-07-monitor.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-09-formalismi-visuali.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 20 e 23 febbraio, 13, 16, 20 e 30 marzo, 17 aprile 2026 · N. Carriero, D. Gelernter, <em>How to Write Parallel Programs: A Guide to the Perplexed</em>, ACM Computing Surveys, 1989 · D. Gelernter, <em>Generative Communication in Linda</em>, TOPLAS, 1985 · T. Mattson, B. Sanders, B. Massingill, <em>Patterns for Parallel Programming</em>, 2005 · J. Magee, J. Kramer, <em>Concurrency: State Models and Java Programs</em> · J. L. Ortega-Arjona, <em>Patterns for Parallel Software Design</em>, 2010 · T. Malone, K. Crowston, <em>The Interdisciplinary Study of Coordination</em>, 1993 · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+</body>
+</html>

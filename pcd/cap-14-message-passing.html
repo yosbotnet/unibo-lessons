@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cap. 14 — Message passing e canali · PCD</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+.xlab {border:1px solid #C9C3B6;background:#FAF7EF;padding:1rem;margin:1.5rem 0;font-family:var(--lk-utility);font-size:.9rem}
+.xlab button,.xlab select {font:inherit;max-width:100%;white-space:normal;text-align:left;background:#F3EFE3;color:#1546B8;border:1px solid #1546B8;padding:5px 10px;cursor:pointer}
+.xlab button:disabled {color:#6E7068;border-color:#C9C3B6;cursor:default}
+.xlab label {display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center}
+.xlab h5 {margin:0 0 .35rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em}
+.xlab-row {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:.5rem 0}
+.xlab-procs {display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:10px;margin:.75rem 0}
+.xlab-proc {border:1px solid #C9C3B6;background:#F3EFE3;padding:.6rem .8rem}
+.xlab-proc p {margin:.2rem 0;font-family:var(--lk-mono);font-size:.78rem;overflow-wrap:anywhere}
+.xlab-buf,.xlab-status {font-family:var(--lk-mono);font-size:.8rem;margin:.4rem 0;overflow-wrap:anywhere}
+.xlab-ok {color:#1F5A49;font-weight:600}
+.xlab-bad {color:#B83D2D;font-weight:600}
+.xlab-log {font-family:var(--lk-mono);font-size:.78rem}
+.xlab-log ol {max-height:14rem;overflow:auto;margin:.3rem 0}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Navigazione capitoli">
+    <a href="cap-13-reattiva.html">&larr; Cap. 13 — Programmazione reattiva</a>
+    <a href="index.html">Indice</a>
+    <a href="cap-15-attori.html">Cap. 15 — Il modello ad attori &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Parte III — Message passing e attori · Capitolo 14</div>
+    <h1>Message passing e canali</h1>
+    <div class="lk-meta"><span>~30 min di lettura</span><span>1 laboratorio: lo scambio dei valori con canali sincroni e bufferizzati</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In questo capitolo</h3>
+    <ol>
+      <li><a href="#s1">Che cos'è il message passing</a></li>
+      <li><a href="#s2">Sincrono o asincrono?</a></li>
+      <li><a href="#s3">Schemi di comunicazione e canali di risposta</a></li>
+      <li><a href="#s4">Il server come monitor attivo</a></li>
+      <li><a href="#s5">Ricevere da più canali: la comunicazione con guardia</a></li>
+      <li><a href="#s6">Peer-to-peer: lo scambio dei valori</a></li>
+      <li><a href="#s7">Rendez-vous: call e accept</a></li>
+      <li><a href="#s8">Go: goroutine, canali e select</a></li>
+      <li><a href="#quiz">Verifica le tue conoscenze</a></li>
+    </ol>
+  </div>
+
+  <p><strong>Il capitolo in un paragrafo.</strong> Nel message passing i processi non condividono nulla: interagiscono solo con <code>send</code> e <code>receive</code> su canali, e si trasferiscono dati, mai il flusso di controllo. La distinzione centrale è tra comunicazione sincrona, in cui la send aspetta la receive, e asincrona, in cui un buffer li disaccoppia. Su queste basi si costruiscono server che fanno da monitor attivi, receive su più canali con le guardie di Dijkstra, protocolli tra pari con topologie diverse, il rendez-vous di Ada. Go offre il modello sincrono direttamente nel linguaggio, con goroutine, canali e <code>select</code>.</p>
+
+  <section id="s1">
+    <h2>1. Che cos'è il message passing</h2>
+
+    <p>Nel modello a scambio di messaggi l'<strong>unico</strong> modo in cui i processi interagiscono è inviarsi messaggi con due primitive, <code>send</code> e <code>receive</code>. Non esistono altre astrazioni condivise: niente oggetti condivisi, monitor, lock o semafori. È il modello naturale del distribuito, ma lo si usa sempre più anche su una sola macchina, per evitare le insidie del multithreading: lo adottano i Web Worker, i framework ad attori, Go e Dart.</p>
+
+    <p>Nella prima parte del corso i thread interagivano attraverso componenti passivi, i monitor: chiamare un metodo del monitor significa eseguirne il codice con il <em>proprio</em> flusso di controllo, e magari restarci bloccati su una <code>wait</code>. Con i messaggi si trasferiscono solo <strong>dati</strong>, mai il controllo: ogni processo esegue solo il proprio codice, e si blocca solo sulle proprie receive (o send sincrone).</p>
+
+    <h3>Canali e primitive</h3>
+    <p>Il mezzo è il <strong>canale</strong>, un'astrazione di prima classe con un nome e un tipo di messaggio:</p>
+<pre><code class="language-plaintext">chan ch(type1 id1, ..., typen idn)   -- dichiarazione: nome e campi del messaggio
+send ch(expr1, ..., exprn)            -- invia un messaggio con quei valori
+receive ch(var1, ..., varn)           -- riceve un messaggio e lo copia nelle variabili</code></pre>
+    <p>I tipi delle espressioni e delle variabili devono corrispondere ai campi dichiarati. L'accesso al contenuto di un canale è <strong>atomico</strong>: send e receive sullo stesso canale non si interferiscono, qualunque sia l'interleaving. I canali sono dichiarati globali ai processi, e sono l'unica cosa che i processi condividono, gestita dal supporto a run time. Un canale con buffer è, a tutti gli effetti, il bounded buffer del produttore-consumatore: chi fa send produce, chi fa receive consuma.</p>
+
+<pre><code class="language-plaintext">channel buf(int)
+Producer: loop forever               Consumer: loop forever
+  p1: x ← produce                      q1: receive buf(y)
+  p2: send buf(x)                      q2: consume(y)</code></pre>
+
+    <p>Il messaggio viaggia <em>per copia</em>: i processi non condividono memoria, quindi il destinatario riceve un valore, non un riferimento a un oggetto del mittente. In Java (e negli attori scritti in Java) inviare un oggetto significa invece inviare un riferimento: se mittente e destinatario poi lo modificano, la memoria condivisa rientra dalla finestra. La disciplina è usare messaggi immutabili, come i <code>record</code>.</p>
+
+    <div class="callout note"><span class="callout-label">Oltre le slide: chi nomina chi</span><p>I testi classificano i modelli anche per il <em>naming</em>. Con il <strong>naming diretto</strong> si nomina il processo destinatario, con quello <strong>indiretto</strong> un canale (o porta, o mailbox) condiviso. Il naming è <strong>simmetrico</strong> se anche il ricevente nomina il mittente, come nel CSP originale di Hoare del 1978 (<code>P!x</code>, <code>Q?y</code>). È <strong>asimmetrico</strong> se il ricevente accetta da chiunque. I canali di questo capitolo sono naming indiretto. Gli attori (<a href="cap-15-attori.html">capitolo 15</a>) e le entry di Ada (<a href="#s7">sezione 7</a>) sono naming diretto e asimmetrico: il mittente conosce il destinatario, il destinatario riceve senza sapere da chi, a meno che il mittente non si identifichi nel messaggio.</p></div>
+
+    <p>Le origini: message passing asincrono con Brinch Hansen (1970, sistema operativo dell'RC 4000), porte di comunicazione con Balzer (1971), comunicazione sincrona con il CSP di Hoare (1978); gli attori di Hewitt (1973) sono asincroni. Rimasto a lungo materia di sistemi operativi, il modello è tornato con il multi-core. La cronologia completa è nel <a href="cap-15-attori.html#s4">capitolo 15</a>.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Sincrono o asincrono?</h2>
+
+    <table>
+      <thead><tr><th></th><th>Comunicazione sincrona</th><th>Comunicazione asincrona</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Buffer</strong></td><td>nessuno</td><td>una coda FIFO per canale</td></tr>
+        <tr><td><strong>send</strong></td><td>si blocca finché il messaggio non è ricevuto</td><td>ha successo appena il messaggio è in coda</td></tr>
+        <tr><td><strong>receive</strong></td><td>si blocca finché qualcuno non invia</td><td>si blocca finché la coda è vuota</td></tr>
+        <tr><td><strong>Accoppiamento</strong></td><td>stretto: la comunicazione è un'azione atomica comune ai due processi</td><td>lasco: il mittente non sa quando, né se, il messaggio sarà ricevuto</td></tr>
+        <tr><td><strong>Dove</strong></td><td>algebre di processi (CSP), Occam, canali di Go senza buffer</td><td>porte, socket UDP, attori, middleware</td></tr>
+      </tbody>
+    </table>
+
+    <p>Nel caso sincrono il trasferimento avviene solo quando il puntatore di controllo del mittente è sulla <code>send ch</code> <em>e</em> quello del ricevente è sulla <code>receive ch</code>: chi arriva prima aspetta l'altro. Nel produttore-consumatore qui sopra il dato passa solo quando P è in p2 e Q è in q1. È il modello più primitivo, quello delle algebre di processi, dove si scrive <code>ch ! msg</code> per la send e <code>ch ? msg</code> per la receive. Nel caso asincrono i canali hanno un buffer FIFO; in alcuni sistemi un canale asincrono si chiama <strong>porta</strong>.</p>
+
+    <p>Un esempio rende la differenza osservabile. P esegue <code>send ch(1); print("done")</code>, Q esegue <code>print("ready"); receive ch(v); print(v)</code>. Con la comunicazione sincrona <code>done</code> compare sempre <em>dopo</em> che Q ha eseguito la receive: quando la send si sblocca, il messaggio è stato ricevuto. Con quella asincrona <code>done</code> può comparire anche prima di <code>ready</code>, perché la send ha solo depositato il messaggio nel buffer. Attenzione: la send sincrona aspetta la <em>ricezione</em>, non una risposta. Se P vuole una risposta deve fare a sua volta una receive; la send che aspetta anche la risposta è il rendez-vous della <a href="#s7">sezione 7</a>.</p>
+
+    <p>Il sincrono, introdotto dal CSP di Hoare (1978), è stato realizzato negli anni '80 dai Transputer programmati in Occam: processori con memoria propria collegati da canali senza buffer. Tra i due estremi stanno i canali con buffer di capacità <var>k</var>, dove la send si blocca solo a buffer pieno. Il sincrono dà un punto di sincronizzazione gratuito ma porta facilmente al deadlock (<a href="#s6">sezione 6</a>); l'asincrono disaccoppia, ed è la scelta di quasi tutti i sistemi moderni.</p>
+
+    <div class="callout exam"><span class="callout-label">Per l'esame</span><p>Ricci chiede spesso la differenza tra message passing sincrono e asincrono. Nel sincrono non c'è buffer e sia la send sia la receive sono bloccanti: il trasferimento è un punto d'incontro. Nell'asincrono la send non si blocca perché il canale ha un buffer, e si blocca solo la receive. Un linguaggio con message passing sincrono nativo è <strong>Go</strong>, i cui canali creati senza buffer sono sincroni; altri esempi sono Occam, derivato dal CSP, e il rendez-vous di Ada.</p></div>
+  </section>
+
+  <section id="s3">
+    <h2>3. Schemi di comunicazione e canali di risposta</h2>
+
+    <p>Un canale può essere condiviso da quanti processi si vuole, da entrambi i lati. Le slide elencano tre schemi; il quarto è il duale del many-to-one.</p>
+    <table>
+      <thead><tr><th>Schema</th><th>Mittenti → riceventi</th><th>Caratteristiche</th></tr></thead>
+      <tbody>
+        <tr><td><strong>One-to-one</strong></td><td>1 → 1</td><td>il canale serve una sola coppia di processi. È il più semplice, tipico della comunicazione sincrona (Occam sui Transputer).</td></tr>
+        <tr><td><strong>Many-to-one</strong></td><td>N → 1</td><td>un solo ricevente, molti mittenti: è lo schema delle porte e del client-server. Il ricevente vede tutti i messaggi, senza competizione.</td></tr>
+        <tr><td><strong>One-to-many</strong></td><td>1 → N</td><td>più riceventi competono: ogni messaggio va a <em>uno solo</em> di loro, non a tutti. Serve a distribuire compiti tra worker.</td></tr>
+        <tr><td><strong>Many-to-many</strong></td><td>N → M</td><td>il caso più generale: competizione in ricezione e non determinismo su chi riceve che cosa.</td></tr>
+      </tbody>
+    </table>
+    <p>Negli attori la topologia è fissata: ogni attore ha il proprio canale, la mailbox, su cui solo lui fa receive e tutti gli altri possono fare send. È many-to-one ovunque.</p>
+
+    <h3>Chi riceve la risposta?</h3>
+    <p>Il primo esempio delle slide: P chiede a Q di calcolare <code>r*2</code> e a R di calcolare <code>r+1</code>, poi riceve due risposte sullo stesso canale e le somma.</p>
+<pre><code class="language-plaintext">chan requestA(int), requestB(int), response(int)
+P: send requestA(5); send requestB(6)
+   receive response(r1); receive response(r2); write(r1 + r2)
+Q: receive requestA(r); send response(r * 2)
+R: receive requestB(r); send response(r + 1)</code></pre>
+    <p>Un solo canale di risposta basta, perché solo P riceve. Ma le risposte arrivano in ordine non deterministico: per una somma non importa, per una divisione sì, e servirebbe un canale di risposta per ciascuno.</p>
+
+    <p>Nel client-server i client sono molti, e un messaggio non dice chi l'ha inviato: il mittente va messo nel messaggio. Le slide danno a ogni client un canale di risposta in un array, <code>reply[i]</code>, e il client mette il proprio indice nella richiesta. Un unico canale di risposta condiviso non funzionerebbe: la receive di base prende il primo messaggio disponibile, e un client potrebbe prendersi la risposta destinata a un altro. Per evitarlo servirebbe una receive con un <em>pattern</em> («il primo messaggio con il mio id»), che è la receive selettiva di Erlang (<a href="cap-15-attori.html#s2">capitolo 15</a>).</p>
+    <p>L'array di canali obbliga il server a conoscere in anticipo tutti i client. La soluzione elegante è trattare i canali come <strong>valori</strong>: il client crea un canale e lo mette nella richiesta («rispondimi qui»), così i client possono variare a run time. È lo schema che si usa in Go (<a href="#s8">sezione 8</a>).</p>
+
+    <details>
+      <summary>Dalle slide: un filtro in una pipeline</summary>
+      <p>Ogni stadio di una pipeline è un processo che riceve da un canale e invia su un altro, all'infinito. <code>CharToLine</code> riceve caratteri e invia una riga quando incontra un a capo o raggiunge la lunghezza massima.</p>
+<pre><code class="language-plaintext">chan input(char), output(char[MAXLINE])
+process CharToLine {
+  char line[MAXLINE+1]; int i = 0;
+  while (true) {
+    receive input(line[i]);
+    while (line[i] != CR and i &lt; MAXLINE) { i = i + 1; receive input(line[i]); }
+    line[i] = EOL; send output(line); i = 0;
+  }
+}</code></pre>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. Il server come monitor attivo</h2>
+
+    <p>Un server che riceve richieste e le serve una alla volta somiglia molto a un monitor: incapsula uno stato, e le operazioni su quello stato sono in mutua esclusione perché un solo processo le esegue. Per questo si chiama <strong>monitor attivo</strong>: fa il lavoro del monitor, ma è un processo con il proprio flusso di controllo. È il modo tipico di realizzare gli <em>allocatori di risorse</em>.</p>
+<pre><code class="language-plaintext">chan request(int clientID, op_kind kind, arg_type args)
+chan reply[N](res_type result)
+
+process Server {                          process Client[i = 0 to N-1] {
+  while (true) {                            send request(i, opXXX, myargs);
+    receive request(clientID, kind, args);  receive reply[i](myres);
+    if (kind == op1) { body of op1 }      }
+    else if ... else if (kind == opN) { body of opN }
+    send reply[clientID](results);
+  }
+}</code></pre>
+
+    <p>Resta la sincronizzazione condizionale. In un monitor, se la risorsa non c'è, il chiamante si sospende con una <code>wait</code> su una variabile condizione. Un server non può farlo, perché non c'è un flusso di controllo del client da bloccare. Il client è già bloccato da solo, sulla propria receive. Al server basta <strong>parcheggiare la richiesta</strong> in una coda e rispondere più tardi, quando potrà soddisfarla. È un idioma generale: rispondere a una richiesta non significa rispondere subito.</p>
+
+<pre><code class="language-plaintext">chan request(int clientID, op_kind kind, res_id id)
+chan reply[N](res_id id)
+
+process ResAllocator {
+  int avail = MAXUNITS; set units = &lt;valori iniziali&gt;;
+  queue pending;                                 # richieste in attesa
+  while (true) {
+    receive request(clientID, kind, id);
+    if (kind == ACQUIRE) {
+      if (avail &gt; 0) { avail = avail - 1; id = remove(units); send reply[clientID](id); }
+      else insert(pending, clientID);            # al posto della wait
+    } else {                                     # RELEASE: il client restituisce id
+      if (empty(pending)) { insert(units, id); avail = avail + 1; }
+      else { clientID = remove(pending); send reply[clientID](id); }   # al posto della signal
+    }
+  }
+}
+Client[i]: send request(i, ACQUIRE, 0); receive reply[i](id); ... usa id ...; send request(i, RELEASE, id)</code></pre>
+    <p>Quando arriva un rilascio e qualcuno aspetta, l'unità passa direttamente al primo in coda, senza tornare disponibile. È la stessa tecnica della versione con monitor delle slide, dove <code>release</code> non incrementa <code>avail</code> ma fa <code>signal</code> e passa l'unità al processo risvegliato (<a href="cap-07-monitor.html">capitolo 7</a>). Le slide mettono in parallelo le due versioni:</p>
+
+    <table>
+      <thead><tr><th>Allocatore con monitor (passivo)</th><th>Allocatore come processo (attivo)</th></tr></thead>
+      <tbody>
+        <tr><td>variabili permanenti</td><td>variabili locali del server</td></tr>
+        <tr><td>identificatori delle procedure</td><td>canale di richiesta e tipi di operazione</td></tr>
+        <tr><td>chiamata di procedura</td><td><code>send request(...)</code> seguita da <code>receive reply(...)</code></td></tr>
+        <tr><td>ingresso nel monitor</td><td><code>receive request(...)</code></td></tr>
+        <tr><td>ritorno dalla procedura</td><td><code>send reply(...)</code></td></tr>
+        <tr><td><code>wait</code></td><td>salvare la richiesta pendente</td></tr>
+        <tr><td><code>signal</code></td><td>recuperare e servire una richiesta pendente</td></tr>
+        <tr><td>corpi delle procedure</td><td>rami di uno switch sul tipo di operazione</td></tr>
+      </tbody>
+    </table>
+    <p>Il modello si estende senza cambiamenti al distribuito: se i canali sono connessioni di rete, client e server possono stare su macchine diverse, cosa impossibile con un monitor.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Ricevere da più canali: la comunicazione con guardia</h2>
+
+    <p>Un server che ascolta su due canali ha un problema: la receive su uno si blocca, e intanto un messaggio può arrivare sull'altro. È il problema che risolvono la <code>select</code> sulle socket o Java NIO. La soluzione concettuale è la <strong>comunicazione con guardia</strong> (<em>guarded communication</em>) di Dijkstra (1974), valida nel caso sincrono e in quello asincrono.</p>
+
+<pre><code class="language-plaintext">B ; C → S</code></pre>
+    <ul>
+      <li><strong>B</strong> è un'espressione booleana sullo stato locale del processo; se manca vale <code>true</code>.</li>
+      <li><strong>C</strong> è un'istruzione di comunicazione, di solito una receive (ma può essere una send).</li>
+      <li><strong>S</strong> è il blocco di istruzioni da eseguire.</li>
+    </ul>
+    <p><strong>B e C insieme formano la guardia.</strong> La guardia <em>ha successo</em> se B è vera ed eseguire C non causerebbe attesa (c'è un messaggio da ricevere). <em>Fallisce</em> se B è falsa. <em>Si blocca</em> se B è vera ma C non può ancora essere eseguita.</p>
+
+    <p>Da sola una guardia serve a poco; serve quando ce ne sono più d'una in alternativa. Nell'<code>if</code> la semantica è in tre tempi:</p>
+<pre><code class="language-plaintext">if B1; C1 → S1
+[] B2; C2 → S2
+[] B3; C3 → S3
+fi</code></pre>
+    <ol>
+      <li>Si valutano le guardie. Se falliscono tutte, l'<code>if</code> termina senza effetto. Se almeno una ha successo, se ne sceglie <strong>una in modo non deterministico</strong>. Se nessuna ha successo e alcune sono bloccate, si aspetta che una abbia successo.</li>
+      <li>Si esegue la comunicazione C della guardia scelta.</li>
+      <li>Si esegue il blocco S corrispondente.</li>
+    </ol>
+    <p>Quindi, se più guardie sono soddisfatte, non c'è un ordine: ne viene eseguita una sola, scelta a caso, e i messaggi sugli altri canali restano dove sono per la prossima volta. Il costrutto <code>do … od</code> ripete la selezione finché tutte le guardie falliscono, ed è la forma tipica di un server. Nell'esempio delle slide il server accetta richieste di somma e di prodotto su due canali diversi, finché non ne ha servite <code>max</code>:</p>
+<pre><code class="language-plaintext">if nReqs &lt; max; receive computeSum(a, b, i) → nReqs += 1; send result[i](a + b)
+[] nReqs &lt; max; receive computeMul(a, b, i) → nReqs += 1; send result[i](a * b)
+fi</code></pre>
+
+    <p>La parte booleana dice <em>quando</em> un ramo è abilitato. Nel processo <code>Copy</code>, un buffer circolare di 10 caratteri tra due canali, la seconda guardia contiene una send: con un canale sincrono anche la send può bloccarsi, quindi può stare in una guardia.</p>
+<pre><code class="language-plaintext">process Copy(chan in(char), chan out(char)) {
+  char buffer[10]; int front = 0, rear = 0, count = 0;
+  do count &lt; 10; receive in(buffer[rear]) → count++; rear = (rear + 1) % 10;
+  [] count &gt; 0;  send out(buffer[front])  → count--; front = (front + 1) % 10;
+  od
+}</code></pre>
+    <p>Quando il buffer non è né vuoto né pieno entrambe le guardie possono avere successo, e la scelta non deterministica lascia procedere l'una o l'altra.</p>
+
+    <p>Con lo stesso schema il bounded buffer diventa un <strong>processo gestore</strong>, cioè un monitor attivo con due canali di richiesta. La guardia <code>nItems &lt; maxElems</code> disabilita le put a buffer pieno, <code>nItems &gt; 0</code> le get a buffer vuoto. Il consumatore che chiede un elemento a buffer vuoto resta bloccato sulla propria receive finché il gestore non gli risponde: nessun processo blocca mai il flusso di controllo di un altro.</p>
+<pre><code class="language-plaintext">process BoundedBufferManager {
+  Queue&lt;Item&gt; queue; int nItems = 0;
+  do nItems &lt; maxElems; receive put(item, replyChan) → queue.add(item); nItems++; send replyChan(ack)
+  [] nItems &gt; 0;        receive get(replyChan)       → nItems--; send replyChan(queue.remove())
+  od
+}
+Producer: loop { el = produce(); send put(el, myChan); receive myChan(ack) }
+Consumer: loop { send get(myChan); receive myChan(el); consume(el) }</code></pre>
+  </section>
+
+  <section id="s6">
+    <h2>6. Peer-to-peer: lo scambio dei valori</h2>
+
+    <p>Nell'interazione <strong>peer-to-peer</strong> le responsabilità non sono concentrate in un server ma distribuite tra processi pari (<em>peer</em>), che si coordinano con un protocollo di messaggi. L'esempio del corso è l'<strong>exchanging values problem</strong>: <var>n</var> processi hanno ciascuno un intero <var>v</var>, e ognuno deve scoprire il minimo e il massimo di tutti i valori. Le tre soluzioni delle slide usano tre topologie diverse, con proprietà diverse.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Tre topologie per lo scambio dei valori: un coordinatore P0 collegato a tutti; quattro processi tutti collegati con tutti; quattro processi in un anello orientato che parte da P0">
+      <svg viewBox="0 0 640 210" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="mpa" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="#1546B8"/></marker></defs>
+        <g fill="none" stroke="#1546B8" stroke-width="1.6"><line x1="107.0" y1="67.0" x2="107.0" y2="45.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="128.0" y1="88.0" x2="150.0" y2="88.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="107.0" y1="109.0" x2="107.0" y2="131.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="86.0" y1="88.0" x2="64.0" y2="88.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/></g>
+        <circle cx="107" cy="88" r="17" fill="#FAF7EF" stroke="#B83D2D" stroke-width="2"/><text x="107" y="93" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#B83D2D">P0</text>
+        <circle cx="107" cy="24" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="107" y="29" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P1</text>
+        <circle cx="171" cy="88" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="171" y="93" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P2</text>
+        <circle cx="107" cy="152" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="107" y="157" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P3</text>
+        <circle cx="43" cy="88" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="43" y="93" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P4</text>
+        <text x="107" y="186" font-family="sans-serif" font-size="15" font-weight="bold" text-anchor="middle" fill="#1546B8">centralizzata</text>
+        <text x="107" y="204" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#45463F">2(n−1) messaggi</text>
+        <g fill="none" stroke="#1546B8" stroke-width="1.6"><line x1="296.0" y1="42.0" x2="344.0" y2="42.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="289.7" y1="57.0" x2="350.3" y2="119.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="275.0" y1="63.0" x2="275.0" y2="113.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="365.0" y1="63.0" x2="365.0" y2="113.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="350.3" y1="57.0" x2="289.7" y2="119.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/><line x1="344.0" y1="134.0" x2="296.0" y2="134.0" marker-start="url(#mpa)" marker-end="url(#mpa)"/></g>
+        <circle cx="275" cy="42" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="275" y="47" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P0</text>
+        <circle cx="365" cy="42" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="365" y="47" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P1</text>
+        <circle cx="365" cy="134" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="365" y="139" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P2</text>
+        <circle cx="275" cy="134" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="275" y="139" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P3</text>
+        <text x="320" y="186" font-family="sans-serif" font-size="15" font-weight="bold" text-anchor="middle" fill="#1546B8">simmetrica</text>
+        <text x="320" y="204" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#45463F">n(n−1) messaggi</text>
+        <g fill="none" stroke="#1546B8" stroke-width="1.6"><line x1="545.7" y1="38.7" x2="580.2" y2="73.2" marker-end="url(#mpa)"/><line x1="582.3" y1="100.7" x2="547.8" y2="135.2" marker-end="url(#mpa)"/><line x1="520.3" y1="137.3" x2="485.8" y2="102.8" marker-end="url(#mpa)"/><line x1="483.7" y1="75.3" x2="518.2" y2="40.8" marker-end="url(#mpa)"/></g>
+        <circle cx="533" cy="26" r="17" fill="#FAF7EF" stroke="#B83D2D" stroke-width="2"/><text x="533" y="31" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#B83D2D">P0</text>
+        <circle cx="595" cy="88" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="595" y="93" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P1</text>
+        <circle cx="533" cy="150" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="533" y="155" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P2</text>
+        <circle cx="471" cy="88" r="17" fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5"/><text x="471" y="93" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#1546B8">P3</text>
+        <text x="533" y="186" font-family="sans-serif" font-size="15" font-weight="bold" text-anchor="middle" fill="#1546B8">ad anello</text>
+        <text x="533" y="204" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#45463F">2n messaggi, due giri</text>
+      </svg>
+      <figcaption><b>Fig. 1</b> — Le tre soluzioni. Le frecce doppie sono un invio e una risposta; nell'anello l'informazione fa due giri nello stesso verso, partendo da P0.</figcaption>
+    </figure>
+
+    <div class="lk-tabs" data-kit="tabs">
+      <div class="lk-tablist">
+        <button class="lk-tab">Centralizzata</button>
+        <button class="lk-tab">Simmetrica</button>
+        <button class="lk-tab">Ad anello</button>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-plaintext">chan values(int), results[n](int smallest, int largest)
+process P[0] {                                   # coordinatore
+  int v = ...; int new, smallest = v, largest = v;
+  for i in [1 .. n-1] {
+    receive values(new);
+    if (new &lt; smallest) smallest = new;
+    if (new &gt; largest) largest = new;
+  }
+  for i in [1 .. n-1] send results[i](smallest, largest);
+}
+process P[i = 1 to n-1] {
+  int v = ..., smallest, largest;
+  send values(v); receive results[i](smallest, largest);
+}</code></pre>
+        <p>Il coordinatore raccoglie gli <var>n</var> − 1 valori e poi invia a tutti il risultato: <strong>2(<var>n</var> − 1) messaggi</strong>. Pochi messaggi, ma il coordinatore è un collo di bottiglia: fa tutto il lavoro, le sue receive si susseguono una alla volta, e nel distribuito se cade lui cade tutto.</p>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-plaintext">chan values[n](int)
+process P[i = 0 to n-1] {
+  int v = ...; int new, smallest = v, largest = v;
+  for j in [0 .. n-1], j != i
+    send values[j](v);                           # il mio valore a tutti
+  for k in [1 .. n-1] {                          # gli n-1 valori degli altri
+    receive values[i](new);
+    if (new &lt; smallest) smallest = new;
+    if (new &gt; largest) largest = new;
+  }
+}</code></pre>
+        <p>Tutti eseguono lo stesso algoritmo: ognuno invia il proprio valore a tutti gli altri e calcola da sé minimo e massimo. Nessun coordinatore e massima distribuzione, ma <strong><var>n</var>(<var>n</var> − 1) messaggi</strong>, cioè una crescita quadratica.</p>
+      </div>
+      <div class="lk-tabpanel">
+<pre><code class="language-plaintext">chan values[n](int smallest, int largest)
+process P[0] {
+  int v = ...; int smallest = v, largest = v;
+  send values[1](smallest, largest);             # 1° giro: raccolta
+  receive values[0](smallest, largest);          # ora li conosce solo P0
+  send values[1](smallest, largest);             # 2° giro: diffusione
+}
+process P[i = 1 to n-1] {
+  int v = ..., smallest, largest;
+  receive values[i](smallest, largest);
+  if (v &lt; smallest) smallest = v;
+  if (v &gt; largest) largest = v;
+  send values[(i+1) % n](smallest, largest);
+  receive values[i](smallest, largest);
+  send values[(i+1) % n](smallest, largest);
+}</code></pre>
+        <p>Ogni processo riceve dal predecessore e invia al successore. Nel primo giro il minimo e il massimo parziali si aggiornano passando di mano in mano, e alla fine solo P0 conosce quelli globali; il secondo giro li diffonde. Sono <strong>2<var>n</var> messaggi</strong>, lineari, senza un centro che lavora per tutti, ma con concorrenza limitata: in ogni momento si muove un solo messaggio. Un elemento guasto rompe l'anello, e nel distribuito bisogna accorgersene con dei timeout.</p>
+      </div>
+    </div>
+
+    <p>Il confronto è un compromesso tra numero di messaggi, distribuzione del lavoro e grado di concorrenza. La centralizzata e l'anello usano pochi messaggi; la simmetrica paga in messaggi l'assenza di qualunque punto centrale.</p>
+
+    <h3>Laboratorio: le stesse soluzioni con canali sincroni</h3>
+    <p>Lo pseudocodice delle slide assume canali asincroni. Qui scegli soluzione, <var>N</var> e capacità dei canali (0 = sincroni, come in Go senza buffer), poi esegui a passi o verifica tutti gli interleaving. Da provare: la simmetrica con canali sincroni, dove tutti fanno send e nessuno riceve; la capacità minima che la sblocca; l'anello sincrono, dove l'ultima send verso P0 non trova nessuno che riceva, finché non spunti «P0 riceve anche l'ultimo messaggio».</p>
+    <div id="exchange-lab"></div>
+    <p>La lezione generale: una strategia corretta con canali asincroni può andare in deadlock con canali sincroni. Nella simmetrica ogni canale deve poter contenere <var>n</var> − 1 messaggi, uno per ogni altro processo, altrimenti serve una strategia diversa: un buffer di 1 non basta.</p>
+
+    <details>
+      <summary>Dalle slide: i filosofi a cena con i messaggi</summary>
+      <p>Il problema dei <a href="cap-06-deadlock.html">filosofi a cena</a> si può ripensare in un ambiente distribuito: ogni filosofo su un nodo diverso, le forchette come risorse gestite da processi. Le slide danno due soluzioni. Nella <strong>centralizzata</strong> un unico cameriere (<code>Waiter</code>) è l'allocatore delle forchette: riceve <code>getForks(f1, f2, replyChan)</code> e concede entrambe le forchette insieme, oppure parcheggia la richiesta; a ogni <code>releaseForks</code> rilascia le forchette e ricontrolla le richieste pendenti. Evita il deadlock e può garantire l'equità, ma è un collo di bottiglia. Nella <strong>distribuita</strong> c'è un cameriere per forchetta, e il deadlock si evita con la gerarchia delle risorse: ogni filosofo chiede prima la forchetta con indice minore.</p>
+<pre><code class="language-plaintext">chan getFork[N](), getForkReply[N](), releaseFork[N](), releaseForkReply[N]()
+process Waiter[i = 0 to N-1] {
+  loop { receive getFork[i](); send getForkReply[i]();
+         receive releaseFork[i](); send releaseForkReply[i](); }
+}
+process Philosopher[i = 0 to N-1] {
+  int first = i, second = (i+1) % N;
+  if (second &lt; first) { first = second; second = i; }   # prima l'indice minore
+  loop {
+    think();
+    send getFork[first]();  receive getForkReply[first]();
+    send getFork[second](); receive getForkReply[second]();
+    eat();
+    send releaseFork[first]();  receive releaseForkReply[first]();
+    send releaseFork[second](); receive releaseForkReply[second]();
+  }
+}</code></pre>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. Rendez-vous: call e accept</h2>
+
+    <p>Nelle slide il <strong>rendez-vous</strong> è una sincronizzazione <em>estesa</em>: il mittente aspetta non solo che il destinatario riceva la richiesta, ma anche che gli restituisca il risultato. Il nome evoca due persone che si danno appuntamento: la prima che arriva aspetta la seconda. I punti di sincronizzazione sono due invece di uno, sempre senza trasferimento di controllo.</p>
+    <ul>
+      <li>Il <strong>processo chiamante</strong> esegue una <code>call</code> su una <em>entry</em> del processo accettante. Deve conoscere l'identità dell'accettante e il nome della entry.</li>
+      <li>Il <strong>processo accettante</strong> esegue <code>accept</code> sulle proprie entry, calcola e restituisce il risultato. Non ha bisogno di conoscere l'identità del chiamante.</li>
+    </ul>
+<pre><code class="language-plaintext">Client                                      Server
+loop forever                                loop forever
+  p1: param ← ...                             q1: accept service(p, r)
+  p2: call server.service(param, result)      q2:   &lt;esegue il servizio con p&gt;
+  p3: use(result)                             qN:   r ← &lt;risultato&gt;</code></pre>
+    <p>La <code>call</code> si blocca finché il server non esegue l'<code>accept</code>, e resta bloccata finché il corpo dell'accept non è finito e il risultato non è tornato.</p>
+
+    <table>
+      <thead><tr><th></th><th>Send sincrona</th><th>Rendez-vous (call/accept)</th></tr></thead>
+      <tbody>
+        <tr><td>Il mittente si sblocca</td><td>quando il messaggio è ricevuto</td><td>quando il servizio è completato e il risultato è tornato</td></tr>
+        <tr><td>Dati scambiati</td><td>un messaggio, in un verso</td><td>parametri all'andata, risultati al ritorno</td></tr>
+        <tr><td>Chi nomina chi</td><td>entrambi nominano il canale</td><td>il chiamante nomina il processo e la entry; l'accettante non nomina nessuno</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Ada</strong>, il linguaggio nato negli anni '70–'80 per i sistemi della difesa statunitense, ha il rendez-vous come meccanismo base di comunicazione tra task. Le entry si dichiarano nell'interfaccia pubblica del task e si implementano nel corpo con l'istruzione <code>accept</code>; il chiamante scrive <code>T.E(parametri)</code>.</p>
+<pre><code class="language-ada">with Ada.Text_IO; use Ada.Text_IO;
+procedure HotDog is
+   task Gourmet is
+      entry Make_A_Hot_Dog;
+   end Gourmet;
+
+   task body Gourmet is
+   begin
+      Put_Line("I am ready to make a hot dog for you");
+      for Index in 1 .. 4 loop
+         accept Make_A_Hot_Dog do          -- il chiamante aspetta fino a end
+            delay 0.8;
+            Put("Put hot dog in bun ");
+            Put_Line("and add mustard");
+         end Make_A_Hot_Dog;
+      end loop;
+      Put_Line("I am out of hot dogs");
+   end Gourmet;
+begin
+   for Index in 1 .. 4 loop
+      Gourmet.Make_A_Hot_Dog;              -- entry call: rendez-vous
+      delay 0.1;
+      Put_Line("Eat the resulting hot dog");
+      New_Line;
+   end loop;
+   Put_Line("I am not hungry any longer");
+end HotDog;</code></pre>
+    <p>A ogni chiamata il programma principale resta fermo per gli 0,8 secondi del corpo dell'accept, quindi ogni «Put hot dog in bun and add mustard» è seguito da «Eat the resulting hot dog». Solo dopo il quarto accept il Gourmet stampa «I am out of hot dogs» prima dell'ultimo «Eat», perché il chiamante è ancora nel suo <code>delay 0.1</code>.</p>
+    <p>Oggi il rendez-vous come primitiva è raro. L'idea sopravvive nelle chiamate di procedura remota, e in forma asincrona nell'<code>ask</code> degli attori (<a href="cap-15-attori.html#s4">capitolo 15</a>), che invia una richiesta e restituisce una future per la risposta.</p>
+  </section>
+
+  <section id="s8">
+    <h2>8. Go: goroutine, canali e select</h2>
+
+    <p><strong>Go</strong> è un linguaggio a tipizzazione statica nato in Google nel 2007 (Griesemer, Pike e Thompson): sintassi derivata dal C, compilazione in codice nativo, garbage collection. Per il corso interessa perché ha nel linguaggio tre primitive di concorrenza di origine CSP: processi leggeri (<strong>goroutine</strong>), <strong>canali</strong> e l'istruzione <strong><code>select</code></strong>. Il motto è <em>«Do not communicate by sharing memory; instead, share memory by communicating»</em>. Go offre comunque anche mutex e gli altri meccanismi classici nel package <code>sync</code>.</p>
+
+    <p>Per leggere gli esempi basta poco. Il tipo segue il nome (<code>x int</code>), <code>:=</code> dichiara e inferisce il tipo, le funzioni si dichiarano con <code>func nome(parametri) tipoRisultato</code>. L'unico ciclo è <code>for</code>, anche nella forma <code>for i, x := range s</code>, e <code>[]T</code> è una <em>slice</em>, cioè un array dinamico che cresce con <code>append</code>. Non ci sono classi: le <code>struct</code> ricevono metodi dall'esterno e le interfacce sono soddisfatte implicitamente da chi ha i metodi giusti.</p>
+
+    <table>
+      <thead><tr><th>Costrutto</th><th>Significato</th></tr></thead>
+      <tbody>
+        <tr><td><code>go f(x)</code></td><td>avvia <code>f</code> in una nuova goroutine. Le goroutine sono gestite dal runtime, che le distribuisce su pochi thread del sistema operativo (scheduling M:N); partono con uno stack di pochi KB e se ne creano milioni.</td></tr>
+        <tr><td><code>make(chan T)</code></td><td>canale <strong>senza buffer</strong>: sincrono, send e receive si aspettano</td></tr>
+        <tr><td><code>make(chan T, k)</code></td><td>canale con buffer di capacità <var>k</var>: la send si blocca solo a buffer pieno</td></tr>
+        <tr><td><code>ch &lt;- v</code> · <code>v := &lt;-ch</code></td><td>send · receive</td></tr>
+        <tr><td><code>chan&lt;- T</code> · <code>&lt;-chan T</code></td><td>tipi di canale in sola scrittura · sola lettura, per i parametri</td></tr>
+        <tr><td><code>close(ch)</code>, <code>for v := range ch</code></td><td>chiude il canale; il ciclo riceve finché il canale non è chiuso e vuoto</td></tr>
+        <tr><td><code>select { case … }</code></td><td>attende su più operazioni di canale e ne esegue una pronta</td></tr>
+      </tbody>
+    </table>
+
+    <p>La <code>select</code> è la comunicazione con guardia della <a href="#s5">sezione 5</a>, senza la parte booleana: ogni <code>case</code> è una send o una receive. Si blocca finché uno dei casi non può procedere; se ne sono pronti più d'uno, ne sceglie uno a caso, con probabilità uniforme. Un ramo <code>default</code> la rende non bloccante.</p>
+
+    <h3>Esempio: client-server con canale di risposta</h3>
+    <p>Il server ascolta su due canali, uno per le somme e uno per i prodotti. Ogni client crea un canale privato e lo mette nella richiesta, come nella <a href="#s3">sezione 3</a>, così il server non deve conoscere i client in anticipo.</p>
+<pre><code class="language-go">type Request struct {
+	X, Y  int
+	Reply chan int // dove rispondere
+}
+
+func server(add, mul &lt;-chan Request) {
+	for {
+		select { // attesa su due canali: il primo pronto vince
+		case r := &lt;-add:
+			r.Reply &lt;- r.X + r.Y
+		case r := &lt;-mul:
+			r.Reply &lt;- r.X * r.Y
+		}
+	}
+}
+
+func client(name string, ch chan&lt;- Request, done chan&lt;- string) {
+	myChan := make(chan int) // canale privato per la risposta
+	ch &lt;- Request{2, 3, myChan}
+	done &lt;- fmt.Sprintf("%s: %d", name, &lt;-myChan)
+}
+
+func main() {
+	add, mul, done := make(chan Request), make(chan Request), make(chan string)
+	go server(add, mul)
+	go client("somma", add, done)
+	go client("prodotto", mul, done)
+	fmt.Println(&lt;-done)
+	fmt.Println(&lt;-done) // l'ordine delle due righe non è deterministico
+}</code></pre>
+    <p>Tutti i canali sono senza buffer: ogni send si completa solo quando dall'altra parte c'è una receive. Il <code>main</code> aspetta i due messaggi su <code>done</code> prima di terminare, e non è un dettaglio: in Go, quando il <code>main</code> termina, il programma finisce e tutte le goroutine vengono interrotte.</p>
+
+    <div class="callout note"><span class="callout-label">Oltre le slide: le guardie booleane in Go</span><p>La parte B di una guardia si ottiene con un canale <code>nil</code>, perché un'operazione su un canale nil non è mai pronta e quel <code>case</code> resta disabilitato. Ecco il processo <code>Copy</code> della sezione 5:</p>
+<pre><code class="language-go">func copyProc(in &lt;-chan rune, out chan&lt;- rune) {
+	var buf [10]rune
+	front, rear, count := 0, 0, 0
+	for {
+		var inC &lt;-chan rune // nil: ramo disabilitato
+		var outC chan&lt;- rune
+		if count &lt; 10 { inC = in }  // guardia del primo ramo
+		if count &gt; 0 { outC = out } // guardia del secondo ramo
+		select {
+		case c := &lt;-inC:
+			buf[rear] = c
+			rear, count = (rear+1)%10, count+1
+		case outC &lt;- buf[front]:
+			front, count = (front+1)%10, count-1
+		}
+	}
+}</code></pre></div>
+
+    <h3>Tre trappole viste in laboratorio</h3>
+    <ul>
+      <li><strong>Canali nil negli array.</strong> <code>make([]chan int, n)</code> crea una slice di <var>n</var> canali <em>nil</em>, non <var>n</var> canali. Una send o una receive su un canale nil si blocca per sempre senza eccezioni: ogni elemento va creato con <code>make(chan int)</code>.</li>
+      <li><strong>La fine del <code>main</code>.</strong> Non aspetta le goroutine. Invece di un ciclo infinito in fondo al <code>main</code> si usa un canale <code>done</code> su cui ognuno segnala la fine, oppure un <code>sync.WaitGroup</code>.</li>
+      <li><strong>Deadlock da canali sincroni.</strong> Un algoritmo pensato per canali asincroni, come la soluzione simmetrica dello scambio dei valori, con canali senza buffer si blocca. Se tutte le goroutine sono bloccate il runtime termina con <code>fatal error: all goroutines are asleep - deadlock!</code>; se qualcuna è ancora viva, per esempio un server in ciclo infinito, il programma resta semplicemente fermo.</li>
+    </ul>
+
+    <details>
+      <summary>Laboratorio Go: gli esempi del corso</summary>
+      <p>Gli esempi del corso aggiungono una cosa alla volta: <code>x01</code> due goroutine inviano un valore al <code>main</code> su un canale condiviso; <code>x02</code> client-server con il canale di risposta nel messaggio; <code>x03</code> la <code>select</code> (l'esempio sopra); <code>x04</code> un milione di goroutine. L'esercizio è lo scambio dei valori nelle tre versioni.</p>
+      <p><strong>Un milione di goroutine.</strong> L'idioma è una funzione <em>factory</em> che crea il canale dell'agente, lancia la goroutine e restituisce il canale, che diventa l'unico modo di interagire con l'agente. Senza stampe, su un normale portatile, un milione di goroutine si crea e si sincronizza con il <code>main</code> in pochi secondi. Le receive nel <code>main</code> avvengono nell'ordine di creazione, anche se le goroutine sono pronte in un ordine qualsiasi.</p>
+<pre><code class="language-go">func spawnAgent(id int) &lt;-chan string {
+	ch := make(chan string)
+	go func() { ch &lt;- fmt.Sprint("ciao da ", id) }()
+	return ch
+}
+
+func main() {
+	const n = 1_000_000
+	start := time.Now()
+	agents := make([]&lt;-chan string, 0, n)
+	for i := 0; i &lt; n; i++ {
+		agents = append(agents, spawnAgent(i))
+	}
+	for _, ch := range agents {
+		&lt;-ch
+	}
+	fmt.Println(n, "goroutine in", time.Since(start))
+}</code></pre>
+      <p><strong>Scambio dei valori, versione simmetrica.</strong> Funziona perché ogni canale ha un buffer di <var>n</var> − 1: ognuno può inviare a tutti prima di ricevere. Con <code>make(chan int)</code> va in deadlock, come mostra il laboratorio della sezione 6. Nella versione ad anello, con canali sincroni, P0 deve eseguire anche l'ultima receive.</p>
+<pre><code class="language-go">func peer(i, v int, values []chan int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for j, ch := range values {
+		if j != i {
+			ch &lt;- v // prima invio il mio valore a tutti...
+		}
+	}
+	smallest, largest := v, v
+	for k := 1; k &lt; len(values); k++ { // ...poi ricevo gli altri n-1
+		x := &lt;-values[i]
+		smallest, largest = min(smallest, x), max(largest, x)
+	}
+	fmt.Printf("P%d: min %d, max %d\n", i, smallest, largest)
+}
+
+func main() {
+	vs := []int{7, 3, 9, 1, 5}
+	n := len(vs)
+	values := make([]chan int, n) // n canali nil: vanno creati uno per uno
+	for i := range values {
+		values[i] = make(chan int, n-1) // con make(chan int) è deadlock
+	}
+	var wg sync.WaitGroup
+	for i, v := range vs {
+		wg.Add(1)
+		go peer(i, v, values, &amp;wg)
+	}
+	wg.Wait()
+}</code></pre>
+    </details>
+
+    <p>L'assignment 3 comprende anche un piccolo esercizio in Go con i canali: le domande tipiche sono nella <a href="prep-assignment-03.html">pagina di preparazione</a>. Il prossimo capitolo passa al modello opposto, gli attori, dove tutto è asincrono e il canale diventa la mailbox di ciascuno.</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Verifica le tue conoscenze</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Che cos'è un modello a scambio di messaggi e quali sono le sue primitive?</summary>
+        <p>Un modello in cui i processi non condividono memoria e interagiscono solo scambiandosi messaggi. Le primitive sono <code>send</code> e <code>receive</code> su canali tipati; si trasferiscono dati, mai il flusso di controllo.</p>
+      </details>
+      <details>
+        <summary>Che cosa cambia tra message passing sincrono e asincrono?</summary>
+        <p>Nel sincrono il canale non ha buffer: la send si blocca finché il messaggio non è ricevuto e la receive finché qualcuno non invia, quindi i due processi si incontrano. Nell'asincrono il canale ha una coda FIFO: la send ha successo appena il messaggio è accodato e solo la receive si blocca.</p>
+      </details>
+      <details>
+        <summary>Un linguaggio che supporta nativamente lo scambio di messaggi sincrono?</summary>
+        <p>Go, con i canali creati senza buffer (<code>make(chan T)</code>). Altri esempi sono Occam, derivato dal CSP di Hoare, e Ada con il rendez-vous.</p>
+      </details>
+      <details>
+        <summary>Quali schemi di comunicazione esistono?</summary>
+        <p>One-to-one (un canale per coppia, tipico del sincrono), many-to-one (un ricevente, molti mittenti: porte e client-server), many-to-many (competizione e non determinismo), più il one-to-many, in cui i riceventi competono e ogni messaggio va a uno solo.</p>
+      </details>
+      <details>
+        <summary>Perché nel client-server ogni client ha un proprio canale di risposta?</summary>
+        <p>Perché la receive di base prende il primo messaggio disponibile: con un canale condiviso un client potrebbe prendersi la risposta di un altro. In alternativa il client mette nella richiesta un canale creato da lui, o si usa una receive con pattern.</p>
+      </details>
+      <details>
+        <summary>Come fa un server a rimandare una richiesta che non può soddisfare subito?</summary>
+        <p>La parcheggia in una coda di richieste pendenti e risponde quando può, per esempio a un rilascio della risorsa. Fa le veci della <code>wait</code> di un monitor: il client resta bloccato sulla propria receive, perché nessun processo può bloccare il flusso di controllo di un altro.</p>
+      </details>
+      <details>
+        <summary>Che cos'è una guardia e da quali componenti è composta?</summary>
+        <p>Nella forma <code>B; C → S</code> la guardia è la coppia di un'espressione booleana B e di un'istruzione di comunicazione C; S è il blocco eseguito se la guardia viene scelta. Ha successo se B è vera e C può procedere, fallisce se B è falsa, si blocca se B è vera ma C deve aspettare.</p>
+      </details>
+      <details>
+        <summary>In che ordine vengono eseguite più guardie soddisfatte?</summary>
+        <p>In nessun ordine: se ne sceglie una in modo non deterministico e si esegue solo quella. Gli altri messaggi restano nei loro canali; nel <code>do</code> la selezione si ripete finché tutte le guardie falliscono.</p>
+      </details>
+      <details>
+        <summary>Che cosa significa peer-to-peer e quali topologie ha lo scambio dei valori?</summary>
+        <p>Responsabilità distribuite tra processi pari che si coordinano con un protocollo di messaggi. Le soluzioni sono tre: centralizzata (2(<var>n</var> − 1) messaggi, coordinatore collo di bottiglia), simmetrica (<var>n</var>(<var>n</var> − 1) messaggi, massima distribuzione) e ad anello (2<var>n</var> messaggi, concorrenza limitata).</p>
+      </details>
+      <details>
+        <summary>Che cosa significa rendez-vous?</summary>
+        <p>Una sincronizzazione estesa in cui il chiamante (<code>call</code>) aspetta non solo che l'accettante riceva la richiesta (<code>accept</code>), ma anche che restituisca il risultato. Ada lo offre nativamente con entry e accept.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Da quali lezioni viene questo capitolo</summary>
+    <p>Slide del modulo 3.1, <em>Message Passing Models</em> · 17 aprile 2026 (§1–11: primitive, sincrono e asincrono, schemi, client-server, monitor attivi, guardie, scambio dei valori, filosofi, rendez-vous) · 20 aprile (laboratorio Go: linguaggio, goroutine, canali, select, esempi x01–x04) · 24 aprile (§1–11: ripasso del modulo 3.1 prima degli attori) · 27 aprile (prima parte: soluzione in Go dello scambio dei valori, canali nil, deadlock con canali sincroni). La mappa completa è in <code>coverage-matrix.json</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Navigazione capitoli">
+      <a href="cap-13-reattiva.html">&larr; Capitolo precedente</a>
+      <a href="index.html">Indice</a>
+      <a href="cap-15-attori.html">Capitolo successivo &rarr;</a>
+    </nav>
+    <p>Fonti: lezioni del 17, 20, 24 e 27 aprile 2026 · G. R. Andrews, <em>Foundations of Multithreaded, Parallel and Distributed Programming</em> · M. Ben-Ari, <em>Principles of Concurrent and Distributed Programming</em> · E. W. Dijkstra, EWD472 · documentazione di Go · Programmazione Concorrente e Distribuita, UniBo, a.a. 2025/2026 · Prof. A. Ricci</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/ada.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/exchange-lab.js"></script>
+  <script>ExchangeLab.mount('#exchange-lab', { start: 'symmetric', n: 4, cap: 0 });</script>
+</body>
+</html>
