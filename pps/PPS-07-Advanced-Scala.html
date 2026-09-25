@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 7 &mdash; Advanced Scala: types, mixins, variance, contextual abstractions &middot; PPS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+.pps-fig text{font-family:var(--lk-utility);fill:#171813}
+.pps-fig .mono{font-family:var(--lk-mono)}
+.llab{border:1px solid #C9C3B6;background:#FAF7EF;padding:1rem;margin:1.5rem 0;font-family:var(--lk-utility);font-size:.9rem}
+.llab select{font:inherit;max-width:100%;background:#F3EFE3;color:#1546B8;border:1px solid #1546B8;padding:4px 8px}
+.llab-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:.4rem 0}
+.llab-src{width:100%;box-sizing:border-box;font-family:var(--lk-mono);font-size:.82rem;line-height:1.45;border:1px solid #C9C3B6;background:#fff;padding:.5rem;resize:vertical}
+.llab h5{margin:.9rem 0 .3rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em}
+.llab ul{margin:.2rem 0;padding-left:1.2rem}
+.llab li{font-family:var(--lk-mono);font-size:.8rem;overflow-wrap:anywhere}
+.llab-concat{display:flex;flex-wrap:wrap;gap:4px}
+.llab-concat code{font-size:.78rem;padding:1px 5px;border:1px solid #C9C3B6}
+.llab-concat code.dropped{color:#6E7068;text-decoration:line-through;background:#F3EFE3}
+.llab-concat code.kept{border-color:#1546B8;color:#10368E}
+.llab-chain{display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center}
+.llab-chain code{font-size:.8rem}
+.llab-arrow{color:#6E7068}
+.llab-note{color:#45463F}
+.llab-err{color:#B83D2D;font-weight:600}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Lesson navigation">
+    <a href="PPS-06-Scala-Scalability.html">&larr; Lesson 6 &mdash; Scala for scalable software: collections, mutability, modularity</a>
+    <a href="index.html">Index</a>
+    <a href="PPS-08-Agile-and-Methodology.html">Lesson 8 &mdash; Agile development and software methodology &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Scala for scalable software · Lesson 7</div>
+    <h1>Advanced Scala: types, mixins, variance, contextual abstractions</h1>
+    <div class="lk-meta"><span>~30 min of reading</span><span>1 instrument: a mixin linearization calculator</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this lesson</h3>
+    <ol>
+      <li><a href="#s1">What are abstract types and aliases for?</a></li>
+      <li><a href="#s2">Trait or abstract class?</a></li>
+      <li><a href="#s3">How do mixins stack?</a></li>
+      <li><a href="#s4">What does a self-type add?</a></li>
+      <li><a href="#s5">Why prefer delegation, and what does export do?</a></li>
+      <li><a href="#s6">How do variance and bounds work?</a></li>
+      <li><a href="#s7">What are extension methods for?</a></li>
+      <li><a href="#s8">How does contextual abstraction work?</a></li>
+      <li><a href="#s9">How do these features make DSLs?</a></li>
+      <li><a href="#s10">What does a for-comprehension mean?</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <p><strong>The lesson in one paragraph.</strong> This lesson collects the mechanisms that make Scala more than a better Java. Abstract type members let a trait describe a whole system of concepts that subclasses make concrete. Traits are mixins: they stack through linearization, which decides where each <code>super</code> call goes, and self-types express a dependency without subtyping. <code>export</code> removes the boilerplate of delegation. Declaration-site variance with bounds gives safe generic types such as a covariant stack. Extension methods, <code>given</code>/<code>using</code> and conversions add operations, context and adapters after the fact, which is what makes DSLs like ScalaTest possible. Finally, a <code>for</code>-comprehension is sugar for <code>flatMap</code>, <code>map</code> and <code>withFilter</code>, the basis of search problems such as the n-queens.</p>
+
+  <section id="s1">
+    <h2>1. What are abstract types and aliases for?</h2>
+    <p>A trait or abstract class can declare an <strong>abstract type member</strong>, <code>type T</code> or the bounded <code>type T &lt;: R</code>. A subclass must make it concrete, <code>type T = R</code>, before objects can be created. This is type parameterisation where the abstracted types are members instead of parameters in brackets, and a type member can itself be generic (<code>type MySeq[T] = List[T]</code>). It has three uses:</p>
+    <ol>
+      <li><strong>aliases</strong>, possibly abstract and made concrete in subclasses. This is like import renaming, but it also works for generic types;</li>
+      <li><strong>abstract modelling</strong> of the concepts of a domain, as with ADTs;</li>
+      <li><strong>path-dependent types</strong>, the basis of family polymorphism, discussed at the end of the course.</li>
+    </ol>
+    <p>The collection aliases of <a href="PPS-06-Scala-Scalability.html#s5">lesson 6</a> are defined this way: <code>Map</code> and <code>Set</code> in <code>scala.Predef</code> (below), <code>List</code>, <code>Seq</code> and the others in the <code>scala</code> package object.</p>
+<pre><code class="language-scala">// an extract of scala.Predef
+class Predef:
+  type Class[T] = java.lang.Class[T]
+  type Function[-A, +B] = (A) =&gt; B
+  type Map[A, +B] = collection.immutable.Map[A, B]
+  type Set[A] = collection.immutable.Set[A]
+  type String = java.lang.String</code></pre>
+    <p>An alias is often paired with a same-named factory method, so that the new name works both as a type and as a constructor. The deck's version has a bug worth seeing, because it compiles and runs:</p>
+<pre><code class="language-scala">// aliases and corresponding constructors, as in the deck
+object MyAliases:
+  type MySeq[T] = collection.immutable.Vector[T]
+  def MySeq[T](elems: T*) = collection.immutable.Vector(elems)
+  type MySet[T] = collection.immutable.HashSet[T]
+  def MySet[T](elems: T*) = collection.immutable.HashSet(elems)
+  type MyMap[A, +B] = collection.immutable.HashMap[A, B]
+  def MyMap[A, B](elems: (A, B)*) = collection.immutable.HashSet(elems)
+
+object Aliases extends App:
+  import MyAliases.*
+  val seq = MySeq(10, 20, 30)
+  println(s"$seq, ${seq.getClass}")
+  val set = MySet(10, 20, 30)
+  println(s"$set, ${set.getClass}")
+  val map = MyMap(10 -&gt; "a", 20 -&gt; "b", 30 -&gt; "c")
+  println(s"$map, ${map.getClass}")</code></pre>
+    <p>It prints <code>Vector(ArraySeq(10, 20, 30))</code>, <code>HashSet(ArraySeq(10, 20, 30))</code> and <code>HashSet(ArraySeq((10,a), (20,b), (30,c)))</code>. <code>Vector(elems)</code> passes the varargs sequence as <em>one</em> element, and <code>MyMap</code> builds a <code>HashSet</code>. Since the factories have no declared result type, the compiler cannot catch either mistake. The fix is to spread the arguments with <code>elems*</code> and to declare the result types:</p>
+<pre><code class="language-scala">object MyAliasesFixed:
+  type MySeq[T] = collection.immutable.Vector[T]
+  def MySeq[T](elems: T*): MySeq[T] = collection.immutable.Vector(elems*)
+  type MySet[T] = collection.immutable.HashSet[T]
+  def MySet[T](elems: T*): MySet[T] = collection.immutable.HashSet(elems*)
+  type MyMap[A, +B] = collection.immutable.HashMap[A, B]
+  def MyMap[A, B](elems: (A, B)*): MyMap[A, B] = collection.immutable.HashMap(elems*)
+
+object AliasesFixed extends App:
+  import MyAliasesFixed.*
+  val seq: MySeq[Int] = MySeq(10, 20, 30)
+  println(seq)   // Vector(10, 20, 30)
+  val set = MySet(10, 20, 30)
+  println(set)   // HashSet(10, 20, 30)
+  val map = MyMap(10 -&gt; "a", 20 -&gt; "b", 30 -&gt; "c")
+  println(map)   // HashMap(10 -&gt; a, 20 -&gt; b, 30 -&gt; c)</code></pre>
+
+    <h3>The Exams case study</h3>
+    <p>Abstract types let one trait describe a whole system. <code>Exams</code> leaves students, teachers, courses and evaluations abstract, defines the concepts built on them, and declares the operations:</p>
+<pre><code class="language-scala">trait Exams:
+  // abstracted types
+  type Student
+  type Teacher
+  type Course
+  type Evaluation
+  trait Session:
+    def id: Int
+
+  // defined types
+  case class Exam(course: Course, session: Session, student: Student)
+  type Registration = (Exam, Evaluation)
+
+  // methods
+  def register(registration: Registration): Unit
+  def evaluation(student: Student, course: Course): Evaluation
+
+abstract class AbstractExams extends Exams:
+  private var registrations: Set[Registration] = Set()
+
+  override def register(registration: Registration) =
+    registrations = registrations + registration
+
+  override def evaluation(student: Student, course: Course) =
+    registrations
+      .collect:
+        case (Exam(`course`, call, `student`), eval) =&gt; (call.id, eval)
+      .maxBy(_._1)._2</code></pre>
+    <p><code>AbstractExams</code> implements the operations without knowing any concrete type. It keeps the registrations in a private immutable <code>var</code>, the guideline of lesson 6. <code>evaluation</code> uses <code>collect</code> with a pattern in which the backquoted <code>`course`</code> and <code>`student`</code> match the <em>values</em> of the parameters (without backquotes they would be fresh variables matching anything), while <code>call</code> binds the session. <code>maxBy</code> then selects the latest session. A last class fixes the types:</p>
+<pre><code class="language-scala">class BasicExamsImpl extends AbstractExams:
+  override type Student = String
+  override type Teacher = String
+  override type Course = String
+  override type Evaluation = Int
+
+  case class SessionWithId(id: Int) extends Session
+  def session(id: Int): Session = SessionWithId(id)
+
+object WorkWithExams extends App:
+  val exams = new BasicExamsImpl()
+  exams.register((exams.Exam("oop", exams.session(0), "mirko"), 20))
+  exams.register((exams.Exam("oop", exams.session(1), "mirko"), 25))
+  exams.register((exams.Exam("sisop", exams.session(0), "mirko"), 30))
+
+  println(exams.evaluation("mirko", "oop"))   // 25: the latest session wins
+  println(exams.evaluation("mirko", "sisop")) // 30</code></pre>
+<pre><code class="language-scala">object ExamsExtra extends App:
+  val exams = new BasicExamsImpl()
+  exams.register((exams.Exam("oop", exams.session(0), "mirko"), 20))
+  println(scala.util.Try(exams.evaluation("mirko", "pps")))
+  // Failure(java.lang.UnsupportedOperationException: empty.maxBy)
+  val other = new BasicExamsImpl()
+  // exams.register((other.Exam("oop", other.session(0), "luca"), 18)) // type mismatch</code></pre>
+    <p>Two details. <code>Exam</code> is a class nested in the system, so <code>exams.Exam</code> and <code>other.Exam</code> are different path-dependent types, and the compiler rejects registering one system's exam in another ("Found: other.Exam, Required: exams.Exam"). And <code>maxBy</code> on an empty set throws, so a student with no exam for the course makes <code>evaluation</code> fail. Returning <code>Option[Evaluation]</code> would be the idiomatic fix.</p>
+    <p>The deck calls this <em>the</em> approach to complex abstractions: define a system as a trait of concepts, then refine it step by step. It is hard to reproduce in mainstream languages. Three techniques extend it: mixins to compose a system from several "slices" (section 3), self-types to let a slice declare what it expects without inheriting it (section 4), and family polymorphism for mutually dependent concepts.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Trait or abstract class?</h2>
+    <table class="lk-table">
+      <thead><tr><th></th><th>Abstract class</th><th>Trait</th></tr></thead>
+      <tbody>
+        <tr><td>Meaning</td><td>as in Java</td><td>an interface that can also carry implementation: methods, fields, state</td></tr>
+        <tr><td>On the JVM</td><td>a JVM abstract class, no overhead</td><td>an interface plus static methods, called by the extending class as needed</td></tr>
+        <tr><td>Extension</td><td>single, like any class</td><td>a class can mix in many; linearization stacks them from left (top) to right (bottom) as a chain of decorations</td></tr>
+        <tr><td>Cost</td><td>none compared to Java</td><td>possibly a small delay, usually irrelevant</td></tr>
+      </tbody>
+    </table>
+    <p>Traits serve five purposes: <strong>abstract concepts</strong> (Java-like interfaces with only methods); <strong>rich interfaces</strong>, with a few abstract methods and many template methods derived from them (<code>Iterable</code> is the prime example); <strong>interfaces for strategies and type classes</strong>, such as <code>Ordered[T]</code> or any <code>FunctionN</code> type like <code>(Int, Double) =&gt; String</code>; <strong>class templates</strong>, partial classes extended many times; and <strong>stackable modifications</strong>, the key mixin property (next section).</p>
+
+    <h3>Rich interfaces</h3>
+<pre><code class="language-scala">case class Point(x: Int, y: Int)
+
+trait Rectangular:
+  // abstract methods
+  def topLeft: Point
+  def bottomRight: Point
+  // template methods
+  def left: Int = topLeft.x
+  def right: Int = bottomRight.x
+  def top: Int = topLeft.y
+  def bottom: Int = bottomRight.y
+
+case class Rectangle(
+  override val topLeft: Point,
+  override val bottomRight: Point) extends Rectangular
+
+object TryRichInterface extends App:
+  val r = Rectangle(Point(0, 0), Point(10, 20))
+  println(s"${r.left},${r.right}")  // 0,10
+  println(s"${r.top},${r.bottom}")  // 0,20</code></pre>
+    <p>A <code>Rectangle</code> implements the two abstract methods, here directly as constructor fields with <code>override val</code>, and gets <code>left</code>, <code>right</code>, <code>top</code> and <code>bottom</code> for free. The same idea is behind <code>Ordered</code>: one abstract comparison, four derived operators. The deck's simplified version extends Java's <code>Comparable</code>, so Java's own sorting accepts it:</p>
+<pre><code class="language-scala">trait Ordered[T] extends Comparable[T]:  // a simplified scala.math.Ordered
+  def compareTo(that: T): Int
+  def &lt;(that: T): Boolean = (this compareTo that) &lt; 0
+  def &gt;(that: T): Boolean = (this compareTo that) &gt; 0
+  def &lt;=(that: T): Boolean = (this compareTo that) &lt;= 0
+  def &gt;=(that: T): Boolean = (this compareTo that) &gt;= 0
+
+case class MyInt(n: Int) extends Ordered[MyInt]:
+  override def compareTo(that: MyInt) = this.n - that.n
+
+object TryOrdered extends App:
+  println(MyInt(5) &lt; MyInt(7))   // true
+  println(MyInt(5) &lt;= MyInt(7))  // true
+  println(MyInt(5) &gt; MyInt(7))   // false
+  println(MyInt(5) &gt;= MyInt(7))  // false
+  // a Java Comparable, so Java's sorting works too:
+  val l = java.util.ArrayList[MyInt](java.util.List.of(MyInt(3), MyInt(1), MyInt(2)))
+  java.util.Collections.sort(l)
+  println(l)                     // [MyInt(1), MyInt(2), MyInt(3)]</code></pre>
+    <p>In the library, <code>scala.math.Ordered[T]</code> plays the role of Java's <code>Comparable</code> (the ordering is part of the object), while <code>scala.math.Ordering[T]</code> plays the role of <code>Comparator</code> (a separate strategy object). <code>Ordering</code> comes back as a type class in section 8.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. How do mixins stack?</h2>
+    <p>A <strong>mixin</strong> is a unit of code, possibly partially implemented, that is combined with other mixins to form a class. The class must provide whatever the mixins leave missing. Mixins are "included" or "stacked in" rather than inherited: they give reuse, not necessarily substitutability. Scala traits work as mixins, a class can extend several of them, and inside a trait <code>super</code> behaves specially, so that traits can be chained by composition as well as by inheritance.</p>
+<pre><code class="language-scala">abstract class Parser[T]:
+  def parse(t: T): Boolean  // accept the token! did it work?
+  def end: Boolean          // tokens are over! is this ok?
+  def parseAll(seq: Seq[T]): Boolean = (seq forall (parse(_))) &amp; end // could use &amp; or &amp;&amp;
+
+// a parser consuming any sequence of elements in `chars`
+case class BasicParser(chars: Set[Char]) extends Parser[Char]:
+  override def parse(t: Char) = chars contains t
+  override def end = true
+
+// a mixin rejecting empty strings (see: a sort of decorator!)
+trait NonEmpty[T] extends Parser[T]:
+  private var empty = true
+  abstract override def parse(t: T) = { empty = false; super.parse(t) } // who is super??
+  abstract override def end = !empty &amp;&amp; super.end
+
+class NonEmptyBasicParser(chars: Set[Char]) extends BasicParser(chars) with NonEmpty[Char]
+
+object TryParsers extends App:
+  println(BasicParser(Set('a','b','c')).parseAll("aabc".toList))   // true
+  println(BasicParser(Set('a','b','c')).parseAll("aabcdc".toList)) // false
+  println(BasicParser(Set('a','b','c')).parseAll("".toList))       // true
+  // NonEmpty is "stacked" on to a concrete class
+  println(NonEmptyBasicParser(Set('0','1')).parseAll("0101".toList)) // true
+  println(NonEmptyBasicParser(Set('0','1')).parseAll("0123".toList)) // false
+  println(NonEmptyBasicParser(Set('0','1')).parseAll(List()))        // false</code></pre>
+    <p><code>Parser</code> is an abstract class with a functional template method, <code>parseAll</code>. <code>BasicParser</code> is a baseline implementation. <code>NonEmpty</code> is a mixable decoration that only adds the non-emptiness check, and <code>NonEmptyBasicParser</code> stacks it on top of <code>BasicParser</code>. Inside <code>NonEmpty</code>, <code>super.parse</code> does not mean <code>Parser.parse</code>, which is abstract. It means "whichever implementation comes next in the class this trait is eventually mixed into", which is unknown when the trait is written. Nothing like this exists in Java. The modifier <code>abstract override</code> says exactly that: the method overrides, but still needs a concrete implementation below it. With a plain <code>override</code> the compiler refuses the <code>super</code> call. Mixing <code>NonEmpty</code> into a class that has no concrete <code>parse</code> (such as <code>Parser</code> itself) is rejected too, because the class "needs to be abstract".</p>
+
+    <h3>Linearization</h3>
+    <p>On the JVM, multiple inheritance with traits is rendered by <strong>decoration</strong>, that is, inheritance plus delegation. An object of <code>NonEmptyBasicParser</code> is a <code>NonEmpty</code> decorating a <code>BasicParser</code>, which extends <code>Parser</code>. The order is fixed by the <strong>linearization</strong> of the class, a list of the class and all its ancestors in which each <code>super</code> refers to the next element:</p>
+    <p class="lk-muted">L(C) = C, then the linearizations of C's parents taken <em>from right to left</em> and concatenated, keeping only the <em>last</em> occurrence of each type.</p>
+    <p>No class appears twice, and the shared ancestors sink to the end. The course's smallest example makes the order visible through a string:</p>
+<pre><code class="language-scala">trait T:
+  def f: String = "T"
+trait A extends T:
+  val x = "A"
+  override def f: String = super.f + x
+trait B extends T:
+  override def f: String = super.f + "B"
+
+class C extends A with B   // linearization: C, B, A, T, AnyRef, Any
+
+object Traits extends App:
+  println(new C().f)       // TAB</code></pre>
+    <p>The parents of <code>C</code>, right to left, are <code>B</code> (L = B, T, AnyRef, Any) and <code>A</code> (L = A, T, AnyRef, Any). The concatenation is B, T, AnyRef, Any, A, T, AnyRef, Any. Dropping the earlier copies leaves C, B, A, T, AnyRef, Any. So <code>f</code> starts in <code>B</code>, whose <code>super.f</code> is <code>A</code>'s, whose <code>super.f</code> is <code>T</code>'s: "T" + "A" + "B". The deck points to the classic example of Odersky, Spoon and Venners' book, checked here with <code>super</code> calls:</p>
+<pre><code class="language-scala">class Animal:
+  def chain: List[String] = List("Animal")
+trait Furry extends Animal:
+  override def chain = "Furry" :: super.chain
+trait HasLegs extends Animal:
+  override def chain = "HasLegs" :: super.chain
+trait FourLegged extends HasLegs:
+  override def chain = "FourLegged" :: super.chain
+class Cat extends Animal with Furry with FourLegged:
+  override def chain = "Cat" :: super.chain
+
+object TryCat extends App:
+  println(new Cat().chain.mkString(" -&gt; ")) // Cat -&gt; FourLegged -&gt; HasLegs -&gt; Furry -&gt; Animal</code></pre>
+    <p>For everyday programming "things just work". Linearization matters when stacked traits override the same method, as decorations do. The calculator recomputes it for any declarations you type (Scala 2 <code>with</code> or Scala 3 commas; a last line <code>new … with …</code> makes an anonymous class), shows which copies are dropped and where each <code>super</code> leads, and rejects what the compiler rejects: a class in second position, cycles, and a trait whose superclass is not a superclass of the class.</p>
+    <div id="lin-calc"></div>
+
+    <details>
+      <summary>From the slides: lab 07, exercise 1 (another parser mixin)</summary>
+      <p>Write a mixin <code>NotTwoConsecutive</code>, analogous to <code>NonEmpty</code>, that refuses two equal consecutive elements. Use it to build <code>NotTwoConsecutiveParser</code>, check that the two mixins work together, and write the full linearization of <code>parserNTCNE</code> as a comment. Then extend <code>String</code> with a factory for the parser of its characters, rewrite the tests with ScalaTest, and optionally write a mixin <code>ShortenThenN</code> that accepts sequences of at most n elements (n as a trait parameter). The lab's tests create a fresh parser for each <code>parseAll</code> (a 0-argument <code>def</code>), since the mixins hold state; otherwise the parser must be reset after use. A solution:</p>
+<pre><code class="language-scala">trait NotTwoConsecutive[T] extends Parser[T]:
+  private var last: Option[T] = None
+  abstract override def parse(t: T) =
+    val ok = !last.contains(t)
+    last = Some(t)
+    ok &amp;&amp; super.parse(t)
+
+class NotTwoConsecutiveParser(chars: Set[Char])
+  extends BasicParser(chars) with NotTwoConsecutive[Char]
+
+extension (s: String)             // exercise 2: a parser from a String
+  def charParser(): Parser[Char] = BasicParser(s.toSet)
+
+object TryLab extends App:
+  def parserNTC = NotTwoConsecutiveParser(Set('X', 'Y', 'Z'))
+  println(parserNTC.parseAll("XYZ".toList))      // true
+  println(parserNTC.parseAll("XYYZ".toList))     // false
+  println(parserNTC.parseAll("".toList))         // true
+  def parserNTCNE = new BasicParser(Set('X', 'Y', 'Z')) with NotTwoConsecutive[Char] with NonEmpty[Char]
+  println(parserNTCNE.parseAll("XYZ".toList))    // true
+  println(parserNTCNE.parseAll("XYYZ".toList))   // false
+  println(parserNTCNE.parseAll("".toList))       // false
+  println("abc".charParser().parseAll("aabc".toList)) // true</code></pre>
+      <p>Because <code>BasicParser</code> is a case class, Scala 3 gives it the extra parents <code>Product</code> and <code>Serializable</code>. The full linearization of <code>parserNTCNE</code> is therefore: anonymous class, <code>NonEmpty</code>, <code>NotTwoConsecutive</code>, <code>BasicParser</code>, <code>Serializable</code>, <code>Product</code>, <code>Equals</code>, <code>Parser</code>, <code>AnyRef</code>, <code>Any</code>. This is the calculator's "Lab 07" example, and a run with tracing <code>super</code> calls confirmed the order NonEmpty → NotTwoConsecutive → BasicParser → Parser.</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. What does a self-type add?</h2>
+    <p>The syntax <code>trait T { name: Type =&gt; … }</code> declares a <strong>self-type</strong>. <code>T</code> can be instantiated only when mixed into something of type <code>Type</code>, and inside <code>T</code> the name <code>name</code> is <code>this</code>, typed as <code>Type</code>. The trait is <em>not</em> a subtype of <code>Type</code>. It is inheritance without subtyping, realised internally by decoration, and the typical way to write pure "decorations" that declare a dependency instead of inheriting it:</p>
+<pre><code class="language-scala">trait Producer:
+  def get(): String
+
+// not a subtype of Producer, but truly a mixin!
+trait ProducerUtils:
+  producer: Producer =&gt;
+  def getMany(n: Int): Seq[String] =
+    for i &lt;- 0 to n yield producer.get()
+
+class RandomProducer extends Producer:
+  override def get(): String = Math.random().toString
+
+class ConstantProducer(s: String) extends Producer:
+  override def get(): String = s
+
+class FullRandomProducer extends RandomProducer with ProducerUtils
+
+@main def tryProducers =
+  // attaching utils to any Producer
+  val producer = new FullRandomProducer
+  val producer2 = new RandomProducer() with ProducerUtils
+  val producer3 = new ConstantProducer("a") with ProducerUtils
+  println(producer.getMany(2).size)  // 3: note 0 to n is inclusive
+  println(producer3.getMany(2))      // Vector(a, a, a)
+  // val u = new ProducerUtils {}  // error: the self-type Producer is not satisfied
+  // def asProducer(u: ProducerUtils): Producer = u  // error: no subtyping</code></pre>
+    <p><code>ProducerUtils</code> can be attached to any producer, at class definition or on the fly with <code>new … with ProducerUtils</code>. The two commented lines were compiled separately. <code>new ProducerUtils {}</code> fails with "illegal inheritance: self type … does not conform to self type Producer", and treating a <code>ProducerUtils</code> as a <code>Producer</code> fails with a type mismatch. Compare <code>trait ProducerUtils extends Producer</code>: that version would <em>be</em> a producer, part of every client's view of it, whereas the self-type keeps the dependency internal.</p>
+    <p>If the type is omitted (<code>self =&gt;</code>), the name is just an alias for <code>this</code>, useful in inner or anonymous classes where <code>this</code> means the inner object:</p>
+<pre><code class="language-scala">trait FunctionOption[-A, +B]:
+  self =&gt;
+  def apply(a: A): Option[B]
+
+  final def andThen[C](f: FunctionOption[B, C]): FunctionOption[A, C] =
+    new FunctionOption[A, C]:
+      override def apply(a: A): Option[C] =
+        self.apply(a).flatMap(b =&gt; f.apply(b))
+        // this.apply(a).flatMap(b =&gt; f.apply(b)) // would not compile
+
+@main def mainFunction =
+  val f: FunctionOption[Int, Int] = n =&gt; Some(n) filter (_ % 2 == 0) map (_ / 2)
+  val g: FunctionOption[Int, Int] = n =&gt; Some(n + 1)
+
+  val h: FunctionOption[Int, Int] = f andThen g
+  println(h(5)) // None
+  println(h(6)) // Some(4)</code></pre>
+    <p>Inside the anonymous <code>FunctionOption[A, C]</code>, <code>this.apply(a)</code> would be the new function's own <code>apply</code>, returning <code>Option[C]</code>. The compiler rejects the commented line ("Found: C, Required: B"). <code>self</code> names the outer function. The composed <code>h</code> halves even numbers and adds one: <code>h(6)</code> is <code>Some(4)</code>, and <code>h(5)</code> fails at the first step.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Why prefer delegation, and what does export do?</h2>
+    <p>The modern recipe is to consider delegation instead of inheritance, following the <strong>principle of least power</strong>. Inheritance opens a class too much to its subclasses and handles multiple reuse poorly. Substitutability is better obtained through traits alone, focusing on the contract. Delegation combined with fine-grained access modifiers is preferable, and its one drawback, the boilerplate of forwarding methods, is what Scala 3's <code>export</code> removes. Written inside a class or object with import-like syntax, an export makes members of a stable value visible from outside, by generating the forwarders:</p>
+<pre><code class="language-scala">object Exports extends App:
+
+  trait Counter:
+    def value: Int
+    def increment(): Unit
+
+  class BasicCounter extends Counter:
+    private[Exports] var counterValue = 0
+    def value: Int = counterValue
+    def increment(): Unit = counterValue = counterValue + 1
+    def reset(): Unit = counterValue = 0
+
+  class MultiCounter extends Counter:          // no inheritance, just substitutability
+    private val counter = new BasicCounter()   // no inheritance, just delegation
+    export counter.*                           // export value, increment, reset, counterValue
+    def decrement(): Unit = counterValue -= 1
+
+  class FancyCounter extends Counter:          // no inheritance, just substitutability
+    private val counter = new BasicCounter()   // no inheritance, just delegation
+    private val initDate = java.util.Calendar.getInstance()
+    export counter.{reset as _, *}             // export all but reset
+    export initDate.getTime as creationTime    // export with alias
+
+  val c: Counter = new FancyCounter()          // no inheritance, just substitutability
+  c.increment()
+  c.increment()
+  println(c.value)                             // 2
+  val c2 = new FancyCounter()
+  // c2.decrement()                            // won't compile: FancyCounter has no decrement
+  // c2.reset()                                // won't compile: reset was not exported
+  println(c2.creationTime().getClass)          // class java.util.Date
+  val m = new MultiCounter()
+  m.increment(); m.increment(); m.decrement()
+  println(m.value)                             // 1</code></pre>
+    <p><code>MultiCounter</code> and <code>FancyCounter</code> are <code>Counter</code>s by substitutability only: they reuse <code>BasicCounter</code> by delegation, with no implementation inheritance. <code>export counter.*</code> forwards everything accessible, including <code>counterValue</code>, which is <code>private[Exports]</code> precisely so that <code>decrement</code> can reach it. <code>{reset as _, *}</code> exports all but <code>reset</code>, and <code>getTime as creationTime</code> renames. Only exported members exist on the outside: both <code>c2.decrement()</code> and <code>c2.reset()</code> fail with "not a member of Exports.FancyCounter".</p>
+    <p>Since exports make names available to importers of the object, one object can serve as a reusable <strong>import unit</strong>:</p>
+<pre><code class="language-scala">object MyStandardExports:
+  export scala.collection.mutable.{
+    ListBuffer =&gt; StandardList,
+    HashSet =&gt; StandardSet,
+    HashMap =&gt; StandardMap
+  }
+  export scala.Array.*
+  export java.lang.Math.*
+  export java.util.Date
+
+@main def tryExports =
+  import MyStandardExports.*
+  println(StandardSet(10, 20, 30).getClass)            // class scala.collection.mutable.HashSet
+  println(sin(PI / 2))                                 // 1.0: using Math.*
+  println(concat(Array(10, 20), Array(30, 40)).toList) // List(10, 20, 30, 40): using Array.*
+  println(new Date().getClass)                         // class java.util.Date</code></pre>
+
+    <details>
+      <summary>From the slides: lab 07, exercise 2 (robot composition with export)</summary>
+      <p>Starting from a <code>Robot</code> trait and the examples <code>DumbRobot</code> and <code>LoggingRobot</code>, which compose robots, implement with <code>export</code>: <code>RobotWithBattery</code> (each action consumes a given amount of battery, and nothing is done at 0), <code>RobotCanFail</code> (each action fails with a given probability, and then is not performed), and <code>RobotRepeated</code> (each action is executed a given number of times). Each variant wraps another robot, exports what it does not change and redefines the actions it decorates.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. How do variance and bounds work?</h2>
+    <p>Classes, traits, type aliases and methods can take type parameters, used in the definition as types and usually inferred at the call site. Two mechanisms go further than plain generics.</p>
+    <ul>
+      <li><strong>Declaration-site variance.</strong> A type parameter is declared covariant (<code>+A</code>: <code>C[Cat] &lt;: C[Animal]</code>), contravariant (<code>-A</code>: <code>C[Animal] &lt;: C[Cat]</code>) or, by default, invariant. The decision is taken once, where the type is defined, instead of at every use as with Java's wildcards (<code>List&lt;? extends Number&gt;</code>); the deck cites Igarashi and Viroli, ECOOP 2002. The compiler checks that the annotation respects Liskov's substitution principle. With <code>List[+T]</code> we have <code>List[Int] &lt;: List[AnyVal]</code>, but a setter taking a <code>T</code> is rejected, because <code>T</code> would occur in a <em>contravariant position</em>.</li>
+      <li><strong>Bounds.</strong> An upper bound <code>[A &lt;: Upper]</code>, a lower bound <code>[A &gt;: Lower]</code>, or both restrict how a type parameter can be instantiated.</li>
+    </ul>
+    <p>The rule of thumb is that covariant parameters may appear only in outputs (results) and contravariant ones only in inputs (method parameters). Functions show both: a <code>Function1[-T1, +R]</code> that accepts <code>Any</code> and returns <code>String</code> can be used wherever a function from <code>String</code> to <code>Any</code> is expected. The library is annotated accordingly:</p>
+<pre><code class="language-scala">object Variance extends App:
+  /* from the library:
+  package scala
+  abstract class Option[+A]
+  trait PartialFunction[-T1, +R]  // { case x =&gt; ... }
+  trait Function0[+R]             // () =&gt; R
+  trait Function1[-T1, +R]        // (T1) =&gt; R
+  trait Function2[-T1, -T2, +R]   // (T1, T2) =&gt; R
+  case class Tuple2[+T1, +T2](_1: T1, _2: T2) // (T1, T2)
+
+  package scala.collection
+  trait Iterator[+A]
+  trait Set[A]                    // ... extends (A) =&gt; Boolean
+  trait Seq[+A] extends PartialFunction[Int, A] ... // extends (Int) =&gt; A
+  trait Map[K, +V] extends PartialFunction[K, V] ... // and Iterable[(K, V)]
+  */
+  val v: Option[List[Any]] = Some[List[Int]](List(10, 20, 30))  // covariance, twice
+  val w: Option[Iterable[Any]] = Some[Set[Int]](Set(10, 20, 30))
+  val f: String =&gt; Any = (s: Any) =&gt; s.toString  // contravariant input, covariant output
+  val s: String =&gt; Boolean = Set("a", "b", "c")  // a Set is a predicate
+  val seq: Int =&gt; String = List("a", "b", "c")   // a Seq is a function from indices
+  val m: String =&gt; Int = Map("a" -&gt; 1, "b" -&gt; 2, "c" -&gt; 3) // a Map is a function from keys
+  println(s("b"))    // true
+  println(seq(2))    // c
+  println(m("c"))    // 3
+  // val bad: Set[Any] = Set[Int](1, 2)  // error: Set is invariant</code></pre>
+    <p>A <code>Set</code> is a predicate and is <em>invariant</em>, since its element type is used as an input by <code>contains</code>. A <code>Seq[+A]</code> is a function from indices, and a <code>Map[K, +V]</code> a function from keys, covariant in the values.</p>
+
+    <h3>Making a stack covariant</h3>
+<pre><code class="language-scala">trait Stack[T]:
+  def top: Option[T]
+  def pop: Option[(T, Stack[T])]
+  def push(t: T): Stack[T]
+  def toList: List[T]
+
+object Stack:
+  def apply[T](elems: T*): Stack[T] = StackImpl(elems.toList)
+
+  private class StackImpl[T](val list: List[T]) extends Stack[T]:
+    override def top = list.headOption
+    override def pop = top map ((_, StackImpl(list.tail)))
+    override def push(t: T) = StackImpl(t :: list)
+    override def toList = list
+
+object TryStacks extends App:
+  var stack = Stack(10)
+  stack = stack push 20
+  println(stack.top)        // Some(20)
+  stack = stack.pop.get._2  // [10]
+  println(stack.top)        // Some(10)
+  stack = stack.pop.get._2  // []
+  println(stack.top)        // None
+
+  // COVARIANCE PROBLEM
+  // var generalStack: Stack[Any] = Stack[Int](10, 20, 30) // does not compile: Stack is invariant
+  // generalStack = generalStack.push("a string")          // if it did, this would corrupt the stack</code></pre>
+    <p>If <code>Stack</code> were covariant, a <code>Stack[Int]</code> could be used as a <code>Stack[Any]</code> and a string pushed into it, corrupting a stack that its other owners still see as integers. The compiler prevents this. The invariant stack refuses the assignment ("Found: Stack[Int], Required: Stack[Any]"), and declaring <code>trait Stack[+T]</code> with <code>push(t: T)</code> fails with "covariant type T occurs in contravariant position in type T of parameter t". The fix is to make <code>push</code> more general with a lower bound: pushing an <code>R</code> that is a supertype of <code>T</code> returns a <code>CoStack[R]</code>, so the type widens instead of lying:</p>
+<pre><code class="language-scala">trait CoStack[+T]:                      // a covariant stack
+  def top: Option[T]
+  def pop: Option[(T, CoStack[T])]
+  def push[R &gt;: T](r: R): CoStack[R]    // a more general push is needed
+  def toList: List[T]
+
+object CoStack:                         // same implementation as Stack
+  def apply[T](elems: T*): CoStack[T] = CoStackImpl(elems.toList)
+
+  private case class CoStackImpl[+T](list: List[T]) extends CoStack[T]:
+    override def top = list.headOption
+    override def pop = top map ((_, CoStackImpl(list.tail)))
+    override def push[R &gt;: T](r: R) = CoStackImpl(r :: list)
+    override def toList = list
+
+object TryCoStacks extends App:
+  var stack: CoStack[Any] = CoStack[Int](10, 20, 30)
+  stack = stack push "a string"
+  val list: List[Any] = stack.toList
+  println(list)                         // List(a string, 10, 20, 30)
+  val ints = CoStack(1, 2)
+  val widened = ints.push(3.5)          // R inferred as Int | Double: a CoStack[Int | Double]
+  println(widened.toList)               // List(3.5, 1, 2)</code></pre>
+    <p>Pushing a string on a <code>CoStack[Int]</code> is legal and yields a stack of a wider type. With an <code>Int</code> stack and a <code>Double</code>, Scala 3 infers <code>R = Int | Double</code>, a union type. The original stack is untouched either way.</p>
+    <p>Covariance also allows a <strong>single empty-list object</strong>. <code>Nil</code> is a <code>CoList[Nothing]</code>, and since <code>Nothing</code> is a subtype of every type, it is a <code>CoList[T]</code> for every <code>T</code>:</p>
+<pre><code class="language-scala">// alternative approach: a sealed trait and case classes/objects
+// sealed trait CoList[+T]
+// case class Cons[+T](head: T, tail: CoList[T]) extends CoList[T]
+// case object Nil extends CoList[Nothing]  // a single-object case
+
+enum CoList[+T]:
+  case Cons(head: T, tail: CoList[T])
+  case Nil
+
+object CoList:
+  def apply[T](elems: T*): CoList[T] =
+    elems.foldRight[CoList[T]](Nil)(Cons(_, _)) // functional trick
+
+object TryCoList extends App:
+  // would not type-check with CoList[T] instead of CoList[+T]
+  val ll: CoList[CoList[Any]] = CoList(
+    CoList(10, 20, 30),
+    CoList("a", "b", "c"),
+    CoList(10, 3.5, "a string"))
+  println(ll)</code></pre>
+    <div class="callout note"><span class="callout-label">Beyond the slides</span><p>The slide's comment says <code>ll</code> "would not be typed with <code>CoList[T]</code>". In Scala 3 that exact expression does compile with an invariant list (with <code>case Nil()</code>): the expected type <code>CoList[CoList[Any]]</code> propagates inward and every inner <code>CoList(…)</code> is built directly as a <code>CoList[Any]</code>. Invariance bites as soon as the inner lists already exist: with <code>val a = CoList(10, 20, 30)</code>, <code>CoList[CoList[Any]](a, …)</code> fails with "Found: CoList[Int], Required: CoList[Any]". Invariance also forbids the singleton: <code>case Nil</code> without parentheses is rejected with "cannot determine type argument for enum parent class CoList, type parameter type T is invariant".</p></div>
+  </section>
+
+  <section id="s7">
+    <h2>7. What are extension methods for?</h2>
+    <p>Extension methods, given instances and conversions are the three features, all FP-oriented, that make Scala more flexible. They are to be used with care, making sure the abstraction is captured and documented correctly.</p>
+    <details>
+      <summary>From the slides: why languages add flexibility</summary>
+      <p>Languages are becoming less rigid, to reach new contexts (DSLs, scripting) and to favour agility over predictivity, and terser, since verbosity hampers creativity. Scala already offers symbolic method and class names, infix as well as dot calls, default and named arguments, optional brackets, and powerful imports/exports. The three features rediscussed here are extension methods (enriching existing interfaces), given instances (contextual programming) and automatic conversions (easing portability).</p>
+    </details>
+    <p>Extension methods apply the adapter pattern without an adapter class. When an interface must gain methods after its definition, and only in some contexts, the classic adapter wraps the object in a new class that delegates to it. An extension method is instead defined outside the class, translated to a method taking the receiver as first argument, and callable with dot notation wherever it is in scope:</p>
+<pre><code class="language-scala">case class Point2D(x: Double, y: Double)
+
+extension (p: Point2D)
+  def length: Double = Math.sqrt(p.x * p.x + p.y * p.y)
+  def isZero: Boolean = p.x == 0.0 &amp;&amp; p.y == 0
+
+object Point2DOperators:
+  extension (p: Point2D)
+    def +(q: Point2D): Point2D = Point2D(p.x + q.x, p.y + q.y)
+    def -(q: Point2D): Point2D = Point2D(p.x - q.x, p.y - q.y)
+
+@main def main() =
+  // using methods defined separately from the implementation
+  val p = Point2D(10, 20)
+  println(p.length)        // 22.360679774997898
+  println(p.isZero)        // false
+  println(length(p))       // 22.360679774997898: what p.length is translated to
+
+  // importing and using a desired set of additional operators
+  import Point2DOperators.*
+  println(p + p)           // Point2D(20.0,40.0)
+  println(p - p)           // Point2D(0.0,0.0)
+  println((p - p).isZero)  // true
+
+  // extending and using a library class
+  extension [T](l: List[T])
+    def second: T = l.tail.head
+
+  println(List(10, 20, 30).second) // 20</code></pre>
+    <p>The compiler rewrites <code>p.length</code> to <code>length(p)</code> only if <code>Point2D</code> has no member <code>length</code> and the extension is visible (defined in scope or imported). Operators live in <code>Point2DOperators</code> and exist only after <code>import Point2DOperators.*</code>. Extensions work on library classes too (<code>second</code> on <code>List</code>). Their typical uses are adding operators to existing classes, separating data from operations and recombining them freely, and giving an OO flavour to pure FP code.</p>
+
+    <h3>Do we really need OOP?</h3>
+    <p>The last use can be taken far. Here a list is only data, an enum, and all its operations are extensions in the companion. Clients still write <code>l map (…) filter (…) reduce (…)</code>:</p>
+<pre><code class="language-scala">object OOPFPLists extends App:
+
+  enum MyList[+A]:
+    case Cons(h: A, t: MyList[A])
+    case Empty
+
+  object MyList:
+    import MyList.*
+    def apply[A](a: A*) = a.foldRight[MyList[A]](Empty)(Cons(_, _))
+    extension [A](list: MyList[A])
+      def foldRight[B](init: =&gt; B)(op: (A, B) =&gt; B): B = list match
+        case Empty =&gt; init
+        case Cons(h, t) =&gt; op(h, t.foldRight(init)(op))
+      def foldLeft[B](init: =&gt; B)(op: (B, A) =&gt; B): B = list match
+        case Empty =&gt; init
+        case Cons(h, t) =&gt; t.foldLeft(op(init, h))(op)
+      def map[B](f: A =&gt; B): MyList[B] =
+        list.foldRight[MyList[B]](Empty)((a, b) =&gt; Cons(f(a), b))
+      def filter(p: A =&gt; Boolean) =
+        list.foldRight[MyList[A]](Empty)((a, b) =&gt; if p(a) then Cons(a, b) else b)
+      def reduce(op: (A, A) =&gt; A): A = list match
+        case Cons(h, t) =&gt; t.foldLeft(h)(op)
+
+  import MyList.*
+  val l = MyList(10, 20, 30, 40, 50)
+  println(l map (_ - 1) filter (_ &lt; 30) reduce (_ + _)) // 57: 9 + 19 + 29</code></pre>
+    <p>(The compiler warns that <code>reduce</code> does not handle <code>Empty</code>, and on an empty list it would throw a <code>MatchError</code>.) The recipe is: define types by aliases, case classes and enums; add OO-like operations as extension methods in companion objects; keep trait implementations private, mostly as product types; and always prefer delegation to inheritance. "Receiver plus method" becomes "context argument plus pure function". It works surprisingly often, and when it works it gives solid, controlled designs, with type classes such as monads adding further power. It is not universal: sometimes FP is a stretch, and some things are naturally objects, such as controllers and stateful models.</p>
+  </section>
+
+  <section id="s8">
+    <h2>8. How does contextual abstraction work?</h2>
+    <p>The arguments of a function often fall into two groups: <strong>inputs</strong>, the data turned into the output, and <strong>context</strong>, which influences how the output is produced (a strategy, a configuration, an ordering). The split is neither universal nor unique, but it recurs often, and context can often be inferred from the scope of the call instead of being passed every time. This is <strong>term inference</strong>: in certain scopes, the program tells the compiler how to synthesise a canonical term of a given type. Scala 2 did it with the much-criticised, opaque <code>implicit</code> mechanism. Scala 3 uses the more direct and intent-revealing <code>given</code>/<code>using</code>:</p>
+    <ul>
+      <li><code>def f(using ctx: Context)(input: Input): Output</code> declares a context parameter;</li>
+      <li><code>f(using ctx)(input)</code> passes it explicitly, <code>f(input)</code> lets the compiler find it;</li>
+      <li><code>given Context = …</code> defines the canonical instance for a scope, and <code>import obj.given</code> imports the givens of an object (a plain <code>import obj.*</code> does not).</li>
+    </ul>
+<pre><code class="language-scala">object Parameters extends App:
+
+  trait MyOrdering[A]:
+    def greater(x: A, y: A): Boolean
+
+  def max[T](elem: T, elems: T*)(using ordering: MyOrdering[T]): T =
+    elems.foldLeft(elem)((m, e) =&gt; if ordering.greater(e, m) then e else m)
+
+  val myStringOrdering = new MyOrdering[String]:
+    override def greater(x: String, y: String) = x.compareTo(y) &gt; 0
+
+  println(max("a", "b")(using myStringOrdering)) // b: using a provided ordering
+
+  // givens, with different styles of definition
+  given implicitOrdering: MyOrdering[String] = myStringOrdering
+  // without a name it would shrink to: given MyOrdering[String] = ...
+  // with an in-line implementation of the trait:
+  given MyOrdering[Int] with
+    def greater(x: Int, y: Int): Boolean = x &gt; y
+  // with a lambda, since MyOrdering has a single abstract method:
+  given MyOrdering[List[Int]] = _.size &gt; _.size
+
+  // recovering the canonical instance of MyOrdering[String]
+  println(summon[MyOrdering[String]] eq myStringOrdering) // true
+
+  println(max("a", "b"))                // b: using the given ordering in scope
+  println(max(10, 20))                  // 20
+  println(max(List(10, 20), List(30)))  // List(10, 20): the longer list</code></pre>
+    <p>Three styles of given appear: an alias to an existing value (<code>given implicitOrdering: … = myStringOrdering</code>), an in-line implementation (<code>given … with</code>), and, for a trait with one abstract method, a lambda. <code>summon[T]</code> retrieves the given of type <code>T</code> in scope, here the very same object. (The deck's comment on the last line says 20. The result is <code>List(10, 20)</code>, the longer list.)</p>
+
+    <h3>Context bounds and ad-hoc polymorphism</h3>
+    <p><code>def m[A: B](…)</code> can be called with a type <code>A</code> only if a given of type <code>B[A]</code> is in scope. <code>B</code> is a <strong>context bound</strong> on <code>A</code>: <code>A</code> must come with a "context" describing additional behaviour, which the method recovers with <code>summon[B[A]]</code>. This is not a trick. It gives <strong>ad-hoc polymorphism</strong>, a method applicable to exactly the selected types that have the context, and it paves the way to hierarchies of contexts as <strong>type classes</strong> (<a href="PPS-04-Advanced-Functional-Programming.html">lesson 4</a>):</p>
+<pre><code class="language-scala">object Parameters2 extends App:
+
+  trait MyOrdering[A]:
+    def greater(x: A, y: A): Boolean
+
+  // equivalent to the previous formulation, using a context bound
+  def max[T: MyOrdering](elem: T, elems: T*): T =
+    elems.foldLeft(elem)((m, e) =&gt; if summon[MyOrdering[T]].greater(e, m) then e else m)
+
+  object GivenOrderings:  // all shrinkable to literals
+    given MyOrdering[String] with
+      override def greater(x: String, y: String) = x.compareTo(y) &gt;= 0
+    given MyOrdering[Int] with
+      override def greater(x: Int, y: Int) = x &gt;= y
+    // a generic given: a name is needed
+    given listOrdering[A]: MyOrdering[List[A]] with
+      override def greater(x: List[A], y: List[A]) = x.size &gt;= y.size
+
+  import GivenOrderings.given
+
+  println(max("a", "d", "b", "c"))    // d
+  println(max(10, 40, 20, 30))        // 40
+  println(max(List(10, 20), List(30, 40, 50), List("a", "b"))) // List(30, 40, 50)
+  // println(max(1.5, 2.5))           // error: no given instance of type MyOrdering[Double]</code></pre>
+    <p>The generic <code>given listOrdering[A]</code> provides an ordering for lists of any element type. In the last call the three lists are unified to <code>List[Int | String]</code>, which it also covers. For <code>max(1.5, 2.5)</code> the compiler reports "No given instance of type MyOrdering[Double] was found". The standard library's <code>Ordering</code> is the same type class, already given for the usual types:</p>
+<pre><code class="language-scala">object Bounds extends App:
+  // the same idea with the library's type class scala.math.Ordering
+  def max2[T: Ordering](t1: T, t2: T): T = summon[Ordering[T]].max(t1, t2)
+  println(max2("a", "b"))                          // b
+  println(max2(3.5, 2.5))                          // 3.5: Ordering[Double] is given by the library
+  println(List(3, 1, 2).sorted)                    // List(1, 2, 3): sorted takes a using Ordering
+  println(List(3, 1, 2).sorted(using Ordering[Int].reverse)) // List(3, 2, 1)</code></pre>
+
+    <h3>Given conversions: automatic adapters</h3>
+    <p>Extension methods add methods to a class that lacked them. Legacy libraries that must interoperate with new code built on different assumptions need something more. The adapter pattern works, but it wraps every legacy value by hand. A given instance of <code>scala.Conversion[-I, +O]</code>, a subtype of <code>I =&gt; O</code>, automates it: wherever an <code>I</code> is used where an <code>O</code> is expected, the compiler inserts the conversion. The companion object of the target type is the proper place for it, since givens there are always visible:</p>
+<pre><code class="language-scala">object Conversions extends App:
+  import scala.language.implicitConversions // otherwise each use gives a feature warning
+  case class Point(n: Int, m: Int)
+  object Point: // the companion object is a proper place for conversions
+    // a conversion from tuple to point, by an apply method
+    given Conversion[(Int, Int), Point] with
+      def apply(t: (Int, Int)): Point =
+        println("converting tuple " + t + " to a point..") // a debug print
+        Point(t._1, t._2)
+    // a conversion by a literal
+    given Conversion[List[Int], Point] = l =&gt; Point(l.head, l.tail.head)
+
+  def pointToRadius(p: Point) = Math.sqrt(p.n * p.n + p.m * p.m)
+
+  println(pointToRadius(Point(3, 4)))  // 5.0
+  val tup = (3, 4)
+  println(pointToRadius(tup))          // converting tuple (3,4) to a point.. then 5.0
+  println(pointToRadius(List(3, 4)))   // 5.0
+
+  // checking (e.g. in the REPL) whether a conversion is active
+  println(summon[((Int, Int)) =&gt; Point]((10, 20)))       // converting tuple (10,20) ... then Point(10,20)
+  println(summon[List[Int] =&gt; Point](List(20, 30, 40)))  // Point(20,30)</code></pre>
+    <p>Each use of a conversion produces a feature warning unless <code>scala.language.implicitConversions</code> is imported. That friction is deliberate, because conversions make code harder to read. (Among the deck's <code>summon</code> checks, the comment "Point(10,20)" for <code>List(20,30,40)</code> is a slip: the result is <code>Point(20,30)</code>.) The deck's example of a legitimate use is a facade over Swing:</p>
+<pre><code class="language-scala">import java.awt.event.*
+import javax.swing.*
+import scala.language.implicitConversions
+
+object ScalaSwingFacade:
+
+  def createPanel(comps: JComponent*): JPanel =
+    comps.foldLeft(new JPanel()): (p, c) =&gt;
+      p.add(c); p
+
+  given Conversion[ActionEvent =&gt; Unit, ActionListener] = f =&gt; f(_)
+  // i.e. f =&gt; new ActionListener(){ def actionPerformed(e: ActionEvent) = f(e) }
+  // i.e. f =&gt; e =&gt; f(e)
+
+  extension (b: JButton)
+    def addActionListener(action: =&gt; Unit): Unit = b.addActionListener(e =&gt; action)
+
+object TrySwing extends App:
+  import ScalaSwingFacade.{*, given}
+
+  val f = new JFrame("title")
+  val text = new JTextField(10)
+  val bok = new JButton("OK")
+  val bevt = new JButton("Event")
+  val bquit = new JButton("Quit")
+  val p = createPanel(text, bok, bevt, bquit)
+  bok.addActionListener(JOptionPane.showMessageDialog(f, s"Text: ${text.getText}"))
+  bevt.addActionListener(JOptionPane.showMessageDialog(f, _))
+  bquit.addActionListener(System.exit(0))
+  val log: ActionEvent =&gt; Unit = e =&gt; println(e.getActionCommand)
+  bok.addActionListener(log)   // a Scala function value: needs the given Conversion
+  f.getContentPane.add(p)
+  f.pack()
+  f.setVisible(true)</code></pre>
+    <p>Two mechanisms cooperate. The extension adds an <code>addActionListener</code> taking a by-name block, so <code>bquit.addActionListener(System.exit(0))</code> reads naturally. Java's own method still takes precedence when a listener-shaped lambda is passed. The given conversion turns any Scala function <code>ActionEvent =&gt; Unit</code> into an <code>ActionListener</code>. The <code>import ScalaSwingFacade.{*, given}</code> matters: with <code>import ScalaSwingFacade.*</code> alone, <code>bok.addActionListener(log)</code> fails with "Found: ActionEvent =&gt; Unit, Required: ActionListener", and the compiler suggests importing the given.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. How do these features make DSLs?</h2>
+    <p>ScalaTest is the course's example of a "pretty DSL", or library pimping. The <code>AnyFunSuite</code> style resembles JUnit, and the <code>AnyFlatSpec</code> style reads as a specification. The <em>should matchers</em> turn assertions into near-English, and give readable failure messages:</p>
+<pre><code class="language-scala">import org.scalatest.matchers.should.Matchers.*
+
+class ScalaTestShowcase extends org.scalatest.funsuite.AnyFunSuite:
+
+  test("List operations, and should matchers"):
+    val testedList: List[Int] = 10 :: 20 :: 30 :: 40 :: Nil
+    assert(testedList.size == 4)   // JUnit-like assertion
+    testedList.size shouldBe 4     // from here, should matchers...
+    testedList.size should be (4)
+    testedList should have size 4
+    testedList should not be empty
+    testedList.forall(_ &gt; 5) should be (true)
+    a [IndexOutOfBoundsException] should be thrownBy testedList(5)
+    testedList.collect { case i if i &gt; 20 =&gt; i + 1 } should contain allOf (31, 41)
+    "val l = 10 :: 20 :: Nil" should compile
+
+class SetSpec extends org.scalatest.flatspec.AnyFlatSpec:
+
+  "A mutable Set" should "correctly add elements" in:
+    val s: collection.mutable.Set[Int] = collection.mutable.Set()
+    s += 10
+    s += 20
+    s += 30
+    assert(s == Set(10, 20, 30))
+    s should be (Set(10, 20, 30))</code></pre>
+    <p>Run with ScalaTest 3.2.19, both suites pass. A deliberately failing <code>List(10, 20) should contain (30)</code> reports "List(10, 20) did not contain element 30". Almost every token is one of this lesson's mechanisms. <code>testedList should have size 4</code> is a chain of infix method calls, and <code>should</code> is added to any value by a conversion that <code>Matchers.*</code> brings into scope. <code>thrownBy testedList(5)</code> takes a by-name argument, so the exception is raised inside the matcher. The indented block after <code>test(…):</code> is the by-name body of the test, and <code>"…" should compile</code> is checked at compile time by a macro. In sbt the dependency goes in the test scope (the deck's line: <code>libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.18" % "test"</code>).</p>
+    <details>
+      <summary>From the slides: a creative DSL in tests</summary>
+      <p>A PPS project (PPS-22-chess, on GitHub) pushed the idea further: its tests compare a board with a literal drawing of it. <code>ChessBoard.standard shouldEqual ChessBoard:</code> is followed by eight rows such as <code>r | n | b | q | k | b | n | r</code> and <code>* | * | * | * | * | * | * | *</code>, where each piece letter and <code>|</code> is an ordinary Scala identifier or method.</p>
+    </details>
+  </section>
+
+  <section id="s10">
+    <h2>10. What does a for-comprehension mean?</h2>
+    <p>The weak reading of <code>for</code> is "an iteration construct with several variables", something like <code>foreach</code>, or perhaps <code>map</code>/<code>flatMap</code>. The stronger reading, which the course builds on, is that it is a way to encode <strong>exploration-like computations</strong>, to define a notion of <strong>sequentiality</strong> in FP, and to encapsulate <strong>monads</strong>. For now: <code>for</code>/<code>yield</code> is sugar for <code>map</code>, <code>flatMap</code> and filtering.</p>
+<pre><code class="language-scala">object Comprehension extends App:
+
+  val l = List(10, 20, 30)
+  println(l map (_ * 2))          // List(20, 40, 60)
+  println(l flatMap (List(_, 0))) // List(10, 0, 20, 0, 30, 0)
+  println(l filter (_ &gt; 10))      // List(20, 30)
+
+  // Problem: give all quartets (x, y, z, x*y*z) such that:
+  // 1) x, y, z in 1..8; 2) x + y + z == 10; 3) x &lt; y &lt; z
+  val l2 = for
+    x &lt;- 1 until 9
+    y &lt;- 1 until 9
+    z &lt;- 1 until 9
+    if x + y + z == 10
+    if x &lt; y &amp;&amp; y &lt; z
+    w = x * y * z
+  yield
+    (x, y, z, w)
+  println(l2) // Vector((1,2,7,14), (1,3,6,18), (1,4,5,20), (2,3,5,30))
+
+  // desugared version (as in Scala 2)
+  val l3 = (1 until 9)
+    .flatMap(x =&gt; (1 until 9)
+      .flatMap(y =&gt; (1 until 9)
+        .filter(z =&gt; x + y + z == 10)
+        .filter(z =&gt; x &lt; y &amp;&amp; y &lt; z)
+        .map(z =&gt; (z, x * y * z))
+        .map { case (z, w) =&gt; (x, y, z, w) }))
+  println(l3 == l2) // true</code></pre>
+    <p>(The deck's comment says <code>x, y, z</code> range over 1..9, but <code>1 until 9</code> stops at 8. The answers are the same because the sum is 10.) The translation rules, which the compiler applies before type checking and which work for <em>any</em> type with these methods:</p>
+    <table class="lk-table">
+      <thead><tr><th>In the <code>for</code></th><th>Becomes</th></tr></thead>
+      <tbody>
+        <tr><td>each generator <code>x &lt;- e</code> except the last</td><td><code>e.flatMap(x =&gt; …)</code></td></tr>
+        <tr><td>the last generator, with <code>yield</code></td><td><code>e.map(x =&gt; …)</code></td></tr>
+        <tr><td>the last generator, with <code>do</code></td><td><code>e.foreach(x =&gt; …)</code> (all generators become <code>foreach</code>)</td></tr>
+        <tr><td>a guard <code>if c</code></td><td><code>.withFilter(x =&gt; c)</code>, a lazy <code>filter</code></td></tr>
+        <tr><td>a definition <code>w = e</code></td><td>a <code>map</code> that pairs the variable with <code>w</code>, then unpacks the pair</td></tr>
+      </tbody>
+    </table>
+    <p>Printing the compiler's tree for <code>l2</code> (<code>-Xprint:typer</code>) shows exactly the deck's "Scala 2" version, with <code>withFilter</code> in place of <code>filter</code>: <code>flatMap</code>, <code>flatMap</code>, <code>withFilter</code>, <code>withFilter</code>, <code>map(z =&gt; (z, w))</code>, <code>map { case (z, w) =&gt; (x, y, z, w) }</code>. A smaller case, with the same rules applied to <code>do</code> and to <code>Option</code>:</p>
+<pre><code class="language-scala">object Small extends App:
+  val a = for x &lt;- List(1, 2); y &lt;- List(3, 4) if x + y &gt; 4 yield (x, y)
+  val b = List(1, 2).flatMap(x =&gt; List(3, 4).withFilter(y =&gt; x + y &gt; 4).map(y =&gt; (x, y)))
+  println(a)       // List((1,4), (2,3), (2,4))
+  println(a == b)  // true
+  for x &lt;- List(1, 2); y &lt;- List("a") do print(s"$x$y ")  // 1a 2a
+  println()
+  List(1, 2).foreach(x =&gt; List("a").foreach(y =&gt; print(s"$x$y "))) // the same, desugared
+  println()
+  // the same sugar works on any type with map/flatMap/withFilter, e.g. Option
+  println(for x &lt;- Some(3); y &lt;- Option.empty[Int] yield x + y)  // None</code></pre>
+
+    <h3>Exploring a search space: the n-queens</h3>
+    <p>Place n queens on an n×n board so that none attacks another. <code>placeQueens(n)</code> returns every safe placement on rows 1..n. It takes each placement for n − 1 rows, tries every column of row n, keeps only the safe cells, and extends the placement. The base case is a single empty placement.</p>
+<pre><code class="language-scala">object Nqueen:
+  type Queen = (Int, Int)            // type aliases improve readability
+  type Solution = Iterable[Queen]
+  type IterableFactory = Solution =&gt; Iterable[Solution]
+  val size = 8
+  given IterableFactory = LazyList(_) // could switch to Set(_), List(_), or List(_).view
+
+  @main def run() = placeQueens().zipWithIndex foreach (printSolution(_))
+
+  def placeQueens(n: Int = size)(using factory: IterableFactory): Iterable[Solution] = n match
+    case 0 =&gt; factory(Set())
+    case _ =&gt;
+      for
+        queens &lt;- placeQueens(n - 1)   // get a solution on a smaller grid
+        y &lt;- 1 to size                 // iterate over all columns
+        queen = (n, y)                 // consider a new queen on any cell in the last row
+        if isSafe(queen, queens)       // ...only a safe one
+      yield
+        queens.toSeq :+ queen          // construct the new solution
+
+  def isSafe(queen: Queen, others: Iterable[Queen]) =
+    others forall (!isAttacked(queen, _))
+
+  def isAttacked(q1: Queen, q2: Queen) =
+    q1._1 == q2._1 || q1._2 == q2._2 || (q2._1 - q1._1).abs == (q2._2 - q1._2).abs
+
+  def printSolution(si: (Solution, Int)): Unit =
+    println(); println(s"sol ${si._2}")
+    for queen &lt;- si._1; x &lt;- 1 to size do
+      print(if queen._2 == x then "Q " else ". ")
+      if x == size then println()</code></pre>
+    <p>The type aliases make the signature readable, and the collection used for the exploration is a context parameter. With the given <code>LazyList(_)</code> the search is lazy, so asking for the first solution computes little more than one path. Passing <code>List(_)</code>, <code>Set(_)</code> or <code>List(_).view</code> changes the strategy without touching the algorithm:</p>
+<pre><code class="language-scala">@main def stats() =
+  val all = placeQueens()
+  println(all.getClass.getSimpleName)          // LazyList
+  println(all.head)                            // List((1,1), (2,5), (3,8), (4,6), (5,3), (6,7), (7,2), (8,4))
+  println(all.size)                            // 92
+  printSolution((all.head, 0))
+  println(placeQueens()(using List(_)).size)   // 92: the same search, eager</code></pre>
+    <p>(<code>stats</code> prints the first solution as the board shown by <code>printSolution</code>: a queen in column 1 of row 1, column 5 of row 2, and so on. The deck sets <code>size = 10</code>, which gives 724 solutions; 8 gives the classic 92.)</p>
+
+    <details>
+      <summary>From the slides: lab 07, exercises 3 and 4 (solitaire, ConnectThree)</summary>
+      <p><strong>Solitaire.</strong> On a w × h board (start with 5 × 5), place the numbers 1 … w·h: the first in the centre (w/2, h/2), each next one at a free cell reachable from the previous, until the board is full. Implement <code>placeMarks</code> returning all solutions, following the structure of the n-queens. The lab's text says "two positions vertically or horizontally, or one diagonally", but its own example (from (3, 3) on a 6 × 6 board: (0, 3), (6, 3), (3, 0), (3, 6), (1, 1), (5, 5), (1, 5), (5, 1)) and the original game (Sol35) move <em>three</em> cells orthogonally and <em>two</em> diagonally, jumping over two and one cells respectively. The literal reading has no solution at all, because it only visits cells with the parity of the centre. (The example's (6, 3) is also off a 6 × 6 board.) With the example's moves:</p>
+<pre><code class="language-scala">type Position = (Int, Int)
+type Solution = List[Position]        // most recent mark first
+
+val moves = List((3, 0), (-3, 0), (0, 3), (0, -3), (2, 2), (2, -2), (-2, 2), (-2, -2))
+
+def placeMarks(width: Int, height: Int): Iterable[Solution] =
+  def inside(p: Position) = p._1 &gt;= 0 &amp;&amp; p._1 &lt; width &amp;&amp; p._2 &gt;= 0 &amp;&amp; p._2 &lt; height
+  def place(n: Int): Iterable[Solution] = n match
+    case 1 =&gt; LazyList(List((width / 2, height / 2)))  // the first mark, in the centre
+    case _ =&gt;
+      for
+        sol &lt;- place(n - 1)
+        (dx, dy) &lt;- moves
+        next = (sol.head._1 + dx, sol.head._2 + dy)
+        if inside(next) &amp;&amp; !sol.contains(next)
+      yield next :: sol
+  place(width * height)</code></pre>
+      <p>On the 5 × 5 board this finds 352 solutions (in well under a second), the first being (2,2), (4,4), (1,4), (1,1), (4,1), (2,3), … . <strong>ConnectThree</strong> (optional): a 4 × 4 Connect Four where three aligned discs win. Implement <code>find</code>, <code>placeAnyDisk</code>, <code>firstAvailableRow</code> and <code>computeAnyGame</code> as the comments in the template suggest, stop a game when someone wins, add a random AI and a smarter one (maximising aligned discs, or minimax), build an MVC application for two players, and try TicTacToe with the same structure.</p>
+    </details>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>What is an abstract type member, and how does the Exams trait use it?</summary>
+        <p>A <code>type T</code> declared in a trait and made concrete (<code>type T = …</code>) in a subclass. <code>Exams</code> leaves <code>Student</code>, <code>Course</code>, <code>Evaluation</code> … abstract, defines <code>Exam</code> and <code>Registration</code> on top of them, and <code>AbstractExams</code> implements the operations before <code>BasicExamsImpl</code> fixes the types to <code>String</code> and <code>Int</code>.</p>
+      </details>
+      <details>
+        <summary>Why does <code>NonEmpty</code> declare <code>abstract override def parse</code>, and what does its <code>super.parse</code> call?</summary>
+        <p><code>super</code> in a trait is resolved by the linearization of the final class, so when the trait is written it refers to an unknown, possibly abstract implementation. <code>abstract override</code> says the method overrides but needs a concrete one below it. In <code>NonEmptyBasicParser</code>, <code>super.parse</code> is <code>BasicParser.parse</code>.</p>
+      </details>
+      <details>
+        <summary>Give the linearization of <code>class C extends A with B</code>, where <code>A</code> and <code>B</code> both extend <code>T</code>.</summary>
+        <p>C, B, A, T, AnyRef, Any: the parents' linearizations are concatenated right to left and only the last copy of <code>T</code> is kept. A method that each trait overrides with a <code>super</code> call runs B, then A, then T.</p>
+      </details>
+      <details>
+        <summary>How does <code>trait ProducerUtils { producer: Producer =&gt; … }</code> differ from <code>trait ProducerUtils extends Producer</code>?</summary>
+        <p>The self-type requires any concrete class mixing in <code>ProducerUtils</code> to be a <code>Producer</code>, and lets the trait use it as one, but <code>ProducerUtils</code> is not a subtype of <code>Producer</code>. It is a dependency, not inheritance, and the trait works as a pure decoration.</p>
+      </details>
+      <details>
+        <summary>What does <code>export counter.{reset as _, *}</code> generate, and why is it preferable to inheritance here?</summary>
+        <p>Forwarder methods for every accessible member of <code>counter</code> except <code>reset</code>. The class reuses <code>BasicCounter</code> by delegation and is a <code>Counter</code> only through the trait, so it exposes exactly what it chooses. Inheritance would expose everything and tie it to one superclass.</p>
+      </details>
+      <details>
+        <summary>Why can't <code>Stack[+T]</code> have <code>def push(t: T): Stack[T]</code>? What is the fix?</summary>
+        <p>A covariant <code>T</code> in a parameter position would allow a <code>Stack[Int]</code>, seen as a <code>Stack[Any]</code>, to receive a string. The fix is a lower bound: <code>def push[R &gt;: T](r: R): CoStack[R]</code>, which widens the result type instead.</p>
+      </details>
+      <details>
+        <summary>When does the compiler turn <code>p.length</code> into a call of an extension method?</summary>
+        <p>When the receiver's type has no member <code>length</code> and an extension <code>length</code> for that type is in scope, defined or imported. The call becomes <code>length(p)</code>.</p>
+      </details>
+      <details>
+        <summary>What does <code>def max[T: MyOrdering](elem: T, elems: T*): T</code> mean? How does the body get the ordering?</summary>
+        <p>A context bound: <code>max</code> can be called at a type <code>T</code> only if a given <code>MyOrdering[T]</code> is in scope. It is sugar for an anonymous <code>using MyOrdering[T]</code> parameter, retrieved with <code>summon[MyOrdering[T]]</code>. The result is ad-hoc polymorphism, the basis of type classes.</p>
+      </details>
+      <details>
+        <summary>What is a given <code>Conversion</code>, and where should it be defined?</summary>
+        <p>A given instance of <code>Conversion[I, O]</code> that the compiler inserts wherever an <code>I</code> is used as an <code>O</code>. It automates the adapter pattern for legacy code. The target type's companion object is the natural place, and uses need <code>import scala.language.implicitConversions</code> to avoid a feature warning.</p>
+      </details>
+      <details>
+        <summary>Desugar <code>for x &lt;- List(1, 2); y &lt;- List(3, 4) if x + y &gt; 4 yield (x, y)</code>.</summary>
+        <p><code>List(1, 2).flatMap(x =&gt; List(3, 4).withFilter(y =&gt; x + y &gt; 4).map(y =&gt; (x, y)))</code>, which gives <code>List((1,4), (2,3), (2,4))</code>. Generators before the last become <code>flatMap</code>, the last <code>map</code>, guards <code>withFilter</code>.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Where this lesson comes from</summary>
+    <p>Deck <strong>07-scala-advanced</strong> (52 slides): aliases and abstract types (3–7), traits and mixins (8–20), exports (21–24), variance and generics (25–30), extension methods (31–36), contextual programming (37–45), ScalaTest (46–48), for-comprehension (49–52). <strong>07lab</strong>: parser mixins, robots with export, solitaire, ConnectThree. Code: <code>code-scala/src/main/scala/u07/</code> and <code>src/test/scala/u07/ScalaTestShowcase.scala</code>. Every example was compiled and run with Scala 3.3.6 (ScalaTest 3.2.19); the lab solutions are this page's own. The calculator is <code>assets/linearization.js</code>, tested by <code>dev/test-pps-linearization.cjs</code>.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Lesson navigation">
+      <a href="PPS-06-Scala-Scalability.html">&larr; Lesson 6 &mdash; Scala for scalable software: collections, mutability, modularity</a>
+      <a href="index.html">Index</a>
+      <a href="PPS-08-Agile-and-Methodology.html">Lesson 8 &mdash; Agile development and software methodology &rarr;</a>
+    </nav>
+    <p>Sources: deck 07-scala-advanced and lab 07 · course code u07 · M. Odersky, L. Spoon, B. Venners, <em>Programming in Scala</em> (linearization) · Paradigmi di Programmazione e Sviluppo, Prof. Mirko Viroli, University of Bologna, a.y. 2025/2026. Study notes reconstructed from the course material: not an official source.</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/scala.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/linearization.js"></script>
+  <script>Linearization.mount('#lin-calc', { start: 'parser' });</script>
+</body>
+</html>

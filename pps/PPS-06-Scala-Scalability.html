@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 6 &mdash; Scala for scalable software: collections, mutability, modularity &middot; PPS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+.pps-fig text{font-family:var(--lk-utility);fill:#171813}
+.pps-fig .mono{font-family:var(--lk-mono)}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Lesson navigation">
+    <a href="PPS-05-Scala-OOP.html">&larr; Lesson 5 &mdash; Object-oriented programming in Scala</a>
+    <a href="index.html">Index</a>
+    <a href="PPS-07-Advanced-Scala.html">Lesson 7 &mdash; Advanced Scala: types, mixins, variance, contextual abstractions &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Scala for scalable software · Lesson 6</div>
+    <h1>Scala for scalable software: collections, mutability, modularity</h1>
+    <div class="lk-meta"><span>~30 min of reading</span><span>Deck 06-scala-scalability and lab 06</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this lesson</h3>
+    <ol>
+      <li><a href="#s1">Where do OOP and FP meet in Scala?</a></li>
+      <li><a href="#s2">How do you build a functional data type the Scala way?</a></li>
+      <li><a href="#s3">How do foldLeft and foldRight differ?</a></li>
+      <li><a href="#s4">What changes when the list is mutable?</a></li>
+      <li><a href="#s5">How is the collection framework organised?</a></li>
+      <li><a href="#s6">How do you use the main collections?</a></li>
+      <li><a href="#s7">How should a mutable domain concept be organised?</a></li>
+      <li><a href="#s8">How do constructs, packages and imports nest?</a></li>
+      <li><a href="#s9">Who can see what?</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <p><strong>The lesson in one paragraph.</strong> Scala scales because its constructs compose: a data type can be an enum with OO-style methods whose bodies are pattern matches, classes and objects nest inside each other, and packages, imports and access modifiers let you decide what each piece of code sees. The lesson builds a cons list with the right-associative <code>::</code> trick, rewrites its algorithms as folds, and contrasts it with a mutable list. It then tours the standard collection framework (immutable by default, mutable on request) and ends with the guideline that runs through the whole course: keep mutability encapsulated, prefer a private immutable <code>var</code> to a private mutable <code>val</code>, and push side effects outwards.</p>
+
+  <section id="s1">
+    <h2>1. Where do OOP and FP meet in Scala?</h2>
+    <p>By this point of the course both halves of Scala are on the table. The FP half has function types and literals, higher-order functions, genericity, pattern matching without mutation, modules and ADTs (product and sum types) and lazy evaluation. The OOP half is Java's, made purer: traits, inheritance and delegation, class parameters and auxiliary constructors, <code>object</code> as a singleton that also collects what Java would make <code>static</code>, and uniform access, where every operation is a method call.</p>
+    <p>The resulting shape is: <strong>classes and objects are the main constructs, and methods are filled in functional style</strong>. The deck describes Scala as three stacked levels:</p>
+    <table class="lk-table">
+      <thead><tr><th>Level</th><th>What it provides</th></tr></thead>
+      <tbody>
+        <tr><td>Bottom</td><td>Java and the JVM: efficiency and interoperability (with JS and Native back-ends as well)</td></tr>
+        <tr><td>Middle</td><td>Pure, modern OOP, a better Java: everything is an object, every operation a method call, immutability encouraged</td></tr>
+        <tr><td>Top</td><td>Sugar for FP, and sugar for flexibility, conciseness and DSLs</td></tr>
+      </tbody>
+    </table>
+    <p>Collections are the running example of this lesson. Every application manages sets and iterations of objects. In Scala collections also connect to lazy lists, options and monads, and writing one teaches how to write any structure that combines data and behaviour.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. How do you build a functional data type the Scala way?</h2>
+    <p>A good data type should be immutable when performance allows. It should report "non-bug" failures, such as asking for the head of an empty list, with <code>Option</code> rather than exceptions, and it should support declarative <code>map</code>, <code>filter</code> and <code>foreach</code>. There are three ways to organise it:</p>
+    <ul>
+      <li><strong>Fully functional</strong> (lessons 3 and 4): an enum for the data, and operations as functions in a separate module, possibly behind an opaque type.</li>
+      <li><strong>Fully OO</strong>, as in Java: an interface with the operations, and one class per implementation.</li>
+      <li><strong>Scala's OO/FP mixture</strong>: one enum declares the constructors <em>and</em> the OO-style operation signatures, and a single implementation of each algorithm pattern-matches on <code>this</code>. Factories and FP-style helpers go in the companion object.</li>
+    </ul>
+
+    <h3>The <code>::</code> trick</h3>
+    <p>The example is the cons list, the simplest structure and the most used in FP because it is easy to match. Its cons case is called <code>::</code> instead of <code>Cons</code>, and a method with the same name prepends an element:</p>
+<pre><code class="language-scala">object RightAssociativeConstruction extends App:
+
+  enum List[A]: // a type with two implementations and methods
+    case ::(h: A, t: List[A]) // just a different name for Cons
+    case Nil()
+    def ::(h: A): List[A] = List.::(h, this)
+    def isEmpty: Boolean = this == Nil() // another method
+
+  object List:
+    def head(l: List[Int]): Option[Int] = l match
+      case h :: _ =&gt; Some(h) // same as ::(h, _) =&gt; Some(h)
+      case _ =&gt; None
+
+  import List.*
+
+  val l: List[Int] = ::(10, ::(20, ::(30, Nil()))) // using case ::(h, t)
+  val l2: List[Int] = Nil().::(30).::(20).::(10)   // using def ::
+  val l3: List[Int] = 10 :: 20 :: 30 :: Nil()      // using infix notation
+  // recall that operators ending with : are right-associative
+
+  println(s"$l, $l2, $l3, ${l.isEmpty}")
+  // ::(10,::(20,::(30,Nil()))), ::(10,::(20,::(30,Nil()))), ::(10,::(20,::(30,Nil()))), false
+  println(head(l))   // Some(10): FP-like call
+  println(l.isEmpty) // false: OO-like call</code></pre>
+    <p>Two rules make this work. First, <strong>a method whose name ends in <code>:</code> is right-associative</strong>, and its receiver is the operand on the right: <code>10 :: l</code> means <code>l.::(10)</code>. So <code>10 :: 20 :: 30 :: Nil()</code> groups as <code>10 :: (20 :: (30 :: Nil()))</code>, which is <code>Nil().::(30).::(20).::(10)</code>. The expression reads left to right while the list is built right to left, one O(1) prepend at a time. With ordinary left associativity, <code>10 :: 20</code> would call <code>::</code> on the <code>Int</code> 10, which has no such method. Second, <strong>in a pattern, the infix form <code>p op q</code> means <code>op(p, q)</code></strong>, so <code>case h :: t</code> is the case class pattern <code>::(h, t)</code>. One name therefore serves construction, prepending and extraction. Inside the enum the method writes <code>List.::(h, this)</code> to call the case constructor rather than itself.</p>
+
+    <h3>The type: contract and algorithms in one place</h3>
+<pre><code class="language-scala">enum List[A]:
+  case ::(h: A, t: List[A])
+  case Nil()
+  def ::(h: A): List[A] = List.::(h, this)
+
+  def head: Option[A] = this match
+    case h :: t =&gt; Some(h)  // pattern for scala.Option
+    case _ =&gt; None          // pattern for scala.Option
+
+  def tail: Option[List[A]] = this match
+    case h :: t =&gt; Some(t)
+    case _ =&gt; None
+
+  def append(list: List[A]): List[A] = this match
+    case h :: t =&gt; h :: t.append(list)
+    case _ =&gt; list
+
+  def foreach(consumer: A =&gt; Unit): Unit = this match
+    case h :: t =&gt; consumer(h); t.foreach(consumer)
+    case _ =&gt;
+
+  def get(pos: Int): Option[A] = this match
+    case h :: t if pos == 0 =&gt; Some(h)
+    case h :: t if pos &gt; 0 =&gt; t.get(pos - 1)
+    case _ =&gt; None
+
+  def filter(predicate: A =&gt; Boolean): List[A] = this match
+    case h :: t if predicate(h) =&gt; h :: t.filter(predicate)
+    case _ :: t =&gt; t.filter(predicate)
+    case _ =&gt; Nil()
+
+  def map[B](fun: A =&gt; B): List[B] = this match
+    case h :: t =&gt; fun(h) :: t.map(fun)
+    case _ =&gt; Nil()</code></pre>
+    <p>Every operation is a method with an OO signature, and every body is a pattern match on the receiver. <code>head</code>, <code>tail</code> and <code>get</code> return <code>Option</code>, and <code>get</code> uses guards to walk the list. The companion object adds a varargs factory and a replicating one:</p>
+<pre><code class="language-scala">object List:  // factories
+  def apply[A](elems: A*): List[A] =
+    var list: List[A] = Nil()
+    for e &lt;- elems.reverse do list = e :: list
+    list
+
+  def of[A](elem: A, n: Int): List[A] =
+    if n == 0 then Nil() else elem :: of(elem, n - 1)
+
+object Test extends App:
+  import List.*
+
+  println(List(10, 20, 30, 40))        // ::(10,::(20,::(30,::(40,Nil()))))
+  val l = 10 :: 20 :: 30 :: 40 :: Nil() // same as above
+  println(l.head)                      // Some(10)
+  println(l.tail)                      // Some(::(20,::(30,::(40,Nil()))))
+  println(l.append(l))                 // 10,20,30,40,10,20,30,40 (as nested ::)
+  println(l append l)                  // the same: infix call of a one-argument method
+  println(l get 2)                     // Some(30)
+  println(of("a", 3))                  // ::(a,::(a,::(a,Nil())))
+  println(l filter (_ &lt;= 20) map ("a" + _))   // ::(a10,::(a20,Nil()))
+  println(l.filter(_ &lt;= 20).map("a" + _))     // the same, with dots
+  for i &lt;- l do println(i)             // 10 20 30 40, one per line: uses foreach
+  println(l.append(l) == l)            // false: append built a new list, l is unchanged</code></pre>
+    <p>A one-argument method can be called infix (<code>l get 2</code>, <code>l append l</code>), so chains like <code>l filter (_ &lt;= 20) map ("a" + _)</code> read like Java streams. Because the type has <code>foreach</code>, <code>for i &lt;- l do …</code> works on it. Adding <code>map</code> and <code>flatMap</code> would enable <code>for … yield</code> with several generators, and a <code>withFilter</code> (for instance a <code>filter</code> aliased as <code>withFilter</code>) would enable guards: Scala 3 desugars <code>if</code> guards to <code>withFilter</code> only (the desugaring is in <a href="PPS-07-Advanced-Scala.html#s10">lesson 7</a>). The last line prints <code>false</code>: <code>append</code> built a new list and left <code>l</code> unchanged.</p>
+    <p>Inside, the design separates the contract, construction and extraction, and the algorithms. Some algorithms can still be written OO-style, and many look alike, which calls for a refactoring into folds (next section). The question left open is encapsulation: here the representation is public. FP's answer is to encapsulate behaviour rather than data, through type classes (<a href="PPS-04-Advanced-Functional-Programming.html">lesson 4</a>).</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. How do foldLeft and foldRight differ?</h2>
+    <p><code>map</code>, <code>filter</code>, <code>append</code> and <code>size</code> all walk the list with the same recursion. Folds capture that recursion once:</p>
+<pre><code class="language-scala">enum List[A]:
+  case ::(h: A, t: List[A])
+  case Nil()
+  def ::(h: A): List[A] = List.::(h, this)
+
+  // foldLeft captures left-to-right accumulation, typical of reductions
+  @tailrec final def foldLeft[B](init: B)(f: (B, A) =&gt; B): B = this match
+    case h :: t =&gt; t.foldLeft(f(init, h))(f)
+    case _ =&gt; init
+
+  def size(init: Int = 0): Int = foldLeft(init)((acc, _) =&gt; acc + 1)
+
+  override def toString: String = foldLeft("|")((acc, h) =&gt; acc + h.toString + "|")
+
+  // foldRight captures right-to-left construction
+  def foldRight[B](init: B)(op: (A, B) =&gt; B): B = this match
+    case h :: t =&gt; op(h, t.foldRight(init)(op))
+    case _ =&gt; init
+
+  def map[B](f: A =&gt; B): List[B] = foldRight(Nil())(f(_) :: _)
+
+  def concat(l: List[A]): List[A] = foldRight(l)(_ :: _)
+
+  // right-to-left construction with tail recursion needs a reverse
+  def reverse: List[A] = foldLeft(Nil[A]())((acc, h) =&gt; h :: acc)
+
+  def mapTail[B](f: A =&gt; B): List[B] =
+    foldLeft(Nil[B]())((acc, h) =&gt; f(h) :: acc).reverse</code></pre>
+<pre><code class="language-scala">@main def play =
+  val l = List(10, 20, 31, 40, 50)
+  println(l.size())          // 5
+  println(l)                 // |10|20|31|40|50|  (toString via foldLeft)
+  println(l.reverse)         // |50|40|31|20|10|
+  println(l.mapTail(_ + 1))  // |11|21|32|41|51|
+  println(l.map(_ + 1))      // |11|21|32|41|51|
+  println(l.concat(l))       // |10|20|31|40|50|10|20|31|40|50|
+  println(l.foldLeft(0)((b, a) =&gt; b + a))           // 151
+  println(l.foldLeft(false)((b, a) =&gt; b || a == 30)) // false: 31 is not 30</code></pre>
+    <p><code>foldLeft</code> combines the accumulator with the head <em>before</em> recursing, so the recursive call is the last action and <code>@tailrec</code> compiles it to a loop. <code>foldRight</code> must first fold the tail and only then combine it with the head, so each element keeps a stack frame open until the recursion returns. On <code>List(10, 20, 30)</code> with <code>+</code> and <code>0</code>:</p>
+    <ul>
+      <li><code>foldLeft</code>: 0 + 10 = 10, then 10 + 20 = 30, then 30 + 30 = 60. The result is <code>((0 + 10) + 20) + 30</code>, with the parentheses nesting on the left.</li>
+      <li><code>foldRight</code>: 10 waits for the fold of <code>[20, 30]</code>, which waits for that of <code>[30]</code>, which waits for that of <code>Nil</code>, which is 0. On the way back: 30 + 0 = 30, 20 + 30 = 50, 10 + 50 = 60. The result is <code>10 + (20 + (30 + 0))</code>, with three frames pending at the deepest point.</li>
+    </ul>
+    <figure class="lk-figure">
+      <svg class="pps-fig" viewBox="0 0 640 250" role="img" aria-labelledby="fold-t fold-d">
+        <title id="fold-t">The two folds as expression trees</title>
+        <desc id="fold-d">foldLeft builds a left-leaning tree ((0+10)+20)+30; foldRight builds a right-leaning tree 10+(20+(30+0)).</desc>
+        <text x="160" y="20" text-anchor="middle" class="mono" font-size="14">foldLeft(0)(_ + _)</text>
+        <text x="470" y="20" text-anchor="middle" class="mono" font-size="14">foldRight(0)(_ + _)</text>
+        <g stroke="#6E7068" stroke-width="1.5">
+          <line x1="220" y1="55" x2="160" y2="105"/><line x1="220" y1="55" x2="280" y2="105"/>
+          <line x1="160" y1="105" x2="100" y2="155"/><line x1="160" y1="105" x2="220" y2="155"/>
+          <line x1="100" y1="155" x2="60" y2="205"/><line x1="100" y1="155" x2="140" y2="205"/>
+          <line x1="420" y1="55" x2="360" y2="105"/><line x1="420" y1="55" x2="480" y2="105"/>
+          <line x1="480" y1="105" x2="420" y2="155"/><line x1="480" y1="105" x2="540" y2="155"/>
+          <line x1="540" y1="155" x2="500" y2="205"/><line x1="540" y1="155" x2="580" y2="205"/>
+        </g>
+        <g fill="#FAF7EF" stroke="#1546B8" stroke-width="1.5">
+          <circle cx="220" cy="55" r="15"/><circle cx="160" cy="105" r="15"/><circle cx="100" cy="155" r="15"/>
+          <circle cx="420" cy="55" r="15"/><circle cx="480" cy="105" r="15"/><circle cx="540" cy="155" r="15"/>
+        </g>
+        <g fill="#F3EFE3" stroke="#6E7068">
+          <rect x="42" y="193" width="36" height="24"/><rect x="122" y="193" width="36" height="24"/>
+          <rect x="202" y="143" width="36" height="24"/><rect x="262" y="93" width="36" height="24"/>
+          <rect x="342" y="93" width="36" height="24"/><rect x="402" y="143" width="36" height="24"/>
+          <rect x="482" y="193" width="36" height="24"/><rect x="562" y="193" width="36" height="24"/>
+        </g>
+        <g text-anchor="middle" font-size="15" class="mono">
+          <text x="220" y="60">+</text><text x="160" y="110">+</text><text x="100" y="160">+</text>
+          <text x="420" y="60">+</text><text x="480" y="110">+</text><text x="540" y="160">+</text>
+          <text x="60" y="210">0</text><text x="140" y="210">10</text><text x="220" y="160">20</text><text x="280" y="110">30</text>
+          <text x="360" y="110">10</text><text x="420" y="160">20</text><text x="500" y="210">30</text><text x="580" y="210">0</text>
+        </g>
+        <text x="160" y="243" text-anchor="middle" font-size="14">combined while walking the list</text>
+        <text x="470" y="243" text-anchor="middle" font-size="14">combined only on the way back</text>
+      </svg>
+      <figcaption>The same sum as two trees. <code>foldLeft</code> finishes each inner <code>+</code> before moving on, so nothing waits on the stack. <code>foldRight</code> can compute its innermost <code>+</code> only after reaching <code>Nil</code>.</figcaption>
+    </figure>
+    <p>The difference shows in practice. With the JVM's default stack, <code>foldLeft</code> sums a 100,000-element list of this type without trouble, while <code>foldRight</code> on the same list throws <code>StackOverflowError</code> (a few thousand elements are fine; the exact limit depends on the stack size and on JIT warm-up, and in our runs a cold <code>foldRight</code> already overflowed at 7,000–10,000). For <code>+</code> the two results coincide because addition is associative. With <code>::</code> they do not: <code>foldRight(Nil())(_ :: _)</code> rebuilds the list in order (<code>|10|20|30|</code>), while <code>foldLeft(Nil())((acc, h) =&gt; h :: acc)</code> reverses it (<code>|30|20|10|</code>). This is why <code>map</code> and <code>concat</code> use <code>foldRight</code>, and why <code>reverse</code> and the stack-safe <code>mapTail</code> use <code>foldLeft</code>. <code>mapTail</code> pays with two passes, fold and reverse, to use constant stack.</p>
+
+    <details>
+      <summary>From the slides: lab 06, exercises and worked solutions</summary>
+      <p>Exercise 1 asks you to add these operations to the OO/FP list, first by recursion and then with <code>foldLeft</code>, <code>foldRight</code>, <code>map</code>, <code>flatMap</code> and <code>filter</code>: <code>zipWithValue</code>, <code>length</code> (with <code>foldLeft</code>), <code>indices</code> (<code>foldLeft</code> with an accumulator holding the index and the list being built), <code>zipWithIndex</code> (<code>foldRight</code> with an index accumulator), <code>partition</code>, <code>span</code>, <code>takeRight</code> and <code>collect</code> (a <code>PartialFunction</code>, map and filter in one shot). One set of fold-based solutions, checked on the lab's examples:</p>
+<pre><code class="language-scala">def zipWithValue[B](v: B): List[(A, B)] = map((_, v))
+
+def length: Int = foldLeft(0)((n, _) =&gt; n + 1)
+
+def indices: List[Int] =         // accumulator: (next index, reversed result)
+  foldLeft((0, Nil[Int]()))((acc, _) =&gt; (acc._1 + 1, acc._1 :: acc._2))._2.reverse
+
+def zipWithIndex: List[(A, Int)] = // right to left: indices count down from length - 1
+  foldRight((length - 1, Nil[(A, Int)]()))((a, acc) =&gt; (acc._1 - 1, (a, acc._1) :: acc._2))._2
+
+def partition(p: A =&gt; Boolean): (List[A], List[A]) =
+  foldRight((Nil[A](), Nil[A]()))((a, acc) =&gt;
+    if p(a) then (a :: acc._1, acc._2) else (acc._1, a :: acc._2))
+
+def span(p: A =&gt; Boolean): (List[A], List[A]) = // a failing element sends everything after it right
+  foldRight((Nil[A](), Nil[A]()))((a, acc) =&gt;
+    if p(a) then (a :: acc._1, acc._2) else (Nil(), a :: acc._1.concat(acc._2)))
+
+def takeRight(k: Int): List[A] =
+  foldRight((0, Nil[A]()))((a, acc) =&gt; if acc._1 &lt; k then (acc._1 + 1, a :: acc._2) else acc)._2
+
+def collect[B](pf: PartialFunction[A, B]): List[B] =
+  foldRight(Nil[B]())((a, acc) =&gt; if pf.isDefinedAt(a) then pf(a) :: acc else acc)</code></pre>
+<pre><code class="language-scala">@main def runLab06 =
+  println(List(1, 2, 3).zipWithValue("a"))                 // |(1,a)|(2,a)|(3,a)|
+  println(List(1, 2, 3).length)                            // 3
+  println(List("a", "b", "c").indices)                     // |0|1|2|
+  println(List("a", "b", "c").zipWithIndex)                // |(a,0)|(b,1)|(c,2)|
+  println(List(5, 2, 3, 4).partition(_ % 2 == 0))          // (|2|4|,|5|3|)
+  println(List(2, 4, 3, 6).span(_ % 2 == 0))               // (|2|4|,|3|6|)
+  println(List(1, 2, 3, 4).takeRight(2))                   // |3|4|
+  println(List(1, 2, 3, 4).collect { case x if x % 2 == 0 =&gt; x * 10 }) // |20|40|</code></pre>
+      <p>Folding right is natural whenever the result is built in list order. <code>zipWithIndex</code> then needs the index to count down from <code>length - 1</code>. In <code>span</code>, a failing element moves itself and everything already collected after it into the second list. Exercise 2 re-implements in Scala a Java exam system (the <code>ConferenceReviewing</code> interface and enum from the OOP 2018 exam a03b), following the guidelines of <a href="#s7">section 7</a>. Exercise 3 (optional) creates, queries, updates and deletes each kind of collection, mutable and immutable. It then micro-benchmarks them with the provided <code>PerformanceUtils</code>, looking for scenarios where a mutable implementation (<code>ListBuffer</code>) beats an immutable one (<code>List</code>) behind a common trait. The official performance tables are at docs.scala-lang.org, "performance characteristics".</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. What changes when the list is mutable?</h2>
+    <p>An idiomatic mutable list is an object holding an optional pair (head, tail), with the invariant that an empty head means an empty tail. It cannot be an algebraic data type. An ADT value is one fixed case forever, whereas a mutable list must turn from empty into non-empty in place while keeping its identity. The structure is therefore a trait, plus a companion object that hides the implementation:</p>
+<pre><code class="language-scala">trait MutableList[A]:
+  def head: Option[A]
+  def tail: Option[MutableList[A]]
+  def prepend(h: A): MutableList[A]
+  def append(l: MutableList[A]): MutableList[A]
+  def map[B](f: A =&gt; B): MutableList[B]
+  def toList: List[A]</code></pre>
+<pre><code class="language-scala">object MutableList:
+
+  def apply[A](): MutableList[A] = MutableListImpl(None)
+
+  private case class MutableListImpl[A](
+      var ht: Option[(A, MutableList[A])]) extends MutableList[A]:
+
+    override def head: Option[A] = ht.map(_._1)
+
+    override def tail: Option[MutableList[A]] = ht.map(_._2)
+
+    override def prepend(h: A): MutableList[A] =
+      ht = Some((h, MutableListImpl(ht)))
+      this
+
+    override def append(l: MutableList[A]): MutableList[A] =
+      ht match
+        case None if l.head.isEmpty =&gt; {}                    // [],[] --&gt; []
+        case None =&gt; ht = Some((l.head.get, l.tail.get))     // [],[H|T] --&gt; [H|T]
+        case Some((h, t)) if t.head.isEmpty =&gt; ht = Some((h, l)) // [H],L --&gt; [H|L]
+        case Some((h, t)) =&gt; ht = Some((h, t.append(l)))     // [H|T],L --&gt; [H|T.append(L)]
+      this
+
+    override def map[B](f: A =&gt; B): MutableList[B] =
+      MutableListImpl(ht.map((h, t) =&gt; (f(h), t.map(f))))
+
+    override def toList: List[A] = ht match
+      case None =&gt; List()               // here List is scala's own list
+      case Some((h, t)) =&gt; h :: t.toList</code></pre>
+<pre><code class="language-scala">object TestMutableList extends App:
+  val l: MutableList[Int] = MutableList()
+  l.prepend(40).prepend(30).prepend(20).prepend(10)
+  println(l.toList)          // List(10, 20, 30, 40)
+  println(l.head)            // Some(10)
+  println(l.tail.get.toList) // List(20, 30, 40)
+  val l2: MutableList[Int] = MutableList()
+  l2.prepend(60).prepend(50)
+  l.append(l2)               // what would happen with l.append(l)???
+  println(l.toList)          // List(10, 20, 30, 40, 50, 60)
+  println(l.map(_ + 1).toList) // List(11, 21, 31, 41, 51, 61)</code></pre>
+    <p><code>prepend</code> moves the old content into a fresh node and stores the new pair in <code>this</code>, so the list object keeps its identity. <code>append</code> walks to the last node and links <code>l</code> there, with one case for each shape of the two lists (<code>[]</code>, <code>[H]</code>, <code>[H|T]</code>). Both return <code>this</code>, so calls can be chained fluently. The signatures are those of the immutable version, so in principle mutable and immutable lists could share an interface, but the implementation is trickier. (The deck's <code>toList</code> returns the lesson's own enum list; here it returns Scala's.)</p>
+    <p>The slide asks what <code>l.append(l)</code> would do. The last node of <code>l</code> is linked to <code>l</code> itself, so the list becomes a cycle and every traversal runs forever:</p>
+<pre><code class="language-scala">object SelfAppend extends App:
+  val l: MutableList[Int] = MutableList()
+  l.prepend(20).prepend(10)
+  l.append(l)                // the last node now points back to l itself
+  println(l.tail.get.tail.get.head) // Some(10): after 10, 20 comes 10 again
+  println(try l.toList catch case _: StackOverflowError =&gt; "StackOverflowError")</code></pre>
+    <p>With the immutable list the same call just builds a longer list. The aliasing problem cannot arise, because nothing can be changed through a shared reference.</p>
+
+    <h3>Immutability and performance</h3>
+    <p>Mutable structures are faster when they change often. Well-designed immutable structures still update in logarithmic time by <em>sharing</em> most of the old structure (immutable red-black trees, or <code>Vector</code>). The simplest case is <code>5 :: l</code>, which allocates one node and reuses all of <code>l</code>. Immutable collections are also thread-safe, can be shared freely, and are easy to query with pipelines of operations. Side effects on mutable structures can be tricky, as the cycle above shows.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. How is the collection framework organised?</h2>
+    <p>The standard library's collection framework (reference: the "Collections" chapter of the Scala 3 book) declares six goals: easy, concise, safe, fast, parallel, universal. Its traits live in <code>scala.collection</code> and every abstraction exists in two versions, in <code>scala.collection.immutable</code> and <code>scala.collection.mutable</code>.</p>
+    <ul>
+      <li><code>IterableOnce</code> declares little more than the abstract <code>iterator</code> method. <code>Iterable</code> adds the template methods (<code>map</code>, <code>flatMap</code>, <code>fold</code>, …) on top of it.</li>
+      <li><code>Seq</code> models sequences, roughly Java's lists. A <code>LinearSeq</code> optimises <code>head</code> and <code>tail</code>, an <code>IndexedSeq</code> optimises <code>apply</code> (indexing) and <code>length</code>.</li>
+      <li><code>Set</code> models collections without duplicates, <code>Map</code> key-value pairs, and a view is a lazy <code>Iterable</code> (below).</li>
+    </ul>
+    <figure class="lk-figure">
+      <svg class="pps-fig" viewBox="0 0 640 282" role="img" aria-labelledby="coll-t coll-d">
+        <title id="coll-t">The collection hierarchy</title>
+        <desc id="coll-d">IterableOnce above Iterable; Iterable has View, Seq, Set and Map; Seq splits into LinearSeq and IndexedSeq; Set and Map have sorted variants. Default implementations are listed in each box.</desc>
+        <g stroke="#6E7068" stroke-width="1.3" fill="none">
+          <line x1="320" y1="40" x2="320" y2="62"/>
+          <line x1="320" y1="90" x2="60" y2="112"/><line x1="320" y1="90" x2="187" y2="112"/>
+          <line x1="320" y1="90" x2="435" y2="112"/><line x1="320" y1="90" x2="565" y2="112"/>
+          <line x1="187" y1="152" x2="95" y2="176"/><line x1="187" y1="152" x2="280" y2="176"/>
+          <line x1="435" y1="152" x2="435" y2="176"/><line x1="565" y1="152" x2="565" y2="176"/>
+        </g>
+        <g fill="#FAF7EF" stroke="#1546B8" stroke-width="1.3">
+          <rect x="255" y="12" width="130" height="28"/>
+          <rect x="265" y="62" width="110" height="28"/>
+          <rect x="10" y="112" width="100" height="40"/><rect x="135" y="112" width="104" height="40"/>
+          <rect x="375" y="112" width="120" height="40"/><rect x="505" y="112" width="120" height="40"/>
+          <rect x="10" y="176" width="170" height="40"/><rect x="195" y="176" width="170" height="40"/>
+          <rect x="375" y="176" width="120" height="40"/><rect x="505" y="176" width="120" height="40"/>
+        </g>
+        <g text-anchor="middle" font-size="14" class="mono">
+          <text x="320" y="31">IterableOnce</text><text x="320" y="81">Iterable</text>
+          <text x="60" y="129">View</text><text x="187" y="129">Seq</text><text x="435" y="129">Set</text><text x="565" y="129">Map</text>
+          <text x="95" y="193">LinearSeq</text><text x="280" y="193">IndexedSeq</text><text x="435" y="193">SortedSet</text><text x="565" y="193">SortedMap</text>
+        </g>
+        <g text-anchor="middle" font-size="12.5">
+          <text x="60" y="146">SeqView, …</text>
+          <text x="187" y="146">default: List</text>
+          <text x="435" y="146">HashSet</text>
+          <text x="565" y="146">HashMap</text>
+          <text x="95" y="210">List · LazyList</text>
+          <text x="280" y="210">Vector · <tspan font-style="italic">ArrayBuffer</tspan></text>
+          <text x="435" y="210">TreeSet</text>
+          <text x="565" y="210">TreeMap</text>
+        </g>
+        <g font-size="13">
+          <text x="10" y="242">Sets and maps: the same class names exist in both packages.</text>
+          <text x="10" y="258">Italic: mutable only. Also mutable: ListBuffer (a Buffer; the deck</text>
+          <text x="10" y="274">lists it with LinearSeq) and Array (a Java array, wrapped as ArraySeq).</text>
+        </g>
+      </svg>
+      <figcaption>The main traits and their default implementations. Each trait has an immutable and a mutable version; without imports, the names refer to the immutable ones.</figcaption>
+    </figure>
+
+    <h3>Joining the framework</h3>
+    <p>A class becomes a full collection by extending <code>Iterable</code> and implementing only <code>iterator</code>. The hundred or so template methods (<code>map</code>, <code>filter</code>, <code>sum</code>, <code>toList</code>, …) then come for free:</p>
+<pre><code class="language-scala">object WorkingWithIterable extends App:
+
+  class Fibonacci(n: Int) extends Iterable[Int]:
+    override def iterator: Iterator[Int] = new Iterator[Int]():
+      var counter = 0
+      var prev = (0, 1)
+      override def next(): Int =
+        prev = (prev._2, prev._1 + prev._2)
+        counter = counter + 1
+        prev._1
+      override def hasNext: Boolean = counter &lt;= n
+
+  val fibs = Fibonacci(10)
+  println(fibs.toList)    // List(1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89)
+  println(fibs.map(i =&gt; s"&lt;$i&gt;").take(3)) // List(&lt;1&gt;, &lt;1&gt;, &lt;2&gt;)
+  println(fibs.filter(_ % 2 == 0).sum)    // 44
+  println(fibs)           // Iterable(1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89)</code></pre>
+    <p>Since <code>hasNext</code> tests <code>counter &lt;= n</code>, <code>Fibonacci(10)</code> yields eleven numbers.</p>
+
+    <h3>Aliases and default implementations</h3>
+    <p>Without any import, <code>Iterable</code>, <code>Seq</code>, <code>IndexedSeq</code>, <code>Set</code>, <code>Map</code> and <code>List</code> are aliases for the <strong>immutable</strong> versions. <code>Set</code> means <code>scala.collection.immutable.Set</code>, and so on (aliases are made with the <code>type</code> construct of <a href="PPS-07-Advanced-Scala.html#s1">lesson 7</a>). Mutable collections must be named explicitly. Each trait's companion has a varargs <code>apply</code> that picks a default implementation, visible through <code>getClass</code>:</p>
+<pre><code class="language-scala">object Collections extends App:
+  def print[A](coll: Iterable[A]) = println(s"$coll, ${coll.getClass.getName}")
+
+  print(Seq(10,20,30))                                   // List(10, 20, 30), ...immutable.$colon$colon
+  print(scala.collection.immutable.LinearSeq(10,20,30))  // List(10, 20, 30), ...immutable.$colon$colon
+  print(IndexedSeq(10,20,30))                            // Vector(10, 20, 30), ...immutable.Vector1
+  print(Set(10,20,30,40,50))                             // HashSet(10, 20, 50, 40, 30), ...immutable.HashSet
+  print(scala.collection.immutable.SortedSet(30,10,20))  // TreeSet(10, 20, 30), ...immutable.TreeSet
+  print(Map(10 -&gt; 11, 20 -&gt; 21, 30 -&gt; 31, 40 -&gt; 41))     // Map(...), ...immutable.Map$Map4
+
+  print(Array(10,20,30))                 // ArraySeq(10, 20, 30), ...mutable.ArraySeq$ofInt
+
+  print(scala.collection.mutable.Seq(10,20,30))          // ArrayBuffer(10, 20, 30), ...mutable.ArrayBuffer
+  print(scala.collection.mutable.IndexedSeq(10,20,30))   // ArrayBuffer(10, 20, 30), ...mutable.ArrayBuffer
+  print(scala.collection.mutable.Set(10,20,30))          // HashSet(10, 20, 30), ...mutable.HashSet
+  print(scala.collection.mutable.SortedSet(30,10,20))    // TreeSet(10, 20, 30), ...mutable.TreeSet
+  print(scala.collection.mutable.Map(10 -&gt; 11, 20 -&gt; 21)) // HashMap(10 -&gt; 11, 20 -&gt; 21), ...mutable.HashMap</code></pre>
+    <p>Immutable <code>Seq</code> and <code>LinearSeq</code> give a <code>List</code>; a non-empty list's class is <code>::</code> (<code>$colon$colon</code> on the JVM), the same trick as section 2. <code>IndexedSeq</code> gives a <code>Vector</code>, <code>Set</code> a <code>HashSet</code> and <code>Map</code> a <code>HashMap</code>, except that sets and maps of up to four elements use the special classes <code>Set1</code>…<code>Set4</code> and <code>Map1</code>…<code>Map4</code>. The mutable <code>Seq</code> and <code>IndexedSeq</code> give an <code>ArrayBuffer</code>. An <code>Array</code> used as a collection is wrapped in a <code>mutable.ArraySeq</code>. (The deck's summary slide says <code>WrappedArray</code>, which is the Scala 2.12 name.)</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. How do you use the main collections?</h2>
+    <p>Each block below is one of the deck's examples, run with Scala 3.3.6; the comments show the actual output. Where the deck's comments differ (older library versions print <code>Set(…)</code> where 2.13+ prints <code>HashSet(…)</code>, for instance), the comments here follow the real run.</p>
+
+    <h3>Lists and list buffers</h3>
+<pre><code class="language-scala">object UseLists extends App:
+  // List is an immutable linear sequence, optimising head and tail access
+  val l: List[Int] = List(10,20,30,40,50)  // works without imports
+  println(l.getClass)    // class scala.collection.immutable.$colon$colon
+  println(l.isInstanceOf[scala.collection.immutable.List[?]]) // true
+  println(l.reverse)     // List(50, 40, 30, 20, 10)
+  println(l.zipWithIndex) // List((10,0), (20,1), (30,2), (40,3), (50,4))
+  println(l.splitAt(3))  // (List(10, 20, 30),List(40, 50)): a tuple
+  println(l(2))          // 30
+  println(5 :: l)        // List(5, 10, 20, 30, 40, 50)
+  println(l ::: l)       // List(10, 20, 30, 40, 50, 10, 20, 30, 40, 50)
+  println(l :+ 51)       // List(10, 20, 30, 40, 50, 51)
+  println((l :+ 11).sortWith(_ &lt; _))         // List(10, 11, 20, 30, 40, 50)
+  println(l collect { case i if i &gt; 20 =&gt; i + 1 }) // List(31, 41, 51)
+  println(List.range(0, 10))      // List(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+  println(List.iterate(0, 5)(_ + 3)) // List(0, 3, 6, 9, 12)
+
+  // working with mutable lists: a buffer for lists
+  import scala.collection.mutable.ListBuffer
+  val fruits = ListBuffer[String]()  // mutable buffer to list
+  fruits += "Apple"                  // means: fruits.+=("Apple")
+  fruits += "Banana"
+  fruits += ("Strawberry", "Kiwi")   // deprecated since 2.13: prefer ++= List(...)
+  fruits -= "Apple"
+  println(fruits)                    // ListBuffer(Banana, Strawberry, Kiwi)
+  println(fruits.toList)             // List(Banana, Strawberry, Kiwi)</code></pre>
+    <p><code>:::</code> concatenates and <code>:+</code> appends, both returning new lists. <code>collect</code> takes a partial function and filters and maps in one pass. <code>l(2)</code> works, but on a linear sequence it costs linear time. <code>ListBuffer</code> is the mutable buffer used to build a list incrementally before calling <code>toList</code>. Its <code>+=</code> is a method call (<code>fruits.+=("Apple")</code>).</p>
+
+    <h3>Lazy lists</h3>
+<pre><code class="language-scala">object UseLazyLists extends App:
+  val s: LazyList[Int] = LazyList(10,20,30,40,50)
+  println(s.getClass)  // class scala.collection.immutable.LazyList
+  println(s)           // LazyList(&lt;not computed&gt;)
+  println(s(2))        // 30
+  println(s)           // LazyList(10, 20, 30, &lt;not computed&gt;)
+  val s2 = s.zipWithIndex
+  println(s2)          // LazyList(&lt;not computed&gt;)
+  println(s2(2))       // (30,2)
+  println(s2)          // LazyList((10,0), (20,1), (30,2), &lt;not computed&gt;)
+  println(s.toList)    // List(10, 20, 30, 40, 50)
+  println(s)           // LazyList(10, 20, 30, 40, 50)</code></pre>
+    <p>A <code>LazyList</code> computes elements only when they are needed and memoises them: <code>s(2)</code> forces the first three, and <code>toList</code> forces the rest. Operations such as <code>zipWithIndex</code> build another unevaluated lazy list.</p>
+
+    <h3>Vectors, arrays and array buffers</h3>
+<pre><code class="language-scala">object UseVectorsArrays extends App:
+  // Vector is the default immutable indexed sequence
+  val v: Vector[Int] = Vector(10,20,30,40,50)
+  println(v.getClass)  // class scala.collection.immutable.Vector1
+  println(v.reverse)   // Vector(50, 40, 30, 20, 10): all List operations work
+  println(v(2))        // 30
+
+  // scala.Array is backed by a Java array: mutable, with constant length
+  val a: Array[Int] = Array(10,20,30)
+  println(a)           // [I@&lt;hash&gt;: Java's toString
+  println(a.getClass)  // class [I, namely an int[]
+  println(a.reverse.toList) // List(30, 20, 10): all List operations work
+  a(0) = 99            // in-place update
+  println(a.mkString(",")) // 99,20,30
+
+  import collection.*
+  // ArrayBuffer is the default (fully) mutable indexed sequence
+  val b: mutable.ArrayBuffer[Int] = mutable.ArrayBuffer[Int]()
+  println(b.getClass)  // class scala.collection.mutable.ArrayBuffer
+  b.addAll(List(10,20,30,40))
+  println(b)           // ArrayBuffer(10, 20, 30, 40)
+  println(b.toVector)  // Vector(10, 20, 30, 40): to an immutable sequence</code></pre>
+    <p><code>Vector</code> is the default immutable indexed sequence, with effectively constant-time indexing and updates. <code>Array</code> is a real Java array (<code>class [I</code> is <code>int[]</code>): mutable, fixed length, printed with Java's <code>toString</code>, yet every sequence operation works on it through an implicit wrapper. <code>ArrayBuffer</code> is the default fully mutable indexed sequence.</p>
+
+    <h3>Sets and maps</h3>
+<pre><code class="language-scala">object UseSets extends App:
+  // an immutable set: no sequencing and no duplicates
+  val s: Set[Int] = Set(10,20,30,40,50)
+  println(s.getClass)       // class scala.collection.immutable.HashSet
+  println(s)                // HashSet(10, 20, 50, 40, 30)
+  println(s + 60 + 70)      // HashSet(10, 20, 60, 70, 50, 40, 30)
+  println(s &amp; Set(10,30))   // HashSet(10, 30): intersection
+  println(s.contains(10))   // true
+
+  import collection.*
+  val b: mutable.Set[Int] = mutable.Set(10,20,30)  // a mutable HashSet
+  println(b.getClass)       // class scala.collection.mutable.HashSet
+  b += 40                   // means b.+=(40)
+  b += 40                   // no effect: already there
+  println(b)                // HashSet(40, 10, 20, 30)</code></pre>
+<pre><code class="language-scala">object UseMaps extends App:
+  // an immutable map, i.e., a key-value store
+  val m: Map[Int, String] = Map(10 -&gt; "a", 20 -&gt; "b", 30 -&gt; "c")
+  println(m.getClass)  // class scala.collection.immutable.Map$Map3
+  println(m)           // Map(10 -&gt; a, 20 -&gt; b, 30 -&gt; c)
+  println(m.toVector)  // Vector((10,a), (20,b), (30,c))
+  println(m.values)    // Iterable(a, b, c)
+  println(m.keys)      // Set(10, 20, 30)
+  println(m(10))       // a
+  println(m.get(40))   // None: the safe lookup
+  println(m.map { case (k, v) =&gt; (v, k + ".") }) // Map(a -&gt; 10., b -&gt; 20., c -&gt; 30.)
+                                                 // (Int + String is deprecated: s"$k." is preferred)
+  println(m.map { case (k, v) =&gt; v + v })        // List(aa, bb, cc)
+
+  import collection.*
+  val mm: mutable.Map[Int, String] = mutable.Map[Int, String]()
+  println(mm.getClass) // class scala.collection.mutable.HashMap
+  mm += (10 -&gt; "a")
+  mm += (20 -&gt; "b")
+  mm += (30 -&gt; "c")
+  println(mm)          // HashMap(20 -&gt; b, 10 -&gt; a, 30 -&gt; c)</code></pre>
+    <p>A set has no order and no duplicates, so the printed order is the hash order, and adding 40 twice changes nothing. <code>k -&gt; v</code> is just a pair <code>(k, v)</code>. <code>m(10)</code> throws if the key is missing, while <code>m.get(10)</code> returns an <code>Option</code>. Mapping a map to pairs gives a map again, and mapping it to anything else gives an <code>Iterable</code>.</p>
+
+    <h3>Options</h3>
+<pre><code class="language-scala">object UseOption extends App:
+  val some: Option[Int] = Some(10)
+  val none: Option[Int] = None
+
+  println(some.isDefined)        // true
+  println(some.fold(-1)(_ + 1))  // 11
+  println(none.fold(-1)(_ + 1))  // -1
+  println(some map (_ + 1))      // Some(11)
+  println(none map (_ + 1))      // None
+  println(some filter (_ &gt; 0))   // Some(10)
+  println(Some(-5) filter (_ &gt; 0)) // None
+
+  println(some.flatMap(x =&gt; if x &gt; 0 then Some(1) else None)) // Some(1)
+  println(some.flatMap(x =&gt; Some(1) filter (i =&gt; x &gt; 0)))     // Some(1): better than the above
+  println(none.flatMap(x =&gt; Some(0) filter (i =&gt; x &gt; 0)))     // None
+
+  val some2: Option[Int] = Some(20)
+  println(some flatMap (x =&gt; some2 flatMap (y =&gt; Some(x * y)))) // Some(200)
+  println(for x &lt;- some; y &lt;- some2 yield x * y)               // Some(200): the same, as a for</code></pre>
+    <p><code>Option</code> is "somewhat part" of the framework: a collection of zero or one elements with <code>map</code>, <code>filter</code>, <code>flatMap</code> and <code>fold</code>. The idiom is to chain these calls and leave the empty case to them instead of testing <code>isDefined</code>. The last line shows that the nested <code>flatMap</code> is exactly what a <code>for</code> over options means.</p>
+
+    <h3>Views</h3>
+<pre><code class="language-scala">object Views extends App:
+  val list = collection.mutable.ListBuffer(10, 20, 30, 40)
+  val view = list.view
+
+  println(view)                    // SeqView(&lt;not computed&gt;)
+  println(view.map(_ + 1))         // SeqView(&lt;not computed&gt;)
+  println(view.map(_ + 1).toList)  // List(11, 21, 31, 41)
+
+  list.addOne(50)
+  println(list)                    // ListBuffer(10, 20, 30, 40, 50)
+  println(view.toList)             // List(10, 20, 30, 40, 50): the view sees the change
+  // view.addOne(60)               // does not compile: a view has no mutators</code></pre>
+    <p>A view is another <code>Iterable</code>: a lazy, immutable representation of a collection. Transformations on it are not computed until it is traversed or converted. It has no mutating methods, but it reads the underlying collection live, so it sees changes made to a mutable one. That makes it the right way to expose a private mutable collection read-only (section 7).</p>
+
+    <details>
+      <summary>From the slides: one-slide summaries of the framework and of the guidelines</summary>
+      <p><strong>Architecture.</strong> Traits in <code>scala.collection</code>, implementations in <code>scala.collection.(im)mutable</code>: <code>Iterable</code>, <code>Set</code>/<code>Map</code>/<code>Seq</code> (<code>LinearSeq</code>/<code>IndexedSeq</code>), <code>View</code>. Immutable trait factories: <code>LinearSeq</code> and above give <code>List</code>, <code>IndexedSeq</code> gives <code>Vector</code>, then <code>HashSet</code> and <code>HashMap</code>. The aliases for the top traits and the key immutable traits are all active. Parallel collections are an external library, discussed at the end of the course.</p>
+      <p><strong>Implementations.</strong> Immutable: use the aliases and factories. Mutable: name them explicitly (<code>ListBuffer</code>, <code>ArrayBuffer</code>, <code>HashSet</code>, <code>HashMap</code>). <code>Array</code> gets wrapped into a mutable <code>Seq</code>.</p>
+      <p><strong>Operations.</strong> Basic: <code>add</code>, <code>remove</code>, <code>size</code>, <code>isEmpty</code>, <code>find</code>, <code>sortWith</code>, <code>sum</code>. FP-like: <code>foreach</code>, <code>map</code>, <code>flatMap</code>, <code>filter</code>, <code>reduce</code>, <code>fold</code> (plus <code>Left</code>/<code>Right</code> variants), <code>collect</code>, <code>collectFirst</code>. Adapters: <code>toArray</code>, <code>toList</code>, <code>toSeq</code>, <code>toStream</code> (now <code>to(LazyList)</code>), <code>toIterator</code> (now <code>iterator</code>), <code>to</code>. Operators: <code>++</code>, <code>++:</code>, <code>+:</code>, <code>:+</code>. On immutable collections the "side-effect" operations create new collections.</p>
+      <p><strong>Guidelines: use the proper implementation.</strong> Use immutable collections unless you have severe performance issues: they create new objects on update, but can be shared freely and are easier to work with. Encapsulate mutability, preferring a private immutable <code>var</code> to a private mutable <code>val</code>. Typical choices are <code>Map()</code>, <code>Set()</code>, <code>Seq()</code>, <code>List()</code>, <code>LazyList()</code>, depending on how abstract or concrete you need to be. Local variables and fields need no explicit type.</p>
+      <p><strong>Guidelines: use the proper type in interfaces.</strong> Stick to an abstract concept unless implementation details are strictly needed: <code>Iterable</code>, <code>Set</code>, <code>Seq</code>, <code>Map</code> (occasionally <code>LinearSeq</code>/<code>IndexedSeq</code>). Never expose mutable structures; expose views instead.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. How should a mutable domain concept be organised?</h2>
+    <p>A logger is naturally stateful: it accumulates strings. The deck writes it three ways and asks which is better:</p>
+<pre><code class="language-scala">// a mutable class, using a mutable val
+class Logger:
+  private val strings = collection.mutable.ListBuffer[String]()
+  def log(string: String): Unit = strings.addOne(string)
+  def getLog: Iterable[String] = strings.view // a lazy, immutable wrapper
+
+// a mutable class, using an immutable var
+class Logger2:
+  private var strings = Seq[String]() // a List
+  def log(string: String): Unit = strings = strings :+ string
+  def getLog: Iterable[String] = strings
+
+// an immutable class, using an immutable val
+class Logger3 private (private val strings: List[String]):
+  def this() = this(List[String]())
+  def log(string: String): Logger3 = Logger3(strings :+ string)
+  def getLog: Iterable[String] = strings.view // a lazy, immutable wrapper
+
+object TryLogger extends App: // which one is better??
+  val logger = new Logger()
+  logger.log("str1")
+  logger.log("str2")
+  logger.getLog foreach (println(_))  // str1 str2
+
+  var logger3 = new Logger3()
+  logger3 = logger3.log("str1")
+  logger3 = logger3.log("str2")
+  logger3.getLog foreach (println(_)) // str1 str2</code></pre>
+    <table class="lk-table">
+      <thead><tr><th>Case</th><th>Shape</th><th>Style</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td>1. <code>Logger</code></td><td>mutable class, <code>val</code> holding a mutable structure; changes hit the structure itself</td><td>imperative: what you would do in Java</td><td>only if a precise performance evaluation requires it</td></tr>
+        <tr><td>2. <code>Logger2</code></td><td>mutable class, <code>var</code> holding an immutable structure; changes replace the reference</td><td>mixed imperative/declarative: what Scala code often does</td><td>if the domain concept calls for mutability</td></tr>
+        <tr><td>3. <code>Logger3</code></td><td>immutable class: "changing" methods return a new object</td><td>FP idiom, fully declarative (e.g. with the State monad)</td><td>if the domain concept can accept immutability</td></tr>
+      </tbody>
+    </table>
+    <p>The rule behind the table is <strong>"always put side-effects outwards: the core should be declarative"</strong>. In case 3 the mutation has not disappeared: it moved to the client, which reassigns <code>var logger3</code>. <code>Logger3</code> also shows a private primary constructor with a public auxiliary one, so clients can only start from an empty log. Case 2 beats case 1 for a reason the next run makes concrete. <code>Logger.getLog</code> returns a view of the private buffer, which is read-only but live, while <code>Logger2.getLog</code> returns the immutable sequence itself, a true snapshot:</p>
+<pre><code class="language-scala">object Leak extends App:
+  val logger = new Logger()
+  logger.log("a")
+  val snapshot = logger.getLog     // a view over the private buffer
+  logger.log("b")
+  println(snapshot.toList)         // List(a, b): the "snapshot" changed under our feet
+  val logger2 = new Logger2()
+  logger2.log("a")
+  val snapshot2 = logger2.getLog   // the immutable Seq itself
+  logger2.log("b")
+  println(snapshot2.toList)        // List(a): a true snapshot
+  // snapshot.asInstanceOf[collection.mutable.ListBuffer[String]] would fail:
+  println(snapshot.isInstanceOf[collection.mutable.Buffer[?]]) // false: callers cannot mutate</code></pre>
+    <p>With case 2 the class state is still mutable, but every value that escapes is immutable, so it can be shared, stored and iterated without surprises. Lab 06's second exercise, a small management application ported from a Java exam, applies these guidelines.</p>
+  </section>
+
+  <section id="s8">
+    <h2>8. How do constructs, packages and imports nest?</h2>
+    <p>Scala is scalable because its constructs nest arbitrarily: <code>class</code> (a template for objects), <code>abstract class</code> (a partial template), <code>object</code> (a singleton or module), <code>trait</code> (a mixin or interface) and <code>def</code> (a method). Packages nest too and behave much like objects. Common nestings are:</p>
+    <ul>
+      <li>anything inside an <code>object</code> (for instance one extending <code>App</code>);</li>
+      <li>classes inside classes, like Java inner classes, and the basis of family polymorphism;</li>
+      <li>classes inside objects, like Java static nested classes;</li>
+      <li>methods inside methods, frequent with recursive helpers;</li>
+      <li>anonymous classes inside methods, as local helpers.</li>
+    </ul>
+<pre><code class="language-scala">object Constructs extends App:
+  // nestable constructs
+  class C
+  abstract class D
+  object O
+  trait T
+  def f(): Unit = {}
+
+  val d = new D() {}   // essentially, anonymous classes
+  val t = new T {}     // essentially, anonymous classes
+
+  // nestable constructs with some content (in Scala 2 syntax)
+  class C2 { def a: Int = 1 }
+  abstract class D2 { def b: Int }
+  object O2 { def c: Int = 3 }
+  trait T2 { def d(): Int }   // a function interface
+  def f2(): Unit = print("hello")
+  val d2 = new D2():          // anonymous class, Scala 3 syntax
+    override def b = 2
+  val t2: T2 = () =&gt; 4        // Java-like fill of a functional interface
+
+  println(s"${new C2().a}, ${d2.b}, ${O2.c}, ${t2.d()}") // 1, 2, 3, 4</code></pre>
+    <p><code>new D() {}</code> instantiates an anonymous subclass. A trait with a single abstract method, like <code>T2</code>, can be filled with a lambda, as with Java functional interfaces.</p>
+
+    <h3>Inner classes and local functions</h3>
+<pre><code class="language-scala">object Inner extends App:
+  class C(var v: Int):
+    class D:
+      def g(n: Int): Int =
+        n + C.this.v       // using the outer instance
+
+  val c: C = new C(5)      // enclosing instance
+  println(new c.D().g(4))  // 9
+
+  object O:
+    var v: Int = 10
+    class D:               // a "static" nested class
+      def g(n: Int): Int =
+        n + O.v
+
+  println(new O.D().g(4))  // 14</code></pre>
+    <p>A class nested in a class belongs to an enclosing instance: it is created as <code>new c.D()</code> and reaches the outer fields as <code>C.this.v</code>. A class nested in an object needs no instance, like a Java static nested class. In Scala the type of an inner class depends on its instance: <code>c1.D</code> and <code>c2.D</code> are different types (a <em>path-dependent type</em>), and <code>C#D</code> means "a <code>D</code> of any <code>C</code>":</p>
+<pre><code class="language-scala">object PathDependent extends App:
+  class C(var v: Int):
+    class D:
+      def g(n: Int): Int = n + C.this.v
+  val c1 = new C(1)
+  val c2 = new C(100)
+  val d1: c1.D = new c1.D()
+  // val wrong: c2.D = new c1.D()   // type mismatch: c1.D is not c2.D
+  val any: C#D = d1                 // C#D: a D of any C
+  c1.v = 50
+  println(d1.g(1))                  // 51: d1 reads its own outer instance</code></pre>
+<pre><code class="language-scala">object Anonymous extends App:
+  trait Comparator[A]:
+    def compare(a: A, b: A): Int
+
+  // a function inside a function
+  def min[A](list: List[A], comp: Comparator[A]): Option[A] =
+    @annotation.tailrec
+    def min2(list: List[A], minSoFar: A): A = list match
+      case h :: t if comp.compare(h, minSoFar) &gt; 0 =&gt; min2(t, minSoFar)
+      case h :: t =&gt; min2(t, h)
+      case _ =&gt; minSoFar
+    // if list.isEmpty then None else Some(min2(list.tail, list.head))
+    Some(list) filter (!_.isEmpty) map (l =&gt; min2(l.tail, l.head))
+
+  // instantiating an anonymous class
+  val comp = new Comparator[Int]():
+    override def compare(a: Int, b: Int): Int = a - b
+
+  println(min(List(10, 20, 5, 40), comp))   // Some(5)
+  println(min(List(), comp))                // None
+  println(min(List(10, 20, 5, 40), _ - _))  // Some(5): a lambda fills the functional interface</code></pre>
+    <p><code>min</code> hides its tail-recursive helper inside itself, where it can see <code>comp</code> without passing it along. The final expression turns "empty or not" into an <code>Option</code> without an <code>if</code>. The comparator is an anonymous class, or just a lambda.</p>
+
+    <h3>Packages</h3>
+    <p>Scala packages are fully compatible with Java's, but a source file need not sit in a directory matching its package. One file can open several packages as namespaces (as in C#), and Scala 3 allows top-level <code>val</code>s and <code>def</code>s directly in a package:</p>
+<pre><code class="language-scala">package u06.pack  // the package of all definitions below
+
+val v1 = 1        // a top-level val: when is it initialised?
+
+package a:        // entering a subpackage as a namespace
+  object O1
+  package b:      // entering a further subpackage as a namespace
+    def f2() = 1
+    object O2
+    object A:     // I keep nesting stuff
+      object O3
+      object B:
+        object O4
+        class C:
+          println(s"$O1,$O2,$O3,$O4,$A,$B") // note visibility of everything above
+          println(s"${u06.pack.a.b.A.B.O4}") // full qualification
+        def f(): Unit =
+          println(s"$v1,${f2()},${new C}")
+
+package a:        // re-entering package u06.pack.a
+  object O1B:
+    val v = O1    // using u06.pack.a.O1
+
+object Packages extends App:
+  println(u06.pack.a.b.A.B.O4)   // u06.pack.a.b.A$B$O4$@&lt;hash&gt;
+  println(u06.pack.a.O1B.v)      // u06.pack.a.O1$@&lt;hash&gt;
+  u06.pack.a.b.A.B.f()</code></pre>
+    <p>Code inside <code>C</code> sees <code>O1</code>, <code>O2</code>, <code>A</code>, <code>B</code> and the rest without qualification, because being nested in a package or object means having its definitions in scope. A package can be re-opened later (the second <code>package a:</code>). (The deck's version also calls <code>f()</code> from <code>C</code>'s body and <code>new C</code> from <code>f</code>, a mutual recursion that never terminates if either is used; it is cut here.)</p>
+
+    <h3>Imports</h3>
+<pre><code class="language-scala">package u06.structure
+
+package p1:
+  package p2:
+    object O:
+      val v = 1
+
+object Import extends App:
+  println(u06.structure.p1.p2.O.v) // full qualification
+  println(p1.p2.O.v)               // relative qualification
+
+  import p1.*                      // importing u06.structure.p1
+  println(p2.O.v)
+
+  import p2.*                      // the same as: import u06.structure.p1.p2.*
+  println(O.v)
+
+  import u06.structure.p1.p2.O.*   // "static import" of O's members
+  println(v)
+
+  import u06.structure.p1.p2.{O =&gt; TheObject} // alias (Scala 3 also: O as TheObject)
+  println(TheObject.v)
+
+  import scala.collection.mutable.{Seq =&gt; MutableSeq} // renaming Seq
+  println(s"${Seq(10,20,30)}, ${MutableSeq(10,20,30)}") // List(10, 20, 30), ArrayBuffer(10, 20, 30)</code></pre>
+    <p>Imports can appear anywhere, which keeps them close to their use. They can bring in a whole package, one or more members, or the members of an object or value (a "static import"), and they can rename, which helps when two packages export the same name. <code>scala.*</code>, <code>java.lang.*</code> and <code>scala.Predef.*</code> are always imported; <code>Predef</code> provides <code>println</code>, <code>???</code> and the <code>Map</code> and <code>Set</code> aliases; <code>List</code>, <code>Seq</code>, <code>IndexedSeq</code>, <code>Iterable</code> and the other collection aliases live in the <code>scala</code> package object.</p>
+    <p>At any point of the code, then, the visible identifiers are those of every enclosing package and object, the imports written so far, and the default imports. Imports control which methods, objects, classes and types you can name, and also which <code>given</code> instances and extension methods are available (<a href="PPS-07-Advanced-Scala.html#s8">lesson 7</a>). Access modifiers then restrict this set further.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Who can see what?</h2>
+    <p>Public is the default and not a keyword. A class and its companion object share even their private members. The levels are:</p>
+    <table class="lk-table">
+      <thead><tr><th>Modifier</th><th>Visible to</th><th>Typical use</th></tr></thead>
+      <tbody>
+        <tr><td><code>private</code></td><td>the class (and its companion), as in Java</td><td>implementation-only abstractions</td></tr>
+        <tr><td><code>protected</code></td><td>the class and its subclasses</td><td>inheritance hierarchies</td></tr>
+        <tr><td><code>private[p]</code></td><td>everything inside package (or object) <code>p</code></td><td>the package is the interface/implementation boundary</td></tr>
+        <tr><td><code>protected[p]</code></td><td>subclasses, and everything inside <code>p</code></td><td>as above, plus subclasses elsewhere</td></tr>
+      </tbody>
+    </table>
+<pre><code class="language-scala">package u06.structure
+
+package pa1:
+  package pa2:
+
+    class C:
+      private object pri            // visible only by C's instances (and object C)
+      private[pa2] object pri_pa2   // visible only up to pa2
+      protected object pro          // visible to subclasses
+      protected[pa2] object pro_pa2 // visible to subclasses, or up to pa2
+      def f(c: C) =
+        print(C.g())                // WORKS: can see the companion's private stuff
+
+    object C:
+      print(new C().pri)            // WORKS: can see the class' private stuff
+      private def g() = 1
+
+    class D extends C:
+      //print(pri)                  // ERROR: private is not inherited-visible
+      print(pro)                    // WORKS: subclass
+
+    class E(c: C):
+      //print(c.pri, c.pro)         // ALL ERRORS
+      print(c.pri_pa2, c.pro_pa2)   // WORKS: same package pa2
+  end pa2
+
+  class F extends pa2.C:
+    //print(pri_pa2)                // ERROR: outside pa2
+    print(pro_pa2)                  // WORKS: subclass
+end pa1</code></pre>
+    <p>Each commented line was compiled on its own. <code>c.pri</code> from <code>E</code> fails with "private object pri can only be accessed from class C", and <code>c.pro</code> with "protected object pro can only be accessed from class C … or one of its subclasses". <code>pri_pa2</code> from <code>F</code> fails because <code>F</code> is in <code>pa1</code>, outside <code>pa2</code>. <code>pro_pa2</code> works there because <code>F</code> is a subclass.</p>
+    <p><code>private</code> is less common than in Java, for three reasons. The pattern "private field plus public getter" is unnecessary with uniform access: a public <code>val</code> is already read-only, and it can later become a <code>def</code> without changing clients. Private helpers used by a single public method can be nested inside it. And instead of scattering many private members, you can gather them in one private nested abstraction:</p>
+<pre><code class="language-scala">class C2: // many private helpers, refactored into one private nested object
+  import ImplementationHelpers.*   // to ease the calls
+
+  def f(): Unit =
+    g1()
+    g2()
+
+  private object ImplementationHelpers:
+    def g1(): Unit = println("g1")
+    def g2(): Unit = println("g2")</code></pre>
+    <p>Qualified privacy also gives a clean factory pattern. The implementation's constructor is visible only inside the package, so clients must go through the trait's companion:</p>
+<pre><code class="language-scala">trait Counter:
+  def increment(): Unit
+  def getValue(): Int
+
+object Counter:
+  def apply(): Counter = new CounterImpl
+
+class CounterImpl private[structure] () extends Counter:
+  var count = 0
+  override def increment(): Unit = count += 1
+  override def getValue(): Int = count
+
+object TryCounters extends App:
+  val c = Counter()
+  c.increment()
+  println(c.getValue())  // 1
+  println(c)             // u06.structure.CounterImpl@&lt;hash&gt;</code></pre>
+    <p>From another package, <code>new u06.structure.CounterImpl()</code> is rejected: "private[structure] constructor CounterImpl can only be accessed from package u06.structure". Java's package-private default is not optimal either. In Scala the level of accessibility is a design decision to be taken explicitly for each abstraction, together with what to put in each source file, how to nest it, and what scope the client code should get.</p>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why is <code>::</code> right-associative, and how can one name serve both construction and pattern matching?</summary>
+        <p>Methods whose name ends in <code>:</code> take the right operand as receiver, so <code>a :: b :: Nil()</code> is <code>Nil().::(b).::(a)</code>, a sequence of prepends on the list. In a pattern, <code>h :: t</code> means <code>::(h, t)</code>, so naming the cons case <code>::</code> makes construction and extraction look the same.</p>
+      </details>
+      <details>
+        <summary>What are the three ways to organise a data type, and what does Scala's mixed OO/FP approach look like?</summary>
+        <p>Fully functional (enum plus operations in a module), fully OO (interface plus one class per implementation), or mixed: an enum declaring cases and OO-style methods, each implemented once by pattern matching on <code>this</code>, with factories in the companion object.</p>
+      </details>
+      <details>
+        <summary>Which fold is tail-recursive? Why are <code>map</code> and <code>concat</code> written with the other one?</summary>
+        <p><code>foldLeft</code>: it combines before recursing, so it runs in constant stack. <code>foldRight</code> combines on the way back, so it rebuilds a list in its original order; <code>foldLeft</code> with <code>::</code> would reverse it (hence <code>mapTail</code> = <code>foldLeft</code> + <code>reverse</code>).</p>
+      </details>
+      <details>
+        <summary>What happens with <code>l.append(l)</code> on the mutable list, and on the immutable one?</summary>
+        <p>On the mutable list the last node is linked back to <code>l</code>, creating a cycle, so <code>toList</code> never terminates (it overflows the stack). On the immutable list a new, longer list is built and <code>l</code> is unchanged.</p>
+      </details>
+      <details>
+        <summary>What is the difference between a <code>LinearSeq</code> and an <code>IndexedSeq</code>? Give the default implementation of each.</summary>
+        <p>A <code>LinearSeq</code> optimises <code>head</code>/<code>tail</code> (default <code>List</code>, also <code>LazyList</code>). An <code>IndexedSeq</code> optimises <code>apply</code> and <code>length</code> (default <code>Vector</code>; mutable <code>ArrayBuffer</code>, and <code>Array</code>).</p>
+      </details>
+      <details>
+        <summary>What does <code>Set(1, 2, 3)</code> refer to without imports, and how do you get a mutable set?</summary>
+        <p><code>Set</code> is an alias for <code>scala.collection.immutable.Set</code>, and its factory creates an immutable set. A mutable one must be named explicitly, e.g. <code>collection.mutable.Set(1, 2, 3)</code>, which creates a <code>mutable.HashSet</code>.</p>
+      </details>
+      <details>
+        <summary>What is a view, and why is it used as the return type of a getter?</summary>
+        <p>A lazy, immutable <code>Iterable</code> over another collection: transformations are deferred and it has no mutators. Returning <code>buffer.view</code> exposes a private mutable collection read-only. It is live, though, so it reflects later changes.</p>
+      </details>
+      <details>
+        <summary>Mutable <code>val</code>, immutable <code>var</code>, or immutable class: which should you choose for a domain concept?</summary>
+        <p>A mutable <code>val</code> only after a precise performance evaluation. An immutable <code>var</code> if the concept is inherently mutable: the state changes, but every escaping value is immutable. An immutable class whenever the concept allows it. Always push side effects outwards.</p>
+      </details>
+      <details>
+        <summary>What does <code>private[structure]</code> on a constructor achieve?</summary>
+        <p>Only code inside package <code>structure</code> can call the constructor, so clients must use the factory in the trait's companion object and see only the trait.</p>
+      </details>
+      <details>
+        <summary>Why is <code>private</code> less frequent in Scala than in Java?</summary>
+        <p>Uniform access makes "private field plus public getter" unnecessary, helpers used by one method can be nested inside it, and several private helpers can be grouped into one private nested object.</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Where this lesson comes from</summary>
+    <p>Deck <strong>06-scala-scalability</strong> (54 slides): recap, functional data structures and folding (slides 4–17), the collection framework (18–35), mutability (36–38), nesting, packages, imports and access modifiers (39–54). <strong>06lab</strong>: exercises on the OO/FP list, the management application and collections. Code: <code>code-scala/src/main/scala/u06/</code> (<code>lists</code>, <code>collections</code>, <code>structure</code>). Every example was compiled and run with Scala 3.3.6; the lab solutions are this page's own.</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Lesson navigation">
+      <a href="PPS-05-Scala-OOP.html">&larr; Lesson 5 &mdash; Object-oriented programming in Scala</a>
+      <a href="index.html">Index</a>
+      <a href="PPS-07-Advanced-Scala.html">Lesson 7 &mdash; Advanced Scala: types, mixins, variance, contextual abstractions &rarr;</a>
+    </nav>
+    <p>Sources: deck 06-scala-scalability and lab 06 · course code u06 · Paradigmi di Programmazione e Sviluppo, Prof. Mirko Viroli, University of Bologna, a.y. 2025/2026. Study notes reconstructed from the course material: not an official source.</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/scala.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+</body>
+</html>

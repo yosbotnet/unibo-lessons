@@ -1,0 +1,1137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 4 &mdash; Advanced FP: ADTs, modules, type classes, monads &middot; PPS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Lesson navigation">
+    <a href="PPS-03-Functional-Data-Structures.html">&larr; Lesson 3 &mdash; Functional data structures</a>
+    <a href="index.html">Index</a>
+    <a href="PPS-05-Scala-OOP.html">Lesson 5 &mdash; Object-oriented programming in Scala &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Functional programming in Scala 3 · Lesson 4</div>
+    <h1>Advanced FP: ADTs, modules, type classes, monads</h1>
+    <div class="lk-meta"><span>~35 min of reading</span><span>deck 04-fp-advanced, lab 04</span></div>
+  </header>
+
+  <div class="lk-toc">
+    <h3>In this lesson</h3>
+    <ol>
+      <li><a href="#s1">What does this lesson add to pure FP?</a></li>
+      <li><a href="#s2">How do opaque types build abstract data types?</a></li>
+      <li><a href="#s3">How do module types separate interface from implementation?</a></li>
+      <li><a href="#s4">How do given and using pass context implicitly?</a></li>
+      <li><a href="#s5">What is a type class?</a></li>
+      <li><a href="#s6">What are higher-kinded types, and where does Cats fit?</a></li>
+      <li><a href="#s7">What is a monad?</a></li>
+      <li><a href="#s8">What do Optional, Sequence and IO look like as monads?</a></li>
+      <li><a href="#s9">How does the State monad make a whole application pure?</a></li>
+      <li><a href="#s10">Lab 04</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <p><strong>The lesson in one paragraph.</strong> Five mechanisms let pure FP scale to whole applications. Opaque types hide how a data type is represented, giving abstract data types. Traits used as module types allow many interchangeable implementations of a module. <code>given</code>/<code>using</code> passes such modules implicitly, as context. A generic module type passed this way is a type class, which gives ad-hoc polymorphism through context bounds. Abstracting over type constructors (higher-kinded types) yields the <code>Monad</code> type class: <code>unit</code> plus <code>flatMap</code>, the operations a for-comprehension desugars into. Optional, Sequence, IO and State are all monads, and the State monad is enough to write a small GUI application with no mutable variables in the Scala code.</p>
+
+  <section id="s1">
+    <h2>1. What does this lesson add to pure FP?</h2>
+    <p>The question of the lesson is whether a whole application can be built with pure FP. The answer comes from mechanisms that make FP more applicable while keeping it declarative. Many of them overlap with ideas from OOP, and Scala brought them into mainstream programming. They come in this order:</p>
+    <table>
+      <thead><tr><th>Mechanism</th><th>Scala construct</th><th>What the module is used for</th></tr></thead>
+      <tbody>
+        <tr><td>Abstract data types</td><td>opaque type aliases, type members</td><td>a module that provides a data type and hides its representation</td></tr>
+        <tr><td>Module types (inclusion polymorphism)</td><td><code>trait</code> implemented by <code>object</code>s</td><td>a strategy to pass around: one type, many implementations</td></tr>
+        <tr><td>Contextual abstraction</td><td><code>given</code> / <code>using</code></td><td>a contextual parameter, possibly passed implicitly</td></tr>
+        <tr><td>Type classes (ad-hoc polymorphism)</td><td>context bounds <code>[T: TC]</code></td><td>an <em>a posteriori</em> extension of a type</td></tr>
+        <tr><td>Monads</td><td>for-comprehension, <code>Monad[M[_]]</code></td><td>composing computations in a <code>for</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="s2">
+    <h2>2. How do opaque types build abstract data types?</h2>
+    <p>An <strong>abstract data type</strong> (ADT) is defined by its name, its constructors and its operations, while its concrete implementation stays hidden. It is the FP alternative to encapsulation in OOP. In Scala 3 a module (an <code>object</code>) can define a type as well as methods, and <code>opaque type T = TImpl</code> makes the alias transparent inside the module and opaque outside it. Outside, <code>T</code> is a new type unrelated to <code>TImpl</code>; at run time the two are the same representation, so there is no wrapping cost.</p>
+<pre><code class="language-scala">object EuroADT:
+  opaque type Euro = Int // an alias, into this module, opaque outside
+
+  def fromEuroCents(euros: Int, cents: Int): Euro =
+    require(euros &gt;= 0 &amp;&amp; cents &gt;= 0)
+    cents + euros * 100
+
+  def fromDouble(d: Double): Euro =
+    require(d &gt;= 0 &amp;&amp; d &lt;= 1_000_000)
+    (d * 100).toInt // extension method in libs
+
+  extension (e: Euro)
+    def asString(): String = "$%d.%2d".format(e / 100, e % 100)
+    def sum(e2: Euro): Euro = e + e2
+
+@main def tryEurosADT =
+  import EuroADT.*
+  val e1: Euro = fromEuroCents(100, 50)
+  val e2: Euro = fromDouble(100.0 / 3)
+  println(e1.asString())            // $100.50
+  println(e2.asString())            // $33.33
+  println((e1 sum e2).asString())   // $133.83
+  // val e3: Euro = 100               // error: Found (100 : Int), Required EuroADT.Euro
+  // val e3: Euro = fromEuroCents(-10, 0) // IllegalArgumentException: requirement failed</code></pre>
+    <p>Inside <code>EuroADT</code> a <code>Euro</code> is an <code>Int</code>, so <code>cents + euros * 100</code> is a valid <code>Euro</code> and <code>sum</code> can use integer addition. Outside, the client sees a new type: it can build values with the constructors and manipulate them with the operations, but it has no way to see how the type is implemented. Assigning <code>100</code> to a <code>Euro</code> does not compile, so every value passes through <code>require</code> and the invariant holds by construction.</p>
+    <p>This is the cure for <strong>primitive obsession</strong>: using primitives instead of purpose-built types (strings for concepts, booleans for two-valued types, ints for <em>n</em>-valued types), which the deck classifies as a DIP violation. The designer's job is to hide every implementation detail of the new type.</p>
+    <div class="callout note"><span class="callout-label">Beyond the slides</span><p><code>%2d</code> pads with a space, not a zero: <code>fromEuroCents(1, 5).asString()</code> prints <code>$1. 5</code>. The format should be <code>%02d</code>.</p></div>
+
+    <h3>Sequences and sets as ADTs</h3>
+    <p>Any data type (sequences, streams, optionals) can be defined this way. Here the real data type is a private <code>enum</code> and <code>Sequence</code> is an opaque alias to it, so clients can neither pattern-match on <code>Cons</code>/<code>Nil</code> nor build a sequence except through <code>cons</code> and <code>nil</code>. Operations can be extension methods (<code>map</code>) or plain methods (<code>concat</code>), and a single import brings everything in.</p>
+<pre><code class="language-scala">object SequenceADT:
+  // implementation of data structure: fully hidden
+  private enum SequenceImpl[E]:
+    case Cons(head: E, tail: Sequence[E])
+    case Nil()
+  import SequenceImpl.*
+
+  // the type Sequence is an opaque alias to SequenceImpl
+  opaque type Sequence[A] = SequenceImpl[A]
+
+  // constructors
+  def cons[E](head: E, tail: Sequence[E]): Sequence[E] = Cons(head, tail)
+  def nil[E](): Sequence[E] = Nil[E]()
+
+  // operation as extension methods
+  extension [A](seq: Sequence[A])
+    def map[B](mapper: A =&gt; B): Sequence[B] = seq match
+      case Cons(h, t) =&gt; Cons(mapper(h), t.map(mapper))
+      case Nil()      =&gt; Nil()
+
+  // operations as standard methods
+  def concat[A](seq1: Sequence[A], seq2: Sequence[A]): Sequence[A] = seq1 match
+    case Cons(h, t) =&gt; Cons(h, concat(t, seq2))
+    case Nil()      =&gt; seq2
+
+@main def trySequenceADT =
+  import SequenceADT.* // note single, import
+  val seq = cons(10, cons(20, cons(30, nil())))
+  println(concat(seq, seq.map(_ + 1)))
+  // Cons(10,Cons(20,Cons(30,Cons(11,Cons(21,Cons(31,Nil()))))))</code></pre>
+    <p>A new type can also reuse an existing one transparently. <code>Set</code> below is an opaque alias of the <em>algebraic</em> <code>Sequence</code> of <a href="PPS-03-Functional-Data-Structures.html">lesson 3</a> (the exposed <code>enum</code> with <code>map</code> and <code>filter</code> as extension methods), so inside the module it can match on <code>Cons</code>/<code>Nil</code> and call <code>filter</code>, while outside a <code>Set</code> is not a <code>Sequence</code>.</p>
+<pre><code class="language-scala">import u03.extensionmethods.Sequences.*   // the algebraic Sequence of lesson 3
+import Sequence.*
+
+object SetADT:
+  opaque type Set[A] = Sequence[A]
+
+  def fromSequence[A](s: Sequence[A]): Set[A] = s match
+    case Cons(h, t) =&gt; Cons(h, fromSequence(t.remove(h)))
+    case Nil()      =&gt; Nil()
+
+  def union[A](s1: Set[A], s2: Set[A]): Set[A] = s2 match
+    case Cons(h, t) =&gt; Cons(h, union(s1.remove(h), t))
+    case Nil()      =&gt; s1
+
+  def intersection[A](s1: Set[A], s2: Set[A]): Set[A] = s1 match
+    case Cons(h, t) if s2.contains(h) =&gt; Cons(h, intersection(t, s2.remove(h)))
+    case Cons(_, t) =&gt; intersection(t, s2)
+    case Nil()      =&gt; Nil()
+
+  extension [A](s: Set[A])
+    def contains(a: A): Boolean = s match
+      case Cons(h, t) if h == a =&gt; true
+      case Cons(_, t)           =&gt; t.contains(a)
+      case Nil()                =&gt; false
+    def remove(a: A): Set[A] = s.filter(_ != a)
+    def toSequence(): Sequence[A] = s
+
+@main def trySetADT =
+  import SetADT.*
+  val s1: Set[Int] = fromSequence(Cons(10, Cons(20, Cons(10, Cons(30, Nil())))))
+  val s2: Set[Int] = fromSequence(Cons(10, Cons(11, Nil())))
+  // val s3: Set[Int] = Cons(10, Nil()) // because Set is defined opaque
+  println(s1.toSequence())                   // Cons(10,Cons(20,Cons(30,Nil())))
+  println(s2.toSequence())                   // Cons(10,Cons(11,Nil()))
+  println(union(s1, s2).toSequence())        // Cons(10,Cons(11,Cons(20,Cons(30,Nil()))))
+  println(intersection(s1, s2).toSequence()) // Cons(10,Nil())</code></pre>
+    <p><code>fromSequence</code> removes duplicates by keeping the head and recurring on the tail with every copy of the head removed. <code>union</code> walks <code>s2</code>: it emits <code>10</code>, then <code>11</code>, and when <code>s2</code> is exhausted it appends what is left of <code>s1</code>, that is <code>(20, 30)</code>. The result is therefore <code>(10, 11, 20, 30)</code>. The slide's comment says <code>(10, 20, 30, 11)</code>, which is not what the code prints.</p>
+
+    <h3>ADTs or algebraic data types?</h3>
+    <table>
+      <thead><tr><th>ADTs (opaque, hidden representation)</th><th>Exposed algebraic data types (<code>enum</code>, case classes)</th></tr></thead>
+      <tbody>
+        <tr><td>the more standard software-engineering approach</td><td>closer to the approach of Scala's libraries</td></tr>
+        <tr><td>promote abstraction and modularity</td><td>handier for adding algorithms outside the definition</td></tr>
+        <tr><td>treat operations and constructors uniformly</td><td>—</td></tr>
+        <tr><td>lead naturally to type classes</td><td>lead naturally to the OOP approach</td></tr>
+      </tbody>
+    </table>
+    <p>The price of hiding is that the set of operations is hard to extend outside the module. In the rest of the lesson sequences and streams are the algebraic versions of lesson 3, while the discussion keeps starting from ADTs.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. How do module types separate interface from implementation?</h2>
+    <p>A module can itself be given a type, separating the concept from its implementations: <code>trait ModuleType { &lt;signatures&gt; }</code>, <code>object ModuleImpl extends ModuleType { … }</code>, and functions that take a <code>ModuleType</code> argument. Many implementations can then trade off different aspects, a function can be made more abstract by taking the module as a parameter, and the application decides each time which implementation to pass. This is how OCP (add an implementation without touching the clients) and DIP (depend on the module type, not on an implementation) are obtained in pure FP.</p>
+<pre><code class="language-scala">object LoggerModules:
+  // type for modules exposing definition of a log method (no implementation)
+  trait LoggerModuleType:
+    def log(s: String): Unit
+
+  object BasicLoggerModule extends LoggerModuleType:
+    def log(s: String): Unit = println(s)
+
+  object EmptyLoggerModule extends LoggerModuleType:
+    def log(s: String): Unit = {}
+
+  // method call requiring indication of a LoggerModuleType
+  def loggedCall[A, B](name: String, f: A =&gt; B, a: A)(LoggerModule: LoggerModuleType): B =
+    LoggerModule.log(s"calling function $name with input $a")
+    f(a)
+
+@main def tryLoggers =
+  import LoggerModules.*
+  println(loggedCall("sin", Math.sin(_), 0.5)(BasicLoggerModule))
+  println(loggedCall("sin", Math.sin(_), 0.5)(EmptyLoggerModule))</code></pre>
+<pre><code class="language-plaintext">calling function sin with input 0.5
+0.479425538604203
+0.479425538604203</code></pre>
+
+    <h3>Two implementations of a math module</h3>
+    <p>The same idea applies to algorithms. <code>BasicMathModule</code> is non-tail-recursive and does not check its inputs; <code>ProductionMathModule</code> is tail-recursive and rejects bad inputs with a guarded match, which throws <code>MatchError</code> when the guard fails.</p>
+<pre><code class="language-scala">object MathModules:
+  trait MathModuleType:
+    def factorial(n: Int): Int
+    def exp(base: Double, power: Int): Double
+
+  // non-tail recursive solutions without input checks
+  object BasicMathModule extends MathModuleType:
+    def factorial(n: Int): Int =
+      if n == 0 then 1 else n * factorial(n - 1) // note if-then-else
+    def exp(base: Double, power: Int): Double =
+      if power == 0 then 1 else base * exp(base, power - 1)
+
+  // tail recursive solutions with input checks
+  object ProductionMathModule extends MathModuleType:
+    def factorial(n: Int): Int =
+      @scala.annotation.tailrec
+      def _fact(n: Int, temp: Int): Int =
+        if n == 0 then temp else _fact(n - 1, temp * n)
+      n match
+        case _ if n &gt;= 0 =&gt; _fact(n, 1)
+    def exp(base: Double, power: Int): Double =
+      @scala.annotation.tailrec
+      def _exp(p: Int, temp: Double): Double =
+        if p == 0 then temp else _exp(p - 1, temp * base)
+      power match
+        case _ if base &gt;= 0 =&gt; _exp(power, 1)
+
+@main def tryMathModule =
+  import MathModules.*
+  // probability of x successes over n trials, each with probability p
+  def binomialProbability(mm: MathModuleType)(n: Int, x: Int, p: Double): Double =
+    mm.factorial(n) / mm.factorial(x) / mm.factorial(n-x) *
+    mm.exp(p, x) * mm.exp(1-p, n-x)
+
+  // probability of 6 heads on 10 coin tosses
+  println:
+    binomialProbability(BasicMathModule)(10, 6, 0.5)       // 0.205078125
+  println:
+    binomialProbability(ProductionMathModule)(10, 6, 0.5)  // 0.205078125</code></pre>
+
+    <h3>A module type with a type member</h3>
+    <p>A module type can also declare an abstract <strong>type member</strong>. The trait says that a type <code>Set[A]</code> exists, with its constructors and operations, and each implementation decides what it is. A client depends only on the trait and imports the type and the operations from a value of that trait:</p>
+<pre><code class="language-scala">trait SetADT:
+  type Set[A]
+  def fromSequence[A](s: Sequence[A]): Set[A]
+  def union[A](s1: Set[A], s2: Set[A]): Set[A]
+  def intersection[A](s1: Set[A], s2: Set[A]): Set[A]
+  extension [A](s: Set[A])
+    def contains(a: A): Boolean
+    def remove(a: A): Set[A]
+    def toSequence(): Sequence[A]
+
+object BasicSetADT extends SetADT:
+  opaque type Set[A] = Sequence[A]
+  // ... fromSequence, union, intersection, contains, remove, toSequence as in SetADT above
+
+@main def trySetADTModule =
+  import Sets.*
+  val setADT: SetADT = BasicSetADT
+  import setADT.*          // the type Set and the operations of this implementation
+  val s1: Set[Int] = fromSequence(Cons(10, Cons(20, Cons(10, Cons(30, Nil())))))
+  // val s3: Set[Int] = Cons(10, Nil()) // still rejected: Set is abstract here
+  println(s1.toSequence()) // Cons(10,Cons(20,Cons(30,Nil())))</code></pre>
+  </section>
+
+  <section id="s4">
+    <h2>4. How do given and using pass context implicitly?</h2>
+    <p><strong>Contextual abstraction</strong> is the idea that some inputs of a function are just context. You want to mark them as such, in the definition and at the call, and to have ways of defining and passing them implicitly. It captures extra arguments and strategies easily, and it is the basis of type classes. The constructs:</p>
+    <ul>
+      <li><code>def meth(arg: Type)(using ctx: CtxType) = …</code> declares a contextual parameter. <code>using</code> applies to a whole curried parameter list, typically the last one.</li>
+      <li><code>meth(actualArg)(using actualCtx)</code> passes the context explicitly.</li>
+      <li><code>given givenName: CtxType = actualCtx</code> defines a <strong>canonical term</strong> for that type (the name can be omitted).</li>
+      <li><code>meth(actualArg)</code> then receives the context implicitly.</li>
+    </ul>
+<pre><code class="language-scala">object ContextualParameters:
+  /* A standard max over a sequence, with an additional "configuration"
+   * or "contextual" parameter, specified by using clause. Note the using
+   * clause is not necessary in the recursive call. */
+  def max(seq: Sequence[Int])(using orElse: Int): Int = seq match
+    case Cons(h1, Cons(h2, t)) =&gt; max(Cons(if h1 &gt; h2 then h1 else h2, t))
+    case Cons(h1, Nil())       =&gt; h1
+    case _                     =&gt; orElse
+
+  given standardDefault: Int = -1 // if using an Int is needed, suggest to take this!
+
+@main def tryContextualParameters() =
+  import ContextualParameters.*
+  println:
+    max(Cons(10, Cons(30, Cons(20, Nil()))))(using -1)   // 30
+  println:
+    max(Nil())(using -1)                                 // -1
+  import ContextualParameters.given // or ContextualParameters.standardDefault
+  println:
+    max(Cons(10, Cons(30, Cons(20, Nil()))))             // 30, no using clause needed</code></pre>
+    <h3>Worked example: resolving <code>max(Nil())</code></h3>
+    <p>The call supplies only the first parameter list. Because the second is a <code>using</code> list, the compiler does not report a missing argument: it searches the scope for a <code>given</code> of type <code>Int</code>. Before <code>import ContextualParameters.given</code> there is none, and compilation fails with a message that is worth knowing: <em>No given instance of type Int was found for parameter orElse of method max … given instance standardDefault in object ContextualParameters was not considered because it was not imported with <code>import given</code></em>. A wildcard <code>import X.*</code> does not bring givens in. After the import, <code>standardDefault</code> is the only candidate, and the call becomes <code>max(Nil())(using standardDefault)</code>. Inside the body, the recursive call needs no <code>using</code>: the parameter <code>orElse</code> is itself a given there, so it is found first and passed along. A <code>using</code> parameter is a hole, a <code>given</code> is a value the compiler may put in it, and resolution is a search by type.</p>
+    <p>Plain contextual values like this <code>Int</code> are uncommon. The typical contexts are strategies and modules:</p>
+<pre><code class="language-scala">object ContextualStrategies:
+  def max(seq: Sequence[Int])(using ordering: (Int, Int) =&gt; Boolean): Int = seq match
+    case Cons(h1, Cons(h2, t)) =&gt; max(Cons(if ordering(h1, h2) then h1 else h2, t))
+    case Cons(h1, Nil()) =&gt; h1
+
+  @main def tryContextualStrategies() =
+    println:
+      max(Cons(10, Cons(30, Cons(20, Nil()))))(using _ &gt; _)   // 30
+    println:
+      max(Cons(10, Cons(30, Cons(20, Nil()))))(using _ &lt; _)   // 10
+    // the given defined here needs not be imported;
+    // its name would not be helpful, so it is omitted
+    given ((Int, Int) =&gt; Boolean) = _ &gt; _
+    println:
+      max(Cons(10, Cons(30, Cons(20, Nil()))))                // 30
+
+object ContextualModules:
+  trait IntOrderingModuleType:
+    def greater(t1: Int, t2: Int): Boolean
+
+  def max(seq: Sequence[Int])(using ordering: IntOrderingModuleType): Int = seq match
+    case Cons(h1, Cons(h2, t)) =&gt; max(Cons(if ordering.greater(h1, h2) then h1 else h2, t))
+    case Cons(h1, Nil()) =&gt; h1
+
+  // defining a module implementing the contract
+  object MyIntOrderingModule extends IntOrderingModuleType:
+    def greater(t1: Int, t2: Int): Boolean = t1 &gt; t2
+
+  // defining a canonical term taking an existing module
+  given iom: IntOrderingModuleType = MyIntOrderingModule
+
+@main def tryContextualModules =
+  import ContextualModules.*
+  import ContextualModules.given   // or a specific one: import ContextualModules.iom
+  println:
+    max(Cons(10, Cons(30, Cons(20, Nil()))))   // 30
+  val ord = summon[IntOrderingModuleType]      // gives ContextualModules.iom</code></pre>
+    <p><code>summon[T]</code> returns the given of type <code>T</code> in scope. With a module type as context, a given becomes an <strong>injected dependency</strong>, resolved at compile time without reflection or a container:</p>
+<pre><code class="language-scala">@main def tryContextualMathModule =
+  import MathModules.*
+  def binomialProbability(n: Int, x: Int, p: Double)(using mm: MathModuleType): Double =
+    mm.factorial(n) / mm.factorial(x) / mm.factorial(n-x) *
+    mm.exp(p, x) * mm.exp(1-p, n-x)
+
+  // injecting the dependency by a given!!
+  given MathModuleType = ProductionMathModule
+
+  println:
+    binomialProbability(10, 6, 0.5)   // 0.205078125</code></pre>
+    <div class="callout note"><span class="callout-label">Beyond the slides</span><p>The slide comments that in <code>tryContextualModules</code> "importing just * would not work". It does work, and even no import at all works: <code>IntOrderingModuleType</code> is a member of <code>object ContextualModules</code>, and the givens of the objects a type belongs to (its companion and its prefix objects) are in that type's <em>implicit scope</em>, which is searched after the lexical scope. The import is really needed for <code>Int</code> in <code>ContextualParameters</code>, because <code>Int</code>'s implicit scope does not include that object. Putting a type class's standard instances in its companion object, so that no import is needed, relies on this rule.</p></div>
+  </section>
+
+  <section id="s5">
+    <h2>5. What is a type class?</h2>
+    <p>A module type can be generic. Used as a context, a generic module type <code>TC[T]</code> acts as a <strong>context bound</strong>: a constraint on the type variable saying that an instantiation is admissible only if a <code>TC[T]</code> is available in scope. <code>TC</code> can then be read as an <em>a posteriori</em> extension of <code>T</code>, a <strong>type class</strong>, and the given in scope is its <strong>witness</strong>. This is a programmable form of <strong>ad-hoc polymorphism</strong>: each type gets its own implementation, chosen by which given is in scope rather than by inheritance. It encourages concise data types that are extended later, where and if needed. The constructs are <code>trait TC[T] { … }</code>, <code>def meth[T: TC](arg: T) = …</code> (sugar for a <code>using TC[T]</code> clause) and <code>summon[TC[T]]</code> to recover the witness.</p>
+<pre><code class="language-scala">// Ordered as a generic module type, namely, a so called "type class"
+trait Ordered[T]:
+  def greater(t1: T, t2: T): Boolean
+
+// using-oriented style of definition
+def maxWithUsing[T](seq: Sequence[T])(using ordered: Ordered[T]): T = max(seq)
+
+// equivalent definition with context bound, recalling "ad-hoc polymorphism":
+// it can be called on T only if an Ordered[T] is available in scope
+def max[T: Ordered](seq: Sequence[T]): T = seq match
+  case Cons(h1, Cons(h2, t)) =&gt; max(Cons(if summon[Ordered[T]].greater(h1, h2) then h1 else h2, t))
+  case Cons(h1, Nil()) =&gt; h1
+
+// defining an Ordered "extension" for type Int
+given Ordered[Int] with
+  def greater(t1: Int, t2: Int): Boolean = t1 &gt; t2
+
+// doing the same for String, in a different style
+object MyOrderedString extends Ordered[String]:
+  def greater(t1: String, t2: String): Boolean = t1 &gt; t2
+given Ordered[String] = MyOrderedString
+
+@main def tryContextBound =
+  println:
+    max(Cons(10, Cons(30, Cons(20, Nil()))))       // 30
+  println:
+    max(Cons("a", Cons("c", Cons("d", Nil()))))    // d
+  // println(max(Cons(1.0, Cons(3.0, Cons(5.0, Nil())))))
+  // error: No given instance of type Ordered[Double] was found
+  //        for a context parameter of method max</code></pre>
+
+    <h3>Showable: adding a method to existing types</h3>
+    <p>Combining a type class with an extension method whose type parameter has a context bound makes it look as if <code>Int</code> and <code>String</code> had been given a new method. The type class and its algorithms live in one object; the instances live in another, imported with <code>{*, given}</code>.</p>
+<pre><code class="language-scala">import u03.extensionmethods.Sequences.*, Sequence.*
+
+object Showables:
+  trait Showable[T]:          // the type class
+    def show(t: T): String
+
+  object Showable:            // algorithms/operations on showables
+    extension [A: Showable](a: A)
+      def show(): String = summon[Showable[A]].show(a)
+
+    def showPair[A: Showable, B: Showable](t: (A, B)): String = t match
+      case (a, b) =&gt; "(" + a.show() + ", " + b.show() + ")"
+
+    def showSequence[A: Showable](seq: Sequence[A]): String = seq match
+      case Sequence.Cons(h, t) =&gt; "|" + h + showSequence(t)
+      case Sequence.Nil() =&gt; ":"
+
+object ShowableGivenInstances:
+  import Showables.*, Showable.*
+  // canonical terms for Int, String, Student
+  given Showable[Int] with
+    def show(i: Int): String = "" + i
+  given Showable[String] with
+    def show(s: String): String = s
+  case class Student(name: String, id: Int)
+  given Showable[Student] with
+    def show(s: Student): String = s match
+      case Student(n, i) =&gt; "stud(" + n.show() + ", " + i.show() + ")"
+
+@main def tryShowable =
+  import Showables.*, Showable.*
+  import ShowableGivenInstances.{*, given}
+  // it seems like we have actually dynamically extended Int, String...
+  println(10.show())                                   // 10
+  println("hello!".show())                             // hello!
+  println(Student("mario", 201).show())                // stud(mario, 201)
+  println(showPair((Student("mario", 201), 3)))        // (stud(mario, 201), 3)
+  println(showSequence(Cons(1, Cons(2, Nil()))))       // |1|2:</code></pre>
+    <p>The <code>Student</code> instance calls <code>n.show()</code> and <code>i.show()</code>, which resolve to the <code>String</code> and <code>Int</code> instances: instances compose. <code>showSequence</code> concatenates <code>h</code> directly, so it uses <code>toString</code> and never needs its context bound; <code>h.show()</code> was presumably meant.</p>
+    <details>
+      <summary>From the course code: a <code>Combine</code> type class with an operator</summary>
+      <p><code>u04/typeclasses/TypeClasses.scala</code> shows a type class with two instances for the same type, passed explicitly or by a local given, and an operator defined as an extension inside the trait.</p>
+<pre><code class="language-scala">object TypeClasses:
+  trait Combine[T]:
+    def combine(t1: T)(t2: T): T
+    extension (t1: T) def &lt;&gt;(t2: T): T = combine(t1)(t2)
+
+  object SumInt extends Combine[Int]:
+    def combine(t1: Int)(t2: Int): Int = t1 + t2
+  object ProdInt extends Combine[Int]:
+    def combine(t1: Int)(t2: Int): Int = t1 * t2
+  object ConcatStrings extends Combine[String]:
+    def combine(t1: String)(t2: String): String = t1 + t2
+
+  def combine3[T](using cmb: Combine[T])(t1: T, t2: T, t3: T): T = t1 &lt;&gt; t2 &lt;&gt; t3
+  def combine4[T: Combine](t1: T, t2: T, t3: T): T = t1 &lt;&gt; t2 &lt;&gt; t3
+
+  @main def ex1 =
+    println(combine3(using SumInt)(1, 10, 100))    // 111
+    println(combine3(using ProdInt)(1, 10, 100))   // 1000
+    given Combine[Int] = ProdInt
+    println(1 &lt;&gt; 2)                                // 2
+    println(combine3(1, 10, 100))                  // 1000</code></pre>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. What are higher-kinded types, and where does Cats fit?</h2>
+    <p>Genericity can itself be generalised. Types have <strong>kinds</strong>: a 0-kinded type is an ordinary type (<code>Int</code>, <code>Euro</code>); a 1-kinded type is generic over a 0-kinded one (<code>Showable[T]</code>, <code>Sequence[A]</code>), and is also called a <em>type constructor</em>; a 2-kinded type is generic over a 1-kinded one, written <code>T[_]</code>.</p>
+<pre><code class="language-scala">// 0-kinded types, that is, standard types
+trait FactorialModuleType:
+  def factorial(n: Int): Int
+object BasicFactorialModule extends FactorialModuleType:
+  def factorial(n: Int): Int = if n == 0 then 1 else n * factorial(n-1)
+val f = BasicFactorialModule.factorial(5)          // 120
+
+// 1-kinded types, that is, types generic over a 0-kinded type
+trait Showable[T]:
+  def show(t: T): String
+object ShowableInt extends Showable[Int]:
+  def show(i: Int): String = "" + i
+val s = ShowableInt.show(5)                        // "5"
+
+// 2-kinded types, that is, types generic over a 1-kinded type
+trait Filterable[T[_]]:
+  def filter[A](t: T[A])(f: A =&gt; Boolean): T[A]
+
+import u03.extensionmethods.Optionals.*, Optional.*   // Just(a) | None()
+object FilterableOptional extends Filterable[Optional]:
+  def filter[A](t: Optional[A])(f: A =&gt; Boolean): Optional[A] = t match
+    case Just(a) if f(a) =&gt; Just(a)
+    case _ =&gt; None()
+
+val opt = FilterableOptional.filter(Just(11))(_ &gt; 10)   // Just(11)</code></pre>
+    <p><code>Filterable</code> is written once for every container: an instance fixes <code>T</code> to <code>Optional</code>, <code>Sequence</code>, and so on. The <code>Monad</code> type class of the next section has the same shape, <code>Monad[M[_]]</code>. The course code also has a variant of these three modules with extension methods, so that one writes <code>5.factorial()</code>, <code>5.show()</code> and <code>Just(11).filter(_ &gt; 10)</code>.</p>
+    <p>The <strong>Cats</strong> library organises FP abstractions as a hierarchy of such type classes. The deck shows the full Cats infographic; the part that matters here is below.</p>
+    <figure class="lk-figure">
+      <svg viewBox="0 0 640 250" width="100%" role="img" aria-label="Part of the Cats type class hierarchy: Order extends PartialOrder extends Eq; Monoid extends Semigroup; Apply extends Functor, Applicative and FlatMap extend Apply, Monad extends both Applicative and FlatMap" style="max-width:640px;height:auto;font-family:var(--lk-mono);font-size:14px">
+        <defs><marker id="cats-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9" fill="none" stroke="var(--lk-ink-soft)" stroke-width="1.2"/></marker></defs>
+        <g fill="none" stroke="var(--lk-ink-soft)" stroke-width="1.2" marker-end="url(#cats-arr)">
+          <path d="M80,72 L80,54"/><path d="M80,128 L80,110"/>
+          <path d="M230,72 L230,54"/>
+          <path d="M470,72 L470,54"/>
+          <path d="M410,128 L450,110"/><path d="M530,128 L490,110"/>
+          <path d="M450,184 L415,166"/><path d="M490,184 L525,166"/>
+        </g>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4">
+          <rect x="20" y="16" width="120" height="36" rx="6"/>
+          <rect x="20" y="72" width="120" height="36" rx="6"/>
+          <rect x="20" y="128" width="120" height="36" rx="6" stroke-width="2.4"/>
+          <rect x="170" y="16" width="120" height="36" rx="6"/>
+          <rect x="170" y="72" width="120" height="36" rx="6" stroke-width="2.4"/>
+          <rect x="410" y="16" width="120" height="36" rx="6"/>
+          <rect x="410" y="72" width="120" height="36" rx="6"/>
+          <rect x="345" y="128" width="120" height="36" rx="6"/>
+          <rect x="475" y="128" width="120" height="36" rx="6"/>
+          <rect x="410" y="184" width="120" height="36" rx="6" stroke-width="2.4"/>
+        </g>
+        <g fill="var(--lk-ink)" text-anchor="middle">
+          <text x="80" y="32" font-weight="600">Eq</text><text x="80" y="46" font-size="12.5">===, =!=</text>
+          <text x="80" y="88" font-weight="600">PartialOrder</text><text x="80" y="102" font-size="12.5">&lt;=, &gt;=</text>
+          <text x="80" y="144" font-weight="600">Order</text><text x="80" y="158" font-size="12.5">≈ our Ordered</text>
+          <text x="230" y="32" font-weight="600">Semigroup</text><text x="230" y="46" font-size="12.5">combine, |+|</text>
+          <text x="230" y="88" font-weight="600">Monoid</text><text x="230" y="102" font-size="12.5">empty ≈ Summable</text>
+          <text x="470" y="32" font-weight="600">Functor</text><text x="470" y="46" font-size="12.5">map</text>
+          <text x="470" y="88" font-weight="600">Apply</text><text x="470" y="102" font-size="12.5">ap, map2</text>
+          <text x="405" y="144" font-weight="600">Applicative</text><text x="405" y="158" font-size="12.5">pure = our unit</text>
+          <text x="535" y="144" font-weight="600">FlatMap</text><text x="535" y="158" font-size="12.5">flatMap</text>
+          <text x="470" y="200" font-weight="600">Monad</text><text x="470" y="214" font-size="11.5">≈ our Monad[M[_]]</text>
+        </g>
+        <g fill="var(--lk-ink-soft)" font-size="12.5" font-family="var(--lk-font)">
+          <text x="20" y="242">kernel: equality and order</text>
+          <text x="170" y="200">kernel: algebra</text>
+          <text x="600" y="242" text-anchor="end">core: from functors to monads · arrow = extends</text>
+        </g>
+      </svg>
+      <figcaption>A slice of the Cats hierarchy (from the cats-infographic in the deck). Thick borders mark the classes that correspond to this lesson's <code>Ordered</code>, the lab's <code>Summable</code> and the course's <code>Monad</code>. The full chart also has <code>Foldable</code>/<code>Traverse</code>, <code>Show</code>, <code>Alternative</code>, arrows, and the effect classes of cats-effect (<code>Sync</code>, <code>Async</code>, <code>Concurrent</code>).</figcaption>
+    </figure>
+    <details>
+      <summary>Beyond the slides: the same ideas with Cats</summary>
+<pre><code class="language-scala">//&gt; using dep org.typelevel::cats-core:2.12.0
+import cats.{Monad, Monoid, Show}
+import cats.syntax.all.*
+
+case class Student(name: String, id: Int)
+given Show[Student] = Show.show(s =&gt; s"stud(${s.name}, ${s.id})")
+
+@main def tryCats =
+  println(Monoid[Int].combineAll(List(10, 20, 30)))              // 60
+  println(Student("mario", 201).show)                            // stud(mario, 201)
+  println(Monad[Option].pure(10))                                // Some(10)
+  println((Option(1), Option(2)).mapN(_ + _))                    // Some(3)
+  println(Monad[List].flatMap(List(10, 20))(x =&gt; List(x, x + 1)))  // List(10, 11, 20, 21)</code></pre>
+      <p><code>Monoid[Int]</code> and <code>Monad[Option]</code> are <code>summon</code> in disguise: each type class companion has an <code>apply</code> that returns the given in scope. <code>mapN</code> is the <code>map2</code> of section 7.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. What is a monad?</h2>
+    <p>A for-comprehension in Scala is syntax for <code>flatMap</code> and <code>map</code> calls, and it works on any type that has them. The standard <code>Option</code> and <code>List</code> show it:</p>
+<pre><code class="language-scala">def getRandom(): Option[Double] =
+  if Math.random() &lt; 0.9 then Some(Math.random) else None
+
+val sum: Option[Double] =
+  for
+    x &lt;- getRandom()
+    y &lt;- getRandom()
+    z &lt;- getRandom()
+  yield x+y+z
+println(sum) // Some(x+y+z) or None, probabilistically; one run: Some(2.0485792428914555)
+
+val list: List[String] =
+  for
+    x &lt;- List(10,20,30)
+    y &lt;- List("A","B","C")
+  yield x+y
+println(list) // List(10A, 10B, 10C, 20A, 20B, 20C, 30A, 30B, 30C)
+
+// equivalent to
+val list2: List[String] =
+  List(10,20,30).flatMap(x =&gt;
+    List("A","B","C").map(y =&gt;
+      x+y))
+println(list2) // List(10A, 10B, 10C, 20A, 20B, 20C, 30A, 30B, 30C)</code></pre>
+    <p>The rule that the monad discussion needs: every generator but the last becomes a <code>flatMap</code>, the last becomes a <code>map</code>, and <code>yield</code> gives the body of that <code>map</code>. (The full desugaring, with guards and <code>withFilter</code>, value definitions and <code>for</code> without <code>yield</code>, is in <a href="PPS-07-Advanced-Scala.html#s10">Lesson 7, section 10</a>.) For <code>list2</code>, the outer <code>flatMap</code> calls its function once per element: <code>x = 10</code> gives <code>List("10A","10B","10C")</code>, and so on, and <code>flatMap</code> concatenates the three lists. With <code>map</code> in place of the outer <code>flatMap</code> the result would be a list of three lists. For <code>Option</code> the same rule means: if a <code>getRandom()</code> is <code>None</code>, <code>flatMap</code> returns <code>None</code> without running the rest.</p>
+
+    <h3>unit and flatMap</h3>
+    <p>A <strong>monad</strong> is a computational "package" for elements of a type <code>A</code>, with two operators:</p>
+    <ul>
+      <li><code>unit</code>, which creates the package around a value of type <code>A</code>;</li>
+      <li><code>bind</code>, also called <code>flatMap</code>, which takes a package of <code>A</code> and a function from <code>A</code> to a package of <code>B</code>, takes the values out of the input package, applies the function to them and returns a single package of <code>B</code>.</li>
+    </ul>
+    <p>It is a functional, programmable way of composing packages. <code>for x &lt;- m; …</code> becomes <code>m.flatMap(x =&gt; …)</code>, so by writing <code>flatMap</code> we program our own meaning of "<code>;</code>" in comprehensions over <code>m</code>'s type: what to extract from the monad and how to pass it to the next stages. <code>map</code> is derived: <code>flatMap</code> followed by <code>unit</code>.</p>
+<pre><code class="language-scala">// F[_] is called a "type constructor", or 1-kinded type
+// Monad is generic in a type constructor named F
+trait Monad[F[_]]:
+  // two constructs for monads, namely, its true "definition"
+  def unit[A](a: =&gt; A): F[A]
+  def flatMap[A, B](ma: F[A])(f: A =&gt; F[B]): F[B]
+
+  // monadic laws that must hold:
+  // Left identity: flatMap(unit(a),f) === f(a)
+  // Right identity: flatMap(m,unit(_)) === m
+  // Associativity: flatMap(flatMap(m,f),g) ===
+  //                flatMap(m,x=&gt;flatMap(f(x),g))
+
+  // map as a key derived operation
+  def map[A, B](ma: F[A])(f: A =&gt; B): F[B] =
+    flatMap(ma)(a =&gt; unit(f(a)))</code></pre>
+    <table>
+      <thead><tr><th>Law</th><th>Equation</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>Left identity</td><td><code>flatMap(unit(a), f) === f(a)</code></td><td><code>unit</code> adds no effect: wrapping and then binding is just applying <code>f</code></td></tr>
+        <tr><td>Right identity</td><td><code>flatMap(m, unit) === m</code></td><td><code>unit</code> removes no effect</td></tr>
+        <tr><td>Associativity</td><td><code>flatMap(flatMap(m, f), g) === flatMap(m, x =&gt; flatMap(f(x), g))</code></td><td>how nested steps are grouped does not matter, so a comprehension can be split or inlined safely</td></tr>
+      </tbody>
+    </table>
+    <p>The laws are what make <code>unit</code> a neutral element and <code>flatMap</code> a composition, so that monadic code can be reasoned about equationally. For a concrete monad they can be checked case by case; for the <code>Optional</code> monad of section 8, with <code>f = x =&gt; if x &gt; 0 then Just(x*10) else Empty()</code> and <code>g = y =&gt; Just("v"+y)</code>, all three hold for <code>Just(3)</code>, <code>Just(-3)</code> and <code>Empty()</code>.</p>
+
+    <h3>The Monad type class used in the course</h3>
+    <p>There are two ways to support for-comprehensions for a data type: just implement <code>flatMap</code>/<code>map</code> as extension methods, or use the type class approach and get further operations for free. The course's <code>Monad</code> declares <code>flatMap</code> as an extension, so that <code>m.flatMap(…)</code> and <code>for</code> work directly, and adds general-purpose operations in its companion:</p>
+<pre><code class="language-scala">object Monads:
+  trait Monad[M[_]]:
+    def unit[A](a: A): M[A]
+    extension [A](m: M[A])
+      def flatMap[B](f: A =&gt; M[B]): M[B]
+      def map[B](f: A =&gt; B): M[B] = m.flatMap(a =&gt; unit(f(a)))
+
+  object Monad:
+    // additional general-purpose operations on monads
+    def map2[M[_]: Monad, A, B, C](m: M[A], m2: =&gt; M[B])(f: (A, B) =&gt; C): M[C] =
+      m.flatMap(a =&gt; m2.map(b =&gt; f(a, b)))
+
+    def seq[M[_]: Monad, A, B](m: M[A], m2: =&gt; M[B]): M[B] =
+      map2(m, m2)((a, b) =&gt; b)
+
+    def seqN[M[_]: Monad, A](stream: Stream[M[A]]): M[A] =
+      stream match
+        case Cons(h, t) =&gt; (h(), t()) match
+          case (m, Empty()) =&gt; m
+          case (m, s) =&gt; seq(m, seqN(s))
+    // ... many others exist</code></pre>
+    <p><code>map2</code> combines two monadic values, <code>seq</code> runs two in order and keeps the second result, <code>seqN</code> runs a whole lazy <code>Stream</code> of them in order (it is not defined on an empty stream). All three work for any <code>M</code> with a <code>Monad[M]</code> in scope.</p>
+    <details>
+      <summary>From the slides: what people say about monads, and their history</summary>
+      <p>"Everybody talks about monads (sources intentionally neglected)": it is the one-for-all recipe; it is the single design pattern for FP; it is a way of programming the semicolon in for-comprehensions; it is a variable-binding mechanism; it can bring logic features into FP; it is a tool for packing imperative aspects as pure FP.</p>
+      <p>History: in category theory a monad is an endofunctor <code>T</code> with two natural transformations, a unit <code>η: I → T</code> and a multiplication <code>μ: T ∘ T → T</code> (the deck draws the arrows the other way round), and the monadic laws. Eugenio Moggi (University of Genoa) described their use in programming in 1991. Haskell introduced them to handle I/O under lazy evaluation. They have been used in FP for sequences, optionals, streams, stateful evaluation, futures, I/O and parsers. Scala collections are monadic, which is what for-comprehensions rely on, and libraries such as scalaz and Cats support monads fully. The deck also shows the "monads in pictures" drawings from adit.io: a value in a box, and <code>flatMap</code> as unboxing, applying a function that returns a new box.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. What do Optional, Sequence and IO look like as monads?</h2>
+    <p>Making a data type a monad means giving a <code>Monad</code> instance: <code>unit</code> says how to box a value, <code>flatMap</code> says what "and then" means for that type.</p>
+    <h3>Optional: stop at the first empty result</h3>
+<pre><code class="language-scala">import Monads.*, Monad.*
+
+object Optionals:
+  enum Optional[A]:
+    case Just(a: A)
+    case Empty()
+
+  object Optional:   // minimal set of algorithms
+    extension [A](m: Optional[A])
+      def filter(p: A =&gt; Boolean): Optional[A] = m match
+        case Just(a) if (p(a)) =&gt; m
+        case _                 =&gt; Empty()
+
+  // extending Optional to be a Monad!
+  given Monad[Optional] with
+    import Optional.{Just, Empty}
+    // unit: just boxing the value
+    def unit[A](a: A): Optional[A] = Just(a)
+    // flatMap: opens the box if possible, gives the new box
+    extension [A](m: Optional[A])
+      def flatMap[B](f: A =&gt; Optional[B]): Optional[B] =
+        m match
+          case Just(a) =&gt; f(a)
+          case Empty() =&gt; Empty()
+
+@main def tryOptionals =
+  import Optionals.{*, given} // importing also given terms
+  import Optional.*           // importing Optional algorithms
+
+  def optionalRandom(): Optional[Double] =
+    Just(java.lang.Math.random()).filter(_ &lt; 0.9)
+
+  // for comprehension: &lt;- just unboxes the Optional if possible
+  val m: Optional[Double] = for
+    x &lt;- optionalRandom()
+    y &lt;- optionalRandom()
+    z &lt;- optionalRandom()
+  yield x + y + z
+  println(m)                  // one run: Just(1.7172390656077152)
+
+  // equivalent formulation by flatMap/map
+  val m2: Optional[Double] =
+    optionalRandom().flatMap(x =&gt;
+      optionalRandom().flatMap(y =&gt;
+        optionalRandom().map(z =&gt;
+          x + y + z)))
+  println(m2)                 // one run: Just(1.3992065720142168)
+
+  // use of some monadic operator
+  println:
+    map2(Just("rand: "), optionalRandom())(_ + _) // Just(rand: 0.587...) or Empty()</code></pre>
+
+    <h3>Sequence: every combination</h3>
+    <p>For <code>Sequence</code>, <code>&lt;-</code> iterates over all the elements, and each one produces a new sequence; <code>flatMap</code> appends them. Nested generators give all combinations, with the outer generator varying slowest.</p>
+<pre><code class="language-scala">object Sequences:
+  enum Sequence[A]:
+    case Cons(h: A, t: Sequence[A])
+    case Nil()
+
+  object Sequence:
+    extension [A](s1: Sequence[A])
+      def append(s2: Sequence[A]): Sequence[A] = s1 match
+        case Cons(h, t) =&gt; Cons(h, t.append(s2))
+        case Nil()      =&gt; s2
+
+  given Monad[Sequence] with
+    import Sequence.*
+    def unit[A](a: A) = Cons(a, Nil())
+    extension [A](m: Sequence[A])
+      def flatMap[B](f: A =&gt; Sequence[B]): Sequence[B] =
+        m match
+          case Cons(h, t) =&gt; f(h).append(t.flatMap(f))
+          case Nil()      =&gt; Nil()
+
+@main def trySequences =
+  import Sequences.{*, given}, Sequence.*
+  val s: Sequence[(Int, String)] = for
+    x &lt;- Cons(10, Cons(20, Nil()))
+    y &lt;- Cons("a", Cons("b", Nil()))
+    z &lt;- Cons(true, Cons(false, Nil()))
+  yield if z then (x, y) else (0, y)
+  println(s)
+  // Cons((10,a),Cons((0,a),Cons((10,b),Cons((0,b),
+  // Cons((20,a),Cons((0,a),Cons((20,b),Cons((0,b),Nil()))))))))</code></pre>
+
+    <h3>IO: side effects behind a pure interface</h3>
+    <p>Reading and printing are side effects, and they break referential transparency. Plain Scala I/O (<code>scala.io.StdIn.readLine</code>, <code>println</code>) is imperative. The IO monad packs such operations into values of type <code>IO[A]</code>, a wrapper around a thunk <code>() =&gt; A</code>, and composes them in a for-comprehension:</p>
+<pre><code class="language-scala">object IOs:
+  // data structure for a computation with input/output
+  case class IO[A](exec: () =&gt; A)
+
+  object IO:   // minimal set of operations
+    def read(): IO[String] = IO(() =&gt; scala.io.StdIn.readLine)
+    def write[A](a: A): IO[A] = IO(() =&gt; { println(a); a })
+    def compute[A](a: =&gt; A): IO[A] = IO(() =&gt; a)
+    def nop(): IO[Unit] = compute(())
+
+  // extending IO to be a Monad!
+  given Monad[IO] with
+    // unit: an IO that just returns the boxed value
+    def unit[A](a: A): IO[A] = IO(() =&gt; a)
+    // flatMap: opens the box, executes, and creates a new box with result
+    extension [A](m: IO[A])
+      def flatMap[B](f: A =&gt; IO[B]): IO[B] =
+        m match
+          case IO(e) =&gt; f(e())
+
+val simpleInteractiveComputation: IO[Int] =
+  for
+    s &lt;- read()
+    _ &lt;- write("Thanks for providing: " + s)
+    i &lt;- compute(s.toInt)
+    j &lt;- compute(i * 2)
+    _ &lt;- write("Result is: " + j)
+  yield j
+
+// desugared version
+val simpleInteractiveComputationByFlatMaps: IO[Int] =
+  read()                              .flatMap(s =&gt;
+  write("Thanks for providing: " + s) .flatMap(_ =&gt;
+  compute(s.toInt)                    .flatMap(i =&gt;
+  compute(i * 2)                      .flatMap(j =&gt;
+  write("Result is: " + j)            .map(_ =&gt;
+    j)))))</code></pre>
+    <p>Note what this <code>flatMap</code> does: <code>f(e())</code> runs <code>m</code>'s effect as soon as the composition is <em>built</em>. Defining the two <code>val</code>s above therefore reads and prints twice (with input <code>5</code> then <code>7</code>: <code>Thanks for providing: 5</code>, <code>Result is: 10</code>, <code>Thanks for providing: 7</code>, <code>Result is: 14</code>), and nobody ever calls <code>exec</code>. The effects are packaged behind a pure-looking interface, but the value is not a deferred description.</p>
+    <details>
+      <summary>Beyond the slides: a lazy IO, where building runs nothing</summary>
+      <p>Changing only <code>flatMap</code> so that it returns a new thunk makes an <code>IO</code> a description that runs when, and every time, <code>exec()</code> is called. The for-comprehensions are unchanged.</p>
+<pre><code class="language-scala">given Monad[IO] with
+  def unit[A](a: A): IO[A] = IO(() =&gt; a)
+  extension [A](m: IO[A])
+    def flatMap[B](f: A =&gt; IO[B]): IO[B] = IO(() =&gt; f(m.exec()).exec())
+
+val program: IO[Int] = for
+  _ &lt;- write("step 1")
+  i &lt;- compute(20 + 1)
+  _ &lt;- write("step 2: " + i)
+yield i * 2
+println("-- nothing has run yet --")
+println(program.exec())   // step 1 / step 2: 21 / 42
+println(program.exec())   // step 1 / step 2: 21 / 42 again</code></pre>
+    </details>
+
+    <h3>The DrawNumber game</h3>
+    <p>A whole interactive game in the IO monad. The loop is recursion inside the monad, and <code>res &lt;- if … then (for …) else (for …)</code> binds the result of whichever nested computation is chosen.</p>
+<pre><code class="language-scala">@main def tryDrawGameApp =
+  enum Result:
+    case Won, Lost
+
+  def drawNumberGame(attempts: Int, draw: Int): IO[Result] =
+    if attempts == 0
+    then compute(Result.Lost)
+    else
+      for
+        _ &lt;- write("give your number: ")
+        d &lt;- read()
+        i &lt;- compute(d.toInt)
+        res &lt;-
+          if (i == draw)
+          then
+            for
+              _ &lt;- write("won")
+              r &lt;- compute(Result.Won)
+            yield r
+          else
+            for
+              _ &lt;- write(if i &gt; draw then "too high!" else "too low!")
+              r &lt;- drawNumberGame(attempts - 1, draw)
+            yield r
+      yield res
+
+  // starts one run of the game
+  drawNumberGame(10, scala.util.Random.nextInt(100))</code></pre>
+    <p>The last line only builds the <code>IO[Result]</code>, and with this eager <code>flatMap</code> building is playing. With the draw fixed at 37 and inputs 50, 25, 37, the game prints <code>give your number:</code>, <code>too high!</code>, <code>give your number:</code>, <code>too low!</code>, <code>give your number:</code>, <code>won</code> before the value exists; its <code>exec()</code> then returns <code>Won</code>.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. How does the State monad make a whole application pure?</h2>
+    <p>A <code>State[S, A]</code> is a function from a state <code>S</code> to a pair (new state, result <code>A</code>). <code>flatMap</code> runs the first transition on the current state and feeds the new state to the next one. A program that reads like a sequence of commands on a mutable object is really a composition of pure functions.</p>
+<pre><code class="language-scala">import Monads.*, Monad.*
+
+object States:
+  // a state is/has a function evolving S and producing a result A
+  case class State[S, A](run: S =&gt; (S, A))
+
+  object State:   // minimal set of algorithms
+    // a facility to run the state on an initial `s`
+    extension [S, A](m: State[S, A])
+      def apply(s: S): (S, A) = m match
+        case State(run) =&gt; run(s)
+
+  // define a given instance that works on all S, shall use "type lambdas"
+  given stateMonad[S]: Monad[[A] =&gt;&gt; State[S, A]] with
+    // unit: a state with no evolution, just the result
+    def unit[A](a: A): State[S, A] = State(s =&gt; (s, a))
+    // flatMap: runs the state, use result to create a new state
+    extension [A](m: State[S, A])
+      override def flatMap[B](f: A =&gt; State[S, B]): State[S, B] =
+        State(s =&gt; m.apply(s) match
+          case (s2, a) =&gt; f(a).apply(s2)
+        )</code></pre>
+    <p><code>Monad</code> expects a 1-kinded type constructor, while <code>State</code> has two parameters. The <strong>type lambda</strong> <code>[A] =&gt;&gt; State[S, A]</code> fixes <code>S</code> and leaves <code>A</code> free, and <code>given stateMonad[S]</code> provides one instance for every <code>S</code>.</p>
+
+    <h3>A counter as a State ADT</h3>
+    <p>The counter is an ADT (a module type with an abstract type member) whose operations are state transitions:</p>
+<pre><code class="language-scala">import States.*
+
+trait CounterState:
+  type Counter
+  def initialCounter(): Counter
+  def inc(): State[Counter, Unit]
+  def dec(): State[Counter, Unit]
+  def reset(): State[Counter, Unit]
+  def get(): State[Counter, Int]
+  def nop(): State[Counter, Unit]
+
+object CounterStateImpl extends CounterState:
+  opaque type Counter = Int
+  def initialCounter(): Counter = 0
+  // giving (new_counter, result)
+  def inc(): State[Counter, Unit] = State(i =&gt; (i + 1, ()))
+  def dec(): State[Counter, Unit] = State(i =&gt; (i - 1, ()))
+  def reset(): State[Counter, Unit] = State(i =&gt; (0, ()))
+  def get(): State[Counter, Int] = State(i =&gt; (i, i))
+  def nop(): State[Counter, Unit] = State(i =&gt; (i, ()))
+
+@main def tryCounterState =
+  import Monads.*, Monad.*, States.{*, given}, State.*
+  val counterState: CounterState = CounterStateImpl
+  import counterState.*  // or directly, import CounterStateImpl.*
+
+  println:
+    inc().run(initialCounter())               // (1,())
+  println:
+    seq(inc(), inc()).run(initialCounter())   // (2,())
+
+  def increment(n: Int): State[Counter, Unit] =   // a loop as monadic recursion
+    if n == 0
+      then nop()
+      else
+        for
+          _ &lt;- increment(n - 1)
+          _ &lt;- inc()
+        yield ()
+
+  val session: State[Counter, Int] =
+    for
+      _ &lt;- inc()
+      _ &lt;- reset()
+      _ &lt;- increment(5)
+      v &lt;- get()
+      _ &lt;- reset()
+    yield v
+
+  println:
+    session.run(initialCounter())  // (0,5)</code></pre>
+    <figure class="lk-figure">
+      <svg viewBox="0 0 640 170" width="100%" role="img" aria-label="session.run(0): the counter goes 0, 1 after inc, 0 after reset, 5 after increment(5), stays 5 after get which returns 5 as v, then 0 after reset; the final pair is (0, 5)" style="max-width:640px;height:auto;font-family:var(--lk-mono);font-size:14px">
+        <defs><marker id="st-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9" fill="none" stroke="var(--lk-ink-soft)" stroke-width="1.2"/></marker></defs>
+        <text x="6" y="22" font-size="12.5" fill="var(--lk-ink-soft)" font-family="var(--lk-font)">counter (the state S), threaded by flatMap</text>
+        <path d="M6,70 L632,70" fill="none" stroke="var(--lk-ink-soft)" stroke-width="1.2" marker-end="url(#st-arr)"/>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.4">
+          <rect x="36" y="52" width="84" height="36" rx="6"/>
+          <rect x="152" y="52" width="84" height="36" rx="6"/>
+          <rect x="268" y="52" width="84" height="36" rx="6"/>
+          <rect x="384" y="52" width="84" height="36" rx="6"/>
+          <rect x="500" y="52" width="84" height="36" rx="6"/>
+        </g>
+        <g fill="var(--lk-paper)" stroke="var(--lk-cobalt-dark)" stroke-width="1.4">
+          <circle cx="18" cy="70" r="11"/><circle cx="136" cy="70" r="11"/><circle cx="252" cy="70" r="11"/>
+          <circle cx="368" cy="70" r="11"/><circle cx="484" cy="70" r="11"/><circle cx="604" cy="70" r="11"/>
+        </g>
+        <g fill="var(--lk-ink)" text-anchor="middle" dominant-baseline="middle">
+          <text x="18" y="71">0</text><text x="136" y="71">1</text><text x="252" y="71">0</text>
+          <text x="368" y="71">5</text><text x="484" y="71">5</text><text x="604" y="71">0</text>
+          <text x="78" y="71">inc()</text><text x="194" y="71">reset()</text>
+          <text x="310" y="71" font-size="11.5">increment(5)</text>
+          <text x="426" y="71">get()</text><text x="542" y="71">reset()</text>
+        </g>
+        <g fill="var(--lk-ink-soft)" text-anchor="middle" font-size="13">
+          <text x="78" y="108">result ()</text><text x="194" y="108">result ()</text>
+          <text x="310" y="108">five inc(): 1…5</text>
+          <text x="426" y="108" fill="var(--lk-cobalt-dark)">result 5 → v</text><text x="542" y="108">result ()</text>
+        </g>
+        <text x="320" y="150" text-anchor="middle" fill="var(--lk-ink)" font-size="14">yield v  ⇒  session.run(0) = (final state 0, result 5) = (0,5)</text>
+      </svg>
+      <figcaption>Running <code>session</code> from counter 0. Each box is a <code>State</code> transition; <code>flatMap</code> passes the counter it produces to the next box. Only <code>get()</code> produces a useful result, bound to <code>v</code>.</figcaption>
+    </figure>
+    <p><code>session</code> is a value: nothing happens until <code>run</code> is applied to an initial counter, and running it twice gives <code>(0,5)</code> twice, because nothing has been mutated in between. The pair is (state, result), as <code>run: S =&gt; (S, A)</code> says; the slide comments print the components the other way round (<code>((), 1)</code>, <code>(5, 0)</code>).</p>
+
+    <h3>A State-monadic little "MVC"</h3>
+    <p>The deck closes with a GUI counter whose Scala code has no mutable variables. The view is a Java <code>SwingFunctionalFacade</code> with a fluent <code>Frame</code> interface (<code>setSize</code>, <code>addButton</code>, <code>addLabel</code>, <code>showToLabel</code>, <code>show</code>, and <code>events()</code>, a <code>Supplier&lt;String&gt;</code> that blocks until a button is pressed and returns its name). A second State ADT wraps it:</p>
+<pre><code class="language-scala">trait WindowState:
+  type Window
+  def initialWindow: Window
+  def setSize(width: Int, height: Int): State[Window, Unit]
+  def addButton(text: String, name: String): State[Window, Unit]
+  def addLabel(text: String, name: String): State[Window, Unit]
+  def toLabel(text: String, name: String): State[Window, Unit]
+  def show(): State[Window, Unit]
+  def exec(cmd: =&gt;Unit): State[Window, Unit]
+  def eventStream(): State[Window, Stream[String]]
+
+object WindowStateImpl extends WindowState:
+  import SwingFunctionalFacade.*
+  type Window = Frame
+  def initialWindow: Window = createFrame
+  def setSize(width: Int, height: Int): State[Window, Unit] =
+    State(w =&gt; ((w.setSize(width, height)), {}))
+  def addButton(text: String, name: String): State[Window, Unit] =
+    State(w =&gt; ((w.addButton(text, name)), {}))
+  def addLabel(text: String, name: String): State[Window, Unit] =
+    State(w =&gt; ((w.addLabel(text, name)), {}))
+  def toLabel(text: String, name: String): State[Window, Unit] =
+    State(w =&gt; ((w.showToLabel(text, name)), {}))
+  def show(): State[Window, Unit] =
+    State(w =&gt; (w.show, {}))
+  def exec(cmd: =&gt;Unit): State[Window, Unit] =
+    State(w =&gt; (w, cmd))
+  def eventStream(): State[Window, Stream[String]] =
+    State(w =&gt; (w, Stream.generate(() =&gt; w.events().get)))</code></pre>
+    <p>The controller works on the pair of states <code>(Counter, Window)</code>. <code>mv</code> runs a model transition, then a view transition built from the model's result:</p>
+<pre><code class="language-scala">@main def runMVC =
+  import Monads.*, Monad.*, States.*, State.*, CounterStateImpl.*, WindowStateImpl.*
+  import u03.extensionmethods.Streams.*
+
+  def mv[SM, SV, AM, AV](m1: State[SM,AM], f: AM =&gt; State[SV, AV]): State[(SM, SV), AV] =
+    State: (sm, sv) =&gt;
+      val (sm2, am) = m1.run(sm)
+      val (sv2, av) = f(am).run(sv)
+      ((sm2, sv2), av)
+
+  def windowCreation(str: String): State[Window, Stream[String]] = for
+    _ &lt;- setSize(300, 300)
+    _ &lt;- addButton(text = "inc", name = "IncButton")
+    _ &lt;- addButton(text = "dec", name = "DecButton")
+    _ &lt;- addButton(text = "reset", name = "ResetButton")
+    _ &lt;- addButton(text = "quit", name = "QuitButton")
+    _ &lt;- addLabel(text = str, name = "Label1")
+    _ &lt;- show()
+    events &lt;- eventStream()
+  yield events
+
+  val controller = for
+    events &lt;- mv(seq(reset(), get()), i =&gt; windowCreation(i.toString()))
+    _ &lt;- seqN(events.map(_ match
+        case "IncButton" =&gt; mv(seq(inc(), get()), i =&gt; toLabel(i.toString, "Label1"))
+        case "DecButton" =&gt; mv(seq(dec(), get()), i =&gt; toLabel(i.toString, "Label1"))
+        case "ResetButton" =&gt; mv(seq(reset(), get()), i =&gt; toLabel(i.toString, "Label1"))
+        case "QuitButton" =&gt; mv(nop(), _ =&gt; exec(sys.exit()))))
+  yield ()
+
+  controller.run((initialCounter(), initialWindow))</code></pre>
+    <p>Read the controller from the top. <code>seq(reset(), get())</code> resets the counter and reads it in one model step; its result (0) becomes the label of the new window, and the view step returns the infinite lazy stream of button events. Each event is mapped to a <code>State[(Counter, Window), Unit]</code> that updates the model and then the label, and <code>seqN</code> chains them in order: that chain is the event loop. It never ends until <code>QuitButton</code> runs <code>sys.exit()</code>. The mutable Swing machinery exists, but it is hidden behind the facade; the application logic is a single <code>State</code> value run once on <code>(initialCounter(), initialWindow)</code>. This is the lesson's answer to its opening question.</p>
+  </section>
+
+  <section id="s10">
+    <h2>10. Lab 04</h2>
+    <p>The lab (repository <code>unibo-pps/pps-lab04</code>) practises the three parts of the lesson, each task with its tests: ADTs (a complex-number ADT, a school model, a stack ADT), type classes (<code>Summable</code>, a 1-kinded type class with <code>zero</code> and <code>sum</code>; <code>Traversable</code>, a higher-kinded one) and monads (a <code>Try</code> monad, like <code>Optional</code> but carrying an exception).</p>
+    <details>
+      <summary>From the lab: the six tasks, and a sketch of the type-class and monad ones</summary>
+      <ol>
+        <li><code>Ex1ComplexADT</code>: complete the module so that <code>ComplexADTTest</code> passes; think about the best representation of a complex number.</li>
+        <li><code>Ex2SchoolModel</code>: implement the module and its <code>SchoolModelTest</code>, following the comments.</li>
+        <li><code>Ex3StackADT</code>: implement it and its <code>StackADTTest</code>, following the comments.</li>
+        <li><code>Ex4Summables</code>: a one-kinded type class made of <code>zero</code> and <code>sum</code>.</li>
+        <li><code>Ex5Traversable</code>: a higher-kinded type class, taking a type constructor as parameter.</li>
+        <li><code>Ex6TryMonad</code>: understand and complete a <code>Try</code> monad and check that its main works.</li>
+      </ol>
+      <p>A sketch of tasks 4–6 in the style of this lesson (the lab's own signatures may differ):</p>
+<pre><code class="language-scala">import u03.extensionmethods.Sequences.*, Sequence.*
+import u03.extensionmethods.Optionals.*, Optional.*
+import u04.monads.Monads.*, Monad.*
+
+trait Summable[A]:
+  def zero: A
+  def sum(a1: A, a2: A): A
+
+given Summable[Int] with
+  def zero: Int = 0
+  def sum(a1: Int, a2: Int): Int = a1 + a2
+given Summable[String] with
+  def zero: String = ""
+  def sum(a1: String, a2: String): String = a1 + a2
+
+def sumAll[A: Summable](seq: Sequence[A]): A =
+  val s = summon[Summable[A]]
+  seq match
+    case Cons(h, t) =&gt; s.sum(h, sumAll(t))
+    case Nil()      =&gt; s.zero
+
+trait Traversable[T[_]]:
+  def logAll[A](t: T[A])(log: A =&gt; Unit): Unit
+
+given Traversable[Sequence] with
+  def logAll[A](t: Sequence[A])(log: A =&gt; Unit): Unit = t match
+    case Cons(h, tl) =&gt; log(h); logAll(tl)(log)
+    case Nil()       =&gt; ()
+given Traversable[Optional] with
+  def logAll[A](t: Optional[A])(log: A =&gt; Unit): Unit = t match
+    case Just(a) =&gt; log(a)
+    case _       =&gt; ()
+
+def printAll[T[_]: Traversable, A](t: T[A]): Unit =
+  summon[Traversable[T]].logAll(t)(a =&gt; println("&gt; " + a))
+
+enum MyTry[A]:
+  case Success(value: A)
+  case Failure(exception: Throwable)
+object MyTry:
+  def apply[A](a: =&gt; A): MyTry[A] =
+    try Success(a) catch case e: Throwable =&gt; Failure(e)
+
+given Monad[MyTry] with
+  import MyTry.*
+  def unit[A](a: A): MyTry[A] = Success(a)
+  extension [A](m: MyTry[A])
+    def flatMap[B](f: A =&gt; MyTry[B]): MyTry[B] = m match
+      case Success(a) =&gt; f(a)
+      case Failure(e) =&gt; Failure(e)
+
+@main def tryLab04 =
+  println(sumAll(Cons(10, Cons(20, Cons(30, Nil())))))   // 60
+  println(sumAll(Cons("a", Cons("b", Cons("c", Nil()))))) // abc
+  printAll(Cons(1, Cons(2, Nil())))                       // &gt; 1  &gt; 2
+  printAll(Just("hi"))                                    // &gt; hi
+  def parse(s: String): MyTry[Int] = MyTry(s.toInt)
+  println(for a &lt;- parse("10"); b &lt;- parse("32") yield a + b)  // Success(42)
+  println(for a &lt;- parse("10"); b &lt;- parse("x2") yield a + b)
+  // Failure(java.lang.NumberFormatException: For input string: "x2")</code></pre>
+    </details>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>What is the difference between <code>type Euro = Int</code> and <code>opaque type Euro = Int</code>?</summary>
+        <p>A plain alias is a synonym: clients can use <code>Euro</code> and <code>Int</code> interchangeably. An opaque alias is transparent only inside the defining module; outside, <code>Euro</code> is a distinct type, so values can only be built and used through the module's constructors and operations, at no run-time cost.</p>
+      </details>
+      <details>
+        <summary>When would you prefer an ADT to an exposed algebraic data type?</summary>
+        <p>When abstraction and modularity matter more than adding operations from outside: an ADT hides the representation, so it can change without breaking clients, and it leads naturally to type classes. An exposed <code>enum</code> is handier when clients need to write new algorithms by pattern matching.</p>
+      </details>
+      <details>
+        <summary>How do module types give OCP and DIP without inheritance of implementation?</summary>
+        <p>A function takes the module type (a trait) as a parameter and depends only on its signatures. New implementations are new objects extending the trait, passed without changing the function.</p>
+      </details>
+      <details>
+        <summary>What does the compiler do with <code>max(seq)</code> when <code>max</code> has a <code>(using ord: Ord)</code> clause?</summary>
+        <p>It looks for a <code>given</code> of type <code>Ord</code>, first in the lexical scope (local definitions and imports, including <code>import X.given</code>) and then in the implicit scope of the type (its companion and prefix objects), and passes it. If there is none, or two equally specific ones, compilation fails.</p>
+      </details>
+      <details>
+        <summary>What is a type class, and what does <code>def max[T: Ordered](s: Sequence[T])</code> mean?</summary>
+        <p>A generic trait used as a contextual parameter, which extends a type <em>a posteriori</em>. The context bound is sugar for <code>(using Ordered[T])</code>: <code>max</code> can be called at type <code>T</code> only if a witness <code>Ordered[T]</code> is in scope, recovered in the body with <code>summon[Ordered[T]]</code>.</p>
+      </details>
+      <details>
+        <summary>Why does <code>Monad</code> need a higher-kinded parameter, and why does <code>State</code> need a type lambda?</summary>
+        <p><code>Monad[M[_]]</code> abstracts over the container, so <code>map2</code>, <code>seq</code> and <code>seqN</code> are written once for all monads. <code>State[S, A]</code> has two parameters, so <code>[A] =&gt;&gt; State[S, A]</code> fixes <code>S</code> to obtain the 1-kinded constructor that <code>Monad</code> expects.</p>
+      </details>
+      <details>
+        <summary>Desugar <code>for x &lt;- a; y &lt;- b yield x + y</code>, and say what <code>&lt;-</code> means for Optional, Sequence and State.</summary>
+        <p><code>a.flatMap(x =&gt; b.map(y =&gt; x + y))</code>. Optional: unbox if present, one empty makes the whole result empty. Sequence: iterate over every element, giving all combinations. State: run the transition on the current state, bind its result, pass the new state on.</p>
+      </details>
+      <details>
+        <summary>State the three monad laws.</summary>
+        <p>Left identity <code>flatMap(unit(a), f) == f(a)</code>; right identity <code>flatMap(m, unit) == m</code>; associativity <code>flatMap(flatMap(m, f), g) == flatMap(m, x =&gt; flatMap(f(x), g))</code>.</p>
+      </details>
+      <details>
+        <summary>With the course's IO monad, when does <code>write("hi")</code> inside a for-comprehension print?</summary>
+        <p>When the comprehension is built, because <code>flatMap</code> is <code>f(e())</code> and executes the effect immediately. Making <code>flatMap</code> return <code>IO(() =&gt; f(m.exec()).exec())</code> would postpone every effect until <code>exec()</code> is called.</p>
+      </details>
+      <details>
+        <summary>What does <code>session.run(initialCounter())</code> return for <code>inc; reset; increment(5); v &lt;- get; reset; yield v</code>?</summary>
+        <p><code>(0,5)</code>: the counter goes 1, 0, 5, stays 5 while <code>get</code> yields 5, then returns to 0. The pair is (final state, result).</p>
+      </details>
+    </div>
+  </section>
+
+  <details class="lk-coverage">
+    <summary>Where this lesson comes from</summary>
+    <p>Deck <em>04 – Advanced Functional Programming: alias types, module types, contexts, and monads</em> (54 slides: ADTs by opaque types, module types, given/using, type classes and higher-kinded types, the Cats chart, monads and the Optional/Sequence/IO/State monads, the State-monadic MVC) · lab <em>04 – Advanced FP in Scala</em> (repository <code>pps-lab04</code>) · course code <code>code-scala/src/main/scala/u04</code> (<code>adts</code>, <code>moduletypes</code>, <code>contextual</code>, <code>typeclasses</code>, <code>monads</code>), with the lesson-3 modules <code>u03/extensionmethods</code>. All Scala examples were compiled and run with Scala 3.3.6; the MVC example was compiled but not run (it opens a Swing window).</p>
+  </details>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Lesson navigation">
+      <a href="PPS-03-Functional-Data-Structures.html">&larr; Lesson 3 &mdash; Functional data structures</a>
+      <a href="index.html">Index</a>
+      <a href="PPS-05-Scala-OOP.html">Lesson 5 &mdash; Object-oriented programming in Scala &rarr;</a>
+    </nav>
+    <p>Sources: deck 04-fp-advanced, lab 04, course code u04 · Paradigmi di Programmazione e Sviluppo, Prof. Mirko Viroli, University of Bologna, a.y. 2025/2026. Study notes built from the course slides, code and labs: not an official source.</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/scala.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+</body>
+</html>
