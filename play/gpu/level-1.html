@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Level 1 — The 1% kernel · GPU kernels</title>
+<link rel="stylesheet" href="../assets/lesson-kit.css">
+<link rel="stylesheet" href="../assets/play.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Campaign navigation">
+    <a href="index.html">&larr; Campaign map</a>
+    <a href="level-2.html">Level 2 — Stop fetching the same numbers &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">GPU kernels, a campaign · Level 1</div>
+    <h1>The 1% kernel</h1>
+    <div class="lk-meta"><span>~30 min</span><span>4 labs · 2 predictions · 1 exercise</span><span>optional: the notebook, ~20 min on a GPU</span></div>
+  </header>
+
+  <p><strong>The level in one paragraph.</strong> You write the most obvious GPU matrix multiply there is, one thread per output, and it runs at about 1% of what the hardware can do. The whole level turns on one distinction: inside a <em>warp</em>, 32 threads that run in lockstep, which values are the same for all of them and which differ. Once you mark that in the code, the reason for the 1% is visible, and so is the fix: move the varying index to a different place, swap two letters, and get about 6x. Then a new problem shows up, and that is level 2.</p>
+
+  <p class="gl-legend">Throughout this level: <span class="u">uniform</span> = the same for all 32 threads of a warp (fixed) · <span class="v">varying</span> = different for each thread (mobile).</p>
+
+  <section id="s1">
+    <h2>1. The job: matrix multiplication in one picture</h2>
+    <p><code>C = A × B</code>. Each cell of <code>C</code> is one row of <code>A</code> "dotted" with one column of <code>B</code>: multiply them element by element and add up.</p>
+<pre class="gl-code">C[i][j] = A[i][0]·B[0][j] + A[i][1]·B[1][j] + … + A[i][N-1]·B[N-1][j]</pre>
+    <p>The loop variable <code>k</code> walks along row <code>i</code> of <code>A</code> and down column <code>j</code> of <code>B</code> at the same time. Tap cells of <code>C</code>:</p>
+    <div id="matmul-lab"></div>
+    <p>Two facts to keep: neighbours in the same <strong>row</strong> of <code>C</code> share their row of <code>A</code>; neighbours in the same <strong>column</strong> of <code>C</code> share their column of <code>B</code>. Our matrices are 4096×4096 floats: 16.7 million outputs, 4,096 multiply-adds each, 137 billion operations with nothing depending on anything else. The best library for it, cuBLAS, does it in about 6 milliseconds on an RTX A6000.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. One worker per output</h2>
+    <p>The obvious GPU plan: 16.7 million <strong>workers</strong> (threads), one per cell of <code>C</code>. Every worker runs the same code; the only difference between them is their ID, a pair <code>(x, y)</code> with both values from 0 to 4095. The one design decision is the <strong>mapping</strong>: which cell each worker computes. The natural first choice is "x picks the row":</p>
+<pre class="gl-code"><span class="c">// every worker runs this; its ID is (x, y)</span>
+row = x;                           <span class="c">// naive mapping: x picks the row of C</span>
+col = y;
+acc = 0;
+for (k = 0; k &lt; N; ++k)
+    acc += A[row][k] * B[k][col];  <span class="c">// the dot product from section 1</span>
+C[row][col] = acc;</pre>
+    <p>It is correct. Written for a real GPU, it is also a textbook case of how to waste one. Commit to a number before reading on.</p>
+    <div id="p-naive"></div>
+  </section>
+
+  <section id="s3">
+    <h2>3. Warps: 32 workers in lockstep</h2>
+    <p>The GPU does not run workers one at a time. It runs them in <strong>warps</strong>: 32 workers with neighbouring <code>x</code> and the same <code>y</code>, such as <code>(0, y)</code> to <code>(31, y)</code>, executing the same line at the same moment. At tick 0 they all do their <code>k = 0</code> step, at tick 1 their <code>k = 1</code> step, and so on. When the line says <code>A[row][k]</code>, the hardware issues <strong>one request</strong> for all 32 of them.</p>
+    <details class="gl-pause">
+      <summary>Your move: in the code above, which values are the same for all 32 workers of a warp, and which differ? (think, then open)</summary>
+      <p>Only <code>x</code> differs inside a warp; <code>y</code>, <code>k</code> and <code>N</code> are shared. Push that through the code:</p>
+<pre class="gl-code">row = <span class="v">x</span>;         <span class="c">// varying: 32 different rows</span>
+col = <span class="u">y</span>;         <span class="c">// uniform: one column for the whole warp</span>
+for (<span class="u">k</span> = 0; <span class="u">k</span> &lt; <span class="u">N</span>; ++<span class="u">k</span>)   <span class="c">// uniform: everyone is at the same step</span>
+    acc += A[<span class="v">row</span>][<span class="u">k</span>] * B[<span class="u">k</span>][<span class="u">col</span>];</pre>
+      <p>So at every tick the warp asks for <code>A[0..31][k]</code>, 32 different rows at the same column, and for <code>B[k][col]</code>, one single float.</p>
+    </details>
+    <p>Here is warp <code>y = 0</code> for its first two ticks. Read each row of the table as <em>one request</em>:</p>
+    <div class="lk-content-scroll"><table>
+      <thead><tr><th>tick</th><th>worker 0</th><th>worker 1</th><th>worker 2</th><th>…</th><th>the warp asks for</th></tr></thead>
+      <tbody>
+        <tr><td><code>k = 0</code></td><td><code>A[0][0]</code>, <code>B[0][0]</code></td><td><code>A[1][0]</code>, <code>B[0][0]</code></td><td><code>A[2][0]</code>, <code>B[0][0]</code></td><td></td><td>32 rows of <code>A</code> · one float of <code>B</code></td></tr>
+        <tr><td><code>k = 1</code></td><td><code>A[0][1]</code>, <code>B[1][0]</code></td><td><code>A[1][1]</code>, <code>B[1][0]</code></td><td><code>A[2][1]</code>, <code>B[1][0]</code></td><td></td><td>the same, one step on</td></tr>
+      </tbody>
+    </table></div>
+    <p>Down a column is one worker over time: the ordinary loop. Across a row is what memory sees. Whether that request is cheap depends on how memory is laid out.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. How memory is actually read</h2>
+    <p><strong>Memory is one long line.</strong> A 4096×4096 matrix is stored row after row: <code>A[0][0]</code> … <code>A[0][4095]</code>, then <code>A[1][0]</code> … So <code>A[r][c]</code> sits at position <code>r × 4096 + c</code>. Each float takes <strong>4 bytes</strong>: the next <code>c</code> is 4 bytes away, the next <code>r</code> is 4,096 × 4 bytes = 16 KB away.</p>
+    <p><strong>Memory is delivered in chunks.</strong> When a thread needs one float, the memory system sends the whole 32-byte chunk around it, a <strong>sector</strong>: 32 ÷ 4 = <strong>8 neighbouring floats</strong>. You pay for all 8 even if you use one, like a database reading a whole page from disk to hand you one row. A warp's request costs as many sectors as its 32 addresses touch. (Two different 32s: 32 threads per warp, 32 bytes per sector. A coincidence.)</p>
+    <p>Put the two facts together and the cost of any request follows from where its <span class="v">varying</span> part sits:</p>
+    <div class="lk-content-scroll"><table>
+      <thead><tr><th>the address</th><th>its 32 addresses are</th><th>cost</th></tr></thead>
+      <tbody>
+        <tr><td>all <span class="u">uniform</span>: <code>B[<span class="u">k</span>][<span class="u">col</span>]</code></td><td>the same float</td><td><strong>broadcast</strong>: 1 sector feeds everyone</td></tr>
+        <tr><td><span class="v">varying</span> in the <strong>last</strong> index: <code>B[<span class="u">k</span>][<span class="v">col</span>]</code></td><td>32 neighbours, 128 bytes</td><td><strong>packed</strong>: 4 sectors, all used</td></tr>
+        <tr><td><span class="v">varying</span> in an <strong>earlier</strong> index: <code>A[<span class="v">row</span>][<span class="u">k</span>]</code></td><td>16 KB apart</td><td><strong>scattered</strong>: 32 sectors, 1 float of 8 used in each</td></tr>
+      </tbody>
+    </table></div>
+    <p>The naive kernel's <code>A[<span class="v">row</span>][<span class="u">k</span>]</code> is the worst row of the table: 1,024 bytes moved to deliver 128, at every tick.</p>
+    <figure class="lk-fig" role="img" aria-label="Memory as a line of floats grouped in sectors of 8. Scattered: the warp's 32 reads land 16 KB apart, one float used per sector, 32 sectors. Packed: 32 neighbouring floats, 4 sectors fully used.">
+      <svg viewBox="0 0 640 244" width="640" style="max-width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+        <style>.t{font:600 15px sans-serif;fill:#171813}.s{font:14px sans-serif;fill:#45463F}.b{font:600 14px sans-serif;fill:#B83D2D}</style>
+        <text x="20" y="22" class="t">scattered: A[0][k], A[1][k], A[2][k] … one float per row</text>
+        <g stroke="#FAF7EF"><rect x="20" y="36" width="14" height="26" fill="#9DB3E6"/><rect x="34" y="36" width="98" height="26" fill="#E3E1D8"/>
+        <rect x="190" y="36" width="14" height="26" fill="#9DB3E6"/><rect x="204" y="36" width="98" height="26" fill="#E3E1D8"/>
+        <rect x="360" y="36" width="14" height="26" fill="#9DB3E6"/><rect x="374" y="36" width="98" height="26" fill="#E3E1D8"/></g>
+        <g fill="none" stroke="#45463F" stroke-width="1.2"><rect x="20" y="36" width="112" height="26"/><rect x="190" y="36" width="112" height="26"/><rect x="360" y="36" width="112" height="26"/></g>
+        <text x="27" y="80" class="s" text-anchor="middle">t0</text><text x="197" y="80" class="s" text-anchor="middle">t1</text><text x="367" y="80" class="s" text-anchor="middle">t2</text>
+        <text x="161" y="54" class="s" text-anchor="middle">16 KB</text><text x="161" y="68" class="s" text-anchor="middle">apart</text>
+        <text x="331" y="54" class="s" text-anchor="middle">16 KB</text><text x="331" y="68" class="s" text-anchor="middle">apart</text>
+        <text x="500" y="54" class="s">… 29 more</text><text x="500" y="68" class="s">sectors</text>
+        <text x="20" y="106" class="b">32 sectors fetched, 1 float of 8 used in each: 1,024 bytes for 128</text>
+        <text x="20" y="146" class="t">packed: B[k][0], B[k][1] … B[k][31], side by side</text>
+        <rect x="20" y="160" width="448" height="26" fill="#9DB3E6"/>
+        <g fill="none" stroke="#45463F" stroke-width="1.2"><rect x="20" y="160" width="112" height="26"/><rect x="132" y="160" width="112" height="26"/><rect x="244" y="160" width="112" height="26"/><rect x="356" y="160" width="112" height="26"/></g>
+        <text x="76" y="204" class="s" text-anchor="middle">t0–t7</text><text x="188" y="204" class="s" text-anchor="middle">t8–t15</text><text x="300" y="204" class="s" text-anchor="middle">t16–t23</text><text x="412" y="204" class="s" text-anchor="middle">t24–t31</text>
+        <rect x="500" y="162" width="12" height="12" fill="#9DB3E6"/><text x="518" y="172" class="s">used now</text>
+        <rect x="500" y="182" width="12" height="12" fill="#E3E1D8"/><text x="518" y="192" class="s">fetched, unused</text>
+        <text x="20" y="230" class="b">4 sectors fetched, every float used: 128 bytes for 128</text>
+      </svg>
+      <figcaption><b>Fig. 1</b> — Each outlined box is one 32-byte sector of 8 floats. What the warp pays for is the number of outlined boxes.</figcaption>
+    </figure>
+    <h3>Lab: count the sectors</h3>
+    <p>The same thing computed for every thread: each cell is a thread (<code>t0</code>–<code>t31</code>) with the sector its float lands in (<code>s0</code>, <code>s1</code> …); the bottom row is what memory actually fetches.</p>
+    <div id="warp-lab"></div>
+  </section>
+
+  <section id="s5">
+    <h2>5. The fix: move the varying index</h2>
+    <details class="gl-pause">
+      <summary>Your move: you want both requests cheap. Where should the varying <code>x</code> go? (think, then open)</summary>
+      <p>Into the <em>last</em> index of something. Let <code>x</code> pick the column and <code>y</code> the row: the warp now owns a slice of a <em>row</em> of <code>C</code> instead of a slice of a column.</p>
+<pre class="gl-code">row = <span class="u">y</span>;   col = <span class="v">x</span>;
+acc += A[<span class="u">row</span>][<span class="u">k</span>] * B[<span class="u">k</span>][<span class="v">col</span>];   <span class="c">// broadcast · packed</span></pre>
+    </details>
+    <p><code>A</code> becomes all uniform, a broadcast; <code>B</code> becomes varying in the last index, packed. Per tick the warp goes from 33 sectors (32 + 1) to 5 (1 + 4): a 6.6x cut in memory traffic. Before you look at the measurement, guess.</p>
+    <div id="p-swap"></div>
+    <p>The memory throughput Boehm measured went from 15 GB/s to 110 GB/s. The rule, <strong>neighbouring threads touch neighbouring addresses</strong>, is called <em>coalescing</em>, and it comes back in every level of this campaign.</p>
+
+    <h3>Not a trade-off</h3>
+    <p>"But the swapped kernel still jumps 16 KB through <code>B</code> at every tick." True, and so did the naive one: over time, both kernels do exactly the same thing. The swap only changes which workers stand next to each other.</p>
+    <div class="lk-content-scroll"><table>
+      <thead><tr><th></th><th>over time (one worker, tick after tick)</th><th>across the warp (one tick)</th></tr></thead>
+      <tbody>
+        <tr><td>naive</td><td>A: +4 bytes per tick · B: +16 KB per tick</td><td>A scattered (32) · B broadcast (1)</td></tr>
+        <tr><td>swapped</td><td>A: +4 bytes per tick · B: +16 KB per tick</td><td>A broadcast (1) · B packed (4)</td></tr>
+      </tbody>
+    </table></div>
+    <p>If your instinct says "each thread should walk memory in order", that is the CPU rule: one thread streaming sequentially is what CPU caches love, and the naive kernel does exactly that along its row of <code>A</code>. On a GPU the rule is transposed: what must be in order is the 32 threads side by side at one moment.</p>
+
+    <details class="gl-pause">
+      <summary>Your move: suppose <code>B</code> were stored column by column, so <code>B[k][c]</code> sits at <code>c × 4096 + k</code>. Is the swapped kernel's read of <code>B</code> still packed? (think, then open)</summary>
+      <p>No. Now the <em>first</em> index is the contiguous one, and the varying <code>col</code> is the 16 KB-stride index: scattered again. You would want <code>x</code> to drive <code>k</code>, but <code>k</code> is uniform, the loop variable, not something a worker owns. The right mapping depends on the layout; this is why libraries such as cuBLAS take a "transpose" flag, and one reason real kernels stage data in shared memory (level 2).</p>
+    </details>
+    <details>
+      <summary>Another fix you might have thought of: let each thread read 8 floats at once</summary>
+      <p>A sector is 8 floats, so why not have each thread consume all 8, reading <code>A[row][k]</code> to <code>A[row][k+7]</code> in one go? It works: the warp still touches 32 sectors, but every byte of each is used, and the loop needs 8 times fewer requests. This is <strong>vectorised loading</strong>, a later rung of this ladder (level 5, where Boehm goes from 68.7% to 78.4%). The widest load one thread can do is <code>float4</code>, 16 bytes, so a thread takes two loads per sector. The swap fills a sector with 8 threads reading one float each, which the hardware merges for free, so it comes first; vectorised loads fill it from one thread, and stack on top later.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Blocks: pagination for workers</h2>
+    <p>16.7 million workers are too many for the hardware to treat as one group, so a real kernel cuts them into <strong>blocks</strong> of 32 × 32 = 1,024 threads, arranged in a <strong>grid</strong> of 128 × 128 blocks. Each thread gets its block's position in the grid, <code>blockIdx.x</code> and <code>blockIdx.y</code> (0 to 127), and its own position inside the block, <code>threadIdx.x</code> and <code>threadIdx.y</code> (0 to 31). A worker ID is rebuilt the way you rebuild an offset from a page: <em>page × page size + position on the page</em>.</p>
+    <p>A warp always lives inside one block, as 32 threads with neighbouring <code>threadIdx.x</code> and the same <code>threadIdx.y</code>. So <code>blockIdx</code>, <code>blockDim</code> and <code>threadIdx.y</code> are <span class="u">uniform</span>, and only <code>threadIdx.x</code> is <span class="v">varying</span>: the same picture as before.</p>
+<pre class="gl-code"><span class="c">// naive: threadIdx.x picks the row</span>
+extern "C" __global__ void matmul_naive(const float* A, const float* B, float* C, int N) {
+    int row = <span class="u">blockIdx.x</span> * <span class="u">blockDim.x</span> + <span class="v">threadIdx.x</span>;   <span class="c">// varying</span>
+    int col = <span class="u">blockIdx.y</span> * <span class="u">blockDim.y</span> + <span class="u">threadIdx.y</span>;   <span class="c">// uniform</span>
+    if (row &lt; N &amp;&amp; col &lt; N) {                            <span class="c">// edge guard: idle threads past the matrix</span>
+        float acc = 0.0f;
+        for (int k = 0; k &lt; N; ++k)
+            acc += A[<span class="v">row</span> * N + <span class="u">k</span>] * B[<span class="u">k</span> * N + <span class="u">col</span>];   <span class="c">// A[row][k], B[k][col], stored flat</span>
+        C[row * N + col] = acc;
+    }
+}
+
+<span class="c">// swapped: threadIdx.x picks the column</span>
+    int col = <span class="u">blockIdx.x</span> * <span class="u">blockDim.x</span> + <span class="v">threadIdx.x</span>;   <span class="c">// varying</span>
+    int row = <span class="u">blockIdx.y</span> * <span class="u">blockDim.y</span> + <span class="u">threadIdx.y</span>;   <span class="c">// uniform</span></pre>
+    <p>Two details. The matrices arrive as flat arrays, so <code>A[row * N + k]</code> is exactly <code>A[row][k]</code> in the "one long line" layout of section 4. And which block axis you pair with rows or columns does not matter for a warp: all 32 threads share their block, so only the <code>threadIdx</code> choice decides uniform or varying.</p>
+    <h3>Lab: pick a thread</h3>
+    <p>Choose any block and thread. The arithmetic shows which terms are uniform and varying; the patch shows the thread's output in red and the rest of its warp in blue. Switch the mapping and the warp's strip turns from vertical to horizontal.</p>
+    <div id="thread-lab"></div>
+  </section>
+
+  <section id="s7">
+    <h2>7. …and the next problem</h2>
+    <p>The swapped kernel sits at 8.5% of cuBLAS. Nothing is wasted per request any more, so what is left? Every output still reads a full row of <code>A</code> and a full column of <code>B</code> from global memory, and each element of <code>A</code> is read by all 4,096 workers that compute its row of <code>C</code>. You are fetching the same hot rows four thousand times. Any backend developer knows the next move. That is <a href="level-2.html">level 2</a>.</p>
+  </section>
+
+  <section id="practice">
+    <h2>Practice: mark it yourself</h2>
+    <p>Three new kernels. For each access, mark every index uniform or varying and predict what one warp request costs. This is the whole skill of level 1, applied where the page has not done it for you.</p>
+    <div id="annotate-lab"></div>
+    <details>
+      <summary>Write your own version (optional)</summary>
+      <div id="explain-1"></div>
+    </details>
+  </section>
+
+  <section id="play">
+    <h2>Side quest: do it on a real GPU</h2>
+    <p>The notebook runs the naive kernel, gives you the same kernel to fix, times both against cuBLAS on <em>your</em> GPU and prints a score line for the ladder below. Colab's free T4 is enough.</p>
+    <ul>
+      <li><a href="https://colab.research.google.com/github/yosbotnet/unibo-lessons/blob/main/play/gpu/campaign.ipynb">Open in Colab</a> (then Runtime &gt; Change runtime type &gt; T4 GPU)</li>
+      <li><a href="campaign.ipynb" download>Download the notebook</a> for Jupyter on your own GPU (<code>pip install cupy-cuda12x</code>)</li>
+    </ul>
+    <div id="ladder"></div>
+  </section>
+
+  <section id="done">
+    <h2>What you earned</h2>
+    <div id="complete-1"></div>
+    <details>
+      <summary>After you have played: how the professionals see this</summary>
+      <p>GPU programmers call the distinction <em>uniform</em> vs <em>varying</em> (per-lane) values, and recent NVIDIA GPUs even keep uniform values in separate registers, stored once per warp. Nsight Compute, NVIDIA's kernel profiler, reports what the lab counts: in its memory workload analysis the naive kernel shows many more sectors per request than the coalesced one. The full climb this campaign follows, from 1.3% to 93.7% of cuBLAS, is Simon Boehm's <a href="https://siboehm.com/articles/22/CUDA-MMM">How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance</a> (RTX A6000, 4092×4092 FP32).</p>
+    </details>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Campaign navigation">
+      <a href="index.html">&larr; Campaign map</a>
+      <a href="level-2.html">Level 2 &rarr;</a>
+    </nav>
+    <p>Measurements: S. Boehm, <em>How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance</em>, 2022 (RTX A6000). The sector counts follow NVIDIA's 32-byte sector model of global memory. Progress is saved in this browser only.</p>
+  </footer>
+
+  <script src="../assets/lesson-kit.js"></script>
+  <script src="../assets/matmul-lab.js"></script>
+  <script src="../assets/warp-lab.js"></script>
+  <script src="../assets/thread-lab.js"></script>
+  <script src="../assets/annotate-lab.js"></script>
+  <script src="../assets/campaign.js"></script>
+  <script>
+    MatmulLab.mount('#matmul-lab');
+    WarpLab.mount('#warp-lab');
+    ThreadLab.mount('#thread-lab');
+    AnnotateLab.mount('#annotate-lab', { store: {
+      get: () => Campaign.load().annotate || {},
+      set: (v) => { const s = Campaign.load(); s.annotate = v; Campaign.save(s); }
+    } });
+    Campaign.mountPredict('#p-naive', { id: 'l1-naive', question: 'What percentage of cuBLAS does this plan reach on a real GPU?', unit: '%', answer: 1.3, source: 'Boehm, RTX A6000: 309 GFLOP/s against cuBLAS 23,250 GFLOP/s.' });
+    Campaign.mountPredict('#p-swap', { id: 'l1-swap', question: 'How many times faster is the swapped kernel?', unit: 'x', answer: 6.4, source: 'Boehm, RTX A6000: 309 to 1,987 GFLOP/s. The sector count predicted 6.6x.' });
+    Campaign.mountLadder('#ladder', { upTo: 1 });
+    Campaign.mountExplain('#explain-1', { id: 'l1', prompt: 'In your own words and names: why is the swapped kernel about 6x faster?', points: [
+      'Inside a warp only threadIdx.x (x) varies; y, k, N and the block are uniform.',
+      'Memory arrives in 32-byte sectors of 8 floats; a warp request costs the sectors its 32 addresses touch.',
+      'Naive: A[varying][k] puts the varying index first, 32 addresses 16 KB apart, 32 sectors.',
+      'Swapped: A[row][k] is all uniform (one broadcast), B[k][varying] puts it last (4 packed sectors).',
+      'Over time both kernels do the same thing; only which threads stand side by side changed.'
+    ] });
+    Campaign.mountComplete('#complete-1', { level: 1, mechanics: ['grid', 'warp', 'coalescing'] });
+  </script>
+</body>
+</html>

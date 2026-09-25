@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Level 2 — Stop fetching the same numbers · GPU kernels</title>
+<link rel="stylesheet" href="../assets/lesson-kit.css">
+<link rel="stylesheet" href="../assets/play.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Campaign navigation">
+    <a href="level-1.html">&larr; Level 1 — The 1% kernel</a>
+    <a href="index.html">Campaign map &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">GPU kernels, a campaign · Level 2</div>
+    <h1>Stop fetching the same numbers</h1>
+    <div class="lk-meta"><span>~40 min</span><span>4 labs · 2 predictions · 1 exercise</span><span>optional: notebook level 2</span></div>
+  </header>
+
+  <p><strong>The level in one paragraph.</strong> Your coalesced kernel wastes nothing per request, yet it reads the whole input four thousand times over. The fix is the one you would use for a hot database row: keep a copy close to where it is used. On a GPU that copy lives in <em>shared memory</em>, loaded tile by tile by a whole block working together, with two barriers you already know from concurrency class. Your uniform/varying lens from level 1 keeps working, now also inside shared memory. It cuts global-memory traffic by 32x. Then comes the twist: the kernel gets only about 1.5x faster, because the bottleneck moved.</p>
+
+  <p class="gl-legend">As in level 1: <span class="u">uniform</span> = the same for all 32 threads of a warp · <span class="v">varying</span> = different for each thread. A warp is 32 threads with neighbouring <code>threadIdx.x</code> and the same <code>threadIdx.y</code>.</p>
+
+  <section id="s1">
+    <h2>1. The problem: hot rows</h2>
+    <p>Look at who reads what in the coalesced kernel. Row <code>i</code> of <code>C</code> has 4,096 outputs, each computed by its own thread, and every one of those threads reads <em>all</em> of row <code>i</code> of <code>A</code> from global memory. So each float of <code>A</code> is fetched 4,096 times, once per thread that needs it. The same holds for each float of <code>B</code>, read once by every thread in its column of <code>C</code>.</p>
+    <div id="p-reuse"></div>
+    <p>Add it up: <code>A</code> and <code>B</code> are 64 MB each, but the kernel asks global memory for about 550 GB in total, the whole input read four thousand times over. In backend terms, every request re-queries the same hot rows instead of caching them.</p>
+    <p>A useful way to measure this is <strong>arithmetic intensity</strong>: floating-point operations done per byte fetched from global memory. Each multiply-add (2 operations) brings in two fresh floats (8 bytes): 0.25 operations per byte. A GPU computes far faster than data can arrive at that rate, so the kernel's speed is capped at <em>intensity × memory bandwidth</em>. Plotted against intensity, that cap is a sloped line that flattens out at the compute peak: the <strong>roofline</strong>.</p>
+    <h3>Lab: where is the ceiling?</h3>
+    <p>Keep "no tiling" and pick your GPU (Colab's free one is the T4). The red bar is the ceiling that binds; the others are the ones you would hit next.</p>
+    <div id="roofline-lab"></div>
+    <p>One honest wrinkle: real untiled kernels run above the "no tiling" line, because the GPU's L2 cache quietly catches some of the reuse. The cache is doing this level's trick for you, partly and by accident. Doing it on purpose is the fix.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Where could a copy live?</h2>
+    <p>A GPU has several kinds of memory, from huge and slow to tiny and fast. The latencies below are rough orders of magnitude; they vary by chip.</p>
+    <div class="lk-content-scroll"><table>
+      <thead><tr><th>memory</th><th>who sees it</th><th>size</th><th>roughly how far</th><th>managed by</th></tr></thead>
+      <tbody>
+        <tr><td><strong>registers</strong></td><td>one thread</td><td>a few hundred KB per SM, split among its threads</td><td>~1 cycle</td><td>the compiler</td></tr>
+        <tr><td><strong>shared memory</strong></td><td>the threads of one block</td><td>tens of KB per block (48 KB by default)</td><td>~20–30 cycles</td><td><strong>you</strong></td></tr>
+        <tr><td><strong>L2 cache</strong></td><td>the whole GPU</td><td>a few MB</td><td>~200 cycles</td><td>the hardware</td></tr>
+        <tr><td><strong>global memory</strong></td><td>the whole GPU</td><td>gigabytes</td><td>~400–800 cycles</td><td>you (it is where <code>A</code>, <code>B</code>, <code>C</code> live)</td></tr>
+      </tbody>
+    </table></div>
+    <p>An <strong>SM</strong> (streaming multiprocessor) is one of the GPU's core clusters; a block always runs on a single SM. <strong>Shared memory</strong> is the interesting row: on-chip, fast, and shared by exactly the threads of one block. It is a cache <em>you</em> manage: nothing arrives there unless your code copies it in, and it disappears when the block finishes. You declare it inside the kernel:</p>
+<pre class="gl-code">__shared__ float As[32][32];   <span class="c">// one copy per block, visible to all its 1,024 threads</span></pre>
+    <details class="gl-pause">
+      <summary>Your move: a block of 32×32 threads computes a 32×32 patch of <code>C</code>. What does the whole block need from <code>A</code> and <code>B</code>, and can it fit in shared memory? (think, then open)</summary>
+      <p>A 32×32 patch of <code>C</code> needs 32 full rows of <code>A</code> (a horizontal strip) and 32 full columns of <code>B</code> (a vertical strip). Each strip is 32 × 4,096 floats = 512 KB: far too big for shared memory. But the dot products can be done <em>in pieces</em>: take the first 32 columns of the <code>A</code> strip and the first 32 rows of the <code>B</code> strip, two 32×32 tiles of 4 KB each, do all the multiply-adds they allow, then move on to the next 32. That is tiling.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. The plan, one tile at a time</h2>
+<pre class="gl-code">for each step t = 0, 1, …, 127:
+    every thread copies ONE float of A's tile and ONE float of B's tile into shared memory
+    wait until the whole block has finished copying
+    every thread does 32 multiply-adds, reading only shared memory
+    wait until the whole block has finished computing
+every thread writes its one output</pre>
+    <p>Why one float per thread per tile? A tile has 32 × 32 = 1,024 floats and the block has 1,024 threads: the copy is shared out perfectly. Then each loaded float is used by 32 threads: <code>A</code>'s tile element in row <code>r</code> by the 32 threads computing row <code>r</code> of the patch, <code>B</code>'s element in column <code>c</code> by the 32 threads computing column <code>c</code>. Watch it:</p>
+    <h3>Lab: walk the tiles</h3>
+    <p>Tap a block of <code>C</code>, then step through <code>t</code>. The block moves along its strip of <code>A</code> (left to right) and down its strip of <code>B</code> (top to bottom), one tile each per step.</p>
+    <div id="tile-lab"></div>
+    <p>Back to the roofline lab above: choose "tile 32x32" and watch the DRAM ceiling move 32 times higher, from 0.25 to 8 operations per byte.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. The kernel, line by line</h2>
+<pre class="gl-code">#define TILE 32
+extern "C" __global__ void matmul_tiled(const float* A, const float* B, float* C, int N) {
+    __shared__ float As[TILE][TILE];                                  <span class="c">// (1)</span>
+    __shared__ float Bs[TILE][TILE];
+    int tx = threadIdx.x, ty = threadIdx.y;
+    int row = <span class="u">blockIdx.y</span> * TILE + <span class="u">ty</span>;                               <span class="c">// (2) uniform</span>
+    int col = <span class="u">blockIdx.x</span> * TILE + <span class="v">tx</span>;                               <span class="c">// (2) varying</span>
+    float acc = 0.0f;
+    for (int t = 0; t &lt; N; t += TILE) {                               <span class="c">// (3)</span>
+        As[<span class="u">ty</span>][<span class="v">tx</span>] = A[<span class="u">row</span>][<span class="u">t</span> + <span class="v">tx</span>];                         <span class="c">// (4) packed</span>
+        Bs[<span class="u">ty</span>][<span class="v">tx</span>] = B[<span class="u">t</span> + <span class="u">ty</span>][<span class="v">col</span>];                         <span class="c">// (4) packed</span>
+        __syncthreads();                                              <span class="c">// (5)</span>
+        for (int k = 0; k &lt; TILE; ++k)
+            acc += As[<span class="u">ty</span>][<span class="u">k</span>] * Bs[<span class="u">k</span>][<span class="v">tx</span>];                     <span class="c">// (6) broadcast · no conflict</span>
+        __syncthreads();                                              <span class="c">// (7)</span>
+    }
+    if (row &lt; N &amp;&amp; col &lt; N)
+        C[row * N + col] = acc;                                        <span class="c">// (8)</span>
+}
+<span class="c">// A[r][c] stands for A[r * N + c]; the notebook version also checks bounds on the loads.</span></pre>
+    <ol>
+      <li><strong>Two tiles of shared memory</strong>, 4 KB each, one pair per block.</li>
+      <li><strong>The output this thread owns</strong>, mapped the level-1 way: <code>tx</code> picks the column, so a warp owns a slice of a row of <code>C</code>.</li>
+      <li><strong>The walk along the strips</strong>: <code>t</code> is the tile's starting column in <code>A</code> and starting row in <code>B</code>. It is uniform: the whole block is on the same step.</li>
+      <li><strong>The copy.</strong> Thread <code>(tx, ty)</code> copies element <code>(ty, tx)</code> of each tile. Read through the lens: <code>A[row][t + tx]</code> is varying only in the last index, packed; <code>B[t + ty][col]</code> too. The loads are coalesced exactly as in level 1.</li>
+      <li><strong>First barrier</strong>: nobody reads the tiles before all 1,024 threads have written their element.</li>
+      <li><strong>The work</strong>, 32 multiply-adds from shared memory. <code>As[ty][k]</code> is all uniform: one value broadcast to the warp. <code>Bs[k][tx]</code> is varying in the last index. Section 6 shows why both are fast in shared memory too.</li>
+      <li><strong>Second barrier</strong>: section 5 is all about it.</li>
+      <li><strong>The write</strong>: one output per thread, packed as in level 1.</li>
+    </ol>
+  </section>
+
+  <section id="s5">
+    <h2>5. The barrier you already know</h2>
+    <p><code>__syncthreads()</code> is a barrier for the threads of one block: nobody passes until everybody arrives, the same idea as the barriers of concurrent programming. The first one is obvious. The second is not.</p>
+    <details class="gl-pause">
+      <summary>Your move: what breaks if you delete the <em>second</em> barrier? (think, then open)</summary>
+      <p>A fast warp finishes its 32 multiply-adds, loops around and writes the <em>next</em> tile into <code>As</code> and <code>Bs</code> while a slower warp is still reading the current one: a write-after-read race. Try it below.</p>
+    </details>
+    <h3>Lab: race two warps</h3>
+    <p>A block shrunk to two warps; each writes half of the tile, and each computes on the whole tile. Step them in any order, switch barriers off, or let W0 run ahead as a fast warp would. With both barriers, no order you choose can produce a wrong step.</p>
+    <div id="barrier-lab"></div>
+    <p>Two more rules from the same family. Every thread of the block must reach every barrier: a <code>__syncthreads()</code> inside an <code>if</code> that only some threads take can hang the block. And like any race, the missing-barrier bug shows up only sometimes, depending on timing, which is exactly what makes it dangerous.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. Your lens, inside shared memory</h2>
+    <p>Shared memory has its own version of sectors. It is split into 32 <strong>banks</strong> of 4 bytes: float <code>i</code> of a shared array lives in bank <code>i mod 32</code>. Each bank serves one address per step. So a warp's access is fast when its 32 addresses fall in 32 different banks, or are all the same address (a broadcast), and slow when several <em>different</em> addresses land in the same bank: a <strong>bank conflict</strong>, served one after another.</p>
+    <p>The level-1 rule carries over almost unchanged: all uniform is a broadcast; varying in the last index lands in 32 different banks; varying in an earlier index, with rows of 32 floats, puts every thread in the <em>same</em> bank.</p>
+    <h3>Lab: count the bank steps</h3>
+    <div id="bank-lab"></div>
+    <details class="gl-pause">
+      <summary>Your move: the lab's fix wastes one float per row. Why does a 33-float row help? (think, then open)</summary>
+      <p>Going down a column adds one row length to the index. With 32 floats per row that adds exactly one full lap of the 32 banks, so every thread lands on the same bank. With 33 it adds a lap plus one, so thread <code>tx</code> lands in bank <code>(tx + k) mod 32</code>: 32 different banks. Padding is the standard trick whenever a kernel must read a shared tile by columns, for example a transpose.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. The twist</h2>
+    <p>Global-memory traffic is down 32x. Commit to a number before you look.</p>
+    <div id="p-tiled"></div>
+    <p>Only about 1.5x, for 32x less traffic. Two reasons, and both matter for everything that follows:</p>
+    <ul>
+      <li><strong>The L2 cache was already catching much of the reuse</strong> for the coalesced kernel, so the real saving was smaller than the 32x on paper.</li>
+      <li><strong>The bottleneck moved.</strong> Each multiply-add still reads two numbers, now from shared memory instead of global memory. Shared memory is fast, but it has a bandwidth too. Back in the roofline lab with "tile 32x32", on most GPUs the binding ceiling is now <em>shared memory</em>, not DRAM.</li>
+    </ul>
+    <details class="gl-pause">
+      <summary>Your move: bigger tiles would raise the intensity again. Why not use 64×64 tiles? (think, then open)</summary>
+      <p>With one output per thread, a 64×64 patch needs 4,096 threads, and a block can have at most 1,024. The tile size is capped by "one thread, one output". To grow the tile, each thread has to compute <em>several</em> outputs, and keep the values it reuses in registers, the fastest row of the table in section 2.</p>
+    </details>
+    <p>That is exactly the next move: more work per thread, with reused values in registers. It takes the climb from 12.8% to 36.5% and then 68.7% of cuBLAS. That is level 3.</p>
+  </section>
+
+  <section id="practice">
+    <h2>Practice: mark it yourself</h2>
+    <p>Three variations of this kernel. Mark each index uniform or varying and predict the cost: in sectors for global memory, in bank steps for shared memory. In all of them <code>tx</code> is varying and <code>ty</code>, <code>t</code>, <code>k</code> are uniform.</p>
+    <div id="annotate-lab"></div>
+  </section>
+
+  <section id="play">
+    <h2>Side quest: tile it yourself</h2>
+    <p>The notebook's level 2 cell has the skeleton with three TODOs: the two tile loads and the two barriers. It compiles as given but produces a wrong answer until you fill them in; the harness checks every result against cuBLAS.</p>
+    <ul>
+      <li><a href="https://colab.research.google.com/github/yosbotnet/unibo-lessons/blob/main/play/gpu/campaign.ipynb">Open in Colab</a> · <a href="campaign.ipynb" download>download the notebook</a></li>
+    </ul>
+    <div id="ladder"></div>
+  </section>
+
+  <section id="done">
+    <h2>What you earned</h2>
+    <div id="complete-2"></div>
+    <details>
+      <summary>Write your own version (optional)</summary>
+      <div id="explain-2"></div>
+    </details>
+    <details>
+      <summary>Coming next: level 3, more work per thread</summary>
+      <p>Each thread will compute a column of 8 outputs instead of one, reading each value of <code>Bs</code> once into a register and reusing it 8 times. Same shared memory, same barriers, far fewer shared-memory reads per multiply-add. Not built yet: this campaign is a prototype of two levels.</p>
+    </details>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Campaign navigation">
+      <a href="level-1.html">&larr; Level 1</a>
+      <a href="index.html">Campaign map &rarr;</a>
+    </nav>
+    <p>Measurements: S. Boehm, <em>How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance</em>, 2022 (RTX A6000). The labs use simple explicit models (vendor peak figures; 128 bytes of shared memory per SM per clock; 32 four-byte banks); they explain directions, not exact numbers. Latencies are rough orders of magnitude. Progress is saved in this browser only.</p>
+  </footer>
+
+  <script src="../assets/lesson-kit.js"></script>
+  <script src="../assets/roofline-lab.js"></script>
+  <script src="../assets/tile-lab.js"></script>
+  <script src="../assets/barrier-lab.js"></script>
+  <script src="../assets/bank-lab.js"></script>
+  <script src="../assets/annotate-lab.js"></script>
+  <script src="../assets/campaign.js"></script>
+  <script>
+    RooflineLab.mount('#roofline-lab');
+    TileLab.mount('#tile-lab');
+    BarrierLab.mount('#barrier-lab');
+    BankLab.mount('#bank-lab');
+    AnnotateLab.mount('#annotate-lab', {
+      store: { get: () => Campaign.load().annotate2 || {}, set: (v) => { const s = Campaign.load(); s.annotate2 = v; Campaign.save(s); } },
+      exercises: [
+        { id: 'swapload', title: 'A tile load with swapped roles', code: 'Bs[tx][ty] = B[t + tx][col0 + ty];   // col0 = this block\'s first column',
+          context: 'Someone copies the B tile with tx picking the tile row instead of the column. Both sides of the copy change cost.',
+          accesses: [
+            { name: 'B', kind: 'global', idx: [{ n: 't + tx', ans: 'v' }, { n: 'col0 + ty', ans: 'u' }] },
+            { name: 'Bs', kind: 'shared', idx: [{ n: 'tx', ans: 'v' }, { n: 'ty', ans: 'u' }] } ],
+          debrief: 'Both sides now put the varying tx in the first index: the global read is scattered (32 sectors) and the shared write is a 32-way bank conflict. Swapping the roles of tx and ty in the copy costs you twice. Keep tx in the last index on both sides.' },
+        { id: 'colread', title: 'Reading a tile by columns', code: 'acc += As[tx][k] * Bs[k][ty];',
+          context: 'An inner loop from a kernel where tx picks the output row. k is the loop variable.',
+          accesses: [
+            { name: 'As', kind: 'shared', idx: [{ n: 'tx', ans: 'v' }, { n: 'k', ans: 'u' }] },
+            { name: 'Bs', kind: 'shared', idx: [{ n: 'k', ans: 'u' }, { n: 'ty', ans: 'u' }] } ],
+          debrief: 'As[tx][k] walks down a column of a 32-float-wide array: every thread in the same bank, 32 steps. Bs[k][ty] is all uniform: a broadcast. This is the bank-conflict version of level 1\'s naive mapping.' },
+        { id: 'padded', title: 'The padded tile', code: '__shared__ float As[32][33];  ...  acc += As[tx][k] * Bs[k][tx];',
+          context: 'The same column read as before, but each row of As is padded to 33 floats.',
+          accesses: [
+            { name: 'As', kind: 'shared', answer: 'packed', label: 'As (rows of 33)', idx: [{ n: 'tx', ans: 'v' }, { n: 'k', ans: 'u' }] },
+            { name: 'Bs', kind: 'shared', idx: [{ n: 'k', ans: 'u' }, { n: 'tx', ans: 'v' }] } ],
+          debrief: 'The marks are the same as before, but the padding changes the answer: with rows of 33 floats, thread tx lands in bank (tx + k) mod 32, all different, so As[tx][k] is conflict-free. The lens tells you where to look; the row length decides the bank.' }
+      ] });
+    Campaign.mountPredict('#p-reuse', { id: 'l2-reuse', question: 'How many times does the coalesced kernel fetch each float of A from global memory?', unit: 'times', answer: 4096, source: 'One fetch per thread that needs it: all 4,096 threads computing that row of C (the L2 cache absorbs some of them in practice).' });
+    Campaign.mountPredict('#p-tiled', { id: 'l2-tiled', question: 'How many times faster than the coalesced kernel is the tiled one?', unit: 'x', answer: 1.5, source: 'Boehm, RTX A6000: 1,987 to 2,980 GFLOP/s.' });
+    Campaign.mountLadder('#ladder', { upTo: 2 });
+    Campaign.mountExplain('#explain-2', { id: 'l2', prompt: 'Why did cutting global-memory reads by 32x make the kernel only about 1.5x faster?', points: [
+      'Tiling makes each float fetched from global memory serve 32 multiply-adds instead of 1.',
+      'The L2 cache was already absorbing part of that reuse, so the real saving is smaller.',
+      'Every multiply-add still reads two values, now from shared memory.',
+      'Shared memory has its own bandwidth limit, which becomes the new ceiling.',
+      'Tiles cannot simply grow: one output per thread caps a block at 32x32; next step, more outputs per thread.'
+    ] });
+    Campaign.mountComplete('#complete-2', { level: 2, mechanics: ['roofline', 'smem', 'barrier', 'banks'] });
+  </script>
+</body>
+</html>
