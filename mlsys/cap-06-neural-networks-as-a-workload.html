@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 6 — Neural networks as a workload · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch6.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-05-profiling.html">&larr; Ch. 5 — Profiling with Nsight</a>
+    <a href="index.html">Index</a>
+    <a href="index.html">Ch. 7 — Matmul I: tiling (in writing) &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Kernels that matter · Chapter 6</div>
+    <h1>Neural networks as a workload</h1>
+    <div class="lk-meta"><span>~50 min read</span><span>2 interactive widgets</span><span>5 plates</span><span>lab 5 · ~40 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Part I taught you the machine. Part II is about the few kernels that matter on it, so first you need to know what a neural network actually asks the GPU to do. At inference time a model is a <strong>fixed program</strong>: a list of operations on arrays whose shapes are known in advance, applied to weights that never change. Almost every operation falls into one of four classes. <strong>Matrix multiplies</strong> (every linear layer) do nearly all the arithmetic and can sit far right on the roofline. <strong>Elementwise</strong> operations (activations, bias and residual adds), <strong>row reductions</strong> (layernorm, softmax) and <strong>data movement</strong> (embedding lookups, transposes) do almost no arithmetic and are always memory-bound. So the work splits cleanly: make the matrix multiplies fast (chapters 7 and 8), and make everything else move as few bytes as possible, mostly by fusing it into its neighbours (chapter 9). This chapter builds that picture from an MLP block up to all of GPT-2 small, counts its parameters, FLOPs and bytes, and ends with the number formats (FP32 down to FP4) that decide how many bytes there are.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What a model computes</a></li>
+      <li><a href="#s2">Tensors: shapes, layouts, and why a token is a row</a></li>
+      <li><a href="#s3">The linear layer is a matrix multiply</a></li>
+      <li><a href="#s4">Everything else: elementwise, reductions, data movement</a></li>
+      <li><a href="#s5">Four classes on one roofline</a></li>
+      <li><a href="#s6">GPT-2 small, counted</a></li>
+      <li><a href="#s7">Number formats: FP32 down to FP4</a></li>
+      <li><a href="#s8">The plan for Part II</a></li>
+      <li><a href="#s9">Lab 5: the MLP block, op by op</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. What a model computes</h2>
+
+    <p>A neural network is a function with a very large number of adjustable constants. You give it an input <var>x</var> (a sentence, an image), it returns an output <var>y</var> (the next word, a label), and the constants, called <strong>parameters</strong> or <strong>weights</strong>, decide which function it is. <strong>Training</strong> searches for weights that make the outputs good, by running the model forward, measuring the error, and running backward to adjust every weight a little; that costs about three times the arithmetic of the forward pass alone, over trillions of examples. <strong>Inference</strong> uses the finished weights: forward only, weights frozen. This course is about inference, because that is where models spend their lives and where the money goes.</p>
+
+    <p>The function is built from <strong>layers</strong>: small, standard operations applied one after another, each one taking arrays of numbers in and giving arrays out. A modern language model uses maybe ten distinct kinds of layer, repeated dozens of times. Seen from the GPU, three facts make this workload unusual:</p>
+    <ul>
+      <li><strong>It is a fixed program.</strong> There is no data-dependent control flow to speak of: for a given input size, the same operations run in the same order on arrays of the same shapes, every time. That is why a whole forward pass can be recorded once as a CUDA graph and replayed (chapter 5), and why compilers can plan it ahead (Part V).</li>
+      <li><strong>The weights are read, never written.</strong> During inference they are a large read-only array. The only question is how often each byte of them gets <em>used</em> per trip from DRAM: chapter 4&rsquo;s intensity.</li>
+      <li><strong>It is massively parallel by construction.</strong> A layer applies the same operation to thousands of numbers independently, which is exactly the shape chapter 1 said a GPU wants.</li>
+    </ul>
+    <p>So from here on, &ldquo;running a model&rdquo; means: launch a known list of kernels, each one an operation on arrays. The rest of this chapter is about what those operations are and what each one costs.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Tensors: shapes, layouts, and why a token is a row</h2>
+
+    <p>The arrays a model works on are called <strong>tensors</strong>: an array with a <em>shape</em> (the size of each dimension) and a <em>data type</em> (FP32, FP16&hellip;, section 7). A vector is a tensor of shape [768], a matrix [768, 3072]. Whatever the shape, memory is still one long line (chapter 2), so every tensor also has a <strong>layout</strong>: the rule that turns an index into an offset. Frameworks use row-major by default: the last dimension is contiguous.</p>
+
+    <p>A language model reads text as <strong>tokens</strong>, pieces of words, each one an integer ID from a fixed vocabulary (GPT-2&rsquo;s has 50,257). The first layer turns each token into a vector of <var>C</var> numbers (768 in GPT-2 small); every later layer takes those vectors and returns new ones of the same size. So the data flowing through the model, the <strong>activations</strong>, has three dimensions: <strong>B</strong> sequences in the batch, <strong>T</strong> tokens per sequence, <strong>C</strong> channels per token. Shape [B, T, C].</p>
+
+    <figure class="lk-fig" role="img" aria-label="Left: a block of activations with dimensions B sequences, T tokens and C channels. Middle: the same data seen as a matrix of M equals B times T rows and C columns, one row per token. Right: the matrix in memory as one line, row after row, each row C floats long.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 240" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>An activation tensor, three ways</title>
+        <defs><marker id="c6-a1" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker></defs>
+        <text x="95" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">[B, T, C]</text>
+        <!-- stacked sheets: B = 3 -->
+        <g stroke="var(--lk-cobalt)" fill="var(--lk-paper-light)">
+          <rect x="48" y="36" width="110" height="120"/>
+          <rect x="40" y="44" width="110" height="120"/>
+          <rect x="32" y="52" width="110" height="120"/>
+        </g>
+        <g stroke="var(--lk-rule-soft)"><line x1="32" y1="67" x2="142" y2="67"/><line x1="32" y1="82" x2="142" y2="82"/><line x1="32" y1="97" x2="142" y2="97"/><line x1="32" y1="112" x2="142" y2="112"/><line x1="32" y1="127" x2="142" y2="127"/><line x1="32" y1="142" x2="142" y2="142"/><line x1="32" y1="157" x2="142" y2="157"/></g>
+        <rect x="32" y="82" width="110" height="15" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <g font-size="9.5" fill="var(--lk-ink-soft)">
+          <text x="87" y="188" text-anchor="middle">C = 768 channels &rarr;</text>
+          <text x="20" y="112" text-anchor="middle" transform="rotate(-90 20 112)">T tokens &darr;</text>
+          <text x="160" y="42">B sequences</text>
+        </g>
+        <text x="87" y="206" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">one token = one vector of C</text>
+        <line x1="178" y1="112" x2="222" y2="112" stroke="var(--lk-cobalt)" stroke-width="1.3" marker-end="url(#c6-a1)"/>
+        <text x="200" y="104" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">merge B, T</text>
+        <!-- matrix M x C -->
+        <text x="310" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">[M = B&middot;T, C]</text>
+        <rect x="250" y="30" width="120" height="160" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+        <g stroke="var(--lk-rule-soft)"><line x1="250" y1="50" x2="370" y2="50"/><line x1="250" y1="70" x2="370" y2="70"/><line x1="250" y1="90" x2="370" y2="90"/><line x1="250" y1="110" x2="370" y2="110"/><line x1="250" y1="130" x2="370" y2="130"/><line x1="250" y1="150" x2="370" y2="150"/><line x1="250" y1="170" x2="370" y2="170"/></g>
+        <g stroke="var(--lk-rule)" stroke-dasharray="3 3"><line x1="244" y1="90" x2="376" y2="90"/></g>
+        <rect x="250" y="110" width="120" height="20" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="380" y="124" font-size="9.5" fill="var(--lk-cobalt-dark)">row m</text>
+        <text x="380" y="64" font-size="9" fill="var(--lk-ink-soft)">sequence 0</text>
+        <text x="380" y="164" font-size="9" fill="var(--lk-ink-soft)">sequence 1</text>
+        <text x="310" y="206" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">a token is a row</text>
+        <line x1="432" y1="112" x2="470" y2="112" stroke="var(--lk-cobalt)" stroke-width="1.3" marker-end="url(#c6-a1)"/>
+        <!-- memory line -->
+        <text x="560" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">memory</text>
+        <g stroke="var(--lk-cobalt)" fill="var(--lk-paper-light)">
+          <rect x="482" y="30" width="30" height="160"/><rect x="514" y="30" width="30" height="160"/><rect x="546" y="30" width="30" height="160"/><rect x="578" y="30" width="30" height="160"/><rect x="610" y="30" width="30" height="160"/>
+        </g>
+        <rect x="578" y="30" width="30" height="160" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <g font-size="8.5" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="497" y="202">row 0</text><text x="529" y="202">row 1</text><text x="561" y="202">&hellip;</text><text x="593" y="202">row m</text></g>
+        <text x="561" y="222" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">offset = m&middot;C + c</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The same activations three ways. Most layers treat every token independently, so the batch and sequence dimensions merge into one: <var>M</var> = <var>B</var>&middot;<var>T</var> rows of <var>C</var> numbers. In memory each token is <var>C</var> consecutive floats, which is what makes &ldquo;one warp per piece of a row&rdquo; coalesced (chapter 3).</figcaption>
+    </figure>
+
+    <p>The step in the middle of the figure is the most useful idea in this chapter. Almost every layer (linear layers, activations, layernorm) acts on each token <em>on its own</em>: token 5 of sequence 2 does not care which sequence it is in. So the kernels see just a matrix of <strong><var>M</var> = <var>B</var>&middot;<var>T</var> rows</strong>, one per token in flight, each <var>C</var> numbers wide. Only attention (chapter 10) mixes tokens, and only within a sequence. Keep <var>M</var> in mind: it is the number that moves every operation along the roofline.</p>
+
+    <ul>
+      <li><strong>Prefill</strong>: the model reads a prompt of, say, 500 tokens. All 500 are known, so they go through together: <var>M</var> = 500.</li>
+      <li><strong>Decode</strong>: the model generates one token at a time. For one user, <var>M</var> = 1. Serving 64 users at once, <var>M</var> = 64.</li>
+    </ul>
+
+    <div class="callout note">
+      <span class="callout-label">Reshapes are free, transposes are not</span>
+      <p>Viewing [B, T, C] as [B&middot;T, C] changes no bytes: it is the same line of memory with a different indexing rule. Frameworks call that a <em>view</em>. Swapping two dimensions, for example [B, T, H, D] &rarr; [B, H, T, D] to separate attention heads (chapter 10), changes which elements are neighbours in memory, so producing it contiguous means copying the whole tensor. Good kernels avoid the copy by reading the data in its original layout, with a different index formula.</p>
+    </div>
+  </section>
+
+  <section id="s3">
+    <h2>3. The linear layer is a matrix multiply</h2>
+
+    <p>The workhorse layer takes each token&rsquo;s vector of <var>K</var> numbers and returns <var>N</var> numbers, each one a weighted sum of all the inputs plus a constant:</p>
+    <p class="c6-eq"><var>y</var>[<var>m</var>, <var>n</var>] = <var>b</var>[<var>n</var>] + &sum;<sub><var>k</var></sub> <var>x</var>[<var>m</var>, <var>k</var>] &middot; <var>W</var>[<var>k</var>, <var>n</var>]</p>
+    <p>For all tokens at once that is <var>Y</var> = <var>X</var><var>W</var> + <var>b</var>: an [<var>M</var>, <var>K</var>] matrix times a [<var>K</var>, <var>N</var>] weight matrix, the operation BLAS libraries call <strong>GEMM</strong> (general matrix multiply). Every output element is a dot product of length <var>K</var>: <var>K</var> multiplies and <var>K</var> adds.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Matrix X with M rows and K columns times matrix W with K rows and N columns gives Y with M rows and N columns. One highlighted row of X and one highlighted column of W combine into one highlighted element of Y. Annotations: FLOPs equal 2 M K N; W is shared by every row of X.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 230" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>A linear layer as a GEMM</title>
+        <!-- X: M x K -->
+        <rect x="30" y="50" width="150" height="110" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+        <rect x="30" y="92" width="150" height="14" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="105" y="40" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">X  [M, K]</text>
+        <text x="105" y="178" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">activations: one row per token</text>
+        <text x="186" y="103" font-size="9.5" fill="var(--lk-cobalt-dark)">row m</text>
+        <text x="228" y="110" font-size="16" text-anchor="middle" fill="var(--lk-ink)">&times;</text>
+        <!-- W: K x N -->
+        <rect x="255" y="20" width="170" height="150" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+        <rect x="355" y="20" width="14" height="150" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="340" y="190" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">W  [K, N]</text>
+        <text x="340" y="206" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">weights: the same for every token</text>
+        <text x="372" y="14" font-size="9.5" fill="var(--lk-cobalt-dark)">column n</text>
+        <text x="448" y="110" font-size="16" text-anchor="middle" fill="var(--lk-ink)">=</text>
+        <!-- Y: M x N -->
+        <rect x="470" y="50" width="170" height="110" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+        <rect x="570" y="92" width="14" height="14" fill="var(--lk-cobalt)"/>
+        <text x="555" y="40" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">Y  [M, N]</text>
+        <text x="555" y="178" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">y[m, n] = row m &middot; column n</text>
+        <text x="555" y="222" font-size="10" text-anchor="middle" fill="var(--lk-vermilion)">2&middot;M&middot;K&middot;N FLOPs</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; A linear layer applied to <var>M</var> tokens. Each output is one row of <var>X</var> against one column of <var>W</var>. The arithmetic grows with <var>M</var>&middot;<var>K</var>&middot;<var>N</var>, but the biggest input, <var>W</var>, is the same for every row: fetched once, it can be used <var>M</var> times. That reuse is chapter 4&rsquo;s batch dial, and chapters 7 and 8 are about actually getting it.</figcaption>
+    </figure>
+
+    <p>Count it for the first MLP layer of GPT-2 small, which maps 768 channels to 3,072 (<var>K</var> = 768, <var>N</var> = 3,072), in FP32:</p>
+    <table>
+      <tr><th></th><th><var>M</var> = 1 (one user, decode)</th><th><var>M</var> = 512 (a prompt)</th></tr>
+      <tr><td>FLOPs, 2<var>MKN</var></td><td>4.7 M</td><td>2.42 G</td></tr>
+      <tr><td>Bytes: <var>X</var>, <var>W</var>, <var>Y</var> once each</td><td>9.46 MB (almost all <var>W</var>)</td><td>17.3 MB</td></tr>
+      <tr><td>Intensity</td><td><strong>0.5 FLOP/B</strong></td><td><strong>140 FLOP/B</strong></td></tr>
+      <tr><td>Roofline time on your card</td><td>16 &micro;s, memory-bound</td><td>78 &micro;s, compute-bound</td></tr>
+    </table>
+    <p>Same layer, same weights, a factor of 280 in intensity. At <var>M</var> = 1 each weight is used for one multiply-add and thrown away; at <var>M</var> = 512 it is used 512 times. (The roofline times use 88% of the 672 GB/s spec for memory and the 30.9 TFLOPS FP32 peak for compute.)</p>
+
+    <details class="ym">
+      <summary>Your move: at <var>M</var> = 1, the second MLP layer (3,072 &rarr; 768) moves the same 9.4 MB of weights as the first. With the naive one-thread-per-output kernel from lab 5, which of the two do you expect to be slower, and by how much?</summary>
+      <p>The second, and by a lot. One thread per output means the first layer launches 3,072 threads (12 blocks of 256) and the second only <strong>768 threads: 3 blocks</strong>. On a 48-SM GPU, 3 blocks occupy 3 SMs and leave 45 idle, and each of those 768 threads walks a 3,072-long dot product one load after another. Chapter 3&rsquo;s rule is that bandwidth needs bytes in flight: 3 SMs cannot keep enough requests outstanding to pull more than a small fraction of 672 GB/s. Expect the second layer to take several times longer than the first even though it moves the same bytes, and both to be far from the 16 &micro;s roofline. It is chapter 2&rsquo;s &ldquo;many more blocks than SMs&rdquo; rule, broken by a shape. Decode kernels fix it by splitting the <var>K</var> loop across many blocks (split-K, chapter 15). Lab 5 measures both.</p>
+    </details>
+
+    <h3>Which way round is the weight?</h3>
+    <p>The formula above stores <var>W</var> as [<var>K</var>, <var>N</var>] = [in, out], and that is how GPT-2&rsquo;s original checkpoints store it. PyTorch&rsquo;s <code>nn.Linear</code> stores the same numbers as [out, in] and computes <var>X</var><var>W</var><sup>T</sup>. Nothing about the math changes, but the kernel does: in one layout a column of <var>W</var> is contiguous, in the other a row is. BLAS libraries name the variants by which operand is transposed (NN, NT, TN), and a fast kernel for one is not automatically fast for the other. Checking the layout before writing the kernel is the cheapest bug you will ever avoid; lab 5 and the rest of Part II use [<var>K</var>, <var>N</var>], so <var>Y</var> = <var>X</var><var>W</var> with no transpose.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Where the bias goes</span>
+      <p>The <var>+ b</var> is a separate operation only on paper. Adding one number per output column costs nothing if the matmul kernel does it while the result is still in registers, just before writing it. That final step of a matmul kernel is called its <strong>epilogue</strong>, and bias, activation and residual add are all classic epilogue passengers (chapter 9). Lab 5 keeps them as separate kernels on purpose, so that you can see what they cost when they travel alone.</p>
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Everything else: elementwise, reductions, data movement</h2>
+
+    <p>Stacking linear layers alone buys nothing: a linear function of a linear function is still one linear function, and all those weights would collapse into one matrix. Everything that makes a network more than a single matrix lives in the <em>other</em> layers. They do very little arithmetic, but there are many of them.</p>
+
+    <h3>Elementwise operations</h3>
+    <p>An <strong>activation function</strong> is applied to every number independently, which is what breaks the linearity. GPT-2 uses GELU, in its tanh approximation:</p>
+    <p class="c6-eq">gelu(<var>x</var>) = &frac12;<var>x</var> (1 + tanh(&radic;(2/&pi;) (<var>x</var> + 0.044715<var>x</var><sup>3</sup>)))</p>
+    <p>Roughly: pass positive values through, squash negative ones towards zero, smoothly. Other elementwise operations in a transformer: bias adds, the <strong>residual add</strong> (<var>out</var> = <var>x</var> + layer(<var>x</var>), which lets each layer add a correction to its input instead of replacing it), scaling, and conversions between number formats.</p>
+    <p>The cost model is the simplest one in the course. Each element is read once and written once, 8 bytes in FP32, for a handful of FLOPs: intensity around 1 FLOP per byte at best, fifty times left of the ridge. <strong>Every elementwise kernel is memory-bound, and its time is its bytes divided by bandwidth.</strong> GELU on a [512, 3,072] FP32 activation moves 12.6 MB, so about 21 &micro;s on your card, however few or many FLOPs the tanh takes. Unless it is tiny: at <var>M</var> = 1 the same GELU moves 25 KB, which takes 0.04 &micro;s of DRAM time and a few &micro;s of launch overhead. Small elementwise kernels are overhead-bound.</p>
+
+    <h3>Row reductions: layernorm and softmax</h3>
+    <p><strong>Layer normalization</strong> rescales each token&rsquo;s vector to mean 0 and variance 1, then applies a learned scale &gamma; and shift &beta; per channel. It keeps the numbers in a well-behaved range as they pass through dozens of layers:</p>
+    <p class="c6-eq">&mu; = mean(<var>x</var>), &sigma;<sup>2</sup> = mean((<var>x</var> &minus; &mu;)<sup>2</sup>), <var>y</var> = &gamma; &middot; (<var>x</var> &minus; &mu;) / &radic;(&sigma;<sup>2</sup> + &epsilon;) + &beta;</p>
+    <p><strong>Softmax</strong> turns a row of arbitrary scores into positive weights that sum to 1, and it is at the heart of attention (chapter 10):</p>
+    <p class="c6-eq">softmax(<var>x</var>)<sub><var>i</var></sub> = e<sup><var>x<sub>i</sub></var> &minus; max(<var>x</var>)</sup> / &sum;<sub><var>j</var></sub> e<sup><var>x<sub>j</sub></var> &minus; max(<var>x</var>)</sup></p>
+    <p>(Subtracting the maximum changes nothing mathematically and prevents overflow: in FP32, e<sup><var>x</var></sup> is infinite for any <var>x</var> above about 88.7.)</p>
+    <p>Both have the same shape: <strong>reduce a row to one or two numbers, then apply an elementwise formula that uses them</strong>. The reduction is chapter 5&rsquo;s, one per row, and like elementwise ops both are firmly memory-bound. Their special problem is that the formula needs the reduction&rsquo;s result <em>before</em> it can start, so a naive implementation reads each row two or three times: once for the max or mean, once for the sum or variance, once to write the output. Chapter 9 gets that down to one read (Welford&rsquo;s algorithm, online softmax), and chapter 14 uses online softmax to build FlashAttention.</p>
+
+    <h3>Data movement: embeddings and transposes</h3>
+    <p>The first layer is an <strong>embedding lookup</strong>: token ID <var>t</var> selects row <var>t</var> of a [50,257, 768] table. That is chapter 3&rsquo;s gather: rows scattered across the table, but each row contiguous, so one warp per row is coalesced. Zero FLOPs, 3 KB per token. The other movers are the transposes and head splits of attention, which good kernels fold into their index arithmetic instead of running as copies.</p>
+
+    <details class="ym">
+      <summary>Your move: a framework runs bias add, GELU and a dtype conversion as three separate kernels on a [512, 3,072] FP32 tensor. Estimate the time on your card, and what one fused kernel would take.</summary>
+      <p>Each separate kernel reads and writes the whole tensor: 2 &times; 6.3 MB = 12.6 MB, about 21 &micro;s each at ~590 GB/s, so roughly 64 &micro;s for the three (the conversion writes FP16, a bit less). A fused kernel reads the FP32 input once and writes the FP16 output once: 6.3 + 3.1 = 9.4 MB, about 16 &micro;s. Four times faster, and the arithmetic is unchanged. Fusing it into the matmul&rsquo;s epilogue removes even that read. This is the whole argument for fusion, and the reason &ldquo;count the bytes, not the FLOPs&rdquo; is the first rule for everything that is not a matmul.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. Four classes on one roofline</h2>
+
+    <table>
+      <tr><th>Class</th><th>Examples</th><th>FLOP per byte (FP32)</th><th>Bound</th><th>Where we optimize it</th></tr>
+      <tr><td><strong>Matrix multiply</strong></td><td>linear layers; attention&rsquo;s QK<sup>T</sup> and &middot;V</td><td>&asymp; <var>M</var>/2 for small <var>M</var>, up to hundreds</td><td>memory at small <var>M</var>, compute at large <var>M</var></td><td>chapters 7, 8, 12</td></tr>
+      <tr><td><strong>Elementwise</strong></td><td>GELU, bias, residual add, scale, cast</td><td>0.08&ndash;1</td><td>memory (or launch overhead when tiny)</td><td>fusion, chapter 9</td></tr>
+      <tr><td><strong>Row reduction</strong></td><td>layernorm, RMSNorm, softmax</td><td>&asymp; 0.5&ndash;1</td><td>memory; extra passes over the row</td><td>chapter 9; attention: chapter 14</td></tr>
+      <tr><td><strong>Data movement</strong></td><td>embedding gather, transpose, concat</td><td>0</td><td>memory</td><td>fold into the neighbours&rsquo; indexing</td></tr>
+    </table>
+
+    <figure class="lk-fig" role="img" aria-label="FP32 roofline for the RTX 5070. Residual add at intensity 0.08, bias add at 0.125, a linear layer at M equals 1 and decode attention at 0.5, softmax at 0.6, layernorm and GELU at 1: all far down on the bandwidth slope. A linear layer at M equals 64 at intensity 29, on the slope near the ridge; at M equals 512, intensity 140, on the flat compute roof.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 290" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>The four classes on the roofline</title>
+        <g stroke="var(--lk-rule-soft)" stroke-width="1">
+          <line x1="70" y1="30" x2="640" y2="30"/><line x1="70" y1="85" x2="640" y2="85"/><line x1="70" y1="140" x2="640" y2="140"/><line x1="70" y1="195" x2="640" y2="195"/>
+          <line x1="184" y1="30" x2="184" y2="250"/><line x1="298" y1="30" x2="298" y2="250"/><line x1="412" y1="30" x2="412" y2="250"/><line x1="526" y1="30" x2="526" y2="250"/>
+        </g>
+        <rect x="70" y="30" width="570" height="220" fill="none" stroke="var(--lk-rule)"/>
+        <g font-size="9" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="70" y="264">0.01</text><text x="184" y="264">0.1</text><text x="298" y="264">1</text><text x="412" y="264">10</text><text x="526" y="264">100</text><text x="640" y="264">1000</text>
+        </g>
+        <g font-size="9" fill="var(--lk-ink-soft)" text-anchor="end">
+          <text x="64" y="33">100</text><text x="64" y="88">10</text><text x="64" y="143">1</text><text x="64" y="198">0.1</text><text x="64" y="253">0.01</text>
+        </g>
+        <text x="355" y="282" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">arithmetic intensity (FLOP per byte)</text>
+        <text x="16" y="140" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)" transform="rotate(-90 16 140)">TFLOP/s</text>
+        <!-- roof: slope from (89.7,250) to ridge (487.5,58.1), flat to 640 -->
+        <polyline points="89.7,250 487.5,58.1 640,58.1" fill="none" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <text x="480" y="46" font-size="9.5" text-anchor="end" fill="var(--lk-cobalt-dark)">FP32 peak 30.9 TFLOP/s</text>
+        <text x="300" y="128" font-size="9.5" fill="var(--lk-cobalt-dark)" transform="rotate(-25.8 300 128)">672 GB/s</text>
+        <line x1="487.5" y1="58.1" x2="487.5" y2="250" stroke="var(--lk-cobalt)" stroke-dasharray="3 3"/>
+        <text x="491" y="244" font-size="9" fill="var(--lk-cobalt-dark)">ridge 46</text>
+        <!-- points -->
+        <g stroke="var(--lk-ink)" stroke-width="1">
+          <circle cx="175" cy="208.8" r="4.5" fill="var(--lk-forest)"/>
+          <circle cx="195" cy="199.2" r="4.5" fill="var(--lk-forest)"/>
+          <rect x="259.2" y="161.6" width="9" height="9" fill="var(--lk-cobalt)"/>
+          <circle cx="274.7" cy="160.7" r="4.5" fill="var(--lk-paper)"/>
+          <circle cx="298" cy="149.5" r="4.5" fill="var(--lk-forest)"/>
+          <rect x="460.1" y="64.6" width="9" height="9" fill="var(--lk-cobalt)"/>
+          <rect x="538" y="53.6" width="9" height="9" fill="var(--lk-cobalt)"/>
+        </g>
+        <g font-size="9" fill="var(--lk-ink)">
+          <text x="146" y="228">residual add</text>
+          <text x="140" y="193">bias add</text>
+          <text x="255" y="146" text-anchor="end">linear M=1,</text><text x="255" y="156" text-anchor="end" fill="var(--lk-ink-soft)">attention decode</text>
+          <text x="282" y="176">softmax</text>
+          <text x="306" y="162">layernorm, GELU</text>
+          <text x="400" y="98">linear M=64</text>
+          <text x="552" y="80">linear M=512</text>
+        </g>
+        <g font-size="9" fill="var(--lk-ink-soft)">
+          <circle cx="92" cy="44" r="4" fill="var(--lk-forest)" stroke="var(--lk-ink)"/><text x="100" y="47">elementwise</text>
+          <circle cx="92" cy="60" r="4" fill="var(--lk-paper)" stroke="var(--lk-ink)"/><text x="100" y="63">row reduction</text>
+          <rect x="88" y="72" width="8" height="8" fill="var(--lk-cobalt)" stroke="var(--lk-ink)"/><text x="100" y="79">matrix multiply</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; The same model&rsquo;s operations on your card&rsquo;s FP32 roofline (spec bandwidth, as in chapter 4). Everything except a batched matmul lives in the bottom-left corner, two to three orders of magnitude below the compute roof, where time is bytes divided by bandwidth. Only the matmuls can move right, and only when <var>M</var> grows. Embedding lookups do no FLOPs at all and are off the chart to the left.</figcaption>
+    </figure>
+
+    <p>Two consequences shape the rest of Part II. First, <strong>the matmuls are the only operations where the kernel&rsquo;s arithmetic skill matters</strong>: for everything else, a perfect kernel is one that runs at the DRAM ceiling, and the only way to beat that is to move fewer bytes. Second, <strong>the small operations are cheap only in FLOPs</strong>. In a large-<var>M</var> forward pass they are a real slice of the time, and at <var>M</var> = 1 they are dominated by launch overhead. The next section puts numbers on both.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. GPT-2 small, counted</h2>
+
+    <p>GPT-2 small is the model your spine project will run. Its whole configuration fits in one line: vocabulary <var>V</var> = 50,257 tokens, context up to 1,024 tokens, <var>L</var> = 12 layers, width <var>C</var> = 768, 12 attention heads of 64 channels, MLP width 4<var>C</var> = 3,072. Every layer (a <strong>transformer block</strong>) has the same two halves, each wrapped in a residual connection:</p>
+
+    <figure class="lk-fig" role="img" aria-label="Diagram of GPT-2 small. Token IDs go through an embedding lookup into a stream of shape M by 768. Each of 12 blocks has an attention half: layernorm, a linear layer from 768 to 2304 producing queries, keys and values, attention, a linear layer from 768 to 768, and a residual add; and an MLP half: layernorm, a linear layer from 768 to 3072, GELU, a linear layer from 3072 to 768, and a residual add. After the blocks: a final layernorm and a linear layer from 768 to 50257 that produces the scores for the next token, reusing the embedding table as its weights.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 330" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>GPT-2 small as a list of operations</title>
+        <defs><marker id="c6-a2" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-rule)"/></marker></defs>
+        <!-- embedding -->
+        <rect x="10" y="20" width="120" height="44" rx="3" fill="var(--lk-paper)" stroke="var(--lk-ink-soft)" stroke-dasharray="4 2"/>
+        <text x="70" y="38" font-size="10" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">embed</text>
+        <text x="70" y="53" font-size="8.5" text-anchor="middle" fill="var(--lk-ink-soft)">IDs &rarr; [M, 768]</text>
+        <text x="148" y="46" font-size="9" fill="var(--lk-ink-soft)">token + position rows (gather)</text>
+        <line x1="70" y1="64" x2="70" y2="86" stroke="var(--lk-rule)" marker-end="url(#c6-a2)"/>
+        <!-- block frame -->
+        <rect x="10" y="88" width="640" height="170" rx="4" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="640" y="104" font-size="10" font-weight="700" text-anchor="end" fill="var(--lk-cobalt-dark)">&times; 12 blocks</text>
+        <text x="22" y="110" font-size="9" fill="var(--lk-ink-soft)">attention half</text>
+        <text x="22" y="190" font-size="9" fill="var(--lk-ink-soft)">MLP half</text>
+        <!-- attention row y=118..160 -->
+        <g font-size="9.5" text-anchor="middle">
+          <rect x="22" y="118" width="74" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-dasharray="2 2"/><text x="59" y="136" fill="var(--lk-ink)">layernorm</text><text x="59" y="150" font-size="8" fill="var(--lk-ink-soft)">reduction</text>
+          <rect x="112" y="118" width="100" height="40" rx="3" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="162" y="136" fill="var(--lk-ink)">linear</text><text x="162" y="150" font-size="8" fill="var(--lk-cobalt-dark)">768 &rarr; 2,304 (Q,K,V)</text>
+          <rect x="228" y="118" width="110" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.4"/><text x="283" y="136" fill="var(--lk-ink)">attention</text><text x="283" y="150" font-size="8" fill="var(--lk-ink-soft)">mixes tokens: ch. 10</text>
+          <rect x="354" y="118" width="100" height="40" rx="3" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="404" y="136" fill="var(--lk-ink)">linear</text><text x="404" y="150" font-size="8" fill="var(--lk-cobalt-dark)">768 &rarr; 768</text>
+          <circle cx="490" cy="138" r="14" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.4"/><text x="490" y="142" font-size="13" fill="var(--lk-forest)">+</text>
+        </g>
+        <g stroke="var(--lk-rule)" marker-end="url(#c6-a2)"><line x1="96" y1="138" x2="110" y2="138"/><line x1="212" y1="138" x2="226" y2="138"/><line x1="338" y1="138" x2="352" y2="138"/><line x1="454" y1="138" x2="474" y2="138"/></g>
+        <path d="M16 138 L16 170 L490 170 L490 154" fill="none" stroke="var(--lk-forest)" stroke-dasharray="4 3" marker-end="url(#c6-a2)"/>
+        <text x="250" y="182" font-size="8.5" fill="var(--lk-forest)">residual: the input skips ahead and is added back</text>
+        <!-- MLP row y=198..240 -->
+        <g font-size="9.5" text-anchor="middle">
+          <rect x="22" y="198" width="74" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-dasharray="2 2"/><text x="59" y="216" fill="var(--lk-ink)">layernorm</text><text x="59" y="230" font-size="8" fill="var(--lk-ink-soft)">reduction</text>
+          <rect x="112" y="198" width="100" height="40" rx="3" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="162" y="216" fill="var(--lk-ink)">linear</text><text x="162" y="230" font-size="8" fill="var(--lk-cobalt-dark)">768 &rarr; 3,072</text>
+          <rect x="228" y="198" width="110" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.4"/><text x="283" y="216" fill="var(--lk-ink)">GELU</text><text x="283" y="230" font-size="8" fill="var(--lk-ink-soft)">elementwise</text>
+          <rect x="354" y="198" width="100" height="40" rx="3" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="404" y="216" fill="var(--lk-ink)">linear</text><text x="404" y="230" font-size="8" fill="var(--lk-cobalt-dark)">3,072 &rarr; 768</text>
+          <circle cx="490" cy="218" r="14" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.4"/><text x="490" y="222" font-size="13" fill="var(--lk-forest)">+</text>
+        </g>
+        <g stroke="var(--lk-rule)" marker-end="url(#c6-a2)"><line x1="96" y1="218" x2="110" y2="218"/><line x1="212" y1="218" x2="226" y2="218"/><line x1="338" y1="218" x2="352" y2="218"/><line x1="454" y1="218" x2="474" y2="218"/></g>
+        <path d="M504 138 L560 138 L560 188 L16 188 L16 218 L20 218" fill="none" stroke="var(--lk-rule)" marker-end="url(#c6-a2)"/>
+        <path d="M16 218 L16 250 L490 250 L490 234" fill="none" stroke="var(--lk-forest)" stroke-dasharray="4 3" marker-end="url(#c6-a2)"/>
+        <text x="586" y="222" font-size="8.5" text-anchor="middle" fill="var(--lk-ink-soft)">[M, 768]</text>
+        <text x="586" y="232" font-size="8.5" text-anchor="middle" fill="var(--lk-ink-soft)">to next block</text>
+        <line x1="504" y1="218" x2="548" y2="218" stroke="var(--lk-rule)"/>
+        <!-- head -->
+        <line x1="600" y1="258" x2="600" y2="278" stroke="var(--lk-rule)" marker-end="url(#c6-a2)"/>
+        <g font-size="9.5" text-anchor="middle">
+          <rect x="300" y="280" width="90" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-dasharray="2 2"/><text x="345" y="298" fill="var(--lk-ink)">layernorm</text><text x="345" y="312" font-size="8" fill="var(--lk-ink-soft)">final</text>
+          <rect x="410" y="280" width="140" height="40" rx="3" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="480" y="298" fill="var(--lk-ink)">linear (LM head)</text><text x="480" y="312" font-size="8" fill="var(--lk-cobalt-dark)">768 &rarr; 50,257 scores</text>
+        </g>
+        <path d="M600 278 L600 272 L280 272 L280 300 L298 300" fill="none" stroke="var(--lk-rule)" marker-end="url(#c6-a2)"/>
+        <line x1="390" y1="300" x2="408" y2="300" stroke="var(--lk-rule)" marker-end="url(#c6-a2)"/>
+        <text x="560" y="304" font-size="8.5" fill="var(--lk-ink-soft)">weights =</text>
+        <text x="560" y="315" font-size="8.5" fill="var(--lk-ink-soft)">embedding table</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; GPT-2 small as a list of operations: shaded boxes are matrix multiplies, the rest is the cheap-looking majority. Each block keeps the activations at [<var>M</var>, 768]; the four linear layers hold almost all of its weights. After the last block, the LM head scores every word of the vocabulary, and it uses the embedding table itself as its weight matrix (<em>weight tying</em>).</figcaption>
+    </figure>
+
+    <h3>Parameters</h3>
+    <table>
+      <tr><th>Piece</th><th>Shape</th><th>Parameters</th></tr>
+      <tr><td>Token embedding (also the LM head)</td><td>50,257 &times; 768</td><td>38,597,376</td></tr>
+      <tr><td>Position embedding</td><td>1,024 &times; 768</td><td>786,432</td></tr>
+      <tr><td>Per block: Q, K, V projection</td><td>768 &times; 2,304 + 2,304</td><td>1,771,776</td></tr>
+      <tr><td>Per block: attention output</td><td>768 &times; 768 + 768</td><td>590,592</td></tr>
+      <tr><td>Per block: MLP up</td><td>768 &times; 3,072 + 3,072</td><td>2,362,368</td></tr>
+      <tr><td>Per block: MLP down</td><td>3,072 &times; 768 + 768</td><td>2,360,064</td></tr>
+      <tr><td>Per block: two layernorms</td><td>4 &times; 768</td><td>3,072</td></tr>
+      <tr><td><strong>12 blocks</strong></td><td>12 &times; 7,087,872</td><td>85,054,464</td></tr>
+      <tr><td>Final layernorm</td><td>2 &times; 768</td><td>1,536</td></tr>
+      <tr><td><strong>Total</strong></td><td></td><td><strong>124,439,808</strong></td></tr>
+    </table>
+    <p>That is the &ldquo;124M&rdquo; in GPT-2 small&rsquo;s name. In FP32 it is 498 MB, which is chapter 1&rsquo;s &ldquo;0.5 GB&rdquo;: the number of bytes every decode step must read.</p>
+
+    <h3>FLOPs per token</h3>
+    <p>Each token passes through every linear layer once, for 2 FLOPs per weight. The four linear layers of a block hold 7,077,888 weights, so 12 blocks cost <strong>170 MFLOPs</strong> per token. The LM head multiplies by the whole 38.6M-entry embedding table: <strong>77 MFLOPs</strong> more, nearly a third of the total, spent on scoring every word in the vocabulary. Attention adds 4 &times; 768 FLOPs per layer for every earlier token the new one looks at, 37K per token of context over the 12 layers: 38 MFLOPs at a full 1,024-token context, small next to the rest. Total: about <strong>250 MFLOPs per token</strong>, which is chapter 1&rsquo;s &ldquo;2 FLOPs per parameter&rdquo; (2 &times; 124M = 249M). The rule works because the embedding table, used as a free gather at the input, is paid for in full as the LM head at the output.</p>
+
+    <details class="ym">
+      <summary>Your move: a 1,024-token prompt (prefill, <var>M</var> = 1,024) in FP32. How long, at best, on your card, and which bound?</summary>
+      <p>About 1,024 &times; 247 MFLOPs for the linear layers and head, plus attention, where the average token looks back over half the prompt: roughly 0.27 TFLOPs in total. At 30.9 TFLOPS that is <strong>about 9 ms</strong>, compute-bound (the linear layers sit at intensity in the hundreds). Reading the 498 MB of weights once would take 0.8 ms, so memory is not the limit. That is why prefill is measured in thousands of tokens per second and decode in hundreds: prefill uses every byte of weights 1,024 times, decode once.</p>
+    </details>
+
+    <h3>Where the time goes</h3>
+    <p>Now put the pieces together. The census below lists every operation of one forward step of GPT-2 small (bias adds folded into their matmuls), with its bytes, its FLOPs, and its roofline time: the larger of FLOPs/peak and bytes/bandwidth. It models one <strong>decode</strong> step for a batch of <var>M</var> sequences, each with <var>t</var> tokens of context already cached. Start at <var>M</var> = 1, then raise it, switch to FP16, and turn on the launch floor.</p>
+
+    <div id="w-census" class="w"></div>
+
+    <p>Three things to take away from playing with it:</p>
+    <ol>
+      <li><strong>At <var>M</var> = 1 the linear layers are the time</strong>, and all of it is weight bytes: tokens per second is bandwidth divided by model size, exactly chapter 1&rsquo;s estimate. FP16 halves the bytes and doubles the ceiling.</li>
+      <li><strong>At <var>M</var> = 1 the small operations are nearly free in the roofline sense, and not free at all in practice.</strong> With the launch floor on, over a hundred kernels of a few microseconds each add up to a large share of the step. That is the overhead-bound regime of chapter 1, and why engines fuse and capture CUDA graphs.</li>
+      <li><strong>As <var>M</var> grows, the matmuls turn compute-bound and attention takes over.</strong> Every sequence reads its own cached keys and values, so attention bytes grow with <var>M</var> &times; <var>t</var> and never get reused: chapter 4&rsquo;s &ldquo;attention does not batch&rdquo;, now as a share of the step. Part III is about that row.</li>
+    </ol>
+  </section>
+
+  <section id="s7">
+    <h2>7. Number formats: FP32 down to FP4</h2>
+
+    <p>Every byte count above assumed FP32, 4 bytes per number. The simplest way to make a memory-bound workload faster is to make the numbers smaller, and ML has been doing exactly that for a decade. A floating-point number is a sign, an exponent (which sets the range) and a mantissa (which sets the precision): value = &plusmn;1.<var>mantissa</var> &times; 2<sup><var>exponent</var></sup>. Formats differ in how they split their bits:</p>
+
+    <figure class="lk-fig" role="img" aria-label="Bit layouts drawn to scale. FP32: 1 sign bit, 8 exponent bits, 23 mantissa bits. TF32: 1, 8, 10. BF16: 1, 8, 7. FP16: 1, 5, 10. FP8 E4M3: 1, 4, 3. FP8 E5M2: 1, 5, 2. FP4 E2M1: 1, 2, 1.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 250" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Floating-point formats, bit by bit</title>
+        <g font-size="10" fill="var(--lk-ink)" text-anchor="end">
+          <text x="92" y="35">FP32</text><text x="92" y="65">TF32</text><text x="92" y="95">BF16</text><text x="92" y="125">FP16</text><text x="92" y="155">FP8 E4M3</text><text x="92" y="185">FP8 E5M2</text><text x="92" y="215">FP4 E2M1</text>
+        </g>
+        <!-- 15 px per bit, x0 = 100 -->
+        <g stroke="var(--lk-paper)" stroke-width="1">
+          <rect x="100" y="22" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="22" width="120" height="18" fill="var(--lk-cobalt)"/><rect x="235" y="22" width="345" height="18" fill="var(--lk-forest)"/>
+          <rect x="100" y="52" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="52" width="120" height="18" fill="var(--lk-cobalt)"/><rect x="235" y="52" width="150" height="18" fill="var(--lk-forest)"/>
+          <rect x="100" y="82" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="82" width="120" height="18" fill="var(--lk-cobalt)"/><rect x="235" y="82" width="105" height="18" fill="var(--lk-forest)"/>
+          <rect x="100" y="112" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="112" width="75" height="18" fill="var(--lk-cobalt)"/><rect x="190" y="112" width="150" height="18" fill="var(--lk-forest)"/>
+          <rect x="100" y="142" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="142" width="60" height="18" fill="var(--lk-cobalt)"/><rect x="175" y="142" width="45" height="18" fill="var(--lk-forest)"/>
+          <rect x="100" y="172" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="172" width="75" height="18" fill="var(--lk-cobalt)"/><rect x="190" y="172" width="30" height="18" fill="var(--lk-forest)"/>
+          <rect x="100" y="202" width="15" height="18" fill="var(--lk-vermilion)"/><rect x="115" y="202" width="30" height="18" fill="var(--lk-cobalt)"/><rect x="145" y="202" width="15" height="18" fill="var(--lk-forest)"/>
+        </g>
+        <g font-size="9" fill="var(--lk-paper-light)" text-anchor="middle">
+          <text x="175" y="35">exponent 8</text><text x="407" y="35">mantissa 23</text>
+          <text x="175" y="65">8</text><text x="310" y="65">10</text>
+          <text x="175" y="95">8</text><text x="287" y="95">7</text>
+          <text x="152" y="125">5</text><text x="265" y="125">10</text>
+          <text x="145" y="155">4</text><text x="197" y="155">3</text>
+          <text x="152" y="185">5</text><text x="205" y="185">2</text>
+          <text x="130" y="215">2</text><text x="152" y="215">1</text>
+        </g>
+        <g font-size="9" fill="var(--lk-ink-soft)">
+          <text x="592" y="35">4 B</text>
+          <text x="395" y="65">tensor-core input only</text>
+          <text x="350" y="95">2 B · FP32&rsquo;s range</text>
+          <text x="350" y="125">2 B · max 65,504</text>
+          <text x="230" y="155">1 B · max 448</text>
+          <text x="230" y="185">1 B · max 57,344</text>
+          <text x="170" y="215">½ B · values &plusmn;{0, ½, 1, 1½, 2, 3, 4, 6}</text>
+        </g>
+        <g font-size="9" fill="var(--lk-ink-soft)">
+          <rect x="100" y="232" width="10" height="10" fill="var(--lk-vermilion)"/><text x="114" y="241">sign</text>
+          <rect x="160" y="232" width="10" height="10" fill="var(--lk-cobalt)"/><text x="174" y="241">exponent: range</text>
+          <rect x="290" y="232" width="10" height="10" fill="var(--lk-forest)"/><text x="304" y="241">mantissa: precision</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 5</b> &mdash; The formats you will meet, drawn to scale. BF16 is FP32 with the mantissa cut to 7 bits: same range, much less precision. FP16 keeps more precision but overflows above 65,504. The FP8 pair trades one for the other, and FP4 has just 15 distinct values; both need a <em>scale factor</em> per block of numbers to be usable (Part IV).</figcaption>
+    </figure>
+
+    <table>
+      <tr><th>Format</th><th>Largest</th><th>Spacing just above 1</th><th>Typical role</th></tr>
+      <tr><td>FP32</td><td>3.4 &times; 10<sup>38</sup></td><td>1.2 &times; 10<sup>&minus;7</sup></td><td>accumulators, references, your first engine</td></tr>
+      <tr><td>TF32</td><td>3.4 &times; 10<sup>38</sup></td><td>9.8 &times; 10<sup>&minus;4</sup></td><td>tensor-core inputs for FP32 matmuls (chapter 8)</td></tr>
+      <tr><td>BF16</td><td>3.4 &times; 10<sup>38</sup></td><td>7.8 &times; 10<sup>&minus;3</sup></td><td>training, weights of most open models</td></tr>
+      <tr><td>FP16</td><td>65,504</td><td>9.8 &times; 10<sup>&minus;4</sup></td><td>inference weights and activations</td></tr>
+      <tr><td>FP8 E4M3</td><td>448</td><td>0.125</td><td>inference, with scale factors</td></tr>
+      <tr><td>FP8 E5M2</td><td>57,344</td><td>0.25</td><td>gradients in FP8 training</td></tr>
+      <tr><td>FP4 E2M1</td><td>6</td><td>0.5</td><td>weights, with per-block scales (Part IV)</td></tr>
+    </table>
+
+    <p>Neural networks tolerate this because they are statistical: a weight of 0.0213 stored as 0.0214 changes the output by less than the noise the model was trained to ignore. But there is one place where precision cannot be cut, and you have already met it in chapter 5&rsquo;s reduction: <strong>long sums</strong>. A dot product of length 768 adds 768 products into one running total. Once the total is large, each new small product is below the spacing of the format and simply vanishes. Try it:</p>
+
+    <div id="w-formats" class="w"></div>
+
+    <p>Hence the rule every fast kernel follows: <strong>store and multiply in a narrow format, accumulate in FP32.</strong> The inputs are rounded once, which the model tolerates; the sum is never rounded to the narrow format until the very end. Tensor cores are built around exactly this: FP16, BF16 or FP8 inputs, FP32 accumulators (chapter 8). Your spine engine starts in FP32 because it must match PyTorch&rsquo;s outputs to about 10<sup>&minus;5</sup> before anything gets clever, and a mismatch in FP32 is a bug, not rounding.</p>
+
+    <details class="ym">
+      <summary>Your move: FP16 has 10 mantissa bits and BF16 only 7. Why did training move from FP16 to BF16 anyway?</summary>
+      <p>Range. Gradients and some activations span many orders of magnitude, and FP16 overflows above 65,504 and loses precision below 6 &times; 10<sup>&minus;5</sup>, so FP16 training needed <em>loss scaling</em>: multiply the loss by a large factor to keep gradients representable, and back it off when anything overflows. BF16 has FP32&rsquo;s 8-bit exponent, so anything FP32 can represent, BF16 can too, only more coarsely. Losing 3 bits of precision turned out to hurt less than babysitting the range. For inference, where values are better behaved and known in advance, FP16 is still common, and the formats below 16 bits bring back the range problem in a new form: that is what the scale factors are for.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. The plan for Part II</h2>
+
+    <p>Put the census and the roofline side by side and the next five chapters write themselves:</p>
+    <table>
+      <tr><th>Chapter</th><th>What it does to the census</th></tr>
+      <tr><td>7. Matmul I</td><td>Takes the linear layers from the naive kernel (a few percent of peak) to shared-memory tiling, and finds out why tiling alone stops near 10%.</td></tr>
+      <tr><td>8. Matmul II</td><td>Register blocking, warp tiling and tensor cores: the linear layers within reach of cuBLAS, in FP32 and FP16.</td></tr>
+      <tr><td>9. Softmax, layernorm, fusion</td><td>The small operations at the DRAM ceiling in one pass, and fused into their neighbours so their bytes disappear.</td></tr>
+      <tr><td>10. The transformer from the GPU&rsquo;s view</td><td>Attention in detail, the KV cache, and the full block as kernels.</td></tr>
+      <tr><td>11. Lab: GPT-2 forward pass</td><td>The spine project&rsquo;s milestone: all of it assembled, matching PyTorch, benchmarked.</td></tr>
+    </table>
+    <p>The order is not arbitrary: the matmul is where the FLOPs are and where the hardest kernel skills are learned, and those skills (tiling, register reuse, warp-level cooperation) are what every other kernel in Part III is built from.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Lab 5: the MLP block, op by op</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 5</span><span class="lab-title">GPT-2&rsquo;s MLP sublayer, seven kernels, three sizes</span><span class="idx-meta">~40 min · <code>mlsys/labs/lab05-mlp-block/</code></span></div>
+      <div class="lab-body">
+        <p>One program, <code>mlp</code>, runs the MLP half of a GPT-2 block with one kernel per operation: layernorm, the naive matmul (768 &rarr; 3,072), bias, GELU, the naive matmul (3,072 &rarr; 768), bias, residual add, plus a fused <code>bias_gelu</code>. It checks all of them against a double-precision CPU reference, then times each one at <var>M</var> = 1, 64 and 512 tokens and prints its bytes, FLOPs, GB/s, GFLOP/s and share of the total.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab05-mlp-block
+make test        # every kernel vs the CPU reference: all PASS
+make bench       # the op-by-op table at M = 1, 64, 512
+make ncu-table   # optional: DRAM / SM throughput and grid size per kernel</code></pre>
+        <p>Before you run <code>make bench</code>, write down your predictions:</p>
+        <table>
+          <tr><th>Question</th><th>What the chapter predicts</th></tr>
+          <tr><td>M = 512: share of the time in the two matmuls</td><td>above 95%: they are the only compute-heavy ops, and the naive kernel runs them at a few percent of peak</td></tr>
+          <tr><td>M = 512: GELU, bias, residual GB/s</td><td>near your lab 0 ceiling (~590 GB/s)</td></tr>
+          <tr><td>M = 512: bias+GELU fused vs bias then GELU</td><td>fused &asymp; half the sum of the two</td></tr>
+          <tr><td>M = 1: elementwise ops</td><td>a few &micro;s each whatever their size: launch-bound</td></tr>
+          <tr><td>M = 1: matmul fc vs matmul proj</td><td>proj several times slower (3 blocks vs 12, section 3)</td></tr>
+          <tr><td>M = 512: naive matmul GFLOP/s</td><td>a few percent of the 30.9 TFLOPS peak: chapter 7&rsquo;s starting point</td></tr>
+        </table>
+        <p>Paste back the <code>PASTE:</code> lines (one from <code>make test</code>, three from <code>make bench</code>). Your numbers replace the predictions here, and the M = 512 matmul line becomes chapter 7&rsquo;s baseline.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Write <code>bias_gelu_residual</code> for the second half of the sublayer (<var>out</var> = <var>x</var> + <var>v</var> + <var>b</var>) and measure it against bias then residual. Then predict, before measuring, how long all of <code>layernorm</code> would take if you fused it with nothing but made it read each row only once instead of twice. (Hint: the second read of a 3 KB row mostly hits L1. What does that do to your prediction?)</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why can a batch of B sequences of T tokens be treated as one matrix of B&middot;T rows by most layers?</summary>
+        <p>Linear layers, activations and normalizations act on each token&rsquo;s vector independently: the output for one token does not depend on any other token. So which sequence a token belongs to does not matter, and the kernels see one [B&middot;T, C] matrix. Only attention mixes tokens, within a sequence.</p>
+      </details>
+      <details>
+        <summary>A linear layer 768 &rarr; 3,072 in FP32: intensity at M = 1 and at M = 512, and which roof applies to each?</summary>
+        <p>About 0.5 FLOP/B at M = 1 (each weight, 4 bytes, used for one multiply-add): memory-bound. About 140 FLOP/B at M = 512 (each weight used 512 times): past the FP32 ridge of ~46, compute-bound.</p>
+      </details>
+      <details>
+        <summary>GELU takes a dozen FLOPs per element and a residual add takes one. Which is faster on a [512, 3,072] tensor?</summary>
+        <p>Neither by much, and the residual add is slightly <em>slower</em>: both are memory-bound, so time is bytes over bandwidth, and the residual add moves 12 bytes per element (two inputs, one output) against GELU&rsquo;s 8. FLOPs do not enter.</p>
+      </details>
+      <details>
+        <summary>Why does a naive layernorm or softmax read each row more than once, and why does that matter even though the second read may hit in cache?</summary>
+        <p>The elementwise formula needs the row&rsquo;s reduction (max, sum, mean, variance) before it can start, and computing that reduction requires the whole row. So the kernel reads the row to reduce it, then again to normalize it. For short rows the second read hits L1 and costs little; for long rows (softmax over thousands of attention scores) it goes back to L2 or DRAM and doubles the traffic. Chapter 9 removes it.</p>
+      </details>
+      <details>
+        <summary>Where does the &ldquo;2 FLOPs per parameter per token&rdquo; rule come from, and where does GPT-2 small bend it?</summary>
+        <p>Each weight of a linear layer is used in one multiply-add per token. It fails for parameters that are not matmul weights: the embedding table used as an input lookup costs no FLOPs, layernorm parameters cost a few. GPT-2 happens to balance it out because the tied embedding table is also the LM head, a full matmul at the output, so the rule gives 249M against a detailed count of ~250M.</p>
+      </details>
+      <details>
+        <summary>At M = 1, the census says the whole non-matmul part of GPT-2 costs a few percent of the roofline time. Why can it still be a third of the real time?</summary>
+        <p>Each operation is a kernel launch, and a launch costs a few microseconds no matter how little work it does. GPT-2 small runs over a hundred small kernels per token, each far below the launch floor, so they cost launches, not bytes. The fixes are fusion (fewer kernels) and CUDA graphs (cheaper launches).</p>
+      </details>
+      <details>
+        <summary>Why do tensor cores and good kernels accumulate in FP32 even when the inputs are FP16 or FP8?</summary>
+        <p>A long sum in a narrow format stops growing once the running total is so large that each new term is smaller than half the format&rsquo;s spacing at that magnitude: the terms round away. Rounding the inputs costs a little accuracy once; rounding the running total costs accuracy at every step. So inputs are narrow, accumulators are FP32.</p>
+      </details>
+      <details>
+        <summary>BF16 and FP16 are both 2 bytes. What does each give up?</summary>
+        <p>BF16 keeps FP32&rsquo;s 8 exponent bits (same range) and has 7 mantissa bits (spacing ~0.8% near 1). FP16 has 10 mantissa bits (~0.1%) but only 5 exponent bits, so it overflows above 65,504 and starts losing precision below ~6&times;10<sup>&minus;5</sup> (the smallest normal number; below it only subnormals remain, down to ~6&times;10<sup>&minus;8</sup>).</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>A. Radford et al., <em>Language Models are Unsupervised Multitask Learners</em> (OpenAI, 2019): GPT-2&rsquo;s architecture and sizes. The layer shapes and parameter count here were recomputed from the published configuration.</li>
+      <li>A. Karpathy, <a href="https://github.com/karpathy/llm.c">llm.c</a>: GPT-2 in plain C and CUDA, the model your spine project follows; its <code>train_gpt2.c</code> is the clearest listing of every operation and shape. Also his &ldquo;Let&rsquo;s reproduce GPT-2 (124M)&rdquo; lecture.</li>
+      <li>A. Vaswani et al., <em>Attention Is All You Need</em> (2017); J. Ba, J. Kiros, G. Hinton, <em>Layer Normalization</em> (2016); D. Hendrycks, K. Gimpel, <em>Gaussian Error Linear Units</em> (2016): the layers, from their original papers.</li>
+      <li>H. He, <a href="https://horace.io/brrr_intro.html"><em>Making Deep Learning Go Brrrr From First Principles</em></a> (2022): the compute / memory / overhead framing of this chapter&rsquo;s census.</li>
+      <li>kipply, <em>Transformer Inference Arithmetic</em> (2022): FLOPs and bytes per token, prefill versus decode.</li>
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (2023), ch. 16: deep learning as a GPU workload.</li>
+      <li>P. Micikevicius et al., <em>Mixed Precision Training</em> (2018) and <em>FP8 Formats for Deep Learning</em> (2022); D. Kalamkar et al., <em>A Study of BFLOAT16 for Deep Learning Training</em> (2019); Open Compute Project, <em>OCP Microscaling Formats (MX) Specification v1.0</em> (2023): the number formats and their limits.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-05-profiling.html">&larr; Ch. 5 — Profiling with Nsight</a>
+      <a href="index.html">Index</a>
+      <a href="index.html">Ch. 7 — Matmul I: tiling (in writing) &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part II · Chapter 6 · parameter and FLOP counts recomputed from GPT-2&rsquo;s published configuration; lab predictions are estimates until your numbers replace them, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch6.js"></script>
+</body>
+</html>
