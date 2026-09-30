@@ -36,6 +36,7 @@
 #define __forceinline__ inline
 #define __noinline__
 #define __launch_bounds__(...)
+#define __align__(n) __attribute__((aligned(n)))
 #define __restrict__ __restrict
 // Blocks run one at a time, so one static copy per kernel is exactly "per block".
 #define __shared__ static

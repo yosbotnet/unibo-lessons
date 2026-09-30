@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 8 — Matmul II: register blocking, warp tiling, tensor cores · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch8.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-07-matmul-tiling.html">&larr; Ch. 7 — Matmul I: tiling</a>
+    <a href="index.html">Index</a>
+    <a href="index.html">Ch. 9 — Softmax, layernorm, fusion (in writing) &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Kernels that matter · Chapter 8</div>
+    <h1>Matmul II: register blocking, warp tiling, tensor cores</h1>
+    <div class="lk-meta"><span>~70 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 7 · ~60 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Chapter 7 ended at a wall: two shared-memory loads per multiply-add, one eighth of peak. This chapter climbs it. <strong>Register blocking</strong> makes each thread compute a small block of outputs, so that every value it loads from shared memory feeds several FMAs: with 8&times;8 outputs per thread, 16 loads feed 64 FMAs and shared memory stops being the limit. Wider <strong>16-byte loads</strong> and a transposed tile cut the number of load instructions by four. <strong>Warp tiling</strong> then gives each warp a square region of the output, because the shared-memory traffic a warp causes grows with the perimeter of its region, not its area. That hierarchy (block tile in shared memory, warp tile, thread tile in registers) is how every fast GEMM is built, including the ones on <strong>tensor cores</strong>: units that execute a small matrix multiply as a single warp-wide instruction. The chapter ends by putting the same matmul on your card&rsquo;s tensor cores through WMMA, in FP16 with FP32 accumulation, and explains what separates these kernels from cuBLAS.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The ratio, and the only faster memory</a></li>
+      <li><a href="#s2">v4: one column of outputs per thread</a></li>
+      <li><a href="#s3">v5: a block of outputs per thread</a></li>
+      <li><a href="#s4">v6: wider loads and a transposed tile</a></li>
+      <li><a href="#s5">v7: warp tiling</a></li>
+      <li><a href="#s6">Tensor cores</a></li>
+      <li><a href="#s7">Feeding the tensor cores: t1 to t3</a></li>
+      <li><a href="#s8">What cuBLAS does that we do not</a></li>
+      <li><a href="#s9">Predictions, and what the profiler should show</a></li>
+      <li><a href="#s10">Lab 7: register blocking and tensor cores</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. The ratio, and the only faster memory</h2>
+
+    <p>The tiled kernel of chapter 7 does one FMA per two shared-memory loads, and an SM can issue four warp-wide FMAs but only one warp-wide shared load per cycle. To use the FMA units, each value that comes out of shared memory has to be used several times, and the only place to keep a value between uses is a <strong>register</strong>: the fastest storage on the chip, private to one thread, read by the FMA units directly and at full speed.</p>
+
+    <p>The trick that makes this possible is to look at matrix multiply differently. The dot-product view says <var>C</var>[<var>i</var>][<var>j</var>] = &sum;<sub><var>k</var></sub> <var>A</var>[<var>i</var>][<var>k</var>]&middot;<var>B</var>[<var>k</var>][<var>j</var>]: one output at a time. The <strong>outer-product view</strong> swaps the loops: for each <var>k</var>, column <var>k</var> of A times row <var>k</var> of B is a whole matrix of products, and C is the sum of those <var>K</var> matrices. A thread that owns a <var>TM</var>&times;<var>TN</var> block of C only needs, at each <var>k</var>, <var>TM</var> values of A&rsquo;s column and <var>TN</var> values of B&rsquo;s row, and every pair of them is one of its FMAs.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Outer product in registers. A column of 8 values of A in registers regM and a row of 8 values of B in registers regN combine into an 8 by 8 grid of products, each added to one of 64 accumulators. 16 loads from shared memory feed 64 FMAs.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 250" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One step k of a thread&rsquo;s outer product</title>
+        <!-- regN row at top: x 240..400 (8 x 20) y 20..40 -->
+        <g fill="var(--lk-cobalt)" stroke="var(--lk-paper)"><rect x="240" y="24" width="20" height="20"/><rect x="260" y="24" width="20" height="20"/><rect x="280" y="24" width="20" height="20"/><rect x="300" y="24" width="20" height="20"/><rect x="320" y="24" width="20" height="20"/><rect x="340" y="24" width="20" height="20"/><rect x="360" y="24" width="20" height="20"/><rect x="380" y="24" width="20" height="20"/></g>
+        <text x="320" y="16" font-size="10" text-anchor="middle" fill="var(--lk-ink)">regN[8]: row k of the B tile, cols of this thread</text>
+        <!-- regM column: x 200..220, y 60..220 -->
+        <g fill="var(--lk-vermilion)" stroke="var(--lk-paper)"><rect x="204" y="60" width="20" height="20"/><rect x="204" y="80" width="20" height="20"/><rect x="204" y="100" width="20" height="20"/><rect x="204" y="120" width="20" height="20"/><rect x="204" y="140" width="20" height="20"/><rect x="204" y="160" width="20" height="20"/><rect x="204" y="180" width="20" height="20"/><rect x="204" y="200" width="20" height="20"/></g>
+        <text x="190" y="120" font-size="10" text-anchor="end" fill="var(--lk-ink)">regM[8]:</text>
+        <text x="190" y="134" font-size="10" text-anchor="end" fill="var(--lk-ink)">column k of the A tile,</text>
+        <text x="190" y="148" font-size="10" text-anchor="end" fill="var(--lk-ink)">rows of this thread</text>
+        <!-- acc grid 8x8 at x 240..400, y 60..220 -->
+        <rect x="240" y="60" width="160" height="160" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/>
+        <g stroke="var(--lk-paper-light)"><path d="M260 60V220M280 60V220M300 60V220M320 60V220M340 60V220M360 60V220M380 60V220M240 80H400M240 100H400M240 120H400M240 140H400M240 160H400M240 180H400M240 200H400"/></g>
+        <rect x="300" y="120" width="20" height="20" fill="var(--lk-forest)"/>
+        <g stroke="var(--lk-forest)" stroke-dasharray="3 2"><line x1="224" y1="130" x2="300" y2="130"/><line x1="310" y1="44" x2="310" y2="120"/></g>
+        <text x="320" y="238" font-size="10" text-anchor="middle" fill="var(--lk-ink)">acc[8][8] += regM[i] &times; regN[j]: 64 accumulators in registers</text>
+        <!-- counts -->
+        <g font-size="10.5" fill="var(--lk-ink)">
+          <text x="440" y="90">per step k, per thread:</text>
+          <text x="440" y="116" fill="var(--lk-cobalt-dark)">8 + 8 = 16 shared loads</text>
+          <text x="440" y="138" fill="var(--lk-forest)">8 &times; 8 = 64 FMAs</text>
+          <text x="440" y="164" font-weight="700" fill="var(--lk-vermilion)">0.25 loads per FMA</text>
+          <text x="440" y="186" fill="var(--lk-ink-soft)">(chapter 7: 2)</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; One step <var>k</var> for a thread that owns an 8&times;8 block of C. It loads 8 values of A and 8 of B from shared memory into registers, then every one of the 64 pairs is an FMA into one of 64 accumulators, also in registers. Each loaded value is used 8 times. That is the same reuse argument as chapter 7&rsquo;s tiling, one level down the memory hierarchy.</figcaption>
+    </figure>
+
+    <p>So the design of a fast GEMM is a nest of the same idea at three levels, each trading on-chip storage for reuse: a <strong>block tile</strong> in shared memory (reuse across the block, chapter 7), a <strong>warp tile</strong> (section 5), and a <strong>thread tile</strong> in registers (sections 2&ndash;4). The rest of the chapter adds them one at a time, as lab 7&rsquo;s kernels v4 to v7.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. v4: one column of outputs per thread</h2>
+
+    <p>The smallest step: each thread computes <var>TM</var> = 8 outputs stacked in one column of the tile. Per step <var>k</var> it loads <em>one</em> value of B into a register and reuses it for all 8 of its outputs, reading the 8 A values it needs from shared memory. The block computes a 64&times;64 tile with 512 threads, and each phase loads a 64&times;8 slice of A and an 8&times;64 slice of B, exactly one element of each per thread:</p>
+<pre><code class="language-cpp">for (int k = 0; k &lt; BK; ++k) {                 // BK = 8
+    float b = Bs[k][tcol];                        // one load...
+    for (int i = 0; i &lt; TM; ++i)                  // ...reused 8 times
+        acc[i] += As[trow * TM + i][k] * b;       // the same As word for the whole warp: broadcast
+}</code></pre>
+    <p>Nine loads for eight FMAs: 1.125 per FMA instead of 2, which moves the shared-memory ceiling from 1/8 of peak to about 1/4.5. The <code>As</code> loads are broadcasts, since all 32 lanes of a warp share <code>trow</code>, and the 8 accumulators live in registers. Boehm measured this step at 36% of cuBLAS, almost three times the tiled kernel, for a change of a dozen lines.</p>
+
+    <details class="ym">
+      <summary>Your move: the eight <code>As</code> loads per <var>k</var> read <code>As[trow*8+0][k]</code>, <code>As[trow*8+1][k]</code>, &hellip; Can the compiler merge them into two 16-byte <code>LDS.128</code> loads, as it might have in chapter 7?</summary>
+      <p>No. The eight values are in the same column of <code>As[64][8]</code>, so they are 8 floats (32 bytes) apart, not contiguous; a vector load needs consecutive, aligned addresses. Contiguous in <var>k</var> they would be, but a thread needs them across <var>i</var> at a fixed <var>k</var>. The fix is to store the A tile <em>transposed</em>, so that for a fixed <var>k</var> the rows are contiguous: that is v6. <code>make sass</code> in lab 7 shows the plain <code>LDS</code> in v4 and the <code>LDS.128</code> in v6.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. v5: a block of outputs per thread</h2>
+
+    <p>Now the full outer product of figure 1: each thread owns an 8&times;8 block, so the block tile grows to 128&times;128 with 256 threads, and the inner loop becomes</p>
+<pre><code class="language-cpp">for (int k = 0; k &lt; BK; ++k) {
+    for (int i = 0; i &lt; TM; ++i) regM[i] = As[trow * TM + i][k];   // 8 loads
+    for (int j = 0; j &lt; TN; ++j) regN[j] = Bs[k][tcol * TN + j];   // 8 loads
+    for (int i = 0; i &lt; TM; ++i)
+        for (int j = 0; j &lt; TN; ++j)
+            acc[i][j] += regM[i] * regN[j];                        // 64 FMAs
+}</code></pre>
+    <p>0.25 loads per FMA: shared memory can now supply the FMA units with room to spare, and the ceiling of chapter 7 is gone. The block tile got bigger too: 128&times;128 with <var>BK</var> = 8 means each phase loads 128 + 128 values per <var>k</var> for 2&times;128&times;128 FLOPs, a global intensity of 32 FLOP/B if nothing hit in L2 (chapter 4&rsquo;s &ldquo;register tiling&rdquo; point). Each thread now loads four elements of each tile per phase, in a strided loop, which keeps the loads coalesced.</p>
+
+    <h3>The price: registers</h3>
+    <p>64 accumulators, 16 operand registers, plus indices and addresses: expect around 100 registers per thread (<code>-Xptxas -v</code> prints the exact number when you build). At that size an SM&rsquo;s 64K registers hold only two 256-thread blocks: 16 warps, <strong>33% occupancy</strong>. Chapter 2 would have called that a problem. It is not, and why it is not is one of the most useful ideas in GPU performance.</p>
+    <p>Occupancy exists to hide latency: while one warp waits, another issues. But latency can also be hidden <em>inside</em> a warp, if the warp has many independent instructions to issue while it waits. The 64 FMAs of one step are all independent of each other, and the loads of the next step can be issued before they are done. That is <strong>instruction-level parallelism</strong> doing the job of thread-level parallelism. Vasily Volkov made this point in a 2010 talk titled &ldquo;Better performance at lower occupancy&rdquo;, and every fast GEMM since lives at low occupancy with a large register tile. Chapter 2&rsquo;s callout, &ldquo;occupancy is a means, not a goal&rdquo;, is this.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">Spills</span>
+      <p>The one register budget you must not exceed is the hardware&rsquo;s: 255 per thread. A kernel that needs more <em>spills</em>: the compiler parks values in &ldquo;local&rdquo; memory, which is really DRAM behind the L1 (chapter 3), and every access to them is a slow load or store in the middle of your inner loop. <code>-Xptxas -v</code> prints <code>bytes spill stores</code> for every kernel. For a GEMM inner loop, the number you want there is 0.</p>
+    </div>
+
+    <details class="ym">
+      <summary>Your move: why not make the thread tile 16&times;16, for 0.125 loads per FMA?</summary>
+      <p>256 accumulators alone exceed the 255-register limit, so the kernel would spill in its hottest loop. And even without the limit, 0.25 loads per FMA already puts shared memory below the FMA rate: once a resource is not the bottleneck, reducing its use further buys nothing (chapter 4&rsquo;s lesson again). The thread tile is sized to be just big enough, and the remaining register budget goes to the next level of the hierarchy.</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. v6: wider loads and a transposed tile</h2>
+
+    <p>v5 fixed the ratio but still issues one instruction per float moved: 16 <code>LDS</code> per step for 64 <code>FFMA</code>, plus the global loads of the tiles, one float each. Instruction issue is itself a shared resource (one instruction per scheduler per cycle), so v6 moves 16 bytes per instruction wherever it can:</p>
+    <ul>
+      <li><strong>Global loads as <code>float4</code></strong>: each thread loads 4 consecutive floats of A or B with one 16-byte instruction. For the B tile, a warp&rsquo;s 32 such loads cover one 512-byte row segment; for the A tile, 32-byte pieces of 16 rows. Either way every sector fetched is fully used.</li>
+      <li><strong>The A tile stored transposed</strong>, as <code>As[BK][BM]</code>. Now for a fixed <var>k</var>, a thread&rsquo;s 8 values of A are contiguous, and <code>regM</code> is two <code>LDS.128</code> instead of eight <code>LDS</code>. <code>regN</code> was already contiguous in <code>Bs</code>: two more <code>LDS.128</code>. Four load instructions per 64 FMAs.</li>
+    </ul>
+<pre><code class="language-cpp">// one step k: 4 LDS.128 feed 64 FFMA
+*reinterpret_cast&lt;float4*&gt;(&amp;regM[0]) = *reinterpret_cast&lt;const float4*&gt;(&amp;As[k][trow * 8]);
+*reinterpret_cast&lt;float4*&gt;(&amp;regM[4]) = *reinterpret_cast&lt;const float4*&gt;(&amp;As[k][trow * 8 + 4]);
+*reinterpret_cast&lt;float4*&gt;(&amp;regN[0]) = *reinterpret_cast&lt;const float4*&gt;(&amp;Bs[k][tcol * 8]);
+*reinterpret_cast&lt;float4*&gt;(&amp;regN[4]) = *reinterpret_cast&lt;const float4*&gt;(&amp;Bs[k][tcol * 8 + 4]);</code></pre>
+
+    <p>Vector loads come with a condition: the address must be a multiple of 16 bytes. A row of A starts at <code>row * K * 4</code> bytes, which is 16-byte aligned for every row only if <var>K</var> is a multiple of 4; the same goes for <var>N</var> and B. So lab 7&rsquo;s v6 and v7 come in two variants, chosen once per launch: with <code>VEC</code> they use 16-byte loads wherever a group of 4 is fully inside the matrix and fall back to four guarded scalar loads at the edges; without it (an odd <var>K</var> or <var>N</var>) they always use the scalar path. The test shapes include both kinds.</p>
+
+    <details class="ym">
+      <summary>Your move: storing the A tile transposed means each thread writes its 4 loaded floats to 4 different rows of <code>As</code>. Is that store a bank-conflict problem?</summary>
+      <p>Mildly, and it does not matter much. Each element is stored into the tile once per phase, while the loads out of the tile happen at every step <var>k</var>, by many threads. Optimizing the rare operation at the expense of the frequent one would be backwards. Boehm tried two schemes to remove the store conflicts and both came out <em>slower</em>. Lab 7&rsquo;s <code>make ncu-table</code> prints shared-store bank conflicts separately so you can see how small they are relative to the loads.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. v7: warp tiling</h2>
+
+    <p>In v5 and v6, threads are numbered across the block tile row by row: thread <var>t</var> owns rows 8&times;(<var>t</var>/16) and columns 8&times;(<var>t</var> mod 16). A warp, threads 0&ndash;31, therefore owns a strip <strong>16 rows tall and 128 columns wide</strong>. At each step <var>k</var> the warp as a whole reads 16 values of A and 128 values of B from shared memory to produce its 2,048 outputs.</p>
+
+    <p>The amount of shared memory a warp reads per step is the <strong>perimeter</strong> of its region (height + width), while the work it does is the <strong>area</strong> (height &times; width). For a fixed area, a square minimizes the perimeter. So v7 gives each warp an explicit square: the 128&times;128 block tile is split into four 64&times;64 <strong>warp tiles</strong>, one per warp (128 threads), and each thread&rsquo;s 128 outputs are arranged inside its warp&rsquo;s square.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Two 128 by 128 block tiles. Left, v6: warp 0 owns a strip 16 rows tall and 128 columns wide; per step it reads 16 plus 128 values, 144, for 2048 outputs. Right, v7: warp 0 owns a 64 by 64 square; per step it reads 64 plus 64 values, 128, for 4096 outputs. One thread's outputs in v7 are 8 rows by 4 groups of 4 columns spread across the square.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 290" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>A warp&rsquo;s region: strip versus square</title>
+        <text x="130" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">v6 · warp 0 = 16 &times; 128 strip</text>
+        <text x="470" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">v7 · warp 0 = 64 &times; 64 square</text>
+        <!-- block tiles 192x192 (1.5 px per element) -->
+        <rect x="34" y="40" width="192" height="192" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+        <rect x="34" y="40" width="192" height="24" fill="var(--lk-cobalt)" opacity=".8"/>
+        <g stroke="var(--lk-rule-soft)"><path d="M34 64H226M34 88H226M34 112H226M34 136H226M34 160H226M34 184H226M34 208H226"/></g>
+        <text x="130" y="56" font-size="9" text-anchor="middle" fill="var(--lk-paper-light)">warp 0</text>
+        <text x="130" y="80" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">warp 1</text>
+        <text x="130" y="224" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">warp 7</text>
+        <!-- A and B edge marks for v6 -->
+        <rect x="24" y="40" width="6" height="24" fill="var(--lk-vermilion)"/>
+        <rect x="34" y="30" width="192" height="6" fill="var(--lk-vermilion)"/>
+        <text x="130" y="252" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">reads 16 + 128 = 144 values per k</text>
+        <text x="130" y="266" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">for 2,048 outputs: 0.070 per output</text>
+        <!-- v7 -->
+        <rect x="374" y="40" width="192" height="192" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+        <rect x="374" y="40" width="96" height="96" fill="var(--lk-cobalt)" opacity=".8"/>
+        <g stroke="var(--lk-rule)"><line x1="470" y1="40" x2="470" y2="232"/><line x1="374" y1="136" x2="566" y2="136"/></g>
+        <g font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)"><text x="518" y="92">warp 1</text><text x="422" y="188">warp 2</text><text x="518" y="188">warp 3</text></g>
+        <!-- thread 0's outputs in warp 0: rows 0..7 (12 px), 4 groups of 4 cols at 0,16,32,48 (6 px wide each) -->
+        <g fill="var(--lk-vermilion)"><rect x="374" y="40" width="6" height="12"/><rect x="398" y="40" width="6" height="12"/><rect x="422" y="40" width="6" height="12"/><rect x="446" y="40" width="6" height="12"/></g>
+        <rect x="364" y="40" width="6" height="96" fill="var(--lk-vermilion)"/>
+        <rect x="374" y="30" width="96" height="6" fill="var(--lk-vermilion)"/>
+        <text x="470" y="252" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">reads 64 + 64 = 128 values per k</text>
+        <text x="470" y="266" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">for 4,096 outputs: 0.031 per output</text>
+        <g font-size="9" fill="var(--lk-vermilion)"><text x="580" y="48">thread 0&rsquo;s</text><text x="580" y="60">128 outputs</text><text x="580" y="72">(8 rows &times;</text><text x="580" y="84">4 groups of 4)</text></g>
+        <text x="330" y="284" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">red bars: the rows of A and columns of B a warp reads from shared memory at each step k</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; The same 128&times;128 block tile, cut into warps two ways. The red bars are what warp 0 must read from shared memory at every step <var>k</var>. The square warp tile does twice the work for fewer bytes: 2.25&times; less shared traffic per output. Inside the square, each thread&rsquo;s outputs are spread in four groups so that the 32 lanes&rsquo; loads fall on few distinct addresses.</figcaption>
+    </figure>
+
+    <p>The indexing is the only hard part. With a 64&times;64 warp tile and 32 lanes of 128 outputs each, v7 splits the warp tile into <var>WNITER</var> = 4 vertical strips of 16 columns; in each strip, a lane owns an 8&times;4 block (lane / 4 picks the 8 rows, lane mod 4 picks the 4 columns). Per step <var>k</var> a thread loads 8 values of A (two <code>LDS.128</code>) and 4 &times; 4 of B (four <code>LDS.128</code>) and does 8 &times; 16 = 128 FMAs:</p>
+<pre><code class="language-cpp">// lab 7, sgemm_warptile: BM = BN = 128, BK = 16, WM = WN = 64, WNITER = 4, TM = 8, TN = 4
+const int warpRow = warp / 2, warpCol = warp % 2;          // which 64 x 64 square
+const int tRowInWarp = lane / 4, tColInWarp = lane % 4;    // which 8 x 4 block in each strip
+for (int k = 0; k &lt; BK; ++k) {
+    load 8 floats:   As[k][warpRow*64 + tRowInWarp*8 + 0..7]                 -&gt; regM[0..7]
+    for ws in 0..3:  Bs[k][warpCol*64 + ws*16 + tColInWarp*4 + 0..3]         -&gt; regN[ws*4 + 0..3]
+    acc[8][16] += outer(regM, regN)                                          // 128 FMAs
+}</code></pre>
+
+    <p>Besides the traffic, the warp tile matters for a second reason, and it is the one that makes this section the bridge to the rest of the chapter: <strong>a warp is the unit a tensor core works on</strong>. A tensor-core instruction takes a small tile of A and B held collectively by the 32 lanes of a warp. Every tensor-core GEMM is therefore organized exactly like v7: block tile in shared memory, warp tile per warp, and inside the warp, fragments in registers.</p>
+
+    <p>Explore the hierarchy. The presets are lab 7&rsquo;s kernels; change the shapes and watch registers, occupancy, loads per FMA and shared traffic per output move:</p>
+    <div id="w-hier" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: v7 has 128 threads per block and about 170 registers per thread. What is its occupancy, and should that worry you?</summary>
+      <p>It depends on the exact count, which is a nice lesson in itself. Registers are allocated per warp in units of 256, so a 4-warp block at 168 registers takes 4 &times; 5,376 = 21,504 and three blocks fit in 64K (12 warps, 25%); at 176 it takes 22,528 and only two fit (8 warps, 17%). <code>make</code> prints the real number. Either way it should not worry you: each warp has 128 independent FMAs per step to issue and the loads for the next step can overlap them. What would worry you is <code>bytes spill stores</code> above zero, or a profiler showing the SM idle on <code>long_scoreboard</code> at the start of each phase: that is latency the instruction-level parallelism did not cover, and the cure is double buffering (section 7), not more warps.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Tensor cores</h2>
+
+    <p>Everything so far used the FP32 lanes, the &ldquo;CUDA cores&rdquo;: one multiply-add per lane per cycle. Since Volta (2017), each SM also has <strong>tensor cores</strong>: units that multiply small matrices. A tensor-core instruction is issued by a whole warp and computes <var>D</var> = <var>A</var>&middot;<var>B</var> + <var>C</var> on tiles whose elements are spread across the 32 lanes&rsquo; registers. On your card the basic FP16 instruction is <code>mma.sync.m16n8k16</code>: A is 16&times;16, B is 16&times;8, C and D are 16&times;8, so <strong>one warp instruction performs 2,048 multiply-adds</strong>, where an <code>FFMA</code> performs 32.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The tensor-core instruction mma m16n8k16: a 16 by 16 tile of A times a 16 by 8 tile of B plus a 16 by 8 accumulator C gives D. The tiles live in the registers of the 32 lanes of one warp. Beside it, per SM per clock on the RTX 5070: 128 FP32 FMAs on the CUDA cores, 256 FP16 multiply-adds with FP32 accumulation on the tensor cores.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 230" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One mma.sync.m16n8k16</title>
+        <!-- A 16x16 at 8px: 128x128 -->
+        <rect x="20" y="40" width="128" height="128" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="84" y="30" font-size="10.5" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">A 16&times;16 (FP16)</text>
+        <text x="163" y="108" font-size="14" text-anchor="middle" fill="var(--lk-ink)">&times;</text>
+        <rect x="178" y="40" width="64" height="128" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="210" y="30" font-size="10.5" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">B 16&times;8</text>
+        <text x="257" y="108" font-size="14" text-anchor="middle" fill="var(--lk-ink)">+</text>
+        <rect x="272" y="40" width="64" height="128" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="304" y="30" font-size="10.5" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">C 16&times;8</text>
+        <text x="351" y="108" font-size="14" text-anchor="middle" fill="var(--lk-ink)">&rarr;</text>
+        <rect x="366" y="40" width="64" height="128" fill="var(--lk-hl)" stroke="var(--lk-forest)" stroke-width="1.6"/>
+        <text x="398" y="30" font-size="10.5" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">D (FP32)</text>
+        <g stroke="var(--lk-rule-soft)"><path d="M20 72H148M20 104H148M20 136H148M52 40V168M84 40V168M116 40V168M178 72H242M178 104H242M178 136H242M210 40V168M272 72H336M272 104H336M272 136H336M304 40V168M366 72H430M366 104H430M366 136H430M398 40V168"/></g>
+        <text x="225" y="192" font-size="10" text-anchor="middle" fill="var(--lk-vermilion)">one instruction, issued by one warp: 16 &times; 8 &times; 16 = 2,048 multiply-adds</text>
+        <text x="225" y="208" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">every tile is spread over the registers of the warp&rsquo;s 32 lanes</text>
+        <g font-size="10" fill="var(--lk-ink)">
+          <text x="456" y="56" font-weight="700">per SM, per clock</text>
+          <text x="456" y="80">FP32 FFMA (CUDA cores)</text><text x="640" y="80" text-anchor="end" fill="var(--lk-cobalt-dark)">128</text>
+          <text x="456" y="100">FP16 &times; FP16 + FP32</text><text x="640" y="100" text-anchor="end" fill="var(--lk-cobalt-dark)">256</text>
+          <text x="456" y="120">FP16 &times; FP16 + FP16</text><text x="640" y="120" text-anchor="end" fill="var(--lk-cobalt-dark)">512</text>
+          <text x="456" y="140">FP8 &times; FP8 + FP32</text><text x="640" y="140" text-anchor="end" fill="var(--lk-cobalt-dark)">512</text>
+          <text x="456" y="166" font-size="9" fill="var(--lk-ink-soft)">multiply-adds, RTX 5070, dense,</text>
+          <text x="456" y="178" font-size="9" fill="var(--lk-ink-soft)">from the whitepaper TFLOPS at boost</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; One tensor-core instruction and what it is worth. The throughputs on the right are NVIDIA&rsquo;s published dense TFLOPS for your card divided by 48 SMs and the boost clock: FP16 with FP32 accumulation, the mode this course uses, runs at twice the FP32 CUDA-core rate on a GeForce card, and four times with FP16 accumulation or FP8 inputs.</figcaption>
+    </figure>
+
+    <p>The table behind that figure, in the units of chapter 1:</p>
+    <table>
+      <tr><th>Math</th><th>RTX 5070, dense TFLOPS</th><th>Note</th></tr>
+      <tr><td>FP32 on CUDA cores</td><td>30.9</td><td>chapters 7 and 8 so far</td></tr>
+      <tr><td>TF32 tensor</td><td>&asymp; 30.9</td><td>no faster than FP32 on GeForce cards; worth it on data-center GPUs</td></tr>
+      <tr><td>FP16 / BF16 in, FP32 accumulate</td><td>61.7</td><td>this chapter&rsquo;s <code>hgemm</code></td></tr>
+      <tr><td>FP16 in, FP16 accumulate</td><td>123.5</td><td>chapter 6&rsquo;s accumulation problem, so rarely used for long sums</td></tr>
+      <tr><td>FP8 in, FP32 accumulate</td><td>123.5</td><td>Part IV</td></tr>
+      <tr><td>FP4 (block-scaled)</td><td>493.9</td><td>Part IV</td></tr>
+    </table>
+    <p>Two things in that table deserve a comment. First, on a GeForce card the tensor-core advantage for FP16 with FP32 accumulation is &ldquo;only&rdquo; 2&times; the CUDA cores; on an H100 it is about 15&times;. The halving is a product decision (NVIDIA runs FP32 accumulation at half rate on consumer cards), not physics, and it means that on your card the <em>bytes</em> saved by FP16 matter as much as the FLOPs. Second, the ridge moves: at 61.7 TFLOPS and 672 GB/s, a kernel needs 92 FLOP/B to be compute-bound (chapter 1), so tensor-core GEMMs need bigger tiles and more reuse than FP32 ones to reach their roof.</p>
+
+    <h3>Where the operands live: fragments</h3>
+    <p>A tensor-core instruction has no pointer operands. Its A, B, C and D tiles are in registers, <em>distributed</em> over the lanes of the warp: for <code>m16n8k16</code>, each lane holds 8 halves of A (in 4 registers), 4 halves of B (2 registers) and 4 floats of C and D. Which lane holds which element is fixed by the PTX specification, and it is not an obvious layout. Click a lane:</p>
+
+    <div id="w-frag" class="w"></div>
+
+    <p>Two consequences. The 32 lanes together hold each tile exactly once: the warp cooperates, and no single thread &ldquo;has&rdquo; a row. And getting data from shared memory into this layout is its own problem: a plain load per element would be slow, so there is a dedicated instruction, <code>ldmatrix</code> (<code>LDSM</code> in SASS), that loads 8&times;8 blocks of 16-bit values from shared memory straight into the fragment layout, each lane supplying the address of one row.</p>
+
+    <h3>Three ways to program them</h3>
+    <table>
+      <tr><th>Level</th><th>What you write</th><th>Used in</th></tr>
+      <tr><td>WMMA (<code>nvcuda::wmma</code>)</td><td>C++ fragments of 16&times;16&times;16, load / multiply / store calls; the layout is hidden</td><td>this chapter</td></tr>
+      <tr><td>PTX <code>mma.sync</code> + <code>ldmatrix</code></td><td>inline assembly with explicit fragment layouts; full control over data movement</td><td>FlashAttention (chapter 14)</td></tr>
+      <tr><td>CUTLASS / CuTe</td><td>C++ templates that describe tiles and layouts; the library generates the code</td><td>Part V</td></tr>
+    </table>
+    <p>WMMA is the simplest and it compiles to the same tensor-core instructions, but because it hides the layout, you cannot do elementwise work on a fragment that depends on the element&rsquo;s position (masking, per-row scaling) without a round trip through shared memory. That is why serious kernels drop down to <code>mma.sync</code>.</p>
+
+    <div class="callout note">
+      <span class="callout-label">What your sm_120 has, and what it does not</span>
+      <p>Tensor-core programming changed with every data-center generation: Hopper (sm_90) added <code>wgmma</code>, an asynchronous instruction issued by a group of four warps and reading operands straight from shared memory; data-center Blackwell (sm_100) added <code>tcgen05</code> and a dedicated tensor memory. <strong>Your consumer Blackwell (sm_120) has neither.</strong> It runs the warp-level <code>mma.sync</code> family introduced with Ampere, extended with FP8, FP6 and FP4 inputs and block scaling, plus the asynchronous copy engines (<code>cp.async</code>, and the bulk tensor-copy unit). So the model in this chapter, warps issuing synchronous MMAs on register fragments, is exactly what your card executes, and what you learn here transfers directly to Ampere and Ada. The Hopper and B200 models are Part VI&rsquo;s rented-GPU experiment.</p>
+    </div>
+  </section>
+
+  <section id="s7">
+    <h2>7. Feeding the tensor cores: t1 to t3</h2>
+
+    <p>A tensor core consumes operands fast: at 256 multiply-adds per SM per clock, an <code>m16n8k16</code> (2,048 multiply-adds, 768 bytes of A and B) finishes in 8 clocks per SM. If every fragment came from shared memory once per MMA, that is 96 bytes per clock, most of shared memory&rsquo;s 128. So the whole hierarchy of this chapter reappears, one level up: fragments must be reused from registers across several MMAs (the warp tile), tiles must be reused from shared memory across warps (the block tile), and the loads must overlap the math. Lab 7&rsquo;s <code>hgemm</code> takes the three steps:</p>
+
+    <ul>
+      <li><strong>t1: one warp per 16&times;16 tile, fragments straight from global memory.</strong> The tensor-core version of chapter 7&rsquo;s naive kernel: no shared memory, no reuse beyond what L1 and L2 find. Every <code>mma_sync</code> waits for its own global loads.</li>
+      <li><strong>t2: 128&times;128 block tile in shared memory, 8 warps of 64&times;32.</strong> Each phase copies a 128&times;32 tile of A and a 32&times;128 tile of B into shared memory with 16-byte loads; each warp loads 4 A fragments and 2 B fragments per 16-wide step and does all 8 MMAs, so each A fragment is used twice and each B fragment four times from registers. Rows of the shared tiles are padded by 8 halves, so that the 16 rows of a fragment do not start in the same banks.</li>
+      <li><strong>t3: t2 with asynchronous copies into a double buffer.</strong> In t2, every phase is &ldquo;load, wait, compute, wait&rdquo;: while the tile loads, the tensor cores idle. t3 keeps two buffers and, while the warps compute on one, the copies for the next phase are already in flight into the other.</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="Two timelines. Single buffer: load tile 0, compute tile 0, load tile 1, compute tile 1, with the tensor cores idle during every load. Double buffer: load tile 0, then compute tile 0 while tile 1 loads, compute tile 1 while tile 2 loads, and so on: after the first load the tensor cores never wait, as long as a load takes no longer than a compute.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 200" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Single versus double buffering</title>
+        <text x="10" y="40" font-size="10" fill="var(--lk-ink)">t2: one buffer</text>
+        <g font-size="9" text-anchor="middle">
+          <rect x="130" y="26" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="165" y="41" fill="var(--lk-cobalt-dark)">load 0</text>
+          <rect x="200" y="26" width="80" height="22" fill="var(--lk-forest)"/><text x="240" y="41" fill="var(--lk-paper-light)">mma 0</text>
+          <rect x="280" y="26" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="315" y="41" fill="var(--lk-cobalt-dark)">load 1</text>
+          <rect x="350" y="26" width="80" height="22" fill="var(--lk-forest)"/><text x="390" y="41" fill="var(--lk-paper-light)">mma 1</text>
+          <rect x="430" y="26" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="465" y="41" fill="var(--lk-cobalt-dark)">load 2</text>
+          <rect x="500" y="26" width="80" height="22" fill="var(--lk-forest)"/><text x="540" y="41" fill="var(--lk-paper-light)">mma 2</text>
+        </g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.2"><line x1="280" y1="58" x2="350" y2="58"/><line x1="430" y1="58" x2="500" y2="58"/></g>
+        <text x="390" y="72" font-size="9" text-anchor="middle" fill="var(--lk-vermilion)">tensor cores idle during every load</text>
+        <text x="10" y="120" font-size="10" fill="var(--lk-ink)">t3: two buffers</text>
+        <text x="10" y="150" font-size="8.5" fill="var(--lk-ink-soft)">copies (async)</text>
+                <g font-size="9" text-anchor="middle">
+          <rect x="200" y="106" width="80" height="22" fill="var(--lk-forest)"/><text x="240" y="121" fill="var(--lk-paper-light)">mma 0 (buf 0)</text>
+          <rect x="280" y="106" width="80" height="22" fill="var(--lk-forest)"/><text x="320" y="121" fill="var(--lk-paper-light)">mma 1 (buf 1)</text>
+          <rect x="360" y="106" width="80" height="22" fill="var(--lk-forest)"/><text x="400" y="121" fill="var(--lk-paper-light)">mma 2 (buf 0)</text>
+          <rect x="440" y="106" width="80" height="22" fill="var(--lk-forest)"/><text x="480" y="121" fill="var(--lk-paper-light)">mma 3 (buf 1)</text>
+          <rect x="130" y="138" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="165" y="153" fill="var(--lk-cobalt-dark)">load 0</text>
+          <rect x="200" y="138" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="235" y="153" fill="var(--lk-cobalt-dark)">load 1</text>
+          <rect x="280" y="138" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="315" y="153" fill="var(--lk-cobalt-dark)">load 2</text>
+          <rect x="360" y="138" width="70" height="22" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="395" y="153" fill="var(--lk-cobalt-dark)">load 3</text>
+        </g>
+        <text x="370" y="186" font-size="9" text-anchor="middle" fill="var(--lk-cobalt-dark)">after the first tile, each load hides behind the previous tile&rsquo;s math</text>
+        <text x="600" y="121" font-size="9" fill="var(--lk-ink-soft)">&rarr; time</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; Double buffering. With one buffer, each phase loads and then computes, and the math units idle during the load; more warps per SM would hide some of it, but at these register budgets there are few. With two buffers the copy of tile <var>t</var>+1 runs during the math on tile <var>t</var>. It costs twice the shared memory, which is why production kernels choose the number of stages (2, 3, 4&hellip;) per GPU.</figcaption>
+    </figure>
+
+    <p>What makes t3 possible is <code>cp.async</code>: a copy from global to shared memory that the thread <em>issues</em> and then does not wait for. It does not pass through registers, so the thread can go straight on to issuing tensor-core instructions. In CUDA C++ it is <code>__pipeline_memcpy_async(dst, src, 16)</code>; copies are grouped with <code>__pipeline_commit()</code>, and <code>__pipeline_wait_prior(n)</code> waits until at most <var>n</var> groups are still in flight. The main loop of t3:</p>
+<pre><code class="language-cpp">load_tiles_async(buffer 0, tile 0);  commit();
+for (int t = 0; t &lt; tiles; ++t) {
+    if (t + 1 &lt; tiles) load_tiles_async(buffer (t + 1) % 2, tile t + 1);   // start the next copy
+    commit();
+    wait_prior(1);          // everything except the newest group has landed: tile t is in
+    __syncthreads();        // ...for every thread's copies, not just mine
+    compute(buffer t % 2);  // 8 warps x 8 MMAs x 2 steps
+    __syncthreads();        // nobody reads buffer t % 2 any more: iteration t + 1 may refill it
+}</code></pre>
+
+    <details class="ym">
+      <summary>Your move: delete the second <code>__syncthreads()</code> in t3. The copy at iteration <var>t</var>+1 writes into buffer (<var>t</var>+2) % 2. Which buffer is that, and who might still be reading it?</summary>
+      <p>(<var>t</var>+2) % 2 = <var>t</var> % 2: the buffer iteration <var>t</var> just computed from. A fast warp reaches iteration <var>t</var>+1 and starts copying tile <var>t</var>+2 over it while slower warps are still running their MMAs on tile <var>t</var>. It is chapter 3&rsquo;s write-after-read barrier again, in a new costume. Asynchronous copies make it worse, not better: the overwrite happens at some unpredictable later moment, so the bug is even more timing-dependent. (Production kernels use one barrier object per pipeline stage instead of whole-block barriers, so that warps wait only for the stage they need.)</p>
+    </details>
+
+    <div class="callout note">
+      <span class="callout-label">Why the tensor-core kernels pad instead of guarding</span>
+      <p>WMMA loads and stores whole 16&times;16 tiles, with alignment rules on the pointers. Handling ragged edges means either masking inside fragments (impossible with WMMA&rsquo;s hidden layout) or a slow path per edge tile, and libraries spend a lot of code on it. Lab 7 pads every matrix with zeros to a multiple of 128 and checks the logical shape, which is also what many inference engines do: their shapes are known in advance and chosen to be tile-friendly.</p>
+    </div>
+  </section>
+
+  <section id="s8">
+    <h2>8. What cuBLAS does that we do not</h2>
+
+    <p>v7 and t3 contain the ideas that matter. The remaining distance to cuBLAS is made of many smaller ones, each worth a few percent, and knowing their names is useful even before you need them:</p>
+    <ul>
+      <li><strong>Autotuning.</strong> The best BM, BN, BK, warp tile and thread tile depend on the GPU and the matrix shape. cuBLAS ships many kernel variants and a heuristic that picks one per call; Boehm gained about 6 points of cuBLAS on his card by searching tile sizes alone.</li>
+      <li><strong>Deeper pipelines</strong>: three or four shared-memory stages instead of two, so that a load that is slower than one phase of math is still hidden.</li>
+      <li><strong>Swizzled shared-memory layouts</strong> instead of padding: XOR-permuting the columns of each row so that both the stores into the tile and the <code>ldmatrix</code> loads out of it are conflict-free, without wasting memory.</li>
+      <li><strong><code>ldmatrix</code> and hand-placed <code>mma.sync</code></strong>, with fragments double-buffered in registers, so that the loads for the next <var>k</var> step overlap the MMAs of this one.</li>
+      <li><strong>Block rasterization</strong>: launching blocks in an order (for example, in groups along a column) that maximizes L2 hits between blocks that run at the same time.</li>
+      <li><strong>Different algorithms for different shapes</strong>: split-K (several blocks share one output tile and add their partial sums) when <var>M</var>&middot;<var>N</var> is too small to fill 48 SMs, and dedicated GEMV kernels when <var>M</var> = 1, which is decode (chapter 15).</li>
+    </ul>
+    <p>The last point matters most for this course. The square 4096&sup3; GEMM of the benchmark is prefill&rsquo;s shape. Decode&rsquo;s shape is <var>M</var> = 1 to a few dozen, where none of this chapter&rsquo;s compute tricks apply and the kernel is a memory-bound GEMV: the game there is bytes, and Part IV&rsquo;s quantized GEMV kernels are where it is played.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Predictions, and what the profiler should show</h2>
+
+    <p>At 4096&sup3;, from the mechanisms and from Boehm&rsquo;s measured ratios on a different card; ranges, not promises:</p>
+    <table>
+      <tr><th>Kernel</th><th>% of cuBLAS FP32</th><th>Registers</th><th>Occupancy</th><th>What to look for</th></tr>
+      <tr><td>v3 tiled (lab 6)</td><td>10&ndash;15%</td><td>~30</td><td>100%</td><td><code>mio_throttle</code>, 2 LDS per FFMA</td></tr>
+      <tr><td>v4 1D blocking</td><td>25&ndash;40%</td><td>~40</td><td>~100%</td><td>LDS per FFMA &asymp; 1.1</td></tr>
+      <tr><td>v5 2D blocking</td><td>50&ndash;70%</td><td>~100</td><td>~33%</td><td>LDS per FFMA &asymp; 0.25; load bank conflicts appear</td></tr>
+      <tr><td>v6 16-byte loads</td><td>60&ndash;80%</td><td>~100</td><td>~33%</td><td><code>LDS.128</code> in the SASS; 4&times; fewer LDS instructions than v5</td></tr>
+      <tr><td>v7 warp tiling</td><td>70&ndash;90%</td><td>~170</td><td>17&ndash;25%</td><td>fewest shared wavefronts per FFMA; zero spills</td></tr>
+    </table>
+    <table>
+      <tr><th>Tensor-core kernel</th><th>% of cuBLAS HGEMM</th><th>What to look for</th></tr>
+      <tr><td>t1 fragments from global</td><td>10&ndash;30%</td><td>high L2 traffic, <code>long_scoreboard</code>; the tensor pipe mostly idle</td></tr>
+      <tr><td>t2 shared-memory tiles</td><td>40&ndash;70%</td><td>tensor pipe busier; <code>barrier</code> and <code>long_scoreboard</code> at phase boundaries</td></tr>
+      <tr><td>t3 async double buffer</td><td>50&ndash;80%</td><td>fewer stalls at phase boundaries than t2</td></tr>
+      <tr><td>cuBLAS HGEMM</td><td>100% (expect 60&ndash;85% of 61.7 TFLOPS)</td><td>for scale: about 2&ndash;3&times; cuBLAS SGEMM</td></tr>
+    </table>
+    <p>Two comparisons to make when the numbers are in. Your best FP32 kernel against cuBLAS FP32, which is the chapter&rsquo;s exam. And cuBLAS HGEMM against cuBLAS SGEMM on the same shape: that ratio is what switching the spine engine&rsquo;s linear layers to FP16 is worth, before any quantization.</p>
+  </section>
+
+  <section id="s10">
+    <h2>10. Lab 7: register blocking and tensor cores</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 7</span><span class="lab-title">SGEMM v4&ndash;v7 and WMMA t1&ndash;t3, against cuBLAS</span><span class="idx-meta">~60 min · <code>mlsys/labs/lab07-matmul-registers/</code></span></div>
+      <div class="lab-body">
+        <p>Two programs on lab 6&rsquo;s harness: <code>sgemm2</code> (FP32, v3 as the baseline, then v4 to v7, then cuBLAS) and <code>hgemm</code> (FP16 in, FP32 accumulate: t1 to t3, then cuBLAS <code>GemmEx</code>). Both are tested on awkward shapes against a double-precision reference; the FP32 kernels handle any shape, the tensor-core kernels run on zero-padded copies.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab07-matmul-registers
+make               # read the -Xptxas -v lines: registers and spills per kernel
+make test          # sgemm2 and hgemm: all PASS
+make bench         # the two tables at 1024, 2048, 4096 cubed
+make sass          # FFMA, LDS, LDS.128, HMMA, LDSM per kernel
+make ncu-table     # FP32 kernels: shared loads, wavefronts, conflicts, stalls
+make ncu-tensor    # tensor-core kernels: Speed of Light, pipes, memory</code></pre>
+        <table>
+          <tr><th>Step</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>make</code>: registers of v5 and v7</td><td>~100 and ~170, 0 bytes spilled</td></tr>
+          <tr><td><code>sass</code>: LDS per FFMA, v4 / v5 / v6</td><td>&asymp; 1.1 / 0.25 / 0.0625 (as <code>LDS.128</code>)</td></tr>
+          <tr><td><code>bench</code>: the % of cuBLAS column</td><td>section 9&rsquo;s first table</td></tr>
+          <tr><td><code>bench</code>: t1, t2, t3</td><td>section 9&rsquo;s second table</td></tr>
+          <tr><td><code>bench</code>: cuBLAS HGEMM / cuBLAS SGEMM</td><td>2&ndash;3&times;</td></tr>
+          <tr><td><code>sass</code>: t1 vs t2</td><td>both issue <code>HMMA</code>; does WMMA&rsquo;s shared-memory load compile to <code>LDSM</code>?</td></tr>
+        </table>
+        <p>Paste back the <code>PASTE:</code> lines, the register lines from <code>make</code>, and the output of <code>make sass</code> and <code>make ncu-table</code>.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Two options. <strong>Autotune v7</strong>: turn BM, BN, BK, WM, WN, TM, TN into template parameters, instantiate a dozen valid combinations (the hierarchy widget checks validity), and benchmark them at 4096&sup3; and at 4096&times;768&times;3072 (a GPT-2 MLP layer at <var>M</var> = 4096). Is the winner the same for both shapes? <strong>Three stages</strong>: turn t3&rsquo;s double buffer into a triple buffer with <code>wait_prior(2)</code>, and check first that it still fits in shared memory.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why does computing an 8&times;8 block of outputs per thread reduce shared-memory traffic per FMA by 8&times;?</summary>
+        <p>Per step <var>k</var>, the thread needs only 8 values of A (its rows) and 8 of B (its columns), which it loads once into registers; every one of the 64 pairs is an FMA. 16 loads for 64 FMAs is 0.25 loads per FMA, against 2 for one output per thread.</p>
+      </details>
+      <details>
+        <summary>v5 runs at about 33% occupancy and v7 at about 25%, yet both are much faster than the 100%-occupancy tiled kernel. Why is that not a contradiction?</summary>
+        <p>Occupancy hides latency by switching warps; instruction-level parallelism hides it inside a warp. With 64 or 128 independent FMAs per step and loads for the next step issued early, each warp keeps the pipes busy on its own. The tiled kernel had occupancy but was limited by shared-memory bandwidth, which more warps cannot fix.</p>
+      </details>
+      <details>
+        <summary>Why is the A tile stored transposed in v6?</summary>
+        <p>So that a thread&rsquo;s TM values of A for one <var>k</var> are contiguous in shared memory and can be read with <code>LDS.128</code>, 4 floats per instruction. In the untransposed layout they are a column, BK floats apart.</p>
+      </details>
+      <details>
+        <summary>A warp owns a 16&times;128 strip in one kernel and a 64&times;64 square in another. Per step <var>k</var>, how many values does each read from shared memory, and what is the lesson?</summary>
+        <p>16 + 128 = 144 for 2,048 outputs, against 64 + 64 = 128 for 4,096. Shared traffic grows with the perimeter of the warp&rsquo;s region and work with its area, so square warp tiles move fewer bytes per output: 2.25&times; fewer here.</p>
+      </details>
+      <details>
+        <summary>What does one <code>mma.sync.m16n8k16</code> compute, and who issues it?</summary>
+        <p>D = A&middot;B + C with A 16&times;16, B 16&times;8, C and D 16&times;8: 2,048 multiply-adds. It is issued by a whole warp, and the tiles live distributed across the registers of its 32 lanes.</p>
+      </details>
+      <details>
+        <summary>On your card, FP16 with FP32 accumulation is 61.7 TFLOPS against 30.9 for FP32. On an H100 the ratio is about 15&times;. What follows for how you use FP16 on a GeForce card?</summary>
+        <p>The math speedup is only 2&times;, so a large part of FP16&rsquo;s value on your card is the halved bytes: memory-bound kernels (every GEMV of decode) run up to 2&times; faster for that reason alone. And any kernel limited by something other than the FMA rate gains less than 2&times;.</p>
+      </details>
+      <details>
+        <summary>What does <code>cp.async</code> change compared with an ordinary load followed by a shared-memory store?</summary>
+        <p>The copy goes from global to shared memory without passing through registers, and the issuing thread does not wait for it. The thread can continue with math while the copy is in flight, and waits only when it needs the data (<code>__pipeline_wait_prior</code>). That is what lets a double buffer overlap the next tile&rsquo;s load with the current tile&rsquo;s math.</p>
+      </details>
+      <details>
+        <summary>Which tensor-core programming models does sm_120 support: <code>mma.sync</code>, <code>wgmma</code>, <code>tcgen05</code>?</summary>
+        <p>Only the warp-level <code>mma.sync</code> family (with FP8/FP6/FP4 block-scaled extensions). <code>wgmma</code> is Hopper-only (sm_90a) and <code>tcgen05</code> is data-center Blackwell (sm_100a).</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>S. Boehm, <a href="https://siboehm.com/articles/22/CUDA-MMM"><em>How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog</em></a> (2022): kernels v4&ndash;v7 follow his kernels 4, 5, 6 and 10; the bank-conflict and autotuning remarks are his findings.</li>
+      <li>V. Volkov, <em>Better Performance at Lower Occupancy</em> (GTC 2010), and V. Volkov, J. Demmel, <em>Benchmarking GPUs to Tune Dense Linear Algebra</em> (SC 2008): register blocking and instruction-level parallelism instead of occupancy.</li>
+      <li>NVIDIA, <a href="https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md"><em>CUTLASS: Efficient GEMM in CUDA</em></a>: the block / warp / thread tile hierarchy, software pipelining, and why each level exists.</li>
+      <li>NVIDIA, <em>CUDA C++ Programming Guide</em>: warp matrix functions (WMMA) and asynchronous data copies (<code>__pipeline_memcpy_async</code>); <em>PTX ISA</em>: <code>mma.sync.m16n8k16</code> fragment layouts (the lane mapping in the fragment explorer), <code>ldmatrix</code>, <code>cp.async</code>, and the sm_90a / sm_100a-only instructions.</li>
+      <li>NVIDIA, <em>RTX Blackwell GPU Architecture</em> whitepaper (2025): dense tensor throughput per format for the GeForce RTX 50 series, including the half-rate FP32 accumulation on GeForce parts.</li>
+      <li>M. Fasi, N. Higham, M. Mikaitis, S. Pranesh, <em>Numerical behavior of NVIDIA tensor cores</em> (PeerJ CS, 2021): how tensor cores round inside an MMA, the reason for lab 7&rsquo;s looser FP16 tolerance.</li>
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (2023), ch. 6: thread coarsening, the general form of register blocking.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-07-matmul-tiling.html">&larr; Ch. 7 — Matmul I: tiling</a>
+      <a href="index.html">Index</a>
+      <a href="index.html">Ch. 9 — Softmax, layernorm, fusion (in writing) &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part II · Chapter 8 · kernels checked for correctness on awkward shapes; throughputs from NVIDIA&rsquo;s published figures; performance ranges are predictions until lab 7 replaces them, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch8.js"></script>
+</body>
+</html>

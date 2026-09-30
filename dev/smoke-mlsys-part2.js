@@ -36,7 +36,22 @@ const PAGES = [
       await page.locator('#w-tilecalc input[type=checkbox]').check();
       check('07: LDS.128 lifts the ceiling to 6.2 TF', /6\.2 TF/.test(await page.locator('#w-tilecalc .w-bars').textContent()));
     } },
-  { file: 'cap-08-matmul-tensor-cores.html', widgets: ['#w-hier', '#w-ratio'], optional: true },
+  { file: 'cap-08-matmul-tensor-cores.html', widgets: ['#w-hier', '#w-frag'],
+    async interact(page) {
+      check('08: v7 preset is valid, shared not the limit', /not the limit/.test(await page.locator('#w-hier .w-out').textContent()));
+      await page.locator('#w-hier .c8-btns button', { hasText: 'ch. 7 tiled' }).click();
+      check('08: chapter 7 preset shows 12% shared ceiling', /12\.5% of peak/.test(await page.locator('#w-hier .w-out').textContent()));
+      await page.locator('#w-hier select').nth(5).selectOption('4');
+      check('08: invalid tiling is reported', /Not a valid tiling/.test(await page.locator('#w-hier .w-verdict').textContent()));
+      const cover = await page.evaluate(() => ['A', 'B', 'C'].map(k => {
+        const cs = [...document.querySelectorAll('#w-frag .c8-f' + k + ' .c8-fc')];
+        const per = {}; cs.forEach(c => { per[c.dataset.lane] = (per[c.dataset.lane] || 0) + 1; });
+        return cs.length + ':' + Object.keys(per).length + ':' + Math.min(...Object.values(per)) + '-' + Math.max(...Object.values(per));
+      }).join(' '));
+      check('08: fragments cover A 256 / B 128 / C 128 cells, 32 lanes, 8/4/4 each (' + cover + ')', cover === '256:32:8-8 128:32:4-4 128:32:4-4');
+      await page.locator('#w-frag .c8-lane').nth(0).click();
+      check('08: lane 0 holds a0 at (0,0)', /a0=\(0,0\)/.test(await page.locator('#w-frag .w-verdict').textContent()));
+    } },
 ];
 
 (async () => {
