@@ -93,7 +93,8 @@ def main():
                 continue
 
             # 5. count chapters: non-index .html files directly in course dir
-            chapters = sorted(p for p in course_dir.glob("*.html") if p.name != "index.html")
+            # film-*.html pages are standalone media pages embedded in chapters, not chapters
+            chapters = sorted(p for p in course_dir.glob("*.html") if p.name != "index.html" and not p.name.startswith("film-"))
             n = len(chapters)
             # stated number from the card description + explicit extras in the copy
             m = re.match(r"(\d+)\s+(?:interactive\s+)?lessons?", desc)

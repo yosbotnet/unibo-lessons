@@ -727,9 +727,16 @@
       if (document.fullscreenElement) document.exitFullscreen();
       else if ($stage.requestFullscreen) $stage.requestFullscreen();
     });
+    // On the standalone film page the keys always drive the film. Embedded in a
+    // chapter they only do while the film has focus, so the page still scrolls.
+    var filmBox = document.getElementById('film'), standalone = document.body.classList.contains('film-page');
+    $stage.tabIndex = 0;
+    $stage.addEventListener('click', function (e) { if (e.target === $stage || e.target.tagName !== 'BUTTON') $stage.focus({ preventScroll: true }); });
     document.addEventListener('keydown', function (e) {
       var tag = (e.target && e.target.tagName) || '';
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (tag === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;   // the button's own click handles it
+      if (!standalone && !(filmBox && filmBox.contains(document.activeElement))) return;
       if (e.key === ' ' || e.key === 'k') { e.preventDefault(); toggle(); }
       else if (e.key === 'ArrowRight') { e.preventDefault(); var n = ACTS.filter(function (a) { return a[0] > T + 0.5; })[0]; if (n) setTime(n[0] + 0.01); }
       else if (e.key === 'ArrowLeft') { e.preventDefault(); var pv = ACTS.filter(function (a) { return a[0] < T - 1.5; }).pop(); setTime(pv ? pv[0] + 0.01 : 0); }
