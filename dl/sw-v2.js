@@ -1,8 +1,17 @@
 /* Deep Learning course PWA. Network-first for course files, cache fallback offline. */
 'use strict';
-const CACHE = 'dl-v4-content-layout';
+const CACHE = 'dl-v5-fonts';
 const FILES = [
   "../assets/course-figures.css",
+  "../assets/fonts.css",
+  "../assets/fonts/archivo-narrow-tss0ApVBdCYD5Q7hcxTE1ArZ0bbwiXw.woff2",
+  "../assets/fonts/ibm-plex-mono--F63fjptAgt5VM-kVkqdyU8n1i8q1w.woff2",
+  "../assets/fonts/ibm-plex-mono--F6pfjptAgt5VM-kVkqdyU8n1ioa1Xdg.woff2",
+  "../assets/fonts/ibm-plex-mono--F6qfjptAgt5VM-kVkqdyU8n3twJwlBFgg.woff2",
+  "../assets/fonts/ibm-plex-mono--F6qfjptAgt5VM-kVkqdyU8n3vAOwlBFgg.woff2",
+  "../assets/fonts/inter-UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2",
+  "../assets/fonts/source-serif-4-vEFI2_tTDB4M7-auWDN0ahZJW1gb8tc.woff2",
+  "../assets/fonts/source-serif-4-vEFK2_tTDB4M7-auWDN0ahZJW1gewtW_Wg.woff2",
   "./",
   "cap-01-introduction.html",
   "cap-02-math-autodiff.html",
@@ -37,7 +46,8 @@ self.addEventListener('fetch', event => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   const sharedFigures = new URL('../assets/course-figures.css', self.location).pathname;
-  if (url.origin !== self.location.origin || (!url.pathname.startsWith(new URL('./', self.location).pathname) && url.pathname !== sharedFigures)) return;
+  const sharedFonts = new URL('../assets/fonts', self.location).pathname;
+  if (url.origin !== self.location.origin || (!url.pathname.startsWith(new URL('./', self.location).pathname) && url.pathname !== sharedFigures && !url.pathname.startsWith(sharedFonts))) return;
   event.respondWith(fetch(request).then(response => {
     if (response && response.ok) caches.open(CACHE).then(cache => cache.put(request, response.clone()));
     return response;
