@@ -3,6 +3,8 @@
 //   ./transpose test    all kernels against a CPU transpose, awkward sizes too
 //   ./transpose bench   8192 x 8192 floats: copy (the ceiling), naive,
 //                       shared-memory tile, padded tile
+//   ./transpose profile each kernel once on 4096 x 4096, for Nsight Compute
+//                       (chapter 5: `make ncu-transpose` in lab04-profiling)
 //
 // out[c][r] = in[r][c] for an R x C row-major matrix (out is C x R).
 // A transpose does no arithmetic at all: it is pure data movement, so the
@@ -168,12 +170,34 @@ static int run_bench()
     return 0;
 }
 
+// One launch per kernel, so a profiler sees each exactly once.
+static int run_profile()
+{
+    const int R = 4096, C = 4096;  // 64 MB per matrix: bigger than the L2
+    size_t n = (size_t)R * C;
+    float *d_in, *d_out;
+    CUDA_CHECK(cudaMalloc(&d_in, n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out, n * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_in, 0, n * sizeof(float)));
+    for (Kind k : {COPY, NAIVE, SHARED, PADDED}) {
+        launch(k, d_in, d_out, R, C);
+        CUDA_CHECK_LAUNCH(true);
+        std::printf("ran %s\n", kind_name[k]);
+    }
+    CUDA_CHECK(cudaFree(d_in));
+    CUDA_CHECK(cudaFree(d_out));
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
-    if (argc != 2 || (std::strcmp(argv[1], "test") && std::strcmp(argv[1], "bench"))) {
-        std::fprintf(stderr, "usage: %s test|bench\n", argv[0]);
+    if (argc != 2 || (std::strcmp(argv[1], "test") && std::strcmp(argv[1], "bench") &&
+                      std::strcmp(argv[1], "profile"))) {
+        std::fprintf(stderr, "usage: %s test|bench|profile\n", argv[0]);
         return 1;
     }
     require_cuda_device();
-    return std::strcmp(argv[1], "test") == 0 ? run_test() : run_bench();
+    if (std::strcmp(argv[1], "test") == 0) return run_test();
+    if (std::strcmp(argv[1], "bench") == 0) return run_bench();
+    return run_profile();
 }

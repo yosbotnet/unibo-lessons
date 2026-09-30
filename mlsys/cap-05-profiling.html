@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 5 — Profiling with Nsight: reductions and transposes · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch5.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-04-roofline.html">&larr; Ch. 4 — The roofline</a>
+    <a href="index.html">Index</a>
+    <a href="index.html">Part II begins: Ch. 6 — Neural networks as a workload (in writing) &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part I — The GPU · Chapter 5</div>
+    <h1>Profiling with Nsight: reductions and transposes</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 4 · ~60 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Chapters 1&ndash;4 taught you what <em>can</em> limit a kernel. This one teaches you to find out what <em>does</em>, with evidence instead of guesses. Two tools split the job. <strong>Nsight Systems</strong> draws a timeline of the whole program: which kernels ran, when, and where the GPU sat idle waiting for the CPU. <strong>Nsight Compute</strong> takes one kernel apart: how close it came to each hardware limit, how coalesced its accesses were, how many bank conflicts it caused, and, through <em>stall reasons</em>, what its warps were waiting for. The worked subject is the parallel reduction, the classic sum of an array, optimized in six steps where each step moves one metric you can watch. Then chapter 3&rsquo;s transposes go under the microscope, and the chapter ends with a workflow you will use for the rest of the course: timeline first, then one kernel, then one hypothesis, one change, and a re-measurement.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Two tools, two questions</a></li>
+      <li><a href="#s2">Profiling under WSL2</a></li>
+      <li><a href="#s3">Nsight Systems: reading a timeline</a></li>
+      <li><a href="#s4">Nsight Compute: one kernel under the microscope</a></li>
+      <li><a href="#s5">Stall reasons: what the warps were waiting for</a></li>
+      <li><a href="#s6">The reduction, six versions</a></li>
+      <li><a href="#s7">The transposes, under ncu</a></li>
+      <li><a href="#s8">The workflow</a></li>
+      <li><a href="#s9">Lab 4: profile it yourself</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. Two tools, two questions</h2>
+
+    <p>Everyone who starts optimizing GPU code goes through the same phase: change something, rerun the benchmark, stare at a number that moved by 3% in the wrong direction, and have no idea why. The benchmark tells you <em>that</em> something is slow. It can never tell you <em>why</em>. For that you need a profiler, and NVIDIA ships two, because there are two different questions:</p>
+
+    <table>
+      <tr><th></th><th>Nsight Systems (<code>nsys</code>)</th><th>Nsight Compute (<code>ncu</code>)</th></tr>
+      <tr><td><strong>Question</strong></td><td>Where does the time go in the whole program?</td><td>Why is this one kernel as slow as it is?</td></tr>
+      <tr><td><strong>View</strong></td><td>A timeline: CPU threads, CUDA API calls, kernels, copies, your own labelled ranges</td><td>Hundreds of hardware counters for one kernel launch, grouped into sections with explanations</td></tr>
+      <tr><td><strong>Cost</strong></td><td>Low overhead: the program runs at nearly normal speed</td><td>High: each kernel is replayed many times to collect all counters</td></tr>
+      <tr><td><strong>Finds</strong></td><td>Gaps, launch overhead, synchronizations, copies on the critical path, which kernel dominates</td><td>Memory- vs compute-bound, coalescing, bank conflicts, occupancy, stall reasons, the hot source line</td></tr>
+      <tr><td><strong>Chapter 1 regime</strong></td><td>Overhead-bound</td><td>Compute- and memory-bound</td></tr>
+    </table>
+
+    <p>The order matters: <strong>always start with the timeline.</strong> Optimizing a kernel that takes 5% of the run, while the GPU idles 40% of the time between kernels, is the most common way to waste a week in this field. Nsight Systems tells you whether any kernel is worth opening; Nsight Compute tells you what is wrong with it.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Profiling under WSL2</h2>
+
+    <p>Both tools are part of the CUDA toolkit you installed in chapter 1, and both work inside WSL2. NVIDIA supports profiling there on Windows 11 with driver 525 or newer (Windows 10 needs build 19044 and driver 545). The pieces fit together like this:</p>
+
+    <ul>
+      <li><strong>The command-line tools run inside WSL.</strong> <code>nsys profile</code> and <code>ncu</code> run your program and write a report file (<code>.nsys-rep</code>, <code>.ncu-rep</code>). Both also print text summaries, which is often all you need.</li>
+      <li><strong>The GUIs run on Windows.</strong> Install Nsight Systems and Nsight Compute for Windows and open the reports from <code>\\wsl$\Ubuntu-24.04\home\&hellip;</code>. Reports are portable: a report made anywhere opens anywhere.</li>
+      <li><strong>Counter permission is a Windows setting.</strong> The Windows driver owns the GPU&rsquo;s performance counters, so the switch from chapter 1 (NVIDIA Control Panel &rarr; Developer &rarr; Manage GPU Performance Counters &rarr; all users) is what makes <code>ncu</code> work. Without it you get <code>ERR_NVGPUCTRPERM</code>.</li>
+    </ul>
+
+    <p>Three WSL-specific caveats, all from NVIDIA&rsquo;s own documentation:</p>
+    <ul>
+      <li>Nsight Compute&rsquo;s <em>context-switch trace</em> (part of its timeline-style PM sampling) is not supported on WSL. Nothing in this course needs it.</li>
+      <li>Nsight Systems&rsquo; 2025 release notes list a known issue on WSL: its default GPU timestamp conversion is unreliable, so GPU work can appear shifted relative to the CPU calls that caused it. The documented workaround is one line in its config file, and it is in lab 4&rsquo;s README. Apply it only if your timeline looks wrong.</li>
+      <li>We trace only CUDA and NVTX, and switch off Nsight Systems&rsquo; CPU sampling and OS context-switch tracing. Those rely on Linux kernel performance features that a WSL2 kernel may not fully expose, and nothing in this chapter needs them.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="callout-label">The desktop shares your GPU</span>
+      <p>Under WSL2 your RTX 5070 is also drawing the Windows desktop. A browser playing video or a game in the background steals memory bandwidth and SM time, and shows up in your numbers as noise. Close them before profiling, just as for benchmarks.</p>
+    </div>
+  </section>
+
+  <section id="s3">
+    <h2>3. Nsight Systems: reading a timeline</h2>
+
+    <p>A timeline has one row per thing that can be busy. The ones you will read every day:</p>
+    <ul>
+      <li><strong>CUDA API</strong> (per CPU thread): every call into the runtime, as a bar as long as the call took on the CPU. <code>cudaLaunchKernel</code> bars are short; <code>cudaDeviceSynchronize</code> and <code>cudaMemcpy</code> bars are as long as the CPU was blocked.</li>
+      <li><strong>GPU kernels</strong> (per stream): every kernel as a bar as long as it ran on the GPU, with a line back to the launch call that created it.</li>
+      <li><strong>Memory copies</strong>: host-to-device and device-to-host transfers, with their size and speed.</li>
+      <li><strong>NVTX</strong>: ranges you put in your own code with <code>nvtxRangePushA("name")</code> / <code>nvtxRangePop()</code>. They are how you find &ldquo;the part where we do X&rdquo; in a 30-second trace of a real engine. PyTorch, vLLM and llama.cpp all emit NVTX ranges.</li>
+    </ul>
+
+    <p>What you look for is almost always the same thing: <strong>white space in the GPU row</strong>. Every gap is time the GPU could have worked and did not, and the rows above tell you why. Lab 4&rsquo;s <code>graphs.cu</code> builds the three most common situations on purpose: 1,000 tiny kernels (4,096 floats each, a couple of microseconds of GPU work) launched three different ways.</p>
+
+    <figure class="lk-fig" role="img" aria-label="A stylized Nsight Systems timeline with three labelled NVTX ranges. In range A each kernel launch is followed by a long synchronize call, and the GPU row shows short kernels separated by wide gaps. In range B the CPU row is packed with launch calls, and the GPU row shows kernels with small gaps. In range C the CPU row has a single graph launch, and the GPU row shows kernels packed back to back.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 250" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Three launch patterns on a timeline</title>
+        <g font-size="10" fill="var(--lk-ink-soft)">
+          <text x="10" y="44">NVTX</text><text x="10" y="94">CUDA API</text><text x="10" y="106">(CPU)</text><text x="10" y="160">GPU</text><text x="10" y="172">kernels</text>
+        </g>
+        <line x1="80" y1="210" x2="650" y2="210" stroke="var(--lk-rule)"/>
+        <text x="650" y="226" font-size="9.5" text-anchor="end" fill="var(--lk-ink-soft)">time &rarr;</text>
+        <!-- NVTX ranges -->
+        <g font-size="10" fill="var(--lk-ink)">
+          <rect x="82" y="30" width="238" height="20" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="90" y="44">A: launch + sync each</text>
+          <rect x="326" y="30" width="190" height="20" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="334" y="44">B: async launches</text>
+          <rect x="522" y="30" width="126" height="20" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="530" y="44">C: one graph</text>
+        </g>
+        <!-- A: launch tick + long sync, GPU sparse -->
+        <g fill="var(--lk-paper)" stroke="var(--lk-cobalt)">
+          <rect x="84" y="84" width="6" height="18"/><rect x="90" y="84" width="38" height="18" fill="var(--lk-paper-light)"/>
+          <rect x="132" y="84" width="6" height="18"/><rect x="138" y="84" width="38" height="18" fill="var(--lk-paper-light)"/>
+          <rect x="180" y="84" width="6" height="18"/><rect x="186" y="84" width="38" height="18" fill="var(--lk-paper-light)"/>
+          <rect x="228" y="84" width="6" height="18"/><rect x="234" y="84" width="38" height="18" fill="var(--lk-paper-light)"/>
+          <rect x="276" y="84" width="6" height="18"/><rect x="282" y="84" width="36" height="18" fill="var(--lk-paper-light)"/>
+        </g>
+        <g font-size="8.5" fill="var(--lk-ink-soft)"><text x="92" y="96">sync</text><text x="140" y="96">sync</text><text x="188" y="96">sync</text></g>
+        <g fill="var(--lk-forest)"><rect x="104" y="150" width="7" height="22"/><rect x="152" y="150" width="7" height="22"/><rect x="200" y="150" width="7" height="22"/><rect x="248" y="150" width="7" height="22"/><rect x="296" y="150" width="7" height="22"/></g>
+        <g stroke="var(--lk-vermilion)" stroke-width="1.2"><line x1="112" y1="186" x2="151" y2="186"/><line x1="112" y1="182" x2="112" y2="190"/><line x1="151" y1="182" x2="151" y2="190"/></g>
+        <text x="131" y="202" font-size="9" text-anchor="middle" fill="var(--lk-vermilion)">idle GPU</text>
+        <!-- B: dense launches, GPU with small gaps -->
+        <g fill="var(--lk-paper)" stroke="var(--lk-cobalt)">
+          <rect x="328" y="84" width="9" height="18"/><rect x="339" y="84" width="9" height="18"/><rect x="350" y="84" width="9" height="18"/><rect x="361" y="84" width="9" height="18"/><rect x="372" y="84" width="9" height="18"/><rect x="383" y="84" width="9" height="18"/><rect x="394" y="84" width="9" height="18"/><rect x="405" y="84" width="9" height="18"/><rect x="416" y="84" width="9" height="18"/><rect x="427" y="84" width="9" height="18"/><rect x="438" y="84" width="9" height="18"/><rect x="449" y="84" width="9" height="18"/>
+          <rect x="462" y="84" width="52" height="18" fill="var(--lk-paper-light)"/>
+        </g>
+        <text x="468" y="96" font-size="8.5" fill="var(--lk-ink-soft)">sync</text>
+        <g fill="var(--lk-forest)"><rect x="338" y="150" width="7" height="22"/><rect x="349" y="150" width="7" height="22"/><rect x="360" y="150" width="7" height="22"/><rect x="371" y="150" width="7" height="22"/><rect x="382" y="150" width="7" height="22"/><rect x="393" y="150" width="7" height="22"/><rect x="404" y="150" width="7" height="22"/><rect x="415" y="150" width="7" height="22"/><rect x="426" y="150" width="7" height="22"/><rect x="437" y="150" width="7" height="22"/><rect x="448" y="150" width="7" height="22"/><rect x="459" y="150" width="7" height="22"/></g>
+        <text x="400" y="202" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">gap = launch rate &lt; kernel rate</text>
+        <!-- C: one graph launch, packed GPU -->
+        <g fill="var(--lk-paper)" stroke="var(--lk-cobalt)"><rect x="524" y="84" width="12" height="18"/><rect x="536" y="84" width="106" height="18" fill="var(--lk-paper-light)"/></g>
+        <text x="540" y="96" font-size="8.5" fill="var(--lk-ink-soft)">sync</text>
+        <text x="524" y="78" font-size="8.5" fill="var(--lk-cobalt-dark)">cudaGraphLaunch</text>
+        <g fill="var(--lk-forest)"><rect x="540" y="150" width="7" height="22"/><rect x="548" y="150" width="7" height="22"/><rect x="556" y="150" width="7" height="22"/><rect x="564" y="150" width="7" height="22"/><rect x="572" y="150" width="7" height="22"/><rect x="580" y="150" width="7" height="22"/><rect x="588" y="150" width="7" height="22"/><rect x="596" y="150" width="7" height="22"/><rect x="604" y="150" width="7" height="22"/><rect x="612" y="150" width="7" height="22"/><rect x="620" y="150" width="7" height="22"/><rect x="628" y="150" width="7" height="22"/></g>
+        <text x="588" y="202" font-size="9" text-anchor="middle" fill="var(--lk-cobalt-dark)">packed</text>
+        <g stroke="var(--lk-rule-soft)" stroke-dasharray="2 3"><line x1="87" y1="102" x2="105" y2="150"/><line x1="135" y1="102" x2="153" y2="150"/></g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The same 1,000 tiny kernels, three ways (stylized; your trace will have the real proportions). <b>A</b>: after every launch the CPU waits for the GPU, so each kernel pays a full round trip and the GPU idles in between. <b>B</b>: launches queue up and the CPU runs ahead, but when each kernel is shorter than the time it takes to submit the next, the GPU still waits for the CPU. <b>C</b>: the whole sequence was recorded once into a CUDA graph and is submitted with a single call; the kernels run back to back.</figcaption>
+    </figure>
+
+    <details class="ym">
+      <summary>Your move: rank A, B and C by time per kernel, and guess the ratio between A and C.</summary>
+      <p>A &gt; B &gt; C, and the gap between A and C is large: often an order of magnitude. A pays, per kernel, the launch path through the driver, the GPU&rsquo;s own startup and completion, and the trip back to wake up the waiting CPU thread. B hides the waiting but not the submission: the CPU still spends a few microseconds per <code>cudaLaunchKernel</code>, and a 2 &micro;s kernel finishes before the next one arrives. C submits once, so what remains is the GPU&rsquo;s own per-kernel cost. Under WSL2 every submission crosses from Linux into the Windows driver, which makes A and B more expensive than on native Linux and graphs more valuable. Lab 4 prints all three; the exact numbers depend on your CPU and driver.</p>
+    </details>
+
+    <h3>CUDA graphs</h3>
+    <p>A CUDA graph is a recording of GPU work that can be replayed with one call. You make one by <em>capturing</em> a stream: between <code>cudaStreamBeginCapture</code> and <code>cudaStreamEndCapture</code>, launches are recorded instead of executed. <code>cudaGraphInstantiate</code> then validates and prepares the whole sequence once (the expensive step), and <code>cudaGraphLaunch</code> replays it as often as you like:</p>
+<pre><code class="language-cpp">cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal);
+for (int k = 0; k &lt; 1000; ++k) bump&lt;&lt;&lt;16, 256, 0, st&gt;&gt;&gt;(d, 4096);   // recorded, not run
+cudaStreamEndCapture(st, &amp;graph);
+cudaGraphInstantiate(&amp;exec, graph, 0);   // once
+cudaGraphLaunch(exec, st);                // 1,000 kernels, one call</code></pre>
+    <p>The catch is that a graph replays <em>exactly</em> what was recorded: same kernels, same grid sizes, same pointers. That fits workloads that repeat the same shape over and over, which is precisely LLM decode: every step runs the same few hundred kernels on the same buffers. This is why inference engines capture graphs for decode (vLLM captures one per batch size it expects; llama.cpp uses them on NVIDIA GPUs), and it is how your spine project will fix the overhead problem that chapter 1 predicted for GPT-2 small.</p>
+
+    <h3>From picture to numbers</h3>
+    <p>The GUI is for looking; <code>nsys stats</code> is for numbers. <code>make nsys</code> in lab 4 prints three tables from the report: <code>nvtx_sum</code> (time per labelled range), <code>cuda_api_sum</code> (how many times each API call happened and its average CPU time: 2,000 <code>cudaStreamSynchronize</code> calls in A is a smell you can see without opening a timeline), and <code>cuda_gpu_kern_sum</code> (total GPU time per kernel name, the first place to look in a real program).</p>
+    <p>One flag deserves a note: by default Nsight Systems draws a whole graph as a single bar. The lab passes <code>--cuda-graph-trace=node</code> so that you can see the individual kernels inside it.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. Nsight Compute: one kernel under the microscope</h2>
+
+    <h3>How it works, and why its times differ from yours</h3>
+    <p>A GPU can only count a limited number of events at once, but a full report needs thousands of metrics. So Nsight Compute <strong>replays</strong> each profiled kernel: it saves the memory the kernel touches, runs it, restores the memory, runs it again with a different set of counters, and repeats, dozens of times for the full set. Three consequences:</p>
+    <ul>
+      <li><strong>Profiling is slow.</strong> Profile a few kernel launches, not a whole benchmark. That is why lab 4&rsquo;s programs have a <code>profile</code> mode that runs each kernel exactly once.</li>
+      <li><strong>Caches are flushed between passes</strong> by default (<code>--cache-control all</code>), so every pass starts cold. A kernel that benefits from data left in L2 by the previous kernel looks slower under <code>ncu</code> than in your benchmark.</li>
+      <li><strong>Clocks are locked.</strong> Since Nsight Compute 2026.1 the default (<code>--clock-control boost</code>) locks the GPU to its boost clock; earlier versions locked it to the base clock. Your benchmarks run with whatever clock the card chooses at that moment. <code>--clock-control none</code> leaves the clocks alone.</li>
+    </ul>
+    <p>So use <code>ncu</code>&rsquo;s duration to compare kernels <em>with each other</em> inside one report, and your lab benchmark (or Nsight Systems, which neither locks clocks nor flushes caches) for real-world time.</p>
+
+    <h3>Sets and sections</h3>
+    <p>Results are organized in <em>sections</em>, and sections are grouped in <em>sets</em>. Without flags you get the <code>basic</code> set (Speed of Light, Launch Statistics, Occupancy, Workload Distribution): cheap, and enough to classify a kernel. <code>--set full</code> collects everything, including the sections that explain <em>why</em>:</p>
+    <table>
+      <tr><th>Section</th><th>Answers</th></tr>
+      <tr><td><strong>GPU Speed Of Light Throughput</strong></td><td>How close did the kernel get to the compute limit and to the memory limit? The first thing to read.</td></tr>
+      <tr><td><strong>Memory Workload Analysis</strong></td><td>Traffic at each level (L1, shared, L2, DRAM), hit rates, sectors per request, shared-memory bank conflicts.</td></tr>
+      <tr><td><strong>Occupancy</strong></td><td>Theoretical vs achieved occupancy and which resource limits it (chapter 2&rsquo;s calculation, done for you).</td></tr>
+      <tr><td><strong>Scheduler Statistics</strong></td><td>How often each scheduler had a warp ready to issue, and how often it issued nothing.</td></tr>
+      <tr><td><strong>Warp State Statistics</strong></td><td>Stall reasons: how many cycles, on average, warps spent waiting on each kind of thing (section 5).</td></tr>
+      <tr><td><strong>Source Counters</strong></td><td>Which source lines and SASS instructions the stalls and memory traffic belong to. Needs <code>-lineinfo</code> at compile time.</td></tr>
+    </table>
+    <p>Every section ends with <strong>rules</strong>: short diagnoses such as &ldquo;uncoalesced shared accesses&rdquo; or &ldquo;this kernel exhibits low compute throughput and memory bandwidth utilization,&rdquo; each with an estimated speedup. They are good hints and not always right: treat them as hypotheses to check, not verdicts.</p>
+
+    <h3>Speed of Light: the one panel to read first</h3>
+    <figure class="lk-fig" role="img" aria-label="A mock of the GPU Speed Of Light Throughput section. Two main bars: compute (SM) throughput at 21 percent and memory throughput at 87 percent, with a breakdown showing DRAM at 87 percent, L2 at 41 percent and L1 at 30 percent. Annotations explain that the larger bar names the bottleneck candidate, that memory throughput is the maximum over the memory units, and what it means when both bars are low.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 270" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Speed of Light panel, annotated</title>
+        <rect x="10" y="10" width="400" height="250" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/>
+        <text x="22" y="30" font-size="11" font-weight="700" fill="var(--lk-ink)">GPU Speed Of Light Throughput</text>
+        <text x="22" y="46" font-size="9" fill="var(--lk-ink-soft)">reduce_v6 · illustrative numbers, not a measurement</text>
+        <g font-size="10" fill="var(--lk-ink)">
+          <text x="22" y="74">Compute (SM) Throughput</text><rect x="200" y="64" width="160" height="12" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><rect x="200" y="64" width="34" height="12" fill="var(--lk-forest)"/><text x="366" y="74">21%</text>
+          <text x="22" y="98">Memory Throughput</text><rect x="200" y="88" width="160" height="12" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/><rect x="200" y="88" width="139" height="12" fill="var(--lk-cobalt)"/><text x="366" y="98">87%</text>
+        </g>
+        <line x1="22" y1="112" x2="398" y2="112" stroke="var(--lk-rule-soft)"/>
+        <g font-size="9.5" fill="var(--lk-ink)">
+          <text x="34" y="132">DRAM Throughput</text><text x="220" y="132">87%</text>
+          <text x="34" y="150">L2 Cache Throughput</text><text x="220" y="150">41%</text>
+          <text x="34" y="168">L1/TEX Cache Throughput</text><text x="220" y="168">30%</text>
+          <text x="34" y="192">Duration</text><text x="220" y="192">~115 &micro;s</text>
+          <text x="34" y="210">DRAM Frequency</text><text x="220" y="210">(from the report)</text>
+          <text x="34" y="228">SM Frequency</text><text x="220" y="228">(locked by ncu)</text>
+        </g>
+        <!-- annotations -->
+        <g stroke="var(--lk-vermilion)" stroke-width="1.1" fill="none">
+          <path d="M392 92 L420 62"/><path d="M252 129 L420 130"/><path d="M322 224 L420 212"/>
+        </g>
+        <g font-size="9.5" fill="var(--lk-vermilion)">
+          <text x="424" y="46">the larger bar is your</text><text x="424" y="58">bottleneck candidate:</text><text x="424" y="70">here, memory</text>
+          <text x="424" y="118">&ldquo;Memory&rdquo; is the busiest</text><text x="424" y="130">memory unit. Check</text><text x="424" y="142">WHICH one: DRAM here</text>
+          <text x="424" y="200">locked clocks: compare</text><text x="424" y="212">durations inside one</text><text x="424" y="224">report, not with benches</text>
+        </g>
+        <text x="424" y="250" font-size="9.5" fill="var(--lk-cobalt-dark)">both bars low &rarr; latency or</text>
+        <text x="424" y="262" font-size="9.5" fill="var(--lk-cobalt-dark)">overhead: read the stalls</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; How to read Speed of Light (drawn, with illustrative values; the lab gives you the real ones). Both main bars are percentages of a peak: the SM bar of the busiest compute pipeline, the memory bar of the busiest memory unit. One bar near 80&ndash;90% means you are at a roofline from chapter 4, and the only way forward is to need less of that resource. Both bars low means neither limit is reached: the warps are waiting on latency, barriers or the launch itself, and the stall reasons say which.</figcaption>
+    </figure>
+
+    <h3>Metric names, decoded</h3>
+    <p>Every number in a report is a named metric, and the names follow a grammar. Once you can read them you can request exactly what you want with <code>--metrics</code>, as lab 4&rsquo;s <code>make ncu-table</code> does:</p>
+<pre><code>dram__throughput.avg.pct_of_peak_sustained_elapsed
+└┬─┘  └───┬────┘ └┬┘ └──────────────┬─────────────┘
+ unit   counter  rollup           suffix
+(DRAM)  (what)   (over all DRAM   (as % of the peak rate,
+                  channels)        over the kernel's run)</code></pre>
+    <p>Units you will meet: <code>gpu</code> (whole chip), <code>sm</code> and <code>smsp</code> (an SM, and one of its four sub-partitions: the quadrants of chapter 2), <code>l1tex</code> (L1 and shared memory), <code>lts</code> (L2 slices), <code>dram</code>. The rollup says how per-unit values combine (<code>.sum</code>, <code>.avg</code>, <code>.max</code>), and ratios end in <code>.ratio</code>. The ones worth knowing by heart:</p>
+    <table>
+      <tr><th>Metric</th><th>Meaning</th><th>Seen in</th></tr>
+      <tr><td><code>gpu__time_duration.sum</code></td><td>Kernel duration</td><td>everything</td></tr>
+      <tr><td><code>dram__throughput.avg.pct_of_peak_sustained_elapsed</code></td><td>DRAM bandwidth used, % of peak</td><td>memory-bound kernels</td></tr>
+      <tr><td><code>sm__throughput.avg.pct_of_peak_sustained_elapsed</code></td><td>Busiest SM pipeline, % of peak</td><td>compute-bound kernels</td></tr>
+      <tr><td><code>l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio</code> (and <code>_st</code>)</td><td>32-byte sectors per warp-wide global load (store): 4 means perfectly coalesced floats, 32 means scattered</td><td>chapter 3, the transposes</td></tr>
+      <tr><td><code>l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum</code> (and <code>_st</code>)</td><td>Extra shared-memory passes caused by bank conflicts</td><td>v2, the unpadded transpose</td></tr>
+      <tr><td><code>l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum</code></td><td>Shared-memory passes (&ldquo;wavefronts&rdquo;) for loads: 1 per request if conflict-free</td><td>same</td></tr>
+      <tr><td><code>smsp__average_thread_inst_executed_per_inst_executed.ratio</code></td><td>Average active threads per warp instruction: below 32 means divergent branches (predicated-off lanes still count as active)</td><td>chapter 2&rsquo;s divergence lab</td></tr>
+      <tr><td><code>smsp__inst_executed_op_shared_ld_pred_on_any.sum</code></td><td>Shared-memory load instructions with at least one lane switched on: the ones that actually send a request</td><td>v1 vs v3</td></tr>
+      <tr><td><code>smsp__inst_executed.sum</code></td><td>Warp instructions executed: the total work, including overhead</td><td>every version</td></tr>
+      <tr><td><code>sm__warps_active.avg.pct_of_peak_sustained_active</code></td><td>Achieved occupancy</td><td>chapter 2</td></tr>
+    </table>
+    <div class="callout note">
+      <span class="callout-label">Names drift between versions</span>
+      <p>NVIDIA occasionally renames metrics (the older <code>smsp__thread_inst_executed_per_inst_executed</code> is now deprecated in favour of the <code>average_</code> form above). If <code>ncu</code> says a metric does not exist, <code>ncu --query-metrics --chip gb205</code> lists what your version calls things. The names in this chapter were checked against Nsight Compute 2026.3 for your GPU&rsquo;s chip (GB205).</p>
+    </div>
+  </section>
+
+  <section id="s5">
+    <h2>5. Stall reasons: what the warps were waiting for</h2>
+
+    <p>Chapter 2 described the scheduler: every cycle, each quadrant picks one ready warp and issues its next instruction. Nsight Compute watches this happen. For every warp that <em>could not</em> issue, it records why, and reports the result as an average number of warps stalled on each reason per issued instruction. That table is the most direct answer a profiler can give to &ldquo;why is this slow?&rdquo;: it names the thing everyone is waiting for.</p>
+
+    <p>Two rules make stall reasons useful instead of confusing:</p>
+    <ol>
+      <li><strong>Read them together with Speed of Light.</strong> A kernel at 90% of DRAM bandwidth <em>should</em> be dominated by <code>long_scoreboard</code> (waiting for memory): that is what being memory-bound looks like, and there is nothing to fix. The same stall with DRAM at 30% means the kernel is waiting on latency it fails to hide, and you have work to do.</li>
+      <li><strong>Stalls are charged to the instruction that waits, not the one that caused the wait.</strong> A slow load shows up on the first instruction that <em>uses</em> the loaded value. On the Source page, look a few lines up from the hot line.</li>
+    </ol>
+
+    <div id="w-stalls" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: a kernel shows compute at 15%, memory at 25%, occupancy 100%, and its top stall is <code>barrier</code>. What is going on, and what would you try?</summary>
+      <p>Neither resource is busy and the warps are mostly waiting for each other at <code>__syncthreads()</code>. Typical cause: many barriers with very little work between them, which is exactly the shape of a tree reduction where each level adds one number per thread and then synchronizes. Remedies: do more work between barriers (each thread sums several elements first: coarsening), and replace the last barrier-separated levels with warp shuffles, which need no barrier at all. That is versions 4 and 5 below. High occupancy does not help here: more warps just means more warps waiting at the same barrier.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. The reduction, six versions</h2>
+
+    <p>A <strong>reduction</strong> turns an array into one value: a sum, a maximum, a norm. It is everywhere in ML (softmax needs a max and a sum per row, layernorm a mean and a variance, every loss is a sum), and it is the standard exercise for learning to read a profiler, because the naive GPU version is slow for reasons that are all visible in counters.</p>
+
+    <p>Sequentially it is one loop. In parallel it is a <strong>tree</strong>: add pairs, then pairs of pairs, and so on. <var>N</var> values take <var>N</var>&minus;1 additions, the same as the loop, but in log<sub>2</sub><var>N</var> steps instead of <var>N</var>. Rearranging the additions this way is only allowed because addition is associative and commutative. For integers that is exactly true. For floats it is <em>almost</em> true: each ordering rounds differently, so a GPU sum and a CPU sum of the same floats differ in the last bits, and two runs of a kernel that finishes with atomics can differ from each other. Lab 4&rsquo;s test checks floats against a double-precision reference with a tolerance for this reason, and prints one surprise: a plain sequential float loop is the <em>least</em> accurate of all at large sizes, because once the running sum is big, every small addend loses most of its bits. Trees add numbers of similar size.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Two reduction trees over eight values in shared memory. Left, interleaved addressing: at level one threads 0, 2, 4 and 6 add their right neighbour; at level two threads 0 and 4 add the value two away; at level three thread 0 adds the value four away. Right, sequential addressing: at level one threads 0 to 3 add the value four places up; at level two threads 0 and 1 add the value two up; at level three thread 0 adds the next value. On the left the active threads are spread out; on the right they are packed at the front.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 250" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Interleaved vs sequential addressing</title>
+        <defs><marker id="c5-arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker></defs>
+        <text x="160" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">v1 · interleaved</text>
+        <text x="500" y="18" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">v3 · sequential</text>
+        <!-- left: four rows of 8 cells, x0=20, w=34 -->
+        <g font-size="9" fill="var(--lk-ink-soft)"><text x="0" y="45">in</text><text x="0" y="105">L1</text><text x="0" y="165">L2</text><text x="0" y="225">L3</text></g>
+        <g fill="var(--lk-paper)" stroke="var(--lk-rule-soft)">
+          <rect x="20" y="30" width="34" height="22"/><rect x="56" y="30" width="34" height="22"/><rect x="92" y="30" width="34" height="22"/><rect x="128" y="30" width="34" height="22"/><rect x="164" y="30" width="34" height="22"/><rect x="200" y="30" width="34" height="22"/><rect x="236" y="30" width="34" height="22"/><rect x="272" y="30" width="34" height="22"/>
+          <rect x="20" y="90" width="34" height="22"/><rect x="56" y="90" width="34" height="22"/><rect x="92" y="90" width="34" height="22"/><rect x="128" y="90" width="34" height="22"/><rect x="164" y="90" width="34" height="22"/><rect x="200" y="90" width="34" height="22"/><rect x="236" y="90" width="34" height="22"/><rect x="272" y="90" width="34" height="22"/>
+          <rect x="20" y="150" width="34" height="22"/><rect x="56" y="150" width="34" height="22"/><rect x="92" y="150" width="34" height="22"/><rect x="128" y="150" width="34" height="22"/><rect x="164" y="150" width="34" height="22"/><rect x="200" y="150" width="34" height="22"/><rect x="236" y="150" width="34" height="22"/><rect x="272" y="150" width="34" height="22"/>
+          <rect x="20" y="210" width="34" height="22"/><rect x="56" y="210" width="34" height="22"/><rect x="92" y="210" width="34" height="22"/><rect x="128" y="210" width="34" height="22"/><rect x="164" y="210" width="34" height="22"/><rect x="200" y="210" width="34" height="22"/><rect x="236" y="210" width="34" height="22"/><rect x="272" y="210" width="34" height="22"/>
+        </g>
+        <g fill="var(--lk-hl)" stroke="var(--lk-cobalt)"><rect x="20" y="90" width="34" height="22"/><rect x="92" y="90" width="34" height="22"/><rect x="164" y="90" width="34" height="22"/><rect x="236" y="90" width="34" height="22"/><rect x="20" y="150" width="34" height="22"/><rect x="164" y="150" width="34" height="22"/><rect x="20" y="210" width="34" height="22"/></g>
+        <g font-size="9" text-anchor="middle" fill="var(--lk-cobalt-dark)"><text x="37" y="105">t0</text><text x="109" y="105">t2</text><text x="181" y="105">t4</text><text x="253" y="105">t6</text><text x="37" y="165">t0</text><text x="181" y="165">t4</text><text x="37" y="225">t0</text></g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1" marker-end="url(#c5-arr)">
+          <line x1="73" y1="52" x2="42" y2="88"/><line x1="145" y1="52" x2="114" y2="88"/><line x1="217" y1="52" x2="186" y2="88"/><line x1="289" y1="52" x2="258" y2="88"/>
+          <line x1="109" y1="112" x2="42" y2="148"/><line x1="253" y1="112" x2="186" y2="148"/>
+          <line x1="181" y1="172" x2="42" y2="208"/>
+        </g>
+        <!-- right: x0=360 -->
+        <g fill="var(--lk-paper)" stroke="var(--lk-rule-soft)">
+          <rect x="360" y="30" width="34" height="22"/><rect x="396" y="30" width="34" height="22"/><rect x="432" y="30" width="34" height="22"/><rect x="468" y="30" width="34" height="22"/><rect x="504" y="30" width="34" height="22"/><rect x="540" y="30" width="34" height="22"/><rect x="576" y="30" width="34" height="22"/><rect x="612" y="30" width="34" height="22"/>
+          <rect x="360" y="90" width="34" height="22"/><rect x="396" y="90" width="34" height="22"/><rect x="432" y="90" width="34" height="22"/><rect x="468" y="90" width="34" height="22"/><rect x="504" y="90" width="34" height="22"/><rect x="540" y="90" width="34" height="22"/><rect x="576" y="90" width="34" height="22"/><rect x="612" y="90" width="34" height="22"/>
+          <rect x="360" y="150" width="34" height="22"/><rect x="396" y="150" width="34" height="22"/><rect x="432" y="150" width="34" height="22"/><rect x="468" y="150" width="34" height="22"/><rect x="504" y="150" width="34" height="22"/><rect x="540" y="150" width="34" height="22"/><rect x="576" y="150" width="34" height="22"/><rect x="612" y="150" width="34" height="22"/>
+          <rect x="360" y="210" width="34" height="22"/><rect x="396" y="210" width="34" height="22"/><rect x="432" y="210" width="34" height="22"/><rect x="468" y="210" width="34" height="22"/><rect x="504" y="210" width="34" height="22"/><rect x="540" y="210" width="34" height="22"/><rect x="576" y="210" width="34" height="22"/><rect x="612" y="210" width="34" height="22"/>
+        </g>
+        <g fill="var(--lk-hl)" stroke="var(--lk-cobalt)"><rect x="360" y="90" width="34" height="22"/><rect x="396" y="90" width="34" height="22"/><rect x="432" y="90" width="34" height="22"/><rect x="468" y="90" width="34" height="22"/><rect x="360" y="150" width="34" height="22"/><rect x="396" y="150" width="34" height="22"/><rect x="360" y="210" width="34" height="22"/></g>
+        <g font-size="9" text-anchor="middle" fill="var(--lk-cobalt-dark)"><text x="377" y="105">t0</text><text x="413" y="105">t1</text><text x="449" y="105">t2</text><text x="485" y="105">t3</text><text x="377" y="165">t0</text><text x="413" y="165">t1</text><text x="377" y="225">t0</text></g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1" marker-end="url(#c5-arr)">
+          <line x1="521" y1="52" x2="382" y2="88"/><line x1="557" y1="52" x2="418" y2="88"/><line x1="593" y1="52" x2="454" y2="88"/><line x1="629" y1="52" x2="490" y2="88"/>
+          <line x1="449" y1="112" x2="382" y2="148"/><line x1="485" y1="112" x2="418" y2="148"/>
+          <line x1="413" y1="172" x2="382" y2="208"/>
+        </g>
+        <text x="160" y="248" font-size="9.5" text-anchor="middle" fill="var(--lk-vermilion)">spread out: every warp sends a near-empty request</text>
+        <text x="500" y="248" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">packed at the front: fewer warps touch memory</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; The same tree, two ways of assigning its additions to threads (8 values; each highlighted box is written by the thread named in it, which adds the value the arrow brings in). In a real 256-thread block the left version has lanes switched on in all 8 warps for five levels, so all 8 send shared-memory requests; on the right only 4, then 2, then 1 warp does.</figcaption>
+    </figure>
+
+    <p>All six versions below reduce each block&rsquo;s share in shared memory and finish with one <code>atomicAdd</code> per block into the final result (blocks cannot wait for each other, chapter 2). Each version changes one thing, and for each I state what the profiler should show. These are predictions from the mechanisms and from the compiled SASS, not measurements: <code>make ncu-table</code> in lab 4 prints the real values for all six on your card.</p>
+
+    <p>The first three are the textbook sequence (PMPP chapter 10, and Mark Harris&rsquo;s famous 2007 slides). They were designed to teach divergence, and on 2007 hardware each step was worth a factor of two. The profiler is about to tell a more interesting story, so look at what the compiler does with v1 first. Because the block size is a compile-time constant, the loop is fully unrolled, every <code>%</code> becomes a bit mask, and the <code>if</code> becomes <em>predication</em>, not a branch (chapter 2): every warp issues every level&rsquo;s instructions, with some lanes switched off:</p>
+<pre><code>LOP3.LUT P0, RZ, R2, 0x1, RZ, 0xc0, !PT   // P0 = (tid &amp; 1) != 0: the "% 2", as a mask
+BAR.SYNC.DEFER_BLOCKING 0x0               // __syncthreads()
+@!P0 LDS R4, [R3+0x4]                     // s[tid + 1], only lanes with P0 false
+@!P0 LDS R5, [R3]                         // s[tid]
+@!P0 STS [R3], R4                         // (FADD omitted)
+LOP3.LUT P0, RZ, R2, 0x7, RZ, 0xc0, !PT   // next level's mask, 0x3, 0x7, 0xf ...</code></pre>
+    <p>v2 and v3 compile to the same shape: 88 instructions each, identical in count. So the three versions issue the <em>same</em> number of warp instructions, and the classic &ldquo;v1 wastes issue slots on divergent warps&rdquo; argument does not apply to this code. What still differs is which lanes are switched on, and that decides how much <strong>shared-memory traffic</strong> each level causes. A warp whose lanes are all off sends no request; a warp with even one active lane sends one, and a request with bank conflicts takes several passes (&ldquo;wavefronts&rdquo;). Step through it:</p>
+
+    <div id="w-reduce" class="w"></div>
+
+    <h3>v1: interleaved addressing</h3>
+<pre><code class="language-cpp">for (unsigned stride = 1; stride &lt; 256; stride *= 2) {
+    if (tid % (2 * stride) == 0) s[tid] += s[tid + stride];
+    __syncthreads();
+}</code></pre>
+    <p>The direct translation of the tree. The adding threads are the multiples of 2&times;stride, spread across the whole block, so for the first five levels every one of the eight warps has at least one active lane and sends its own nearly empty shared-memory request. Per block: 94 shared-load requests over the whole tree, each one a single pass (no conflicts: the active lanes of a warp sit on different banks). Expected evidence: <code>smsp__inst_executed_op_shared_ld_pred_on_any.sum</code> (shared loads with at least one lane on) about 4&times; higher than v3&rsquo;s, and zero bank conflicts. Stall reasons: <code>barrier</code> dominates, as in every version with eight barriers per 256 values.</p>
+
+    <h3>v2: compact thread index</h3>
+<pre><code class="language-cpp">unsigned idx = 2 * stride * tid;
+if (idx &lt; 256) s[idx] += s[idx + stride];</code></pre>
+    <p>Same pairs, reassigned: thread <var>t</var> does the work thread 2&times;stride&times;<var>t</var> did. Now the working threads are 0, 1, 2&hellip; packed together, so only 4, then 2, then 1 warp has lanes on, and shared-load requests drop from 94 to 24 per block. But a new counter lights up: thread <var>t</var> touches word 2&times;stride&times;<var>t</var>, and neighbours that far apart share banks: 2-way at stride 1, up to 8-way at the deeper levels (red in the stepper). Each request now takes several passes, and the total comes back to 94 passes per block, the same as v1 for a completely different reason. Expected evidence: <code>l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum</code> jumps from zero to about 70 per block, while shared-memory wavefronts stay where v1 had them. Fewer requests, same work for the banks: a textbook &ldquo;improvement&rdquo; with a flaw that only the profiler shows.</p>
+
+    <h3>v3: sequential addressing</h3>
+<pre><code class="language-cpp">for (unsigned stride = 128; stride &gt; 0; stride &gt;&gt;= 1) {
+    if (tid &lt; stride) s[tid] += s[tid + stride];
+    __syncthreads();
+}</code></pre>
+    <p>Fold the upper half onto the lower half. Active threads are packed (few warps send requests) and thread <var>t</var> touches words <var>t</var> and <var>t</var>+stride (consecutive, no conflicts): 24 requests and 24 passes per block, the minimum for this tree. What remains is structural, and identical in all three versions: every 256 input values pay for 8 barriers and 88 instructions per warp, for just 1 KB of data loaded per block. So the honest prediction for the benchmark is that <strong>v1, v2 and v3 land close together</strong>, v3 slightly ahead, nothing like the 2&times; steps of 2007. If your numbers show that, the lesson is the chapter&rsquo;s whole point: optimization folklore is a hypothesis, and the SASS and the counters decide.</p>
+
+    <details class="ym">
+      <summary>Your move: v3 is clean: minimal requests, no conflicts. Yet it will not reach your DRAM ceiling. Which Speed of Light bar and which stall reason do you expect, and what is the fix?</summary>
+      <p>Memory throughput clearly below the practical ceiling you measured in lab 0, compute throughput low too, and <code>barrier</code> high among the stalls: the kernel is not waiting on DRAM, it is spending its time on tree overhead between tiny loads. Each block loads just one float per thread and then runs eight levels of synchronization. The fix is to give every thread more to load before the tree starts: <strong>thread coarsening</strong>. It also puts several loads in flight per thread, which chapter 3 showed is what keeps the memory pipe full.</p>
+    </details>
+
+    <h3>v4: coarsening</h3>
+<pre><code class="language-cpp">T sum = 0;                                            // each thread: 8 values, in a register
+for (int k = 0; k &lt; 8; ++k) {
+    size_t idx = blockIdx.x * 256 * 8 + tid + k * 256;  // coalesced at every k
+    if (idx &lt; n) sum += in[idx];
+}
+s[tid] = sum;  __syncthreads();  /* ...then v3's tree */</code></pre>
+    <p>Each thread first adds 8 values privately: no barrier, no shared memory, every thread busy, and 8 independent loads in flight. The block covers 2,048 values, so there are 8&times; fewer blocks and 8&times; fewer trees, barriers and atomics per byte. Expected evidence: DRAM throughput jumps toward the ceiling, <code>barrier</code> stalls shrink, <code>long_scoreboard</code> (waiting for DRAM) becomes the dominant stall, and total instructions drop sharply. This is usually the biggest single step in the sequence.</p>
+
+    <h3>v5: warp shuffles for the last five levels</h3>
+<pre><code class="language-cpp">__device__ float warp_sum(float v) {
+    for (int offset = 16; offset &gt; 0; offset &gt;&gt;= 1)
+        v += __shfl_down_sync(0xffffffff, v, offset);   // lane i reads lane i+offset's v
+    return v;                                           // lane 0 holds the warp's sum
+}</code></pre>
+    <p>Once 32 or fewer values remain, they all live in one warp, and the lanes of a warp can exchange registers directly with <code>__shfl_down_sync</code>: no shared memory, no barrier. (The mask argument is chapter 2&rsquo;s Volta lesson: it states which lanes take part instead of assuming lockstep.) v5 runs the shared-memory tree down to 64 values, then lets warp 0 finish with five shuffles. Five of eight barriers disappear, and so do five rounds of shared-memory loads and stores. Expected evidence: fewer shared-memory wavefronts and fewer barrier stalls, and probably <em>almost no change in time</em>, because v4 was already close to the DRAM ceiling. That is chapter 4&rsquo;s lesson seen from the profiler: once you are on the roofline, removing work you do not wait for buys nothing. It would matter if the data were in L2, or if this reduction were fused into a kernel with other work, as it will be in Part II&rsquo;s softmax.</p>
+
+    <h3>v6: one wave, wide loads</h3>
+    <p>The modern shape. Launch only as many blocks as fit on the GPU at once (48 SMs &times; 6 blocks of 256 threads = 288), let each thread walk the whole array with a <em>grid-stride loop</em> reading 16 bytes per load (<code>float4</code>), then reduce with shuffles within each warp, one shared-memory slot per warp, and shuffles again. 288 atomics in total instead of 32,768. It should sit at the ceiling, with <code>long_scoreboard</code> the main stall and the fewest instructions of any version. It is also the shape of reduction you will write inside fused kernels later.</p>
+
+    <h3>The ceiling: CUB</h3>
+    <p>CUB, NVIDIA&rsquo;s library of parallel primitives (part of CCCL, shipped with the toolkit), has <code>cub::DeviceReduce::Sum</code>, tuned per architecture. The lab runs it as the reference, and <code>ncu</code> shows you how it does it: typically two kernels, one that reduces tiles to partial sums and a single-block kernel that finishes. In production you call the library; you write your own when the reduction must live <em>inside</em> another kernel.</p>
+
+    <details class="ym">
+      <summary>Your move: before running <code>make bench</code>, sketch the curve: GB/s for v1&hellip;v6 and CUB, relative to your lab 0 ceiling.</summary>
+      <p>The shape to expect, not exact numbers: v1, v2 and v3 close together and well short of the ceiling (same instructions and barriers per 1 KB; only their shared-memory traffic differs), v3 at most modestly ahead; a big jump at v4 as coarsening puts more bytes in flight and cuts the tree overhead eightfold; v5, v6 and CUB clustered just under your lab 0 practical ceiling, within a few percent of each other. If v5 and v6 are no faster than v4, that is not a failed optimization: it is the roofline. The profiler will still show them doing less work, and that difference will matter the day this code is fused with something else.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. The transposes, under ncu</h2>
+
+    <p>Chapter 3 predicted <em>why</em> the three transposes differ: uncoalesced writes in the naive one, a 32-way bank conflict in the unpadded tile, neither in the padded one. <code>make ncu-transpose</code> collects exactly the counters that test those claims, on a 4096&times;4096 matrix, each kernel launched once. Here is what the mechanisms predict (numbers per warp-wide request, from the sector and bank rules):</p>
+
+    <table>
+      <tr><th>Kernel</th><th>Global ld sectors/request</th><th>Global st sectors/request</th><th>Shared ld wavefronts</th><th>Shared ld bank conflicts</th></tr>
+      <tr><td>copy</td><td>4</td><td>4</td><td>0 (no shared memory)</td><td>0</td></tr>
+      <tr><td>naive</td><td>4</td><td><strong>32</strong></td><td>0</td><td>0</td></tr>
+      <tr><td>shared, unpadded</td><td>4</td><td>4</td><td><strong>&asymp; 16.8 M</strong> (32 per request)</td><td><strong>&asymp; 16.3 M</strong> (31 per request)</td></tr>
+      <tr><td>shared, padded</td><td>4</td><td>4</td><td>&asymp; 0.52 M (1 per request)</td><td>&asymp; 0</td></tr>
+    </table>
+
+    <p>Where the big numbers come from: 4096&times;4096 = 16.8 M floats are each read once out of the tile, 32 per warp-wide request, so there are 524,288 shared-memory load requests. Conflict-free, each is one wavefront (one pass through the banks). With 32 lanes on one bank, each needs 32 passes: 31 of them are counted as conflicts. The naive store needs 32 sectors per request because each lane writes a different row of the output, 16 KB from its neighbour (chapter 3&rsquo;s scattered pattern).</p>
+
+    <details class="ym">
+      <summary>Your move: the unpadded kernel&rsquo;s DRAM traffic is already optimal (4 sectors per request both ways). Which Speed of Light bar and which stall reasons would betray its problem?</summary>
+      <p>The memory bar would be high but it would be the <strong>L1/shared</strong> row driving it, not DRAM: the shared-memory pipeline is doing 32 passes per request. DRAM throughput stays below what the copy achieves. Among stalls, <code>mio_throttle</code> and <code>short_scoreboard</code>: warps waiting for a shared-memory queue that is clogged with serialized passes. This is why Speed of Light always has a breakdown: &ldquo;memory-bound&rdquo; is not one thing, and the fix depends on which memory.</p>
+    </details>
+
+    <p>Read your real numbers against this table. Small deviations are normal (a few requests at tile edges, the counters&rsquo; exact definitions). Large ones mean a claim in chapter 3 was wrong for your card, which would be worth knowing, and worth telling me.</p>
+  </section>
+
+  <section id="s8">
+    <h2>8. The workflow</h2>
+
+    <figure class="lk-fig" role="img" aria-label="The profiling loop: measure the whole program with Nsight Systems, pick the kernel that dominates, classify it with Speed of Light, explain it with stall reasons and memory analysis, form one hypothesis, change one thing, re-measure, and stop when a roofline is reached.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 200" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>The profiling loop</title>
+        <defs><marker id="c5-arr2" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker>
+        <marker id="c5-arr3" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-vermilion)"/></marker></defs>
+        <g font-size="10" text-anchor="middle" fill="var(--lk-ink)">
+          <rect x="10" y="30" width="110" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="65" y="50" font-weight="700">1 · nsys</text><text x="65" y="65" font-size="9">where is the time?</text>
+          <rect x="140" y="30" width="110" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="195" y="50" font-weight="700">2 · pick</text><text x="195" y="65" font-size="9">the hot kernel</text>
+          <rect x="270" y="30" width="110" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="325" y="50" font-weight="700">3 · classify</text><text x="325" y="65" font-size="9">Speed of Light</text>
+          <rect x="400" y="30" width="110" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="455" y="50" font-weight="700">4 · explain</text><text x="455" y="65" font-size="9">stalls, memory</text>
+          <rect x="530" y="30" width="120" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="590" y="50" font-weight="700">5 · hypothesis</text><text x="590" y="65" font-size="9">one, testable</text>
+          <rect x="400" y="130" width="120" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="460" y="150" font-weight="700">6 · change ONE</text><text x="460" y="165" font-size="9">thing</text>
+          <rect x="230" y="130" width="130" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.4"/><text x="295" y="150" font-weight="700">7 · re-measure</text><text x="295" y="165" font-size="9">bench + the metric</text>
+          <rect x="30" y="130" width="140" height="46" rx="3" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.4"/><text x="100" y="150" font-weight="700" fill="var(--lk-vermilion)">stop</text><text x="100" y="165" font-size="9">at a roofline</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none" marker-end="url(#c5-arr2)">
+          <line x1="120" y1="53" x2="138" y2="53"/><line x1="250" y1="53" x2="268" y2="53"/><line x1="380" y1="53" x2="398" y2="53"/><line x1="510" y1="53" x2="528" y2="53"/>
+          <path d="M590 76 L590 153 L522 153"/><line x1="400" y1="153" x2="362" y2="153"/>
+          <path d="M295 130 L295 100 L325 100 L325 78"/>
+        </g>
+        <path d="M230 160 L172 160" stroke="var(--lk-vermilion)" stroke-width="1.3" fill="none" marker-end="url(#c5-arr3)"/>
+        <text x="200" y="192" font-size="9" text-anchor="middle" fill="var(--lk-vermilion)">at the ceiling</text>
+        <text x="352" y="112" font-size="9" fill="var(--lk-cobalt-dark)">not yet: again</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; The loop. The two steps people skip are the first (optimizing a kernel that does not matter) and the last (continuing past the roofline). The one people get wrong is step 6: change two things at once and you learn nothing from the result.</figcaption>
+    </figure>
+
+    <ol>
+      <li><strong>Timeline first.</strong> Run the real workload under <code>nsys</code>. Is the GPU busy? If there are gaps, you are overhead-bound (chapter 1), and no kernel work will help until they are gone: fuse, batch, use graphs, move CPU work off the critical path.</li>
+      <li><strong>Pick the kernel</strong> with the largest total time in <code>cuda_gpu_kern_sum</code>. Amdahl decides where effort pays.</li>
+      <li><strong>Classify it</strong> with Speed of Light and chapter 4&rsquo;s roofline: compute-bound, memory-bound (which memory?), or neither.</li>
+      <li><strong>Explain it</strong>: stall reasons, Memory Workload Analysis, the Source page. Find the line and the mechanism.</li>
+      <li><strong>Write down one hypothesis</strong> that predicts a number: &ldquo;padding removes the conflicts, so shared wavefronts per request drop from 32 to 1 and time drops by about X.&rdquo;</li>
+      <li><strong>Change one thing.</strong></li>
+      <li><strong>Re-measure both</strong>: the benchmark (did it get faster?) and the metric (did it change for the reason you thought?). A speedup for the wrong reason is a coincidence you cannot build on.</li>
+    </ol>
+    <p>And keep a log: kernel version, change, hypothesis, benchmark result, key metrics. It takes a minute per iteration, it is the raw material of the write-ups that will become your portfolio, and it is exactly what an interviewer means by &ldquo;walk me through how you optimized something.&rdquo;</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Lab 4: profile it yourself</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 4</span><span class="lab-title">Reductions, launch gaps, transposes under ncu</span><span class="idx-meta">~60 min · <code>mlsys/labs/lab04-profiling/</code></span></div>
+      <div class="lab-body">
+        <p>Two programs: <code>reduce</code> (v1&hellip;v6 and CUB) and <code>graphs</code> (the launch-gap demo). Before profiling, make sure the Windows performance-counter switch is on (section 2).</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab04-profiling
+make test          # every reduction on ints (exact) and floats (tolerance); graph demo
+make bench         # GB/s of v1..v6 and CUB; microseconds per kernel, three ways
+make nsys          # timeline of the launch-gap demo + nvtx / API / kernel tables
+make ncu-table     # this chapter's key metrics for every reduction, as text
+make ncu-transpose # lab 2's transposes: sectors/request, wavefronts, conflicts
+make ncu           # full report of every reduction: open it in the Windows GUI
+make ncu KERNEL=reduce_v3   # ...or just one version</code></pre>
+        <table>
+          <tr><th>Step</th><th>What to look at</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>bench</code></td><td>GB/s per version vs your lab 0 ceiling</td><td>the curve from section 6</td></tr>
+          <tr><td><code>bench</code> (graphs)</td><td>&micro;s per kernel for A, B, C</td><td>the ranking and the A/C ratio (section 3)</td></tr>
+          <tr><td><code>nsys</code></td><td>the three NVTX ranges in the GUI; <code>cuda_api_sum</code></td><td>where the GPU row has gaps</td></tr>
+          <tr><td><code>ncu-table</code></td><td>which metric moves at each version</td><td>section 6, version by version</td></tr>
+          <tr><td><code>ncu-transpose</code></td><td>the four counters of section 7</td><td>the table in section 7</td></tr>
+          <tr><td><code>ncu</code> (GUI)</td><td>v3 vs v4: Speed of Light, Warp State Statistics, Source page</td><td>which stall dominates each</td></tr>
+        </table>
+        <p>The reports land in <code>reports/</code>; open them in the Windows GUIs through <code>\\wsl$\</code>. In the Nsight Compute GUI, select two results and use <em>Add Baseline</em> on the first: every metric of the second is then shown as a difference. That is the fastest way to see what one change did. Paste back the <code>PASTE:</code> lines and the text output of <code>make ncu-table</code> and <code>make ncu-transpose</code>.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Make v5 fully warp-based: every warp reduces its 32 values with <code>warp_sum</code>, lane 0 of each warp writes one value to an 8-entry shared array, one barrier, and warp 0 reduces those 8. That is one barrier per block instead of three. Predict what changes in the profiler and what does not change in the benchmark, then check both. Second stretch: capture the whole reduction benchmark loop (memset + kernel) in a CUDA graph and see whether the graph matters for a kernel this long.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>You have a slow program. Which tool first, and what are you looking for?</summary>
+        <p>Nsight Systems, on the real workload. You look for gaps in the GPU row (overhead-bound time, where no kernel optimization helps) and for the kernels with the largest total time, which are the only ones worth opening in Nsight Compute.</p>
+      </details>
+      <details>
+        <summary>Why can a kernel&rsquo;s duration under <code>ncu</code> differ from your benchmark, and which one do you trust for what?</summary>
+        <p><code>ncu</code> locks the clocks (to boost by default since 2026.1, to base in older versions), flushes the caches before each replay pass, and serializes kernels. Your benchmark runs at whatever clock the card picks, with warm caches. Use <code>ncu</code>&rsquo;s durations to compare kernels within one report, and benchmarks or Nsight Systems for real-world time.</p>
+      </details>
+      <details>
+        <summary>Speed of Light shows compute 20% and memory 88%. What do you do next?</summary>
+        <p>Check <em>which</em> memory unit is at 88%. If it is DRAM and that is near your practical ceiling, the kernel is at its roofline: the only way forward is to move fewer bytes (fusion, lower precision, reuse), not to tune the kernel. If it is L1/shared, look for bank conflicts or excessive shared-memory traffic.</p>
+      </details>
+      <details>
+        <summary>A memory-bound kernel at 90% of DRAM bandwidth has <code>long_scoreboard</code> as its top stall. Problem?</summary>
+        <p>No. Waiting for DRAM is exactly what a kernel limited by DRAM does. <code>long_scoreboard</code> is only a problem when DRAM throughput is low: then warps are waiting on latency that is not being hidden, and the fix is more bytes in flight or better access patterns.</p>
+      </details>
+      <details>
+        <summary>v1, v2 and v3 perform the same additions and compile to the same number of instructions. What differs between them in the profiler, and why?</summary>
+        <p>Shared-memory traffic. v1&rsquo;s adding lanes are spread over all warps, so many warps send nearly empty shared-load requests (about 4&times; more requests than v3, <code>smsp__inst_executed_op_shared_ld_pred_on_any</code>). v2 packs the lanes (few requests) but accesses words 2&times;stride apart, so its requests hit bank conflicts (<code>l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld</code> rises from zero) and need as many passes in total as v1. v3 has both few requests and no conflicts. Warp instructions executed stay the same in all three, because the compiler unrolled the loop and predicated the <code>if</code>.</p>
+      </details>
+      <details>
+        <summary>Why is thread coarsening (v4) usually the biggest single improvement in the sequence?</summary>
+        <p>v1&ndash;v3 pay a full tree (8 barriers, 8 rounds of shared-memory traffic, mostly idle threads) for every 1 KB of data, and each thread has only one load in flight. Coarsening sums 8 values per thread in a register first: 8&times; fewer trees and barriers per byte, and 8 independent loads in flight per thread, which is what keeps the DRAM pipe full.</p>
+      </details>
+      <details>
+        <summary>v5 removes five barriers per block, but the benchmark barely moves. Why, and was it pointless?</summary>
+        <p>v4 was already near the DRAM ceiling: time is set by bytes moved, and v5 moves the same bytes. The profiler still shows fewer barriers and shared-memory operations. That saved work pays off when the data comes from L2 or when the reduction is fused into a kernel that has other work to do.</p>
+      </details>
+      <details>
+        <summary>What does a CUDA graph remove, and why is it a good fit for LLM decode?</summary>
+        <p>It removes the per-launch CPU and driver cost: a recorded sequence of kernels is submitted with one call and runs back to back. It requires the same kernels, shapes and buffers every time, which is what a decode step is: the same few hundred kernels for every token. Engines capture a graph per batch size.</p>
+      </details>
+      <details>
+        <summary>In the unpadded transpose, how many shared-memory load wavefronts per request do you expect, and how many bank conflicts?</summary>
+        <p>32 wavefronts per request, of which 31 are counted as bank conflicts: all 32 lanes of the warp read the same bank (a column of a 32-word-wide tile). With one word of padding: 1 wavefront, no conflicts.</p>
+      </details>
+      <details>
+        <summary>Why does a float reduction on the GPU give a slightly different answer from a CPU loop, and why is the GPU often closer to the truth?</summary>
+        <p>Float addition is not associative, so a different order of additions rounds differently, and atomics make the order vary between runs. A tree adds values of similar magnitude, while a sequential loop keeps adding small values to a growing large sum, losing more of each addend&rsquo;s bits. So the tree is usually more accurate.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (2023), ch. 10: reduction trees, control and memory divergence, shared-memory staging, segmented reduction with atomics, thread coarsening.</li>
+      <li>Mark Harris, <em>Optimizing Parallel Reduction in CUDA</em> (NVIDIA, 2007): the original seven-step version of this sequence. The numbers are from 2007 hardware; the reasoning is not dated.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html">Nsight Compute Profiling Guide</a>: kernel replay, clock and cache control, metric naming, warp stall reasons (the descriptions in the stall widget are paraphrased from it). Also the Nsight Compute 2026.3 release notes (the <code>--clock-control boost</code> default since 2026.1; WSL requirements).</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/nsight-systems/UserGuide/index.html">Nsight Systems User Guide</a>: <code>--trace</code>, <code>--cuda-graph-trace</code>, <code>nsys stats</code> reports. Nsight Systems 2025.x release notes: the WSL timestamp known issue and its workaround.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/wsl-user-guide/index.html">CUDA on WSL User Guide</a>: supported driver and Windows versions for developer tools.</li>
+      <li>NVIDIA, CUDA C++ Programming Guide, sections on CUDA Graphs and warp shuffle functions; CUB documentation for <code>cub::DeviceReduce</code>.</li>
+      <li>All metric names in this chapter were checked with <code>ncu --query-metrics --chip gb205</code> (Nsight Compute 2026.3).</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-04-roofline.html">&larr; Ch. 4 — The roofline</a>
+      <a href="index.html">Index</a>
+      <a href="index.html">Part II begins: Ch. 6 (in writing) &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part I · Chapter 5 · tool behaviour and metric names verified against Nsight Compute 2026.3 and NVIDIA documentation, September 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch5.js"></script>
+</body>
+</html>

@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 4 — The roofline: compute-bound, memory-bound, overhead-bound · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch4.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-03-memory-hierarchy.html">&larr; Ch. 3 — The memory hierarchy: coalescing, shared memory, banks</a>
+    <a href="index.html">Index</a>
+    <a href="cap-05-profiling.html">Ch. 5 — Profiling with Nsight &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part I — The GPU · Chapter 4</div>
+    <h1>The roofline: compute-bound, memory-bound, overhead-bound</h1>
+    <div class="lk-meta"><span>~45 min read</span><span>1 interactive widget</span><span>4 plates</span><span>lab 3 · ~30 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Chapter 1 gave you a formula, <var>time</var> &asymp; max(<var>FLOPs</var> / <var>peak</var>, <var>bytes</var> / <var>bandwidth</var>) + <var>overhead</var>. This chapter turns it into a picture you can draw for any kernel in thirty seconds: the <strong>roofline</strong>. One axis is how much arithmetic a kernel does per byte it moves, the other is how fast it runs, and the hardware draws a roof over both that no kernel can pass. Where a kernel sits under that roof tells you what limits it and which optimizations can possibly help. You will learn to count FLOPs and bytes honestly, see why tiling and batching both work by moving a point to the right, read the several roofs a real GPU has, recognize the regime the chart does not show (overhead), and diagnose a kernel that is running &ldquo;at the roof&rdquo; while wasting most of its time. Lab 3 traces your own card&rsquo;s roofline, one point at a time.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">One chart, two limits</a></li>
+      <li><a href="#s2">Counting FLOPs and bytes honestly</a></li>
+      <li><a href="#s3">Reuse moves you right: matrix multiply</a></li>
+      <li><a href="#s4">The batch dial: GEMV, GEMM, attention</a></li>
+      <li><a href="#s5">Many roofs</a></li>
+      <li><a href="#s6">What the roofline does not show</a></li>
+      <li><a href="#s7">Diagnose this kernel</a></li>
+      <li><a href="#s8">Lab 3: trace your own roofline</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. One chart, two limits</h2>
+
+    <p>A kernel reads and writes some number of bytes and performs some number of floating-point operations. Divide the two and you get its <strong>arithmetic intensity</strong> <var>I</var>, in FLOPs per byte. The hardware offers two rates: a peak FLOP rate <var>P</var> and a memory bandwidth <var>&beta;</var>. If the kernel moved no bytes it could run at <var>P</var>. If it did no math it would be limited to moving bytes at <var>&beta;</var>, which at intensity <var>I</var> means doing <var>I</var> &times; <var>&beta;</var> FLOPs per second. It gets whichever is smaller:</p>
+
+    <p style="text-align:center"><var>attainable FLOP/s</var> = min( <var>P</var>,&nbsp; <var>I</var> &times; <var>&beta;</var> )</p>
+
+    <p>Plot that on log-log axes, intensity across and FLOP/s up, and you get the shape that gave the model its name: a slope of bandwidth rising from the left, meeting a flat roof of peak compute. Williams, Waterman and Patterson introduced it in 2009 for multicore CPUs. It became the standard way to reason about GPU kernels because it compresses the whole of chapter 1 into one glance.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Log-log roofline of the RTX 5070. A DRAM bandwidth slope of 672 gigabytes per second rises from the left and meets flat roofs: FP32 CUDA cores at 30.9 teraflops (ridge at 46 FLOPs per byte), FP16 tensor cores at 61.7 (ridge 92), and FP4 tensor cores at 493.9. Vecadd sits on the slope at intensity 0.083, a decode GEMV at intensity 1, and a large FP16 GEMM at intensity 1365 under the FP16 roof.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+<svg viewBox="0 0 660 340" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+<title>Roofline of the RTX 5070</title>
+<rect x="78" y="22" width="562" height="278" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+<line x1="78.0" y1="22" x2="78.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="78.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">0.01</text>
+<line x1="171.7" y1="22" x2="171.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="171.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">0.1</text>
+<line x1="265.3" y1="22" x2="265.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="265.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1</text>
+<line x1="359.0" y1="22" x2="359.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="359.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10</text>
+<line x1="452.7" y1="22" x2="452.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="452.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">100</text>
+<line x1="546.3" y1="22" x2="546.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="546.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1k</text>
+<line x1="640.0" y1="22" x2="640.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="640.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10k</text>
+<line x1="78" y1="300.0" x2="640" y2="300.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="303.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">0.001</text>
+<line x1="78" y1="253.7" x2="640" y2="253.7" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="257.2" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">0.01</text>
+<line x1="78" y1="207.3" x2="640" y2="207.3" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="210.8" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">0.1</text>
+<line x1="78" y1="161.0" x2="640" y2="161.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="164.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">1</text>
+<line x1="78" y1="114.7" x2="640" y2="114.7" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="118.2" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">10</text>
+<line x1="78" y1="68.3" x2="640" y2="68.3" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="71.8" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">100</text>
+<line x1="78" y1="22.0" x2="640" y2="22.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="25.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">1000</text>
+<text x="359.0" y="330" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)">arithmetic intensity (FLOP per byte of DRAM traffic)</text>
+<text x="16" y="161.0" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)" transform="rotate(-90 16 161.0)">TFLOP/s</text>
+<polyline points="78.0,261.7 533.8,36.2 640.0,36.2" fill="none" stroke="var(--lk-rule)" stroke-width="1.2" stroke-dasharray="4 3"/>
+<polyline points="78.0,261.7 449.2,78.1 640.0,78.1" fill="none" stroke="var(--lk-forest)" stroke-width="1.8"/>
+<polyline points="78.0,261.7 421.1,92.0 640.0,92.0" fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2"/>
+<line x1="88" y1="35" x2="112" y2="35" stroke="var(--lk-rule)" stroke-width="1.8" stroke-dasharray="4 3"/><text x="118" y="38" font-size="10" fill="var(--lk-ink)">FP4 tensor cores · 493.9 TFLOP/s</text>
+<line x1="88" y1="50" x2="112" y2="50" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="118" y="53" font-size="10" fill="var(--lk-ink)">FP16 tensor cores (FP32 acc) · 61.7</text>
+<line x1="88" y1="65" x2="112" y2="65" stroke="var(--lk-cobalt)" stroke-width="1.8"/><text x="118" y="68" font-size="10" fill="var(--lk-ink)">FP32 CUDA cores · 30.9</text>
+<line x1="421.1" y1="92.0" x2="421.1" y2="300" stroke="var(--lk-cobalt)" stroke-dasharray="2 3"/>
+<text x="417.1" y="294" text-anchor="end" font-size="10" fill="var(--lk-cobalt)">ridge 46</text>
+<line x1="449.2" y1="78.1" x2="449.2" y2="300" stroke="var(--lk-forest)" stroke-dasharray="2 3"/>
+<text x="453.2" y="294" font-size="10" fill="var(--lk-forest)">92</text>
+<text x="91.7" y="133.1" font-size="11" fill="var(--lk-ink-soft)">memory-bound</text>
+<text x="91.7" y="146.1" font-size="9.5" fill="var(--lk-ink-soft)">(under the slope)</text>
+<text x="525.6" y="133.1" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">compute-bound</text>
+<text x="195.6" y="193.5" font-size="10" fill="var(--lk-cobalt)" transform="rotate(-26.3 195.6 193.5)">DRAM 672 GB/s</text>
+<circle cx="164.3" cy="219.0" r="4" fill="var(--lk-vermilion)"/>
+<text x="171.3" y="231.0" text-anchor="start" font-size="10" fill="var(--lk-ink)">vecadd</text>
+<circle cx="265.3" cy="169.0" r="4" fill="var(--lk-vermilion)"/>
+<text x="272.3" y="181.0" text-anchor="start" font-size="10" fill="var(--lk-ink)">decode GEMV (FP16)</text>
+<circle cx="559.0" cy="78.1" r="4" fill="var(--lk-vermilion)"/>
+<text x="559.0" y="68.1" text-anchor="middle" font-size="10" fill="var(--lk-ink)">GEMM 4096³ FP16</text>
+</svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The roofline of your RTX 5070. The slope is DRAM bandwidth; each flat line is the peak of one kind of arithmetic unit. The <em>ridge point</em>, where slope meets roof, is the intensity a kernel needs before the math units can be the limit: 46 FLOPs per byte for FP32, 92 for FP16 tensor cores, 735 for FP4. Everything to the left of a ridge is memory-bound on that roof.</figcaption>
+    </figure>
+
+    <p>Three things about the log-log axes make the chart useful and not just pretty:</p>
+    <ul>
+      <li><strong>The slope is a straight line of gradient 1</strong>: double the intensity, double the attainable FLOP/s. A faster memory shifts the line up without changing its gradient, and a faster math unit raises the roof, moving the ridge right.</li>
+      <li><strong>Kernels spread across six orders of magnitude</strong>, from vecadd at 0.08 to a large GEMM above 1,000. A linear axis would squeeze every memory-bound kernel into one pixel.</li>
+      <li><strong>Distances are ratios.</strong> A point one grid line below the roof is running at 10% of what is possible. You read efficiency as a vertical gap, and headroom from optimizations that change intensity as a horizontal one.</li>
+    </ul>
+
+    <details class="ym">
+      <summary>Your move: a kernel has intensity 10 FLOPs per byte and runs on the FP32 cores. What is the best it can do, and what fraction of the FP32 peak is that?</summary>
+      <p>10 &times; 672 GB/s = <strong>6.7 TFLOP/s</strong>, about 22% of 30.9. It is 4.6&times; to the left of the ridge, so it is memory-bound: no amount of arithmetic optimization gets it past 6.7. If it runs at 6 TFLOP/s it is already excellent, even though &ldquo;19% of peak&rdquo; sounds bad. This is the single most useful reframing the roofline gives you: <em>percent of peak</em> is the wrong question for memory-bound work; <em>percent of the roof above your point</em> is the right one.</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. Counting FLOPs and bytes honestly</h2>
+
+    <p>The chart is only as good as the two numbers you feed it, and both are easy to get wrong. The conventions:</p>
+    <ul>
+      <li><strong>A fused multiply-add is 2 FLOPs.</strong> Peak numbers count it that way (6,144 lanes &times; 2 &times; 2.51 GHz = 30.9 TFLOPS), so your count must too. A dot product of length <var>K</var> is 2<var>K</var> FLOPs; a matrix multiply of <var>M</var>&times;<var>K</var> by <var>K</var>&times;<var>N</var> is 2<var>MNK</var>.</li>
+      <li><strong>Count bytes read and bytes written.</strong> A write to DRAM costs bandwidth just like a read. The data type sets the multiplier: the same kernel in FP16 moves half the bytes of FP32 and doubles its intensity.</li>
+      <li><strong>Transcendentals are special.</strong> An <code>exp</code> runs on the special-function units at a fraction of the FMA rate. Counting it as one FLOP is the usual convention for placing a point, but remember that a kernel heavy in <code>exp</code> has a lower private roof.</li>
+      <li><strong>Comparisons, integer math and address arithmetic are not FLOPs.</strong> They cost instruction slots but don&rsquo;t appear on the chart. A kernel can be limited by <em>instructions</em> without being limited by FLOPs; chapter 5&rsquo;s profiler shows that.</li>
+    </ul>
+
+    <h3>Algorithmic versus achieved intensity</h3>
+    <p>There are two different byte counts, and the difference between them is the most important idea in this chapter.</p>
+    <ul>
+      <li>The <strong>algorithmic</strong> (or compulsory) bytes are what the computation <em>must</em> move: every input read once, every output written once. This gives the <em>algorithmic intensity</em>, a property of the math.</li>
+      <li>The <strong>achieved</strong> bytes are what your kernel <em>actually</em> moves across the DRAM interface. Re-reading data that fell out of cache, uncoalesced sectors that are fetched and mostly thrown away, and intermediate results written out and read back all add bytes. This gives the <em>achieved intensity</em>, a property of your code. The profiler measures it directly (<code>dram__bytes</code> in Nsight Compute).</li>
+    </ul>
+    <p>Achieved intensity can never be higher than algorithmic intensity, only equal or lower. So a memory-bound kernel has exactly two ways to get faster: <strong>move its bytes closer to the bandwidth roof</strong> (coalescing, bytes in flight: chapter 3), or <strong>close the gap between achieved and algorithmic intensity</strong> (reuse, fusion). If both are already done, the only remaining move is changing the math itself, for example storing the data in a smaller type.</p>
+
+    <table>
+      <tr><th>Operation (per element unless noted)</th><th>FLOPs</th><th>Bytes</th><th>Algorithmic intensity</th></tr>
+      <tr><td>vecadd, FP32</td><td>1</td><td>12</td><td>0.083</td></tr>
+      <tr><td>SAXPY <code>y = a&middot;x + y</code>, FP32</td><td>2</td><td>12</td><td>0.17</td></tr>
+      <tr><td>ReLU, FP16</td><td>~1 (a compare)</td><td>4</td><td>~0.25</td></tr>
+      <tr><td>softmax over a row, fused, FP32</td><td>~5</td><td>8</td><td>~0.6</td></tr>
+      <tr><td>layernorm, fused, FP32</td><td>~8</td><td>8</td><td>~1</td></tr>
+      <tr><td>matrix &times; vector (GEMV) <var>M</var>&times;<var>K</var>, FP16</td><td>2<var>MK</var></td><td>&asymp; 2<var>MK</var></td><td>&asymp; 1</td></tr>
+      <tr><td>square GEMM <var>N</var>&times;<var>N</var>&times;<var>N</var>, FP32</td><td>2<var>N</var>&sup3;</td><td>12<var>N</var>&sup2;</td><td><var>N</var> / 6</td></tr>
+      <tr><td>square GEMM, FP16</td><td>2<var>N</var>&sup3;</td><td>6<var>N</var>&sup2;</td><td><var>N</var> / 3</td></tr>
+    </table>
+
+    <p>Look at the shape of that table. Elementwise and normalization kernels, which are most of the kernels in a transformer by count, sit between 0.1 and 1, <em>two orders of magnitude</em> left of the FP32 ridge. Only matrix multiplication has an intensity that grows with the problem size, which is why it is the one operation that can use tensor cores fully, and why the rest of the network is about moving bytes efficiently.</p>
+
+    <details class="ym">
+      <summary>Your move: a model applies GELU (about 10 FLOPs per element, FP16) right after a matrix multiply, as a separate kernel. The matmul writes its 64 MB output, and GELU reads it back and writes 64 MB. What does fusing GELU into the matmul&rsquo;s final store save, and does it matter that GELU does 10 FLOPs?</summary>
+      <p>It saves 128 MB of DRAM traffic, about 0.2 ms at the practical bandwidth, and one kernel launch. The FLOPs are irrelevant: at 10 FLOPs per 4 bytes GELU has an intensity of 2.5, deep in memory-bound territory, so the unfused kernel spends essentially all its time moving bytes. Fused into the matmul&rsquo;s epilogue, the same 10 FLOPs happen on values that are already in registers, for free. This is why every serious GEMM library offers &ldquo;epilogue fusion&rdquo;, and why compilers like <code>torch.compile</code> (Part V) spend most of their effort on fusion.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Reuse moves you right: matrix multiply</h2>
+
+    <p>A 4096&times;4096&times;4096 FP32 matrix multiply does 2 &times; 4096&sup3; &asymp; 137 GFLOPs and must touch 3 matrices of 64 MB: an algorithmic intensity of 4096 / 6 &asymp; 683, fifteen times past the ridge. On paper, it is compute-bound. Whether it <em>runs</em> compute-bound depends entirely on the achieved intensity, and that depends on how often each byte fetched from DRAM gets used before it is thrown away.</p>
+
+    <ul>
+      <li><strong>Naive kernel</strong> (one thread per output, loop over <var>k</var>, as in the <a href="../play/gpu/level-1.html">GPU campaign&rsquo;s level 1</a>): every FMA fetches one element of <var>A</var> and one of <var>B</var>, 2 FLOPs per 8 bytes. If nothing were cached, intensity would be <strong>0.25</strong> and the roof 0.17 TFLOP/s. In reality the L1 and L2 serve many of those loads, which is why measured naive kernels do somewhat better, but the point is clear: the code has thrown away almost all of the reuse the math allows.</li>
+      <li><strong>Shared-memory tiles</strong> of <var>T</var>&times;<var>T</var> (chapter 3, and the campaign&rsquo;s level 2): each element brought into shared memory is used <var>T</var> times by the block. Intensity becomes <var>T</var>/4: <strong>4</strong> for 16&times;16 tiles, <strong>8</strong> for 32&times;32. Better by 32&times;, still left of the ridge.</li>
+      <li><strong>Register tiling</strong> (Part II): each block computes a 128&times;128 output tile, each thread a small sub-tile held in registers. Per step along <var>k</var>, the block loads 128 + 128 values and does 2 &times; 128 &times; 128 FLOPs: intensity <strong>32</strong>, closer to the ridge, and the shared-memory traffic drops too.</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="Roofline for FP32 on the RTX 5070 with five points for the same 4096 cubed matrix multiply: naive at intensity 0.25, 16 by 16 tiles at 4, 32 by 32 tiles at 8, register tiling at about 32, and the algorithmic limit at 683 on the flat roof. Each optimization moves the point to the right along the bandwidth slope.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+<svg viewBox="0 0 660 340" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+<title>Tiling moves a matmul to the right</title>
+<rect x="78" y="22" width="562" height="278" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+<line x1="78.0" y1="22" x2="78.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="78.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">0.01</text>
+<line x1="171.7" y1="22" x2="171.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="171.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">0.1</text>
+<line x1="265.3" y1="22" x2="265.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="265.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1</text>
+<line x1="359.0" y1="22" x2="359.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="359.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10</text>
+<line x1="452.7" y1="22" x2="452.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="452.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">100</text>
+<line x1="546.3" y1="22" x2="546.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="546.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1k</text>
+<line x1="640.0" y1="22" x2="640.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="640.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10k</text>
+<line x1="78" y1="300.0" x2="640" y2="300.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="303.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">0.01</text>
+<line x1="78" y1="230.5" x2="640" y2="230.5" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="234.0" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">0.1</text>
+<line x1="78" y1="161.0" x2="640" y2="161.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="164.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">1</text>
+<line x1="78" y1="91.5" x2="640" y2="91.5" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="95.0" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">10</text>
+<line x1="78" y1="22.0" x2="640" y2="22.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="25.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">100</text>
+<text x="359.0" y="330" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)">arithmetic intensity (FLOP per byte of DRAM traffic)</text>
+<text x="16" y="161.0" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)" transform="rotate(-90 16 161.0)">TFLOP/s</text>
+<polyline points="78.0,312.0 421.1,57.4 640.0,57.4" fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2"/>
+<text x="636" y="51.4" text-anchor="end" font-size="10" fill="var(--lk-cobalt)">FP32 roof 30.9 TFLOP/s</text>
+<circle cx="208.9" cy="214.8" r="4" fill="var(--lk-vermilion)"/>
+<text x="201.9" y="206.8" text-anchor="end" font-size="10" fill="var(--lk-ink)">naive: 0.25</text>
+<circle cx="321.7" cy="131.2" r="4" fill="var(--lk-vermilion)"/>
+<text x="329.7" y="145.2" text-anchor="start" font-size="10" fill="var(--lk-ink)">tile 16: 4</text>
+<circle cx="349.9" cy="110.2" r="4" fill="var(--lk-vermilion)"/>
+<text x="341.9" y="101.2" text-anchor="end" font-size="10" fill="var(--lk-ink)">tile 32: 8</text>
+<circle cx="406.3" cy="68.4" r="4" fill="var(--lk-vermilion)"/>
+<text x="398.3" y="59.4" text-anchor="end" font-size="10" fill="var(--lk-ink)">+ register tiles: ~32</text>
+<circle cx="530.8" cy="57.4" r="4" fill="var(--lk-vermilion)"/>
+<text x="530.8" y="75.4" text-anchor="middle" font-size="10" fill="var(--lk-ink)">algorithmic limit: 683</text>
+<text x="375.5" y="251.4" font-size="10.5" fill="var(--lk-ink)">FP32 matmul, 4096 × 4096 × 4096</text>
+<text x="375.5" y="265.4" font-size="10" fill="var(--lk-ink-soft)">x = FLOPs ÷ bytes pulled from DRAM</text>
+<text x="375.5" y="279.4" font-size="10" fill="var(--lk-vermilion)">each step: more reuse per byte → right</text>
+</svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; Same math, five kernels. Every classic matmul optimization is a way of using each byte more times before it leaves the chip, which moves the point <em>to the right</em>, sliding it up the bandwidth slope. Only once it passes the ridge (46) does the FP32 roof become the limit, and only then do arithmetic optimizations start to pay.</figcaption>
+    </figure>
+
+    <p>That is the roofline reading of Part II&rsquo;s whole matmul progression, and of Simon Boehm&rsquo;s famous blog post: the kernels that close the gap to cuBLAS are, one after another, ways to raise achieved intensity. Real kernels don&rsquo;t reach 683 (tiles are finite, and the caches have their own limits), but getting past the ridge is enough, because past the ridge the remaining work is about the math units, not the memory.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Why the points are on the slope, not on a roof</span>
+      <p>Figure 2 plots each kernel at its <em>attainable</em> performance: the best it could possibly do at that intensity. Real kernels land somewhere below their point, and the vertical gap is the second dimension of optimization (coalescing, occupancy, bank conflicts, instruction mix). Horizontal moves change what is possible; vertical moves get closer to it. Chapter 5&rsquo;s profiler tells you which one you need.</p>
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. The batch dial: GEMV, GEMM, attention</h2>
+
+    <p>Chapter 1 argued that LLM decode for one user is memory-bound and that batching fixes it. The roofline shows exactly how. A linear layer applies a weight matrix <var>W</var> (<var>K</var>&times;<var>N</var>) to the activations of every sequence in the batch.</p>
+    <ul>
+      <li><strong>Batch 1</strong> is a matrix-times-vector product, a <strong>GEMV</strong>: each weight is read once and used once. In FP16 that is 2 FLOPs per 2 bytes, intensity &asymp; <strong>1</strong>.</li>
+      <li><strong>Batch <var>B</var></strong> is a thin matrix multiply, a <strong>GEMM</strong> with <var>B</var> rows: each weight is read once and used <var>B</var> times. Intensity &asymp; <strong><var>B</var></strong>, as long as the activations are small next to the weights.</li>
+    </ul>
+    <p>So batch size is a dial that slides the point to the right along the slope, and throughput rises in proportion, for free, until the point reaches the ridge of the FP16 tensor roof at 92. That is chapter 1&rsquo;s &ldquo;compute catches up at batch &asymp; 92&rdquo;, now as a picture. <strong>Prefill</strong>, where the model processes a whole prompt of thousands of tokens at once, behaves like a huge batch: it is a big GEMM and sits far right, compute-bound.</p>
+
+    <details class="ym">
+      <summary>Your move: attention during decode reads each sequence&rsquo;s KV cache (the stored keys and values of all previous tokens). Its intensity is about 1 FLOP per byte in FP16. Does batching 64 sequences move it right, the way it moved the linear layers?</summary>
+      <p><strong>No.</strong> The weights of a linear layer are shared by every sequence, so a bigger batch reuses them more. The KV cache is <em>private</em> to each sequence: 64 sequences read 64 different caches, and each byte is still used once. Batching raises the total FLOPs and the total bytes equally, and the point stays at intensity &asymp; 1. This is why decode attention remains memory-bound at any batch size, why long contexts hurt decode so much, and why so much serving research (paged KV caches, KV quantization, multi-query and grouped-query attention, which share keys and values across heads) is about shrinking or sharing those bytes. Chapters 13 and 15 pick this up.</p>
+    </details>
+
+    <p>Put the pieces together below. Every preset uses the algorithmic intensity worked out in this chapter; try the batch slider on the decode layer, then compare attention decode and prefill.</p>
+
+    <div id="w-roofline" class="w"></div>
+
+    <p>The &ldquo;&asymp;88% DRAM&rdquo; column uses a typical achievable fraction of the spec bandwidth. Lab 0 measured your real one, and it replaces the 88% in every calculation from now on.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Many roofs</h2>
+
+    <p>The basic chart has one slope and one roof. A real GPU has several of each, and a kernel is limited by the lowest one that applies to it.</p>
+
+    <h3>Compute ceilings below the roof</h3>
+    <p>The FP32 roof assumes every lane does an FMA every cycle. Plenty of kernels can&rsquo;t, and each reason draws a lower flat line:</p>
+    <ul>
+      <li><strong>No FMA.</strong> A kernel of plain adds and multiplies does 1 FLOP per lane per cycle, not 2: its ceiling is 15.5 TFLOP/s.</li>
+      <li><strong>No tensor cores.</strong> Matrix math on the CUDA cores stops at 30.9 even in FP16: on your card, plain FP16 arithmetic runs at the same 30.9 TFLOPS as FP32. The 61.7 (and 123.5 for FP16 accumulation, 123.5 for FP8, 493.9 for FP4) are only available through the tensor cores.</li>
+      <li><strong>Divergence.</strong> If on average only half the lanes of a warp are active (chapter 2), the ceiling halves.</li>
+      <li><strong>Not enough independent work.</strong> Too few warps or too little ILP leave issue slots idle while FMAs wait on each other (chapter 2, section 8). Lab 3&rsquo;s kernel uses four independent FMA chains per thread precisely to stay off this ceiling.</li>
+    </ul>
+
+    <h3>Memory ceilings below the slope</h3>
+    <p>Likewise, 672 GB/s is a spec, not a promise. The practical DRAM ceiling, the one lab 0 measured, sits some 10&ndash;20% lower. Uncoalesced access lowers it further: a warp that uses 4 bytes of every 32-byte sector (chapter 3) turns 672 GB/s into 84 GB/s of useful data. Too few bytes in flight lowers it again (chapter 3, section 5).</p>
+
+    <h3>The hierarchical roofline</h3>
+    <p>Bytes don&rsquo;t only cross the DRAM interface. They also flow from L2 to the SMs and from L1 or shared memory into registers, and each of those links has its own, much higher, bandwidth. The <strong>hierarchical roofline</strong> draws one slope per level and places the kernel once per level, each time using the bytes that cross <em>that</em> level. The same kernel has a different intensity at each level: every byte from DRAM passes through L2, but many L2 and L1 accesses never touch DRAM, so the intensities decrease as you go up the hierarchy.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Hierarchical roofline with three slopes: L1 or shared memory at about 15 terabytes per second, L2 drawn as an illustrative dashed slope, and DRAM at 672 gigabytes per second, all meeting the FP32 roof. One kernel running at 12 teraflops appears three times: at intensity 60 for DRAM, far below that slope's limit; at 8 for L2; and at 0.9 for L1, almost touching the L1 slope.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+<svg viewBox="0 0 660 340" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+<title>Hierarchical roofline</title>
+<rect x="78" y="22" width="562" height="278" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+<line x1="78.0" y1="22" x2="78.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="78.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">0.01</text>
+<line x1="171.7" y1="22" x2="171.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="171.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">0.1</text>
+<line x1="265.3" y1="22" x2="265.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="265.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1</text>
+<line x1="359.0" y1="22" x2="359.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="359.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10</text>
+<line x1="452.7" y1="22" x2="452.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="452.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">100</text>
+<line x1="546.3" y1="22" x2="546.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="546.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1k</text>
+<line x1="640.0" y1="22" x2="640.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="640.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10k</text>
+<line x1="78" y1="300.0" x2="640" y2="300.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="303.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">0.1</text>
+<line x1="78" y1="207.3" x2="640" y2="207.3" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="210.8" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">1</text>
+<line x1="78" y1="114.7" x2="640" y2="114.7" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="118.2" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">10</text>
+<line x1="78" y1="22.0" x2="640" y2="22.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="25.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">100</text>
+<text x="359.0" y="330" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)">arithmetic intensity at each level (FLOP per byte crossing that level)</text>
+<text x="16" y="161.0" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)" transform="rotate(-90 16 161.0)">TFLOP/s</text>
+<line x1="78.0" y1="282.6" x2="293.7" y2="69.3" stroke="var(--lk-forest)" stroke-width="1.8"/>
+
+<line x1="134.4" y1="300.0" x2="367.6" y2="69.3" stroke="var(--lk-ink-soft)" stroke-width="1.8" stroke-dasharray="5 3"/>
+
+<line x1="187.8" y1="300.0" x2="421.1" y2="69.3" stroke="var(--lk-cobalt)" stroke-width="1.8"/>
+
+<line x1="293.7" y1="69.3" x2="640" y2="69.3" stroke="var(--lk-cobalt)" stroke-width="2.2"/>
+<text x="636" y="63.3" text-anchor="end" font-size="10" fill="var(--lk-cobalt)">FP32 roof 30.9</text>
+<circle cx="261.0" cy="107.3" r="4.5" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="2"/>
+<text x="261.0" y="125.3" text-anchor="middle" font-size="10" fill="var(--lk-forest)">L1</text>
+<circle cx="349.9" cy="107.3" r="4.5" fill="var(--lk-paper)" stroke="var(--lk-ink-soft)" stroke-width="2"/>
+<text x="349.9" y="125.3" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">L2</text>
+<circle cx="431.9" cy="107.3" r="4.5" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="2"/>
+<text x="431.9" y="125.3" text-anchor="middle" font-size="10" fill="var(--lk-cobalt)">DRAM</text>
+<line x1="267.0" y1="107.3" x2="425.9" y2="107.3" stroke="var(--lk-vermilion)" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="253.0" y="99.3" text-anchor="end" font-size="10" fill="var(--lk-vermilion)">one kernel, 12 TFLOP/s</text>
+<line x1="88" y1="35" x2="112" y2="35" stroke="var(--lk-forest)" stroke-width="1.8"/><text x="118" y="38" font-size="10" fill="var(--lk-ink)">L1 / shared ≈ 15 TB/s</text>
+<line x1="88" y1="50" x2="112" y2="50" stroke="var(--lk-ink-soft)" stroke-width="1.8" stroke-dasharray="5 3"/><text x="118" y="53" font-size="10" fill="var(--lk-ink)">L2 (illustrative, lab 0 hints at it)</text>
+<line x1="88" y1="65" x2="112" y2="65" stroke="var(--lk-cobalt)" stroke-width="1.8"/><text x="118" y="68" font-size="10" fill="var(--lk-ink)">DRAM 672 GB/s</text>
+</svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; One kernel, three points. A tiled matmul running at 12 TFLOP/s has high intensity against DRAM (60: nowhere near that slope), moderate intensity against L2, and low intensity against L1/shared (0.9), where it nearly touches the slope. The level whose point sits closest to its own slope is the one limiting the kernel: here, shared memory, not DRAM. The fix is to cut <em>shared-memory</em> traffic (register tiling), which no DRAM-only roofline would have suggested. The L2 slope is illustrative; NVIDIA doesn&rsquo;t publish L2 bandwidth for your card, and lab 0&rsquo;s &ldquo;fits in L2&rdquo; rows give you a first estimate.</figcaption>
+    </figure>
+
+    <p>The L1/shared slope follows from chapter 3: 32 banks &times; 4 bytes per cycle per SM, &times; 48 SMs &times; 2.5 GHz &asymp; 15 TB/s. Nsight Compute can draw the hierarchical version for you (its &ldquo;Hierarchical Roofline&rdquo; sections, per precision), using hardware counters for the bytes at each level. That&rsquo;s chapter 5.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. What the roofline does not show</h2>
+
+    <p>The roofline has no time axis. It assumes the kernel runs long enough that fixed costs don&rsquo;t matter, and for small kernels that assumption is false. Launching a kernel costs a few microseconds whatever it does, so below a certain size every kernel takes the same time, and its FLOP/s and GB/s collapse towards zero. The kernel hasn&rsquo;t moved on the chart; it has left the chart.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Time per launch of vecadd against bytes moved, both on log scales. The curve is flat at about 4 microseconds from 1 kilobyte to about 2 megabytes, then rises in proportion to the bytes, reaching about 17 milliseconds at 10 gigabytes.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+<svg viewBox="0 0 660 340" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+<title>The overhead floor</title>
+<rect x="78" y="22" width="562" height="278" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)"/>
+<line x1="78.0" y1="22" x2="78.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="78.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1 KB</text>
+<line x1="158.3" y1="22" x2="158.3" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="158.3" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10 KB</text>
+<line x1="238.6" y1="22" x2="238.6" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="238.6" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">100 KB</text>
+<line x1="318.9" y1="22" x2="318.9" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="318.9" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1 MB</text>
+<line x1="399.1" y1="22" x2="399.1" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="399.1" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10 MB</text>
+<line x1="479.4" y1="22" x2="479.4" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="479.4" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">100 MB</text>
+<line x1="559.7" y1="22" x2="559.7" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="559.7" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">1 GB</text>
+<line x1="640.0" y1="22" x2="640.0" y2="300" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="640.0" y="314" text-anchor="middle" font-size="10" fill="var(--lk-ink-soft)">10 GB</text>
+<line x1="78" y1="300.0" x2="640" y2="300.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="303.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">1 µs</text>
+<line x1="78" y1="244.4" x2="640" y2="244.4" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="247.9" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">10 µs</text>
+<line x1="78" y1="188.8" x2="640" y2="188.8" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="192.3" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">100 µs</text>
+<line x1="78" y1="133.2" x2="640" y2="133.2" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="136.7" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">1 ms</text>
+<line x1="78" y1="77.6" x2="640" y2="77.6" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="81.1" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">10 ms</text>
+<line x1="78" y1="22.0" x2="640" y2="22.0" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+<text x="72" y="25.5" text-anchor="end" font-size="10" fill="var(--lk-ink-soft)">100 ms</text>
+<polyline points="78.0,266.5 85.8,266.5 93.6,266.5 101.3,266.5 109.1,266.5 116.9,266.5 124.7,266.5 132.5,266.5 140.2,266.5 148.0,266.5 155.8,266.5 163.6,266.5 171.4,266.5 179.1,266.5 186.9,266.5 194.7,266.5 202.5,266.5 210.3,266.5 218.0,266.5 225.8,266.5 233.6,266.5 241.4,266.5 249.2,266.5 257.0,266.5 264.7,266.5 272.5,266.5 280.3,266.5 288.1,266.5 295.9,266.5 303.6,266.5 311.4,266.5 319.2,266.5 327.0,266.5 334.8,266.5 342.5,266.5 350.3,265.5 358.1,260.1 365.9,254.7 373.7,249.3 381.4,243.9 389.2,238.5 397.0,233.1 404.8,227.8 412.6,222.4 420.3,217.0 428.1,211.6 435.9,206.2 443.7,200.8 451.5,195.4 459.2,190.0 467.0,184.6 474.8,179.3 482.6,173.9 490.4,168.5 498.1,163.1 505.9,157.7 513.7,152.3 521.5,146.9 529.3,141.5 537.0,136.2 544.8,130.8 552.6,125.4 560.4,120.0 568.2,114.6 576.0,109.2 583.7,103.8 591.5,98.4 599.3,93.1 607.1,87.7 614.9,82.3 622.6,76.9 630.4,71.5 638.2,66.1" fill="none" stroke="var(--lk-cobalt)" stroke-width="2.2"/>
+<line x1="348.8" y1="266.5" x2="348.8" y2="300" stroke="var(--lk-vermilion)" stroke-dasharray="2 3"/>
+<text x="353.8" y="292" font-size="10" fill="var(--lk-vermilion)">≈ 2 MB: floor meets slope</text>
+<text x="84.4" y="252.5" font-size="10.5" fill="var(--lk-ink)">overhead-bound: a few µs whatever the size</text>
+<text x="517.7" y="137.5" text-anchor="end" font-size="10.5" fill="var(--lk-ink)">memory-bound: time ∝ bytes</text>
+<text x="359.0" y="330" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)">bytes moved by one vecadd launch</text>
+<text x="16" y="161.0" text-anchor="middle" font-size="10.5" fill="var(--lk-ink)" transform="rotate(-90 16 161.0)">time per launch</text>
+</svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; The regime the roofline hides, drawn as time against size. Below about 2 MB per launch, a vecadd costs the same few microseconds regardless of its size: the fixed cost of a launch dominates. Above it, time grows with bytes: the memory-bound regime the roofline describes. The floor here is an assumed 4 &micro;s; lab 3 measures yours, and lab 0&rsquo;s small-<var>N</var> rows already show the flat part.</figcaption>
+    </figure>
+
+    <p>You recognize the overhead regime by two symptoms: <strong>time that doesn&rsquo;t scale with size</strong> (halve the work and the time barely changes), and <strong>gaps between kernels</strong> on a timeline. The fixes live outside the kernel: fewer, larger kernels (fusion), capturing sequences of launches in a CUDA graph so the CPU submits them all at once (lab 3 measures the difference), or batching more work into each launch. For LLM decode with a small model, this is often <em>the</em> bottleneck, as chapter 1&rsquo;s GPT-2 estimate suggested.</p>
+
+    <h3>Waves and tails</h3>
+    <p>One more effect hides between the roofline&rsquo;s assumptions. A grid runs in <strong>waves</strong>: if 6 blocks fit on each of your 48 SMs, the GPU runs 288 blocks at a time. A grid of 300 blocks needs two waves, and the second one keeps only 12 blocks busy while the other 276 slots sit idle. The kernel does 4% more work than one wave and takes nearly twice as long. Grids that are large compared with one wave hide this; grids of a few waves, common in inference with small batches, show it. When a kernel runs at a strange fraction of its roof, count its waves.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Diagnose this kernel</h2>
+
+    <p>A worked example, with made-up but realistic numbers. You are handed a model that implements layer normalization by hand, out of elementary tensor operations, on a 16,384 &times; 4,096 FP32 activation (67 million elements, 268 MB):</p>
+<pre><code class="language-python">mean = x.mean(-1, keepdim=True)          # kernel 1: read x
+xc   = x - mean                          # kernel 2: read x, write xc
+var  = (xc * xc).mean(-1, keepdim=True)  # kernels 3-4: read xc, write xc², read xc²
+y    = xc * torch.rsqrt(var + 1e-5)      # kernel 5: read xc, write y
+out  = y * gamma + beta                  # kernel 6: read y, write out</code></pre>
+    <p>The profiler reports 4.5 ms in total, spread evenly over six kernels, and each kernel achieves about 590 GB/s of DRAM throughput: 88% of 672. Every kernel is sitting on its roof.</p>
+
+    <details class="ym">
+      <summary>Your move: is this code efficient? Every kernel runs at the practical bandwidth ceiling.</summary>
+      <p>No, and the roofline shows why once you compare the two intensities. Count the achieved bytes: ten passes of 268 MB (read x, read x + write xc, read xc + write xc&sup2;, read xc&sup2;, read xc + write y, read y + write out), about <strong>2.7 GB</strong>. The algorithmic bytes are one read of x and one write of out: <strong>0.54 GB</strong>. Achieved intensity is five times lower than algorithmic. Each kernel is efficient at what it does, but the program does five times too much of it.</p>
+    </details>
+
+    <details class="ym">
+      <summary>Your move: what should a fused kernel take, and what does it need to fit on chip?</summary>
+      <p>One read and one write, 0.54 GB, at the same 590 GB/s: about <strong>0.9 ms</strong>, five times faster than the six kernels. It is still memory-bound, and that&rsquo;s fine: it now sits on the roof <em>at the algorithmic intensity</em>, which is the best any implementation can do. The fused kernel handles one row per block: 4,096 floats is 16 KB, which fits in registers and shared memory, so the mean, the variance and the normalization all happen on data that is already on chip. This is exactly what PyTorch&rsquo;s built-in <code>layer_norm</code> kernel does, and what <code>torch.compile</code> would generate from the code above. You will write it yourself in chapter 9.</p>
+    </details>
+
+    <div class="callout idea">
+      <span class="callout-label">The diagnostic routine</span>
+      <p>1. Work out the algorithmic FLOPs and bytes, and place the ideal point. 2. Measure time and achieved bytes, and place the real point. 3. If the real point is <em>left</em> of the ideal one, you are moving extra bytes: look for reuse or fusion. 4. If it is <em>below</em> its roof, you are using the hardware badly: look at access patterns, occupancy, instruction mix (chapter 5). 5. If it is on the roof at the ideal intensity, stop: the only improvements left change the algorithm or the data type.</p>
+    </div>
+
+    <div class="callout warn">
+      <span class="callout-label">Common mistakes</span>
+      <p><strong>Counting an FMA as one FLOP</strong> halves your numbers. <strong>Using spec bandwidth</strong> makes a kernel at 85% of the practical ceiling look like it has 15% to gain. <strong>Measuring with small, cache-resident data</strong> (lab 0&rsquo;s L2 rows) puts points <em>above</em> the DRAM slope, which is impossible and means you measured L2. <strong>Comparing across precisions</strong> with the wrong roof: an FP16 kernel on the CUDA cores is judged against 30.9, not 61.7.</p>
+    </div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Lab 3: trace your own roofline</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 3</span><span class="lab-title">The roofline of your GPU</span><span class="idx-meta">~30 min · <code>mlsys/labs/lab03-roofline/</code></span></div>
+      <div class="lab-body">
+        <p>Two programs, three experiments. As always under WSL2, work inside the Linux filesystem and close games and video before benchmarking.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab03-roofline
+make          # ptxas: dial&lt;1&gt; ... dial&lt;2048&gt;, the two mma_peak kernels
+make test     # every dial kernel vs a CPU reference, the tensor-core tile, the launch counters
+make bench    # A intensity dial · B tensor-core peak · C launch overhead</code></pre>
+        <table>
+          <tr><th>Exp.</th><th>What it does</th><th>Prediction to write down</th></tr>
+          <tr><td>A</td><td>Loads one float, does <var>F</var> FMAs, stores one float: intensity = <var>F</var>/4, from 0.25 to 512 (sections 1&ndash;2)</td><td>the <var>F</var> where GB/s stops being flat; the GFLOP/s plateau</td></tr>
+          <tr><td>B</td><td>Tensor-core loop with operands in registers, FP32 vs FP16 accumulators (section 5)</td><td>the two TFLOPS numbers, and their ratio</td></tr>
+          <tr><td>C</td><td>Empty kernels: back-to-back, launch + synchronize, and from a CUDA graph (section 6)</td><td>three times in microseconds</td></tr>
+        </table>
+        <p>Paste the <code>PASTE:</code> lines back (two from <code>make test</code>, three from <code>make bench</code>). Experiment A gives you your card&rsquo;s <em>measured</em> ridge point; it replaces the 46 in this chapter.</p>
+      </div>
+    </div>
+
+    <details class="ym">
+      <summary>Your move: in experiment A, at which <var>F</var> should the time per run start to grow, and what GFLOP/s do you expect at <var>F</var> = 2048?</summary>
+      <p>The ridge is where <var>F</var>/4 equals peak / practical bandwidth: roughly 30,900 / 590 &asymp; 52 FLOPs per byte, so <var>F</var> &asymp; 210. Below that, from <var>F</var> = 1 up to about 128, every run moves the same 537 MB and should take the same time, with GB/s flat near your lab 0 ceiling and GFLOP/s doubling with each step. From <var>F</var> = 256 on, time should roughly double with each step and GFLOP/s flatten. At 2048 expect something near the FP32 peak. Don&rsquo;t be surprised by more than 100% of 30.9: GeForce cards often boost above their rated clock when cool, and the rated boost clock is what the spec uses.</p>
+    </details>
+
+    <details class="ym">
+      <summary>Your move: experiment B runs the same tensor-core instructions with FP32 and with FP16 accumulators. What ratio do you expect?</summary>
+      <p>About <strong>2&times;</strong>. NVIDIA&rsquo;s spec sheet gives 61.7 TFLOPS for FP16 inputs with FP32 accumulation and 123.5 with FP16 accumulation: on GeForce cards, FP32 accumulation runs at half rate (datacenter parts don&rsquo;t have this limit). The same halving applies to FP8. Most training and inference uses FP32 accumulation for accuracy, so 61.7 is the tensor roof that matters in practice, which is why this course&rsquo;s charts use it. WMMA is a convenience API, so reaching 85&ndash;95% of either peak would already be good.</p>
+    </details>
+
+    <div class="callout note">
+      <span class="callout-label">How the intensity dial avoids fooling itself</span>
+      <p>Three details keep experiment A honest. The array is 2 &times; 256 MB, far bigger than the 48 MB L2, so the bytes really come from DRAM. The FMA count is a template parameter, so the loop is fully unrolled into straight-line FMAs: the build proves it (the 2048-FMA kernel contains exactly 2,048 <code>FFMA</code> instructions in its SASS). And the FMAs are split over four independent chains per thread, so the compute plateau measures the FMA units, not the latency of one dependent chain (section 5&rsquo;s ILP ceiling).</p>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Make a single-chain version of the dial (<code>CHAINS = 1</code>) and rerun experiment A. Where does the compute plateau land now? You have just measured the &ldquo;not enough independent work&rdquo; ceiling from section 5, and the ratio to the four-chain plateau tells you roughly how many cycles an FMA takes to produce its result.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Write the roofline formula and say what each term is.</summary>
+        <p>Attainable FLOP/s = min(<var>P</var>, <var>I</var> &times; <var>&beta;</var>): <var>P</var> is the peak compute rate of the units the kernel uses, <var>&beta;</var> the memory bandwidth, <var>I</var> the kernel&rsquo;s arithmetic intensity in FLOPs per byte moved. The ridge point <var>P</var>/<var>&beta;</var> separates memory-bound (left) from compute-bound (right).</p>
+      </details>
+      <details>
+        <summary>What is the difference between algorithmic and achieved intensity, and which one can be higher?</summary>
+        <p>Algorithmic intensity uses the bytes the computation must move (inputs once, outputs once); achieved intensity uses the bytes the kernel actually moves across DRAM, including re-reads, wasted sector bytes and round trips of intermediates. Achieved can only be equal or lower. The gap between them is what reuse and fusion close.</p>
+      </details>
+      <details>
+        <summary>Why does tiling speed up matrix multiplication, in roofline terms?</summary>
+        <p>It raises achieved intensity: each element fetched from DRAM is used <var>T</var> times from shared memory (and more with register tiling), so the point moves right along the bandwidth slope, raising the attainable FLOP/s, until it passes the ridge and the compute roof becomes the limit.</p>
+      </details>
+      <details>
+        <summary>Why does batching raise the throughput of a decode linear layer but not of decode attention?</summary>
+        <p>Weights are shared by all sequences in a batch, so a batch of <var>B</var> uses each weight byte <var>B</var> times: intensity &asymp; <var>B</var>. Each sequence&rsquo;s KV cache is private, so batching multiplies FLOPs and bytes equally and attention intensity stays &asymp; 1.</p>
+      </details>
+      <details>
+        <summary>A kernel runs at 25% of the FP32 peak. Is it inefficient?</summary>
+        <p>You can&rsquo;t tell without its intensity. At intensity 10 its roof is 6.7 TFLOP/s (22% of peak), so 25% of peak would be impossible over DRAM (it must be hitting cache). At intensity 100 its roof is the full peak, and 25% means real inefficiency. Always compare with the roof above the point.</p>
+      </details>
+      <details>
+        <summary>What does a point <em>above</em> the DRAM slope mean?</summary>
+        <p>That the kernel moved fewer DRAM bytes than you counted: its data was served from L2 or L1 (for example, a benchmark small enough to be cache-resident). Either recount the bytes that really crossed DRAM, or place it on the hierarchical roofline against the level that served it.</p>
+      </details>
+      <details>
+        <summary>Name three compute ceilings below the FP32 roof.</summary>
+        <p>No FMA (half the rate: 15.5 TFLOP/s), divergence (only the active fraction of lanes does work), and insufficient independent instructions (too few warps or too little ILP to cover FMA latency). Using the CUDA cores for matrix math instead of the tensor cores is a fourth, relative to the tensor roofs.</p>
+      </details>
+      <details>
+        <summary>What regime does the roofline not show, and how do you detect it?</summary>
+        <p>The overhead-bound regime: kernels so short that launch cost dominates. Symptoms: time that doesn&rsquo;t scale with problem size, and gaps between kernels on a timeline. Fixes: fusion, CUDA graphs, larger launches.</p>
+      </details>
+      <details>
+        <summary>A grid has 300 blocks and 288 fit on the GPU at once. What happens?</summary>
+        <p>It runs in two waves; the second has only 12 blocks and leaves almost the whole GPU idle, so the kernel takes nearly twice as long as a 288-block grid for 4% more work. Wave quantization matters when a grid is only a few waves long.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>S. Williams, A. Waterman, D. Patterson, <em>Roofline: An Insightful Visual Performance Model for Multicore Architectures</em>, Communications of the ACM 52(4), 2009: the original model, ceilings below the roof, and the idea of operational intensity.</li>
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed., ch. 5: the compute-to-global-memory-access ratio of the naive and tiled matrix multiply, and the roofline sidebar. All numbers here are recomputed for the RTX 5070.</li>
+      <li>Horace He, <a href="https://horace.io/brrr_intro.html"><em>Making Deep Learning Go Brrrr From First Principles</em></a>: compute, memory and overhead as the three regimes, and fusion as the answer to memory-bound elementwise chains.</li>
+      <li>C. Yang, T. Kurth, S. Williams, <a href="https://arxiv.org/abs/2009.02449"><em>Hierarchical Roofline Analysis for GPUs</em></a> (2020) and <a href="https://arxiv.org/abs/2008.11326"><em>8 Steps to 3.7 TFLOP/s on NVIDIA V100 GPU: Roofline Analysis and Other Tricks</em></a> (2020): the per-level roofline and how to collect it with Nsight Compute.</li>
+      <li>NERSC, <a href="https://docs.nersc.gov/tools/performance/roofline/">Roofline Performance Model documentation</a>: a practical guide to measuring FLOPs and bytes with hardware counters.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html">Nsight Compute Profiling Guide</a>: the Speed of Light roofline and hierarchical roofline sections per precision.</li>
+      <li>NVIDIA, <a href="https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf"><em>RTX Blackwell GPU Architecture</em> whitepaper</a>, Appendix C: every roof in this chapter (FP32 30.9, FP16 non-tensor 30.9, FP16 tensor 61.7 / 123.5, FP8 123.5 / 246.9, FP4 493.9 TFLOPS; 672 GB/s).</li>
+      <li>T. Dao, <a href="https://arxiv.org/abs/2307.08691"><em>FlashAttention-2</em></a> (2023): the IO analysis behind the prefill-attention preset; chapter 14 covers it properly.</li>
+      <li>S. Boehm, <a href="https://siboehm.com/articles/22/CUDA-MMM"><em>How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance</em></a> (2022): the matmul ladder of section 3, kernel by kernel.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-03-memory-hierarchy.html">&larr; Ch. 3 — The memory hierarchy: coalescing, shared memory, banks</a>
+      <a href="index.html">Index</a>
+      <a href="cap-05-profiling.html">Ch. 5 — Profiling with Nsight &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part I · Chapter 4 · roofs from NVIDIA&rsquo;s RTX Blackwell whitepaper, September 2026; lab 3 SASS checked with CUDA 13.4 for sm_120</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/roofline-explorer.js"></script>
+</body>
+</html>
