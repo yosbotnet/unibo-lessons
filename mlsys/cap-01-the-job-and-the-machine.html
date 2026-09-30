@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 1 — The job, the machine, and your bench · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="index.html">&larr; Index</a>
+    <a href="index.html">Index</a>
+    <a href="cap-02-execution-model.html">Ch. 2 — The execution model &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part I — The GPU · Chapter 1</div>
+    <h1>The job, the machine, and your bench</h1>
+    <div class="lk-meta"><span>~45 min read</span><span>1 interactive widget</span><span>2 plates</span><span>lab 0 · ~30 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Performance work on ML systems comes down to one repeated question: <em>where does the time go, and what is the hardware waiting for?</em> This chapter gives you the three possible answers (the math units, memory, or overhead), the reason GPUs are built the way they are (throughput instead of latency, which is why they need tens of thousands of threads), and a back-of-the-envelope model of an LLM generating text that already explains why serving systems batch requests and quantize weights. It ends with your toolchain installed and a first measurement from your own card.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What the job actually is</a></li>
+      <li><a href="#s2">Two ways to spend a chip</a></li>
+      <li><a href="#s3">Why a GPU needs 50,000 threads</a></li>
+      <li><a href="#s4">Three things that can bound you</a></li>
+      <li><a href="#s5">Where the time goes when an LLM talks</a></li>
+      <li><a href="#s6">Your bench: toolchain and profilers</a></li>
+      <li><a href="#s7">Lab 0: meet your GPU</a></li>
+      <li><a href="#s8">Numbers to carry around</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. What the job actually is</h2>
+
+    <p>An ML model in production is a program like any other: something calls it, it runs, it returns. What makes it unusual is the shape of the work. Almost all the time goes into a few operations (matrix multiplications, attention, a handful of elementwise and normalization steps) applied to billions of numbers. Those operations run on hardware whose peak speed is enormous and whose <em>typical</em> speed, in naive code, is a small fraction of that peak. The job is closing the gap.</p>
+
+    <p>The work splits into layers. Each asks the same question about a different part of the stack:</p>
+
+    <table>
+      <tr><th>Layer</th><th>The question</th><th>Typical artifacts</th><th>In this course</th></tr>
+      <tr><td><strong>Kernels</strong></td><td>Is this one GPU function using the hardware well?</td><td>cuBLAS, FlashAttention, quantized GEMMs, fused MoE kernels</td><td>Parts I&ndash;III, V</td></tr>
+      <tr><td><strong>Runtime / serving</strong></td><td>Is the GPU busy with useful work, request after request?</td><td>vLLM, SGLang, TensorRT-LLM, llama.cpp: batching, KV-cache management, scheduling</td><td>Part IV</td></tr>
+      <tr><td><strong>Compilers</strong></td><td>Can we generate good kernels instead of writing each by hand?</td><td>torch.compile / Inductor, Triton, TVM, XLA</td><td>Part V</td></tr>
+      <tr><td><strong>Communication</strong></td><td>When the model spans several GPUs, is the data movement hidden behind compute?</td><td>NCCL, tensor and expert parallelism, disaggregated prefill/decode</td><td>Part VI</td></tr>
+    </table>
+
+    <p>Day to day, the work looks less like &ldquo;write a clever kernel&rdquo; and more like detective work. A deployment is too slow or too expensive. You profile it, and the culprit is often not a slow kernel at all. It might be the CPU failing to launch work fast enough, a hidden synchronization between CPU and GPU, requests batched badly, or memory running out and forcing small batches. Knowing how kernels work is what lets you read the evidence, but the fix lives wherever the evidence points.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">The one habit</span>
+      <p>Never optimize before you know what the hardware is waiting for. Every technique in this course (tiling, fusion, quantization, batching, CUDA graphs, overlap) is an answer to one specific kind of waiting. Applied to the wrong kind, it does nothing.</p>
+    </div>
+  </section>
+
+  <section id="s2">
+    <h2>2. Two ways to spend a chip</h2>
+
+    <p>A chip has a fixed budget of area and power. CPUs and GPUs spend it on opposite goals, and nearly everything strange about GPU programming follows from that choice.</p>
+
+    <p>A <strong>CPU</strong> is built to make <em>one</em> thread finish as soon as possible. Most of its area goes to things that are not arithmetic: out-of-order execution logic that finds independent instructions to run early, branch predictors that guess which way an <code>if</code> goes before it is evaluated, and large multi-level caches that turn slow trips to DRAM into fast hits. All of it serves one goal: <strong>reduce latency</strong>, the time a single operation takes from start to finish.</p>
+
+    <p>A <strong>GPU</strong> gives up on making any single thread fast. It fills the chip with many simple, in-order arithmetic lanes, a very large register file, and wide memory channels, and it accepts that each individual operation takes a long time. The goal is to <strong>maximize throughput</strong>, the total work finished per second across all threads. The GPU doesn't shorten latency, it hides it: while some threads wait for memory, others use the arithmetic units.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Schematic chip layouts. The CPU has four large cores with most area spent on control logic and a big last-level cache, connected to DRAM by a narrow link. The GPU has 48 small streaming multiprocessors, a modest L2 cache, and a wide link to DRAM.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 300" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Latency-oriented vs throughput-oriented chip</title>
+        <text x="150" y="20" text-anchor="middle" font-size="12" font-weight="700" fill="var(--lk-cobalt-dark)">CPU · latency-oriented</text>
+        <rect x="20" y="30" width="260" height="190" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <g font-size="9" text-anchor="middle" fill="var(--lk-ink)">
+          <rect x="32" y="42" width="114" height="62" fill="none" stroke="var(--lk-cobalt)"/><rect x="36" y="46" width="70" height="54" fill="var(--lk-hl)" stroke="none"/><text x="71" y="76">control</text><rect x="110" y="46" width="32" height="54" fill="none" stroke="var(--lk-forest)"/><text x="126" y="76">ALU</text>
+          <rect x="154" y="42" width="114" height="62" fill="none" stroke="var(--lk-cobalt)"/><rect x="158" y="46" width="70" height="54" fill="var(--lk-hl)" stroke="none"/><text x="193" y="76">control</text><rect x="232" y="46" width="32" height="54" fill="none" stroke="var(--lk-forest)"/><text x="248" y="76">ALU</text>
+          <rect x="32" y="110" width="114" height="62" fill="none" stroke="var(--lk-cobalt)"/><rect x="36" y="114" width="70" height="54" fill="var(--lk-hl)" stroke="none"/><text x="71" y="144">control</text><rect x="110" y="114" width="32" height="54" fill="none" stroke="var(--lk-forest)"/><text x="126" y="144">ALU</text>
+          <rect x="154" y="110" width="114" height="62" fill="none" stroke="var(--lk-cobalt)"/><rect x="158" y="114" width="70" height="54" fill="var(--lk-hl)" stroke="none"/><text x="193" y="144">control</text><rect x="232" y="114" width="32" height="54" fill="none" stroke="var(--lk-forest)"/><text x="248" y="144">ALU</text>
+          <rect x="32" y="178" width="236" height="34" fill="none" stroke="var(--lk-cobalt)" stroke-dasharray="4 3"/><text x="150" y="199">large last-level cache</text>
+        </g>
+        <line x1="150" y1="220" x2="150" y2="258" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <rect x="60" y="258" width="180" height="26" rx="3" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+        <text x="150" y="275" text-anchor="middle" font-size="10" fill="var(--lk-ink)">DDR5 · ~0.1 TB/s</text>
+
+        <text x="480" y="20" text-anchor="middle" font-size="12" font-weight="700" fill="var(--lk-cobalt-dark)">GPU · throughput-oriented</text>
+        <rect x="350" y="30" width="260" height="190" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <g fill="none" stroke="var(--lk-forest)" stroke-width="1">
+          <!-- 48 SMs: 8 columns x 6 rows -->
+          <rect x="360" y="40" width="26" height="20"/><rect x="391" y="40" width="26" height="20"/><rect x="422" y="40" width="26" height="20"/><rect x="453" y="40" width="26" height="20"/><rect x="484" y="40" width="26" height="20"/><rect x="515" y="40" width="26" height="20"/><rect x="546" y="40" width="26" height="20"/><rect x="577" y="40" width="26" height="20"/>
+          <rect x="360" y="64" width="26" height="20"/><rect x="391" y="64" width="26" height="20"/><rect x="422" y="64" width="26" height="20"/><rect x="453" y="64" width="26" height="20"/><rect x="484" y="64" width="26" height="20"/><rect x="515" y="64" width="26" height="20"/><rect x="546" y="64" width="26" height="20"/><rect x="577" y="64" width="26" height="20"/>
+          <rect x="360" y="88" width="26" height="20"/><rect x="391" y="88" width="26" height="20"/><rect x="422" y="88" width="26" height="20"/><rect x="453" y="88" width="26" height="20"/><rect x="484" y="88" width="26" height="20"/><rect x="515" y="88" width="26" height="20"/><rect x="546" y="88" width="26" height="20"/><rect x="577" y="88" width="26" height="20"/>
+          <rect x="360" y="112" width="26" height="20"/><rect x="391" y="112" width="26" height="20"/><rect x="422" y="112" width="26" height="20"/><rect x="453" y="112" width="26" height="20"/><rect x="484" y="112" width="26" height="20"/><rect x="515" y="112" width="26" height="20"/><rect x="546" y="112" width="26" height="20"/><rect x="577" y="112" width="26" height="20"/>
+          <rect x="360" y="136" width="26" height="20"/><rect x="391" y="136" width="26" height="20"/><rect x="422" y="136" width="26" height="20"/><rect x="453" y="136" width="26" height="20"/><rect x="484" y="136" width="26" height="20"/><rect x="515" y="136" width="26" height="20"/><rect x="546" y="136" width="26" height="20"/><rect x="577" y="136" width="26" height="20"/>
+          <rect x="360" y="160" width="26" height="20"/><rect x="391" y="160" width="26" height="20"/><rect x="422" y="160" width="26" height="20"/><rect x="453" y="160" width="26" height="20"/><rect x="484" y="160" width="26" height="20"/><rect x="515" y="160" width="26" height="20"/><rect x="546" y="160" width="26" height="20"/><rect x="577" y="160" width="26" height="20"/>
+        </g>
+        <rect x="360" y="188" width="243" height="24" fill="none" stroke="var(--lk-cobalt)" stroke-dasharray="4 3"/>
+        <text x="481" y="204" text-anchor="middle" font-size="9" fill="var(--lk-ink)">L2 cache · 48 MB</text>
+        <g stroke="var(--lk-cobalt)" stroke-width="2"><line x1="400" y1="220" x2="400" y2="258"/><line x1="440" y1="220" x2="440" y2="258"/><line x1="480" y1="220" x2="480" y2="258"/><line x1="520" y1="220" x2="520" y2="258"/><line x1="560" y1="220" x2="560" y2="258"/></g>
+        <rect x="370" y="258" width="220" height="26" rx="3" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+        <text x="480" y="275" text-anchor="middle" font-size="10" fill="var(--lk-ink)">GDDR7 · 0.67 TB/s</text>
+        <text x="618" y="100" font-size="9" fill="var(--lk-vermilion)" transform="rotate(90 618 100)">48 SMs</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; Where the area goes (schematic, not to scale). Left: a few big cores, most of each spent on control logic that makes one thread fast, plus a large cache. Right: your RTX 5070 as 48 streaming multiprocessors (SMs), each a cluster of simple arithmetic lanes, sharing a modest L2 and a memory interface about seven times wider than a desktop CPU&rsquo;s.</figcaption>
+    </figure>
+
+    <h3>Why not both?</h3>
+    <p>Because latency is expensive and throughput is cheap. Doubling throughput is roughly linear: build twice as many arithmetic units and pay for twice the area and power. Halving the latency of an operation means higher clocks, higher voltage and more speculative machinery, and power grows much faster than the gain. Once single-thread performance stopped scaling in the mid-2000s (clocks hit a power wall), the cheap way to get more work per second was more, simpler units. GPUs took that path all the way.</p>
+
+    <div class="specs">
+      <div><b>48</b><span>SMs on your RTX 5070</span></div>
+      <div><b>6,144</b><span>FP32 lanes (128 per SM)</span></div>
+      <div><b>30.9 TFLOPS</b><span>FP32, no tensor cores</span></div>
+      <div><b>61.7 TFLOPS</b><span>FP16 tensor cores, FP32 accumulate</span></div>
+      <div><b>672 GB/s</b><span>GDDR7, 192-bit @ 28 Gbps</span></div>
+      <div><b>12 GB</b><span>VRAM</span></div>
+    </div>
+    <p>For comparison, a current 8-core desktop CPU manages very roughly 1&ndash;2 TFLOPS of FP32 with its vector units and 80&ndash;100 GB/s from dual-channel DDR5. So your card offers something like 20&times; the arithmetic and 7&times; the bandwidth. That gap in <em>ratios</em> is already a hint: the GPU&rsquo;s arithmetic grew much faster than its memory, so keeping the arithmetic fed is the hard part.</p>
+
+    <details class="ym">
+      <summary>Your move: one thread doing a long chain of dependent additions, on the CPU and on one GPU lane. Which finishes first, and by roughly how much?</summary>
+      <p>The CPU, by a wide margin, often 10&times; or more. Both clock at a few GHz, but a GPU lane runs in order with no speculation, its caches are small and shared by thousands of threads, and a trip to memory costs hundreds of nanoseconds that nothing hides when only one thread exists. The GPU is only fast when you give it enough independent work to switch between. <strong>One thread on a GPU is the worst program you can write for it.</strong> This is also why the sequential parts of a program (the Python that decides what to run next, the scheduler of a serving engine) stay on the CPU: the machine is <em>heterogeneous</em> on purpose.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Why a GPU needs 50,000 threads</h2>
+
+    <p>You already know the key tool here from backend work, possibly without its name. If a database round trip takes 5 ms and you want 2,000 queries per second, you need about 10 queries in flight at all times: a connection pool of 10. That is <strong>Little&rsquo;s law</strong>:</p>
+
+    <p style="text-align:center"><var>work in flight</var> = <var>throughput</var> &times; <var>latency</var></p>
+
+    <p>Apply it to GPU memory. To stream data at the full 672 GB/s when each request takes, say, 500 ns to come back from DRAM (typical GPU memory latency is several hundred nanoseconds; you will measure your card&rsquo;s in chapter 3), the chip must keep</p>
+
+    <p style="text-align:center">672 GB/s &times; 500 ns &asymp; <strong>336 KB in flight</strong></p>
+
+    <p>at every moment. Spread over 48 SMs, that is about 7 KB of outstanding loads per SM. If each thread loads one 4-byte float and then waits for it, each SM needs about 1,750 threads waiting simultaneously. An SM on your card can hold at most <strong>1,536</strong> threads. Even a completely full GPU, with one float per thread in flight, cannot quite saturate memory.</p>
+
+    <figure class="lk-fig" role="img" aria-label="A pipe from DRAM to the SMs. Its width is bandwidth, its length is latency, and the requests inside it are the bytes in flight, which must equal bandwidth times latency to keep the pipe full.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 170" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Little's law applied to GPU memory</title>
+        <defs><marker id="c1-arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker>
+        <marker id="c1-arrv" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="var(--lk-vermilion)"/></marker></defs>
+        <rect x="20" y="50" width="90" height="70" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="65" y="82" text-anchor="middle" font-size="12" fill="var(--lk-ink)">SMs</text><text x="65" y="98" text-anchor="middle" font-size="9.5" fill="var(--lk-ink-soft)">issue loads</text>
+        <rect x="530" y="50" width="90" height="70" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <text x="575" y="82" text-anchor="middle" font-size="12" fill="var(--lk-ink)">DRAM</text><text x="575" y="98" text-anchor="middle" font-size="9.5" fill="var(--lk-ink-soft)">GDDR7</text>
+        <rect x="110" y="62" width="420" height="46" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.2"/>
+        <g fill="var(--lk-paper)" stroke="var(--lk-forest)">
+          <rect x="122" y="72" width="22" height="26"/><rect x="152" y="72" width="22" height="26"/><rect x="182" y="72" width="22" height="26"/><rect x="212" y="72" width="22" height="26"/><rect x="242" y="72" width="22" height="26"/><rect x="272" y="72" width="22" height="26"/><rect x="302" y="72" width="22" height="26"/><rect x="332" y="72" width="22" height="26"/><rect x="362" y="72" width="22" height="26"/><rect x="392" y="72" width="22" height="26"/><rect x="422" y="72" width="22" height="26"/><rect x="452" y="72" width="22" height="26"/><rect x="482" y="72" width="22" height="26"/>
+        </g>
+        <line x1="110" y1="135" x2="530" y2="135" stroke="var(--lk-vermilion)" stroke-width="1.3" marker-end="url(#c1-arrv)" marker-start="url(#c1-arrv)"/>
+        <text x="320" y="152" text-anchor="middle" font-size="10.5" fill="var(--lk-vermilion)">latency ≈ several hundred ns (length of the pipe)</text>
+                <text x="320" y="40" text-anchor="middle" font-size="10.5" fill="var(--lk-cobalt-dark)">bandwidth = 672 GB/s (width of the pipe) · requests in the pipe = bytes in flight</text>
+        <text x="320" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="var(--lk-ink)">in flight = bandwidth × latency ≈ 336 KB</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; Little&rsquo;s law for memory. A pipe delivers its full bandwidth only if it is full: the bytes requested but not yet returned must equal bandwidth &times; latency. Every GPU design decision that looks odd (huge register files, thousands of resident threads, cheap switching between them) exists to keep this pipe full.</figcaption>
+    </figure>
+
+    <p>That calculation is the whole design of the GPU in miniature:</p>
+    <ul>
+      <li><strong>Thousands of resident threads per SM</strong>, with their registers permanently allocated, so switching from a waiting thread to a ready one costs nothing. The switch happens every cycle, in hardware.</li>
+      <li><strong>A huge register file</strong> (256 KB per SM on your card, 12 MB in total, which is more than the L1 caches) to hold all those threads&rsquo; state at once.</li>
+      <li><strong>You must launch far more threads than there are lanes.</strong> 6,144 lanes, but you want tens of thousands of threads, and often each thread should also keep several loads in flight or load 16 bytes at a time. Chapter 3 turns this into technique.</li>
+    </ul>
+
+    <div class="callout note">
+      <span class="callout-label">Backend translation</span>
+      <p>A GPU is an extremely wide async server with a slow backing store. Threads are requests; a warp stalled on memory is a request awaiting I/O; the scheduler picks any ready one each cycle. Throughput comes from concurrency, never from making one request faster. Your intuition about connection pools, queue depth and tail latency transfers almost directly.</p>
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Three things that can bound you</h2>
+
+    <p>At any moment, a piece of GPU work is waiting on one of three things. Horace He&rsquo;s essay <em>Making Deep Learning Go Brrrr</em> popularized this split, and it is the most useful diagnostic frame in the field:</p>
+
+    <ul>
+      <li><strong>Compute-bound:</strong> the arithmetic units are the bottleneck. The time is close to <var>FLOPs</var> / <var>peak FLOP/s</var>.</li>
+      <li><strong>Memory-bound:</strong> moving data between DRAM and the SMs is the bottleneck. The time is close to <var>bytes moved</var> / <var>bandwidth</var>.</li>
+      <li><strong>Overhead-bound:</strong> the GPU is idle, waiting for someone to give it work: the CPU running Python, the driver launching a kernel, a synchronization, a memory allocation.</li>
+    </ul>
+
+    <p>A good first model of a kernel&rsquo;s run time is</p>
+    <p style="text-align:center"><var>time</var> &asymp; max( <var>FLOPs</var> / <var>peak</var>,&nbsp; <var>bytes</var> / <var>bandwidth</var> ) + <var>overhead</var></p>
+    <p>The ratio of the two inside the max decides which one wins. Divide FLOPs by bytes and you get the <strong>arithmetic intensity</strong> of the work, in FLOPs per byte. Divide the hardware&rsquo;s peak FLOP/s by its bandwidth and you get the intensity at which the two limits are equal, the <strong>ridge point</strong>:</p>
+
+    <table>
+      <tr><th>On your RTX 5070</th><th>Peak</th><th>Ridge point (peak &divide; 672 GB/s)</th></tr>
+      <tr><td>FP32 on CUDA cores</td><td>30.9 TFLOPS</td><td>&asymp; 46 FLOPs per byte</td></tr>
+      <tr><td>FP16 tensor cores, FP32 accumulate</td><td>61.7 TFLOPS</td><td>&asymp; 92 FLOPs per byte</td></tr>
+      <tr><td>FP8 tensor cores, FP32 accumulate</td><td>123.5 TFLOPS</td><td>&asymp; 184 FLOPs per byte</td></tr>
+      <tr><td>FP4 tensor cores</td><td>493.9 TFLOPS</td><td>&asymp; 735 FLOPs per byte</td></tr>
+    </table>
+
+    <p>Work below the ridge is memory-bound, and work above it is compute-bound. Two examples you will write yourself:</p>
+    <ul>
+      <li><strong>Vector add</strong>, <code>c[i] = a[i] + b[i]</code>: 1 FLOP for every 12 bytes (two 4-byte reads, one 4-byte write). Intensity &asymp; 0.08, more than 500&times; below the ridge. It is hopelessly memory-bound, and its ceiling is 672 / 12 = 56 billion elements per second no matter how clever the code is.</li>
+      <li><strong>Multiplying two 4096&times;4096 FP32 matrices</strong>: 2&times;4096&sup3; &asymp; 137 GFLOPs, touching at minimum 3&times;4096&sup2;&times;4 bytes &asymp; 201 MB. Intensity &asymp; 680, far above the ridge: compute-bound, <em>if</em> the kernel reuses data well. A naive kernel re-reads the same numbers from DRAM thousands of times and turns this compute-bound problem into a memory-bound one. Closing that gap is Part II.</li>
+    </ul>
+
+    <p>The third regime is the one people forget. Launching a kernel costs a few microseconds of CPU and driver work before the GPU sees it. If the kernel itself only runs for 5 &micro;s, you are overhead-bound, and neither faster math nor faster memory helps. Eager-mode PyTorch running a small model is often in exactly this state.</p>
+
+    <table>
+      <tr><th>Regime</th><th>Symptom</th><th>What helps</th><th>What does <em>not</em> help</th></tr>
+      <tr><td>Compute</td><td>Math-unit utilization near peak</td><td>Tensor cores, lower precision, fewer FLOPs (better algorithm)</td><td>Faster memory</td></tr>
+      <tr><td>Memory</td><td>DRAM throughput near 672 GB/s; math units mostly idle</td><td>Moving fewer bytes: fusion, reuse through shared memory, quantization, coalesced access</td><td>Faster math, lower-precision <em>math</em> alone</td></tr>
+      <tr><td>Overhead</td><td>Gaps between kernels in a timeline; GPU idle while the CPU works</td><td>Fewer, bigger kernels (fusion), CUDA graphs, moving CPU work off the critical path</td><td>Optimizing any kernel</td></tr>
+    </table>
+
+    <details class="ym">
+      <summary>Your move: your vector add runs at 600 GB/s. A colleague rewrites it to use tensor cores, which are 2&times; faster at arithmetic. How much faster does it get?</summary>
+      <p>Not at all. At 0.08 FLOPs per byte the arithmetic units already sit idle more than 99% of the time. The kernel is waiting on memory, and at 600 of 672 GB/s it is already close to the ceiling. The only ways to make it faster are to move fewer bytes (store in FP16 and you halve the traffic) or to avoid the round trip entirely by <em>fusing</em> the add into whichever kernel produced <code>a</code> or will consume <code>c</code>. Fusion is the single most common optimization in ML systems, and this is why.</p>
+    </details>
+
+    <div class="callout warn">
+      <span class="callout-label">Amdahl still applies</span>
+      <p>If 20% of a request&rsquo;s time is CPU-side overhead that you cannot remove, then even infinitely fast kernels give at most a 1 / 0.2 = 5&times; speedup. Measure the whole timeline before optimizing any part of it. That is what the profiler in chapter 5 is for.</p>
+    </div>
+  </section>
+
+  <section id="s5">
+    <h2>5. Where the time goes when an LLM talks</h2>
+
+    <p>You don&rsquo;t need any machine learning yet for this; chapters 6 and 10 fill it in. Three facts are enough:</p>
+    <ol>
+      <li>A model is a large, fixed list of numbers, the <strong>parameters</strong> or <strong>weights</strong>. A &ldquo;3B&rdquo; model has 3 billion of them. Stored in FP16 (2 bytes each), that is 6 GB.</li>
+      <li>An LLM produces text one <strong>token</strong> (roughly a word piece) at a time. Producing one token runs the whole model once: a <strong>forward pass</strong>. This phase is called <strong>decode</strong>.</li>
+      <li>During decode, the forward pass uses every weight once, for about one multiply-add: <strong>2 FLOPs per parameter per token</strong>. It also reads a little extra data (the KV cache, chapter 13), which we ignore for now.</li>
+    </ol>
+
+    <p>Now apply section 4. One token of a 3B FP16 model on your card:</p>
+    <ul>
+      <li>Memory: read 6 GB of weights at 672 GB/s &rarr; <strong>8.9 ms</strong>.</li>
+      <li>Compute: 6 GFLOPs at 61.7 TFLOPS &rarr; <strong>0.097 ms</strong>.</li>
+    </ul>
+    <p>Memory takes 92&times; longer. Decode for a single user is massively memory-bound: the tensor cores sit idle 99% of the time while the weights stream past. The ceiling is 1 / 8.9 ms &asymp; <strong>112 tokens per second</strong>, and no kernel, however clever, can beat it without reading fewer bytes.</p>
+
+    <details class="ym">
+      <summary>Your move: the math units are idle 99% of the time. How would you put them to work, without buying a faster GPU?</summary>
+      <p><strong>Serve several users at once.</strong> If 64 conversations each need their next token, one pass over the weights can serve all 64: the weights are read once, and each weight is used 64 times. The bytes stay the same, and the FLOPs grow 64&times;. The time per step barely changes, because memory still dominates, and the total throughput goes up almost 64&times;. The batch at which compute catches up with memory is the ridge point in disguise: 61.7 TFLOPS &times; 2 bytes / (2 FLOPs &times; 672 GB/s) &asymp; <strong>92 sequences</strong>. This is why every serving engine batches, and why &ldquo;continuous batching&rdquo; (Part IV) is one of the biggest wins in LLM serving.</p>
+      <p>The second lever is to read fewer bytes per weight: store them in 4 bits instead of 16. The same model is now 1.5 GB, and the ceiling rises 4&times;. That is <strong>quantization</strong>, also Part IV.</p>
+    </details>
+
+    <p>Play with the numbers. Try a 70B model, try INT4, try an H100 at batch 1 and batch 256, and watch which bar dominates.</p>
+
+    <div id="w-decode" class="w"></div>
+
+    <p>These ceilings ignore the KV cache, activations and overheads, and real engines typically reach 60&ndash;85% of them. The shape of the answer is still right, and it is the kind of estimate an interviewer expects you to do on a whiteboard in two minutes. Chapter 13 makes it exact.</p>
+
+    <details class="ym">
+      <summary>Your move: your spine project starts with GPT-2 small (124M parameters) in FP32. What does the calculator predict for tokens/s, and what do you suspect will actually limit you?</summary>
+      <p>The weights are 124M &times; 4 B &asymp; 0.5 GB, so the memory time is about 0.74 ms per token and the ceiling is around 1,350 tokens/s. But a straightforward implementation launches a couple of hundred small kernels per token (several per layer, 12 layers), and each launch costs a few microseconds of fixed overhead. That adds up to roughly as much time as the useful work. Your first engine will be partly <em>overhead-bound</em>, and you will fix it later with fusion and CUDA graphs. Small models are where overhead hides.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Your bench: toolchain and profilers</h2>
+
+    <p>Everything in this course runs on your RTX 5070. Its architecture is consumer Blackwell, compute capability <strong>12.0</strong>, which the compiler calls <code>sm_120</code>. Two practical consequences:</p>
+    <ul>
+      <li>You need <strong>CUDA 12.8 or newer</strong>. Earlier toolkits don&rsquo;t know <code>sm_120</code>. Any CUDA 13.x is fine too.</li>
+      <li>The <strong>driver must be new enough for the toolkit</strong>. <code>nvidia-smi</code> prints, top right, the newest CUDA version your driver supports. If it is lower than your <code>nvcc --version</code>, update the driver first.</li>
+    </ul>
+
+    <h3>Setting up Windows + WSL2</h3>
+    <p>You will work inside <strong>WSL2</strong>, a real Linux kernel running alongside Windows. It sees your GPU through the Windows driver, and it gives you the Linux command line every lab, codebase and job in this field assumes. One rule matters more than every other step: <strong>the only NVIDIA driver is the Windows one.</strong> Never install a Linux GPU driver inside WSL, because it would overwrite the bridge to the Windows driver.</p>
+    <ol>
+      <li><strong>Windows side:</strong> install the latest NVIDIA Game Ready or Studio driver. That&rsquo;s all the driver you need, and profiling inside WSL requires version 545 or newer, which any current driver satisfies.</li>
+      <li><strong>Get WSL2 with Ubuntu:</strong> in an administrator PowerShell, <code>wsl --install -d Ubuntu-24.04</code>, then check that <code>wsl -l -v</code> shows <code>VERSION 2</code>.</li>
+      <li><strong>Check the GPU from Linux:</strong> in the Ubuntu shell, <code>nvidia-smi</code> should list your RTX 5070. That tool comes from the Windows driver; you didn&rsquo;t install it, and you shouldn&rsquo;t.</li>
+      <li><strong>Install the toolkit, not the driver:</strong> on NVIDIA&rsquo;s CUDA downloads page choose Linux &rarr; x86_64 &rarr; <em>WSL-Ubuntu</em>, follow the repository instructions, and install the package <code>cuda-toolkit</code> (never <code>cuda</code> or <code>cuda-drivers</code>, which pull in a driver). Then add <code>/usr/local/cuda/bin</code> to your <code>PATH</code> and check <code>nvcc --version</code>. Also <code>sudo apt install build-essential git</code>.</li>
+      <li><strong>Clone inside Linux:</strong> put the repository in your WSL home directory (<code>~/</code>), not under <code>/mnt/c/</code>. Files on the Windows drive are reached through a slow bridge, and builds there crawl.</li>
+      <li><strong>Profilers:</strong> <code>nsys</code> and <code>ncu</code> come with the toolkit and run inside WSL. Install the Nsight Systems and Nsight Compute <em>GUIs</em> on Windows and open the report files from WSL with them (Windows sees WSL files at <code>\\wsl$\Ubuntu-24.04\home\&hellip;</code>).</li>
+    </ol>
+    <p>By default WSL2 may use up to half of your PC&rsquo;s RAM. The labs need a few GB of host memory at most, so that&rsquo;s fine. If you ever need more, set <code>memory=</code> in <code>%UserProfile%\.wslconfig</code>.</p>
+
+    <h3>The tools you will live in</h3>
+    <table>
+      <tr><th>Tool</th><th>What it answers</th><th>First used</th></tr>
+      <tr><td><code>nvcc</code></td><td>Compiles <code>.cu</code> files. <code>-Xptxas -v</code> prints registers and shared memory per kernel.</td><td>Lab 0</td></tr>
+      <tr><td><code>nvidia-smi</code></td><td>Driver version, memory in use, clocks, temperature, who is using the GPU.</td><td>Lab 0</td></tr>
+      <tr><td><strong>Nsight Systems</strong> (<code>nsys</code>)</td><td>The <em>timeline</em>: what ran when, on CPU and GPU, and where the gaps are. The overhead detector.</td><td>Chapter 5</td></tr>
+      <tr><td><strong>Nsight Compute</strong> (<code>ncu</code>)</td><td>One kernel under a microscope: achieved bandwidth, FLOP/s, stall reasons, memory transactions, roofline position.</td><td>Chapter 5</td></tr>
+    </table>
+
+    <div class="callout warn">
+      <span class="callout-label">Profiler permission, fix it now</span>
+      <p>By default, NVIDIA drivers only allow administrators to read the GPU&rsquo;s performance counters, and <code>ncu</code> fails with <code>ERR_NVGPUCTRPERM</code>. Under WSL2 this is a <strong>Windows</strong> setting, because the Windows driver owns the counters: NVIDIA Control Panel &rarr; enable Developer Settings from the Desktop menu &rarr; Developer &rarr; Manage GPU Performance Counters &rarr; allow access to all users. (On a native Linux machine it is instead the kernel-module option <code>NVreg_RestrictProfilingToAdminUsers=0</code>.)</p>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Benchmarks on a gaming card</span>
+      <p>Your card boosts its clock depending on temperature and power, so the same kernel can vary by several percent between runs. The labs guard against this with warm-up runs and medians. Nsight Compute goes further and locks clocks to the base frequency by default, so its timings are <em>stable but lower</em> than what your benchmarks see. Keep that in mind when the two disagree.</p>
+    </div>
+  </section>
+
+  <section id="s7">
+    <h2>7. Lab 0: meet your GPU</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 0</span><span class="lab-title">Meet your GPU</span><span class="idx-meta">~30 min · <code>mlsys/labs/lab00-meet-your-gpu/</code></span></div>
+      <div class="lab-body">
+        <p>Two small programs. <code>devquery</code> asks the driver what your card is and derives its peaks. <code>vecadd</code> runs the vector add from section 4 at sizes from a thousand elements to a quarter billion and reports the bandwidth it achieves. You don&rsquo;t need to understand the code yet. Chapter 2 takes the kernel apart line by line. Today is about the toolchain working and about your first real number.</p>
+<pre><code class="language-bash">git pull                                  # the labs live in this repo
+cd mlsys/labs/lab00-meet-your-gpu
+make test     # builds, then checks vecadd against a CPU loop at awkward sizes
+make bench    # prints your card's properties, then the bandwidth sweep</code></pre>
+        <p>If your toolkit isn&rsquo;t on the <code>PATH</code> or you want another architecture: <code>make NVCC=/usr/local/cuda/bin/nvcc ARCH=sm_120</code>. The build prints lines like <code>ptxas info : Used 12 registers</code> for each kernel. Ignore them for now; chapter 2 explains why they matter.</p>
+      </div>
+    </div>
+
+    <p>This is the whole kernel you are about to run:</p>
+<pre><code class="language-cpp" id="lab0-kernel">__global__ void vecadd(const float* a, const float* b, float* c, size_t n)
+{
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;  // which element is mine?
+    if (i < n)                                                  // the last block may overhang
+        c[i] = a[i] + b[i];
+}</code></pre>
+    <p>One thread per element. Each thread works out which element it owns from its position in the launch and does one addition. There is no loop: the loop has become the grid of threads.</p>
+
+    <p>Before running <code>make bench</code>, make three predictions. Write them down, since they are the point of the exercise:</p>
+
+    <details class="ym">
+      <summary>Your move: at N = 1,024 elements (12 KB of data), what bandwidth will vecadd report?</summary>
+      <p>Terrible: a few GB/s, maybe less. The kernel moves 12 KB, which at 672 GB/s would take 18 ns, but a kernel launch and its completion cost several microseconds no matter what it does. The measured time is almost all fixed cost, so &ldquo;bytes / time&rdquo; is tiny. This is the <strong>overhead-bound</strong> regime, measured. The time stays roughly flat from N = 1K up to tens of thousands of elements. That flat floor is your card&rsquo;s minimum cost of doing anything at all.</p>
+    </details>
+
+    <details class="ym">
+      <summary>Your move: at N = 1M elements (12 MB), could vecadd report <em>more</em> than 672 GB/s?</summary>
+      <p>Quite possibly, yes. The benchmark runs the same kernel on the same arrays many times. 12 MB fits comfortably in the 48 MB L2 cache, so after the first run the data never leaves the chip, and L2 bandwidth is several times DRAM bandwidth. The rows marked <code>(fits in L2)</code> measure the cache, not the memory. This is the classic benchmarking trap: <em>the working set determines which memory you are actually measuring.</em> Many &ldquo;impossible&rdquo; results in blog posts are L2 hits.</p>
+    </details>
+
+    <details class="ym">
+      <summary>Your move: at N = 268M elements (3.2 GB), what percentage of 672 GB/s do you expect?</summary>
+      <p>Roughly 80&ndash;92%. Now every byte truly comes from DRAM, and a streaming kernel with perfect access patterns gets close to, but never reaches, the spec: the DRAM has refresh cycles, switches between reading and writing, and has other fixed costs. That number, not 672, is the <em>practical</em> ceiling for every memory-bound kernel you will ever write on this card. Remember it; you will compare everything against it.</p>
+    </details>
+
+    <p>Then run it, and paste the <code>PASTE:</code> lines back: one from <code>make test</code>, two from <code>make bench</code>. Your measured numbers will replace the estimates in this chapter and become the reference line on every roofline in chapter 4. Also note the CPU comparison line near the end: the same loop on one CPU core.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Change <code>float</code> to <code>double</code> in the kernel and the host code. Bytes per element double, FLOPs stay the same. Predict what happens to elements per second and to GB/s before you run it. Consumer cards run FP64 arithmetic at 1/64 of the FP32 rate. Does that matter here? (It shouldn&rsquo;t, and seeing it not matter is the lesson.)</p>
+    </div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Numbers to carry around</h2>
+    <p>Performance engineers do arithmetic in their heads constantly. These are the numbers for your card, and the ones worth memorizing:</p>
+    <table>
+      <tr><th>Quantity</th><th>RTX 5070</th><th>Why you care</th></tr>
+      <tr><td>DRAM bandwidth</td><td>672 GB/s spec, ~80&ndash;90% achievable</td><td>Ceiling for every memory-bound kernel</td></tr>
+      <tr><td>FP32 / FP16 tensor / FP8 / FP4</td><td>30.9 / 61.7 / 123.5 / 493.9 TFLOPS</td><td>Ceilings for compute-bound kernels</td></tr>
+      <tr><td>Ridge point</td><td>&asymp; 46 FLOP/B (FP32), &asymp; 92 (FP16 tensor)</td><td>Which side of the roofline you are on</td></tr>
+      <tr><td>SMs &middot; max threads per SM</td><td>48 &middot; 1,536</td><td>How much parallelism the GPU can hold at once (&asymp; 74K threads)</td></tr>
+      <tr><td>L2 cache</td><td>48 MB</td><td>Working sets below this are not measuring DRAM</td></tr>
+      <tr><td>VRAM</td><td>12 GB</td><td>Largest model + KV cache you can serve locally</td></tr>
+      <tr><td>Kernel launch overhead</td><td>a few &micro;s</td><td>Anything shorter than ~10 &micro;s is probably overhead-bound</td></tr>
+    </table>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>In one sentence each: what does a CPU spend its area on, and what does a GPU spend it on?</summary>
+        <p>A CPU spends it on reducing the latency of one thread: out-of-order logic, branch prediction, big caches. A GPU spends it on throughput: many simple in-order lanes, a huge register file holding thousands of threads&rsquo; state, and wide memory interfaces. It hides latency by switching between threads instead of reducing it.</p>
+      </details>
+      <details>
+        <summary>Using Little&rsquo;s law, why can&rsquo;t a single warp of 32 threads saturate your GPU&rsquo;s memory bandwidth?</summary>
+        <p>To stream at 672 GB/s with a latency of several hundred nanoseconds you need hundreds of kilobytes in flight. 32 threads loading 4 bytes each put 128 bytes in flight, thousands of times too little. Bandwidth is only reached with enough independent outstanding requests, which means many threads (and often several loads per thread).</p>
+      </details>
+      <details>
+        <summary>Define arithmetic intensity and ridge point. What is the ridge point for FP32 on your card?</summary>
+        <p>Arithmetic intensity is the FLOPs performed per byte moved to or from memory by a piece of work. The ridge point is the hardware&rsquo;s peak FLOP/s divided by its bandwidth: the intensity above which work becomes compute-bound. For FP32 on the RTX 5070 it is 30.9 TFLOPS / 672 GB/s &asymp; 46 FLOPs per byte.</p>
+      </details>
+      <details>
+        <summary>A kernel runs in 4 &micro;s. A teammate wants to optimize its memory access pattern. What do you ask first?</summary>
+        <p>Whether it is overhead-bound. A 4 &micro;s kernel is comparable to launch overhead, so the timeline probably shows the GPU idle between launches. Fusing it with neighbouring kernels or capturing the sequence in a CUDA graph is likely worth more than any change inside it.</p>
+      </details>
+      <details>
+        <summary>Why is single-user LLM decode memory-bound, and what are the two main levers against it?</summary>
+        <p>Each token requires reading every weight once but only does about 2 FLOPs per weight, an intensity of about 1 FLOP/byte in FP16, far below the ridge. The levers are batching (amortize each weight read over many sequences, raising the intensity) and quantization (fewer bytes per weight).</p>
+      </details>
+      <details>
+        <summary>At what batch size does decode of an FP16 model become compute-bound on your card, and why doesn&rsquo;t it depend on the model size?</summary>
+        <p>About 92. Bytes per step are <var>P</var> &times; 2 and FLOPs are 2 &times; <var>P</var> &times; <var>B</var>, so they balance when <var>B</var> = peak &times; 2 / (2 &times; bandwidth) = 61.7e12 / 672e9 &asymp; 92. The parameter count <var>P</var> cancels. (Attention and the KV cache, ignored here, change this somewhat. See chapter 13.)</p>
+      </details>
+      <details>
+        <summary>Your vecadd benchmark reports 1,400 GB/s for N = 1M. Is your card faster than its spec?</summary>
+        <p>No. 12 MB fits in the 48 MB L2, and the benchmark reuses the same arrays, so it is measuring L2 bandwidth. To measure DRAM, the working set must be much larger than L2 (or the cache must be flushed between runs).</p>
+      </details>
+      <details>
+        <summary>What compiler target and minimum toolkit does your GPU need, and how do you check the driver supports it?</summary>
+        <p><code>sm_120</code> (compute capability 12.0) and CUDA 12.8 or newer. <code>nvidia-smi</code> shows the highest CUDA version the installed driver supports. It must be at least the toolkit version reported by <code>nvcc --version</code>.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (2023), ch. 1: latency- vs throughput-oriented design, Amdahl&rsquo;s law, memory-bound applications.</li>
+      <li>NVIDIA, <a href="https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf"><em>RTX Blackwell GPU Architecture</em> whitepaper</a>, Appendix C (GB205 / RTX 5070 specifications): every peak number in this chapter.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html">CUDA Programming Guide, Compute Capabilities</a>: per-SM limits for compute capability 12.x.</li>
+      <li>Horace He, <a href="https://horace.io/brrr_intro.html"><em>Making Deep Learning Go Brrrr From First Principles</em></a> (2022): the compute / memory / overhead framing. Read it after this chapter; it takes 20 minutes.</li>
+      <li>Vasily Volkov, <em>Understanding Latency Hiding on GPUs</em> (PhD thesis, UC Berkeley, 2016): Little&rsquo;s law applied rigorously to GPUs. Deep background for chapter 3.</li>
+      <li>kipply, <a href="https://kipp.ly/transformer-inference-arithmetic/"><em>Transformer Inference Arithmetic</em></a> (2022): the full version of section 5&rsquo;s estimate, which chapter 13 builds on.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="index.html">&larr; Index</a>
+      <a href="index.html">Index</a>
+      <a href="cap-02-execution-model.html">Ch. 2 — The execution model &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part I · Chapter 1 · hardware figures verified against NVIDIA documentation, September 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/decode-ceiling.js"></script>
+</body>
+</html>

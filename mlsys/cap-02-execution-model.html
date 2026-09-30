@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 2 — The execution model: grids, blocks, warps · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-01-the-job-and-the-machine.html">&larr; Ch. 1 — The job, the machine, and your bench</a>
+    <a href="index.html">Index</a>
+    <a href="cap-03-memory-hierarchy.html">Ch. 3 — The memory hierarchy &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part I — The GPU · Chapter 2</div>
+    <h1>The execution model: grids, blocks, warps</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>3 interactive widgets</span><span>5 plates</span><span>lab 1 · ~40 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>A kernel launch creates a <em>grid</em> of thousands of threads, grouped into <em>blocks</em> that the hardware places on SMs independently, and each block is cut into <em>warps</em> of 32 threads that execute one instruction at a time, together. That last fact explains the two things this chapter is really about. <strong>Branches</strong> cost nothing when a warp agrees and cost both paths when it doesn&rsquo;t, so the question is never &ldquo;is there an <code>if</code>?&rdquo; but &ldquo;do the 32 threads of a warp disagree?&rdquo;. And <strong>occupancy</strong>, how many warps an SM can hold at once, is set by whichever resource runs out first: thread slots, block slots, registers or shared memory. It matters only as far as it keeps enough work in flight to hide latency.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The shape of a CUDA program</a></li>
+      <li><a href="#s2">The kernel, line by line</a></li>
+      <li><a href="#s3">Grids and blocks in two dimensions</a></li>
+      <li><a href="#s4">Why blocks exist</a></li>
+      <li><a href="#s5">From source to SASS</a></li>
+      <li><a href="#s6">The SM up close: warps and SIMT</a></li>
+      <li><a href="#s7">Branches: uniform, varying, divergent</a></li>
+      <li><a href="#s8">Warp scheduling: how latency disappears</a></li>
+      <li><a href="#s9">Occupancy: who gets to live on the SM</a></li>
+      <li><a href="#s10">Lab 1: warps and occupancy</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. The shape of a CUDA program</h2>
+
+    <p>A CUDA program is an ordinary C++ program running on the CPU (the <strong>host</strong>) that occasionally hands a function to the GPU (the <strong>device</strong>) to run in parallel. The two have separate memories: your 12 GB of VRAM is not addressable by the CPU the way RAM is, and the CPU&rsquo;s memory is not directly visible to kernels. So every CUDA program has the same skeleton, which you already ran in lab 0:</p>
+
+    <ol>
+      <li><strong>Allocate</strong> device memory: <code>cudaMalloc</code>.</li>
+      <li><strong>Copy inputs</strong> host &rarr; device: <code>cudaMemcpy(..., cudaMemcpyHostToDevice)</code>.</li>
+      <li><strong>Launch</strong> the kernel: <code>kernel&lt;&lt;&lt;blocks, threads&gt;&gt;&gt;(args)</code>.</li>
+      <li><strong>Copy outputs</strong> device &rarr; host: <code>cudaMemcpy(..., cudaMemcpyDeviceToHost)</code>.</li>
+      <li><strong>Free</strong>: <code>cudaFree</code>.</li>
+    </ol>
+
+    <p>Click through the host side of lab 0&rsquo;s test to see each call and the trap hiding in it:</p>
+    <div id="w-host"></div>
+
+    <h3>The launch is asynchronous</h3>
+    <p>The most important line is the one that looks least important. <code>vecadd&lt;&lt;&lt;...&gt;&gt;&gt;(...)</code> does not run the kernel; it <em>enqueues</em> it and returns immediately, typically in a few microseconds, while the GPU starts working. The CPU is free to prepare the next launch. That is how a well-written program keeps the GPU fed, and it is why the two kinds of errors in <code>check.h</code> exist: a bad launch configuration is reported at once by <code>cudaGetLastError()</code>, but an out-of-bounds access inside the kernel only surfaces at the next synchronization point, possibly many lines later.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Timeline with two lanes, CPU and GPU. The CPU issues two copies, a kernel launch that returns immediately, does other work, then blocks on a copy back, which waits for the kernel to finish.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 170" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Host and device timeline</title>
+        <defs><marker id="c2a" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-vermilion)"/></marker></defs>
+        <text x="10" y="48" font-size="11" font-weight="700" fill="var(--lk-cobalt-dark)">CPU</text>
+        <text x="10" y="118" font-size="11" font-weight="700" fill="var(--lk-cobalt-dark)">GPU</text>
+        <line x1="50" y1="44" x2="630" y2="44" stroke="var(--lk-rule-soft)"/><line x1="50" y1="114" x2="630" y2="114" stroke="var(--lk-rule-soft)"/>
+        <g font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">
+          <rect x="55" y="32" width="70" height="24" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="90" y="48">copy a, b</text>
+          <rect x="55" y="102" width="70" height="24" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="90" y="118">PCIe in</text>
+          <rect x="130" y="32" width="40" height="24" fill="var(--lk-paper)" stroke="var(--lk-vermilion)"/><text x="150" y="48">&lt;&lt;&lt;&gt;&gt;&gt;</text>
+          <rect x="175" y="32" width="150" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-dasharray="3 2"/><text x="250" y="48">free for other work</text>
+          <rect x="140" y="102" width="220" height="24" fill="var(--lk-paper)" stroke="var(--lk-forest)" stroke-width="1.5"/><text x="250" y="118">vecadd runs</text>
+          <rect x="330" y="32" width="30" height="24" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)"/><text x="345" y="48">wait</text>
+          <rect x="365" y="32" width="70" height="24" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="400" y="48">copy c</text>
+          <rect x="365" y="102" width="70" height="24" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="400" y="118">PCIe out</text>
+        </g>
+        <path d="M150 56 L150 100" stroke="var(--lk-vermilion)" stroke-width="1.3" marker-end="url(#c2a)"/>
+        <text x="156" y="82" font-size="9" fill="var(--lk-vermilion)">enqueue, return at once</text>
+        <path d="M360 102 L345 58" stroke="var(--lk-vermilion)" stroke-width="1.3" marker-end="url(#c2a)"/>
+        <text x="380" y="82" font-size="9" fill="var(--lk-vermilion)">cudaMemcpy blocks until the kernel is done</text>
+        <text x="50" y="158" font-size="9.5" fill="var(--lk-ink-soft)">PCIe 5.0 x16: ≤ ~64 GB/s each way · VRAM: 672 GB/s · keep data on the GPU</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; Host and device run concurrently. The launch only enqueues work; <code>cudaMemcpy</code> back to the host is what waits. The transfer lanes are also the honest cost accounting: the PCIe link is an order of magnitude slower than VRAM.</figcaption>
+    </figure>
+
+    <details class="ym">
+      <summary>Your move: counting the two copies in and one copy out, is lab 0&rsquo;s vector add faster on the GPU or on one CPU core?</summary>
+      <p>On the CPU. The kernel reads and writes 12 bytes per element from VRAM at ~600 GB/s, but getting those bytes onto the card and back costs the same 12 bytes over PCIe at, at best, a tenth of that speed. The GPU&rsquo;s entire advantage is eaten by the trip. The lesson is architectural, and it is how every serving engine is built: <strong>data lives on the GPU</strong>. Weights are uploaded once at startup; activations and the KV cache never leave VRAM; only token IDs and logits cross the bus. A kernel that is fast in isolation but requires a round trip to the host is not fast.</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. The kernel, line by line</h2>
+
+    <p>Now the device side. Click each line:</p>
+    <div id="w-kernel"></div>
+
+    <p>Three ideas to keep from it.</p>
+    <p><strong>The loop became the grid.</strong> The CPU version is <code>for (i = 0; i &lt; n; ++i) c[i] = a[i] + b[i];</code>. The kernel has no loop: each thread <em>is</em> one iteration, identified by its coordinates. This style is called SPMD, single program, multiple data: every thread runs the same function, and the only thing that differs is its ID and therefore its data.</p>
+    <p><strong>Function qualifiers say where code runs.</strong> <code>__global__</code> marks a kernel: runs on the device, launched from the host, returns <code>void</code>. <code>__device__</code> marks a helper callable only from device code (a function a kernel calls; it does not launch anything). <code>__host__</code> is the default for ordinary functions, and <code>__host__ __device__</code> compiles one function for both sides, which is how lab 1&rsquo;s <code>path_a</code> serves as both the kernel&rsquo;s math and the CPU reference.</p>
+    <p><strong>The grid is rounded up, so the guard is mandatory.</strong> Blocks all have the same size. For n = 1,000,003 and 256-thread blocks you need &lceil;1,000,003 / 256&rceil; = 3,907 blocks = 1,000,192 threads, and the last 189 threads have no element. Without <code>if (i &lt; n)</code> they would read and write past the end of the arrays. The integer idiom for the rounding is <code>(n + B - 1) / B</code>.</p>
+
+    <div class="callout warn">
+      <span class="callout-label">The overflow nobody expects</span>
+      <p><code>blockIdx.x * blockDim.x</code> is computed in 32-bit unsigned arithmetic. It wraps silently once a grid covers more than 2<sup>32</sup> elements, which is 16 GB of floats, so it is rare on your card but common on an 80 GB H100. Lab 0 casts to <code>size_t</code> before multiplying. Lab 1 uses <code>int</code> where sizes are known to be small; decide deliberately, every time.</p>
+    </div>
+  </section>
+
+  <section id="s3">
+    <h2>3. Grids and blocks in two dimensions</h2>
+
+    <p>Grids and blocks can have up to three dimensions, described by the type <code>dim3</code> (x, y, z, with unused dimensions set to 1). You pick the dimensionality that mirrors the data: 1D for vectors, 2D for images and matrices. The limits on your card, which have not changed in years:</p>
+    <table>
+      <tr><th>Limit</th><th>Value</th></tr>
+      <tr><td>Threads per block (x &middot; y &middot; z)</td><td>&le; 1,024 in total; x, y &le; 1,024; z &le; 64</td></tr>
+      <tr><td>Blocks per grid</td><td>x &le; 2<sup>31</sup>&minus;1; y, z &le; 65,535</td></tr>
+    </table>
+
+    <p>Take an image 1,000 pixels wide and 700 tall, one thread per pixel, with 32&times;8 blocks (256 threads):</p>
+<pre><code class="language-cpp">dim3 block(32, 8);                                   // x = 32 columns, y = 8 rows
+dim3 grid((1000 + 31) / 32, (700 + 7) / 8);          // 32 x 88 blocks
+blur&lt;&lt;&lt;grid, block&gt;&gt;&gt;(in, out, 1000, 700);
+
+// inside the kernel
+int col = blockIdx.x * blockDim.x + threadIdx.x;     // x is the column...
+int row = blockIdx.y * blockDim.y + threadIdx.y;     // ...y is the row
+if (row &lt; height &amp;&amp; col &lt; width)                   // BOTH guards
+    out[row * width + col] = ...;                    // row-major: row, then column</code></pre>
+
+    <figure class="lk-fig" role="img" aria-label="An image of 1000 by 700 pixels covered by a grid of 32 by 88 blocks of 32 by 8 threads. The last column of blocks overhangs the right edge by 24 pixels, the last row of blocks overhangs the bottom by 4 rows. Below, a 2D element at row r and column c maps to linear offset r times width plus c.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 260" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>2D grid over an image</title>
+        <rect x="30" y="30" width="330" height="200" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <g stroke="var(--lk-rule-soft)" stroke-width="1">
+          <line x1="72" y1="30" x2="72" y2="238"/><line x1="114" y1="30" x2="114" y2="238"/><line x1="156" y1="30" x2="156" y2="238"/><line x1="198" y1="30" x2="198" y2="238"/><line x1="240" y1="30" x2="240" y2="238"/><line x1="282" y1="30" x2="282" y2="238"/><line x1="324" y1="30" x2="324" y2="238"/>
+          <line x1="30" y1="70" x2="370" y2="70"/><line x1="30" y1="110" x2="370" y2="110"/><line x1="30" y1="150" x2="370" y2="150"/><line x1="30" y1="190" x2="370" y2="190"/>
+        </g>
+        <rect x="324" y="30" width="46" height="208" fill="none" stroke="var(--lk-vermilion)" stroke-dasharray="4 3"/>
+        <rect x="30" y="190" width="340" height="48" fill="none" stroke="var(--lk-vermilion)" stroke-dasharray="4 3"/>
+        <rect x="156" y="110" width="42" height="40" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="177" y="128" font-size="9" text-anchor="middle" fill="var(--lk-cobalt-dark)">block</text><text x="177" y="140" font-size="9" text-anchor="middle" fill="var(--lk-cobalt-dark)">(3, 2)</text>
+        <text x="195" y="20" font-size="10" text-anchor="middle" fill="var(--lk-ink)">width = 1000 → gridDim.x = 32 blocks (1024 threads)</text>
+        <text x="16" y="130" font-size="10" text-anchor="middle" fill="var(--lk-ink)" transform="rotate(-90 16 130)">height = 700 → 88 blocks</text>
+        <text x="376" y="60" font-size="9" fill="var(--lk-vermilion)">last block column:</text><text x="376" y="72" font-size="9" fill="var(--lk-vermilion)">8 of 32 columns real</text>
+        <text x="376" y="222" font-size="9" fill="var(--lk-vermilion)">last block row: 4 of 8 rows real</text>
+        <g font-size="10" fill="var(--lk-ink)">
+          <text x="440" y="118" font-weight="700" fill="var(--lk-cobalt-dark)">memory is 1D:</text>
+          <text x="440" y="136">img[row][col] lives at</text>
+          <text x="440" y="152" fill="var(--lk-cobalt-dark)">row * width + col</text>
+          <text x="440" y="176">neighbours in x → adjacent</text>
+          <text x="440" y="190">neighbours in y → 4 KB apart</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; A 32&times;88 grid of 32&times;8 blocks over a 1000&times;700 image. The grid overhangs on the right and at the bottom, hence two guards. Whatever the dimensionality, memory is one long line, and C/CUDA store 2D arrays <strong>row-major</strong>: moving along a row is moving along memory.</figcaption>
+    </figure>
+
+    <div class="callout note">
+      <span class="callout-label">The order that trips everyone</span>
+      <p>Arrays are indexed <code>[row][col]</code>, &ldquo;y then x&rdquo;, but launches are written <code>dim3(x, y)</code>, &ldquo;x then y&rdquo;. Put the column in <code>x</code>. The reason is not taste: threads with consecutive <code>threadIdx.x</code> end up in the same warp (section 6), and you want a warp to touch consecutive addresses, which in a row-major array means consecutive columns. Chapter 3 turns this into the coalescing rule.</p>
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Why blocks exist</h2>
+
+    <p>If threads are the unit of work, why the intermediate level? Because blocks are the unit of <em>placement</em>. When a grid launches, the hardware assigns whole blocks to SMs. All threads of a block land on the same SM at the same time, and stay there until the block finishes. As blocks finish, waiting blocks take their place. Two guarantees follow, and one thing you give up:</p>
+    <ul>
+      <li><strong>Threads in a block can cooperate.</strong> They share the SM&rsquo;s fast on-chip <em>shared memory</em> (chapter 3), and they can wait for each other with <code>__syncthreads()</code>: a barrier no thread in the block passes until all have reached it.</li>
+      <li><strong>Blocks are independent.</strong> There is no barrier across blocks, and no guarantee about their order: block 7 may finish before block 0 starts, or they may run simultaneously. Your kernel must be correct under any order.</li>
+      <li><strong>In exchange: transparent scalability.</strong> Because blocks never wait on each other, the hardware can run as many at a time as fit. Your 48-SM card and a 170-SM RTX 5090 run the same binary, and the bigger one just drains the queue of blocks faster.</li>
+    </ul>
+
+    <details class="ym">
+      <summary>Your move: you need every block to finish phase 1 before any block starts phase 2. A colleague suggests a global counter: each block increments it after phase 1 and spins until it reaches gridDim.x. What goes wrong?</summary>
+      <p>It can deadlock. If the grid has more blocks than fit on the GPU at once, the resident blocks spin forever waiting for blocks that can never be scheduled, because the spinners are occupying the SMs those blocks need. Even when it happens to work on your card, it can hang on a smaller GPU or under a profiler. The standard answer is to <strong>split the kernel in two</strong>: the end of a kernel launch is the global barrier, and it costs only a few microseconds. (Cooperative launches offer a real grid-wide sync, but only for grids small enough to be entirely resident.)</p>
+    </details>
+
+    <div class="callout warn">
+      <span class="callout-label">Barriers and branches</span>
+      <p>A <code>__syncthreads()</code> must be reached by <em>every</em> thread of the block. Placing one inside an <code>if</code> that only some threads take, or one in the <code>then</code> branch and another in the <code>else</code> (they are different barriers), is undefined behaviour: wrong results or a hang. Keep barriers in code that all threads of the block execute.</p>
+    </div>
+  </section>
+
+  <section id="s5">
+    <h2>5. From source to SASS</h2>
+
+    <p>Lab 0 printed a line you were told to ignore: <code>ptxas info : Used 12 registers</code>. Here is where it comes from.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Compilation pipeline. nvcc splits a .cu file into host code, compiled by g++, and device code, compiled to PTX, a virtual instruction set, then by ptxas to SASS machine code for sm_120. Both SASS and PTX are packed in a fatbinary inside the executable; at run time the driver loads the SASS or JIT-compiles the PTX for newer GPUs.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 200" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>nvcc compilation pipeline</title>
+        <defs><marker id="c2b" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker></defs>
+        <g font-size="10" text-anchor="middle" fill="var(--lk-ink)">
+          <rect x="10" y="80" width="80" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/><text x="50" y="104">vecadd.cu</text>
+          <rect x="120" y="80" width="60" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/><text x="150" y="104">nvcc</text>
+          <rect x="215" y="20" width="110" height="36" rx="3" fill="var(--lk-paper)" stroke="var(--lk-rule)"/><text x="270" y="36">host C++</text><text x="270" y="49" font-size="8.5" fill="var(--lk-ink-soft)">→ g++ / cl.exe</text>
+          <rect x="200" y="130" width="140" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)"/><text x="270" y="147">PTX</text><text x="270" y="161" font-size="8.5" fill="var(--lk-ink-soft)">virtual ISA · compute_120</text>
+          <rect x="360" y="130" width="130" height="40" rx="3" fill="var(--lk-paper)" stroke="var(--lk-vermilion)" stroke-width="1.5"/><text x="425" y="147">SASS</text><text x="425" y="161" font-size="8.5" fill="var(--lk-ink-soft)">machine code · sm_120</text>
+          <rect x="500" y="80" width="130" height="50" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.5"/><text x="565" y="100">executable</text><text x="565" y="115" font-size="8.5" fill="var(--lk-ink-soft)">host code + fatbin</text><text x="565" y="126" font-size="8.5" fill="var(--lk-ink-soft)">(SASS + PTX)</text>
+        </g>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none">
+          <path d="M90 100 L118 100" marker-end="url(#c2b)"/><path d="M180 95 L213 42" marker-end="url(#c2b)"/><path d="M180 105 L198 145" marker-end="url(#c2b)"/>
+          <path d="M340 150 L358 150" marker-end="url(#c2b)"/><path d="M490 140 L505 131" marker-end="url(#c2b)"/><path d="M325 38 L498 95" marker-end="url(#c2b)"/>
+          <path d="M300 170 C380 200 560 195 590 132" stroke-dasharray="4 3" marker-end="url(#c2b)"/>
+        </g>
+        <text x="360" y="124" font-size="9" fill="var(--lk-vermilion)">ptxas: registers, spills</text>
+        <text x="10" y="160" font-size="9" fill="var(--lk-ink-soft)">dashed: PTX is kept too,</text><text x="10" y="172" font-size="9" fill="var(--lk-ink-soft)">so newer GPUs can JIT it</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; nvcc splits every <code>.cu</code> file. Host code goes to your normal C++ compiler. Device code goes to <strong>PTX</strong>, a stable virtual instruction set, and then <code>ptxas</code> assembles it into <strong>SASS</strong>, the real machine code of one GPU family. <code>-arch=sm_120</code> is shorthand for &ldquo;SASS for sm_120, plus the PTX&rdquo;, so a future GPU can still JIT-compile it.</figcaption>
+    </figure>
+
+    <p>Register allocation happens in <code>ptxas</code>, which is why it is the one reporting. &ldquo;Used 12 registers&rdquo; means each vecadd <em>thread</em> needs 12 32-bit registers: the three pointers (two registers each, since pointers are 64-bit), <code>n</code>, the index, the loaded values. Twelve is tiny. In section 9 you will see why the number matters: registers are the resource most likely to limit how many threads an SM can hold.</p>
+
+    <p>You can read the SASS yourself with <code>cuobjdump -sass ./divergence</code>. You don&rsquo;t need to write it, but learning to skim it is a real skill: it is the only ground truth about what the compiler did. Here is the heart of lab 1&rsquo;s branch, abridged:</p>
+<pre><code>ISETP.GE.AND P0, PT, R0, UR5, PT   // P0 = (i >= n), one bit per thread
+@P0 EXIT                           // the bounds guard: those threads leave
+...
+BSSY.RECONVERGENT B0, ...          // note where the two paths will meet again
+@P0 BRA path_b                     // threads with P0 jump; the others fall through
+FFMA R5, R5, R2, 0.001             // path A: x = x * 0.999 + 0.001 (one fused op)
+...
+FMUL R5, R5, 0.999                 // path B: the same map as two instructions
+FADD R5, R5, 0.001
+...
+BSYNC.RECONVERGENT B0              // wait until both paths have finished</code></pre>
+    <p>Notice the <code>@P0</code> prefix: <strong>predication</strong>. Every SASS instruction can be guarded by a per-thread predicate bit, and threads whose bit is false simply don&rsquo;t execute it. That is the mechanism behind everything in section 7.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Compatibility in one paragraph</span>
+      <p>SASS for <code>sm_120</code> runs on compute capability 12.x GPUs and nothing else. PTX runs anywhere newer, via the driver&rsquo;s JIT compiler (with a one-time delay at startup). Libraries like PyTorch ship SASS for several architectures plus PTX for the newest, which is why their binaries are huge. You will later meet <code>sm_120a</code>: the <code>a</code> unlocks architecture-specific instructions (some tensor-core formats) at the price of that forward compatibility.</p>
+    </div>
+  </section>
+
+  <section id="s6">
+    <h2>6. The SM up close: warps and SIMT</h2>
+
+    <p>An SM on your card is split into four <strong>quadrants</strong> (also called sub-partitions or processing blocks). Each quadrant has its own warp scheduler, a quarter of the 256 KB register file, 32 of the SM&rsquo;s 128 FP32/INT32 lanes, and one tensor core. The L1 cache / shared memory (128 KB) is shared by the whole SM.</p>
+
+    <figure class="lk-fig" role="img" aria-label="One streaming multiprocessor with four quadrants. Each quadrant has a warp scheduler, a 64 KB register file, 32 lanes and a tensor core. Below them a 128 KB L1 and shared memory block serves all four. A block of 256 threads is cut into 8 warps, which are spread across the quadrants.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 300" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>SM anatomy on compute capability 12.0</title>
+        <rect x="10" y="10" width="420" height="280" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.6"/>
+        <text x="220" y="28" text-anchor="middle" font-size="11" font-weight="700" fill="var(--lk-cobalt-dark)">one SM (×48 on your card)</text>
+        <g font-size="9" text-anchor="middle" fill="var(--lk-ink)">
+          <g><rect x="22" y="38" width="95" height="180" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+            <rect x="28" y="44" width="83" height="22" fill="var(--lk-hl)" stroke="none"/><text x="69" y="59">warp scheduler</text>
+            <rect x="28" y="72" width="83" height="34" fill="none" stroke="var(--lk-cobalt)"/><text x="69" y="87">register file</text><text x="69" y="99">64 KB</text>
+            <rect x="28" y="112" width="83" height="62" fill="none" stroke="var(--lk-forest)"/><text x="69" y="140">32 lanes</text><text x="69" y="153">FP32 / INT32</text>
+            <rect x="28" y="180" width="83" height="30" fill="none" stroke="var(--lk-rule)"/><text x="69" y="199">tensor core</text></g>
+          <g transform="translate(102 0)"><rect x="22" y="38" width="95" height="180" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+            <rect x="28" y="44" width="83" height="22" fill="var(--lk-hl)" stroke="none"/><text x="69" y="59">warp scheduler</text>
+            <rect x="28" y="72" width="83" height="34" fill="none" stroke="var(--lk-cobalt)"/><text x="69" y="87">register file</text><text x="69" y="99">64 KB</text>
+            <rect x="28" y="112" width="83" height="62" fill="none" stroke="var(--lk-forest)"/><text x="69" y="140">32 lanes</text><text x="69" y="153">FP32 / INT32</text>
+            <rect x="28" y="180" width="83" height="30" fill="none" stroke="var(--lk-rule)"/><text x="69" y="199">tensor core</text></g>
+          <g transform="translate(204 0)"><rect x="22" y="38" width="95" height="180" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+            <rect x="28" y="44" width="83" height="22" fill="var(--lk-hl)" stroke="none"/><text x="69" y="59">warp scheduler</text>
+            <rect x="28" y="72" width="83" height="34" fill="none" stroke="var(--lk-cobalt)"/><text x="69" y="87">register file</text><text x="69" y="99">64 KB</text>
+            <rect x="28" y="112" width="83" height="62" fill="none" stroke="var(--lk-forest)"/><text x="69" y="140">32 lanes</text><text x="69" y="153">FP32 / INT32</text>
+            <rect x="28" y="180" width="83" height="30" fill="none" stroke="var(--lk-rule)"/><text x="69" y="199">tensor core</text></g>
+          <g transform="translate(306 0)"><rect x="22" y="38" width="95" height="180" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)"/>
+            <rect x="28" y="44" width="83" height="22" fill="var(--lk-hl)" stroke="none"/><text x="69" y="59">warp scheduler</text>
+            <rect x="28" y="72" width="83" height="34" fill="none" stroke="var(--lk-cobalt)"/><text x="69" y="87">register file</text><text x="69" y="99">64 KB</text>
+            <rect x="28" y="112" width="83" height="62" fill="none" stroke="var(--lk-forest)"/><text x="69" y="140">32 lanes</text><text x="69" y="153">FP32 / INT32</text>
+            <rect x="28" y="180" width="83" height="30" fill="none" stroke="var(--lk-rule)"/><text x="69" y="199">tensor core</text></g>
+          <rect x="22" y="228" width="401" height="50" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-dasharray="4 3"/>
+          <text x="222" y="250">L1 cache / shared memory · 128 KB (up to 100 KB as shared)</text>
+          <text x="222" y="266" fill="var(--lk-ink-soft)">shared by all blocks resident on this SM</text>
+        </g>
+        <g font-size="9.5" fill="var(--lk-ink)">
+          <text x="455" y="50" font-weight="700" fill="var(--lk-cobalt-dark)">a 256-thread block</text>
+          <text x="455" y="64" fill="var(--lk-ink-soft)">= 8 warps, threadIdx 0–31, 32–63, …</text>
+          <g stroke="var(--lk-forest)" fill="var(--lk-paper-light)">
+            <rect x="455" y="74" width="80" height="14"/><rect x="455" y="92" width="80" height="14"/><rect x="455" y="110" width="80" height="14"/><rect x="455" y="128" width="80" height="14"/>
+            <rect x="545" y="74" width="80" height="14"/><rect x="545" y="92" width="80" height="14"/><rect x="545" y="110" width="80" height="14"/><rect x="545" y="128" width="80" height="14"/>
+          </g>
+          <g font-size="8.5" text-anchor="middle"><text x="495" y="85">warp 0 → Q0</text><text x="495" y="103">warp 1 → Q1</text><text x="495" y="121">warp 2 → Q2</text><text x="495" y="139">warp 3 → Q3</text>
+          <text x="585" y="85">warp 4 → Q0</text><text x="585" y="103">warp 5 → Q1</text><text x="585" y="121">warp 6 → Q2</text><text x="585" y="139">warp 7 → Q3</text></g>
+          <text x="455" y="170">per SM, at most:</text>
+          <text x="455" y="186" fill="var(--lk-cobalt-dark)">48 warps (1,536 threads)</text>
+          <text x="455" y="200" fill="var(--lk-cobalt-dark)">24 blocks</text>
+          <text x="455" y="214" fill="var(--lk-cobalt-dark)">65,536 registers</text>
+          <text x="455" y="228" fill="var(--lk-cobalt-dark)">100 KB shared memory</text>
+          <text x="455" y="250" fill="var(--lk-ink-soft)">each scheduler issues one</text>
+          <text x="455" y="263" fill="var(--lk-ink-soft)">warp-instruction per cycle,</text>
+          <text x="455" y="276" fill="var(--lk-ink-soft)">from up to 12 resident warps</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; The SM on compute capability 12.0 (quadrant contents are the SM totals from NVIDIA&rsquo;s whitepaper divided by four). A block&rsquo;s warps are spread over the quadrants; each quadrant&rsquo;s scheduler picks one ready warp per cycle and issues one instruction for all its 32 threads. The limits on the right reappear in section 9.</figcaption>
+    </figure>
+
+    <p>When a block arrives on an SM, it is cut into <strong>warps</strong> of 32 threads with consecutive thread indices: threads 0&ndash;31 form warp 0, 32&ndash;63 warp 1, and so on. A 2D block is first flattened row by row (x fastest, then y, then z), so a 32&times;8 block gives 8 warps, each one row of 32 pixels, which is exactly why section 3 put the column in x. A block whose size is not a multiple of 32 wastes the tail of its last warp: a 48-thread block occupies two full warps, one of them half empty. Always use multiples of 32.</p>
+
+    <p>The warp is the unit the hardware actually schedules. A scheduler fetches one instruction and issues it to all 32 threads of a warp at once, each thread using its own registers: same instruction, different data. That is SIMD hardware, and NVIDIA calls the programming model on top of it <strong>SIMT</strong>, single instruction, multiple threads, because you write the code of <em>one</em> thread and the hardware groups 32 of them. The grouping is invisible for correctness and decisive for performance.</p>
+
+    <h3>Uniform and varying</h3>
+    <p>The most useful mental tool for everything that follows: for any value in a kernel, ask whether it is the same for all 32 threads of a warp.</p>
+    <ul>
+      <li><strong>Uniform</strong>: <code>n</code>, <code>blockIdx.x</code>, <code>blockDim.x</code>, pointers passed as arguments, loop counters of loops with uniform bounds, <code>threadIdx.x / 32</code> (the warp index).</li>
+      <li><strong>Varying</strong>: <code>threadIdx.x</code>, <code>i</code>, anything loaded from <code>a[i]</code>, anything computed from a varying value.</li>
+    </ul>
+    <p>The hardware cares about this distinction so much that it has a separate <em>uniform datapath</em> for it: in the SASS above, the <code>UR</code> registers and <code>U</code>-prefixed instructions (<code>UISETP</code>, <code>BRA.U</code>) hold and process values the compiler proved are the same for the whole warp, computed once instead of 32 times. Section 7 applies the distinction to branches.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Branches: uniform, varying, divergent</h2>
+
+    <p>A warp has one instruction stream. So what happens at an <code>if</code> whose condition differs between threads? The hardware evaluates the condition per thread into a predicate, then:</p>
+    <ul>
+      <li>If <strong>all 32 threads agree</strong>, the warp takes that path and skips the other. The branch cost is a comparison and a jump, the same as on a CPU.</li>
+      <li>If they <strong>disagree</strong>, the warp <strong>diverges</strong>: it executes the <code>then</code> path with the <code>else</code>-threads masked off, then the <code>else</code> path with the <code>then</code>-threads masked off, then reconverges. Every thread waits through the path it did not take.</li>
+    </ul>
+    <p>So the cost model is simple: <strong>a warp pays for every path that at least one of its threads takes.</strong> Step through it:</p>
+
+    <div id="w-warp" class="w"></div>
+
+    <p>The consequence, which is the thing to take away if you have ever struggled to &ldquo;avoid branches&rdquo; in shaders: <strong>branches are not the problem; disagreement within a warp is.</strong> Check the condition&rsquo;s uniformity:</p>
+    <table>
+      <tr><th>Condition</th><th>Uniform within a warp?</th><th>Cost</th></tr>
+      <tr><td><code>if (n &gt; 1024)</code>, <code>if (mode == 2)</code></td><td>yes: kernel arguments</td><td>free</td></tr>
+      <tr><td><code>if ((threadIdx.x / 32) % 2 == 0)</code></td><td>yes: depends only on the warp index</td><td>free: different warps take different paths, each takes one</td></tr>
+      <tr><td><code>if (threadIdx.x % 2 == 0)</code></td><td>no: neighbours disagree</td><td>both paths, every warp</td></tr>
+      <tr><td><code>if (threadIdx.x % 32 != 0)</code></td><td>no: 31 against 1</td><td>both paths, every warp: one dissenter is enough</td></tr>
+      <tr><td><code>if (i &lt; n)</code></td><td>no, but only in one warp</td><td>negligible: one warp of the grid has idle lanes</td></tr>
+      <tr><td><code>if (x[i] &gt; 0)</code> on data</td><td>depends on the data</td><td>sorted data: rarely diverges; random data: usually diverges</td></tr>
+    </table>
+
+    <details class="ym">
+      <summary>Your move: in lab 1&rsquo;s <code>divergence</code>, path A costs 1 instruction per step and path B costs 2. If all-A takes time t, predict all-B, warp-split, lane-split and one-lane.</summary>
+      <p><strong>all-B &asymp; 2t</strong> (twice the instructions). <strong>warp-split &asymp; 1.5t</strong>: half the warps run A, half run B, each warp runs only its own path, so the average is (t + 2t) / 2. <strong>lane-split &asymp; 3t</strong>: every warp diverges and pays A <em>plus</em> B. <strong>one-lane &asymp; 3t as well</strong>: one lane taking B forces the whole warp through B while the other 31 wait, so it is exactly as bad as the 50/50 split. That last one is the one people get wrong. The cost of divergence depends on <em>whether</em> a warp disagrees, not on <em>how many</em> threads disagree.</p>
+    </details>
+
+    <h3>The boundary check is (almost) free</h3>
+    <p>The most common divergent branch in real code is the guard <code>if (i &lt; n)</code>. For n = 1,003 and 256-thread blocks, 4 blocks (32 warps) are launched; 31 warps are entirely inside the array, and one, covering i = 992&hellip;1,023, has 11 active lanes and 21 idle. It is a one-sided branch (there is no <code>else</code>), so the warp doesn&rsquo;t even pay a second path: it just runs the body with 21 lanes masked, as the stepper&rsquo;s last case shows. In a 2D kernel the same logic applies at the edges: in the 1000&times;700 example, the last column of blocks contains 704 partially-idle warps out of 22,528 (3%), and at the bottom, because each warp is one full row, whole warps fall outside the image and exit immediately without costing anything.</p>
+
+    <h3>Loops diverge too</h3>
+    <p>A loop whose trip count varies per thread is a branch at the end of every iteration. A warp runs until its <em>slowest</em> thread finishes: if one thread needs 1,000 iterations and the rest need 10, the warp runs 1,000, mostly with a single active lane. This is the real-world killer: ragged work per thread (variable-length sequences, sparse rows of different lengths, early-exit searches). The fixes are about work assignment, not syntax: sort or bucket the work so that neighbours get similar amounts, or split long items across several threads.</p>
+
+    <h3>Predication: when the compiler removes the branch for you</h3>
+    <p>For a short conditional like <code>y = (x &gt; 0) ? x : 0.1f * x</code>, the compiler usually doesn&rsquo;t branch at all. It computes both sides and selects the result per thread (<code>FSEL</code>), or predicates a few instructions with <code>@P</code>. Both &ldquo;paths&rdquo; always execute, but they are one or two instructions each, which is cheaper than a jump. So for short divergent branches, divergence is simply not a concept you need to worry about. It becomes one when the paths are long, as in lab 1, or when they contain memory accesses.</p>
+
+    <h3>What Volta changed (and didn&rsquo;t)</h3>
+    <p>Since the Volta generation (2017), each thread has its own program counter: <strong>independent thread scheduling</strong>. The two sides of a divergent branch may now <em>interleave</em> (A for a while, then B, then A again) instead of strictly running one after the other, and threads of a warp are no longer guaranteed to be in lockstep at any given point. What this changes:</p>
+    <ul>
+      <li><strong>Correctness, not speed.</strong> Old code that assumed a warp always moves in lockstep (&ldquo;warp-synchronous programming&rdquo;, e.g. exchanging values through shared memory without a barrier) is broken. When threads of a warp must be at the same point, say so explicitly: <code>__syncwarp()</code>, or warp primitives like <code>__shfl_sync</code> that take a mask. You will use these in chapter 5.</li>
+      <li>Algorithms where one thread waits for another thread <em>of the same warp</em> (a spin lock inside a warp) can now make progress instead of deadlocking.</li>
+    </ul>
+    <p>What it does not change: at any instant a warp still executes one instruction for one subset of its threads. A divergent warp still pays for both paths. The cost model above is unchanged.</p>
+
+    <div class="callout idea">
+      <span class="callout-label">Writing branchy code, in practice</span>
+      <p>1. Make conditions depend on uniform values whenever the algorithm allows: branch on the warp or block index, not the thread index. 2. If the condition depends on data, arrange the data so that neighbours agree: sort, bin, or launch separate kernels per case. 3. Keep divergent paths short, and let the compiler predicate them. 4. Hoist uniform work out of divergent regions. 5. Ignore divergence from bounds checks; it is noise.</p>
+    </div>
+  </section>
+
+  <section id="s8">
+    <h2>8. Warp scheduling: how latency disappears</h2>
+
+    <p>Each quadrant can hold up to 12 warps (48 per SM) but issues one instruction per cycle. Why keep so many? Because most of them are waiting. A load from DRAM takes several hundred nanoseconds, so several hundred cycles; even an FMA takes a few cycles before its result can be used by the next dependent instruction. Every cycle, the scheduler looks at its warps, picks one whose next instruction has its inputs ready, and issues it. Switching between warps costs nothing, because every resident warp&rsquo;s registers stay in the register file permanently: there is no context to save, unlike a CPU thread switch.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Timeline of one warp scheduler over cycles. Warp 0 issues, then stalls waiting for memory; warps 1, 2 and 3 issue in turn during the stall; when warp 0's data returns it issues again. The issue slot is busy every cycle even though every warp spends most of its time waiting.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 190" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Latency hiding by warp switching</title>
+        <g font-size="10" fill="var(--lk-ink)"><text x="10" y="34">warp 0</text><text x="10" y="64">warp 1</text><text x="10" y="94">warp 2</text><text x="10" y="124">warp 3</text><text x="10" y="164" font-weight="700" fill="var(--lk-cobalt-dark)">issue slot</text></g>
+        <g fill="var(--lk-cobalt)">
+          <rect x="70" y="22" width="22" height="16"/><rect x="92" y="52" width="22" height="16"/><rect x="114" y="82" width="22" height="16"/><rect x="136" y="112" width="22" height="16"/>
+          <rect x="158" y="52" width="22" height="16"/><rect x="180" y="82" width="22" height="16"/><rect x="202" y="112" width="22" height="16"/>
+          <rect x="400" y="22" width="22" height="16"/><rect x="422" y="22" width="22" height="16"/><rect x="444" y="52" width="22" height="16"/><rect x="466" y="82" width="22" height="16"/><rect x="488" y="112" width="22" height="16"/>
+        </g>
+        <g fill="none" stroke="var(--lk-vermilion)" stroke-dasharray="3 2">
+          <rect x="92" y="24" width="308" height="12"/><rect x="180" y="54" width="264" height="12"/><rect x="202" y="84" width="264" height="12"/><rect x="224" y="114" width="264" height="12"/>
+        </g>
+        <text x="246" y="34" font-size="9" text-anchor="middle" fill="var(--lk-vermilion)">waiting on a load (hundreds of cycles)</text>
+        <g fill="var(--lk-forest)"><rect x="70" y="152" width="154" height="16"/><rect x="400" y="152" width="110" height="16"/></g>
+        <rect x="224" y="152" width="176" height="16" fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)"/>
+        <text x="312" y="164" font-size="9" text-anchor="middle" fill="var(--lk-vermilion)">idle: 4 warps were not enough</text>
+        <line x1="70" y1="180" x2="620" y2="180" stroke="var(--lk-rule)"/><text x="620" y="176" font-size="9" text-anchor="end" fill="var(--lk-ink-soft)">cycles →</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 5</b> &mdash; One scheduler, four warps, each issuing an instruction or two and then a load. While a warp waits, the scheduler issues from another, so the latency is <em>hidden</em>, until every warp is waiting at once and the issue slot goes idle. More resident warps, or more independent instructions per warp before the wait, would fill the gap.</figcaption>
+    </figure>
+
+    <p>This is chapter 1&rsquo;s Little&rsquo;s law seen from inside one SM. To keep an issue slot busy through a latency of L cycles, you need about L cycles&rsquo; worth of independent instructions available, and there are exactly two places they can come from:</p>
+    <ul>
+      <li><strong>More warps</strong> (thread-level parallelism): each warp contributes its next instruction. This is what occupancy measures.</li>
+      <li><strong>More independent instructions per warp</strong> (instruction-level parallelism): a thread that issues four independent loads before using any of them has four requests in flight, not one.</li>
+    </ul>
+    <p>Either works. That is why the next section ends with a warning.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Occupancy: who gets to live on the SM</h2>
+
+    <p><strong>Occupancy</strong> is the number of warps resident on an SM divided by the maximum (48 on your card). A block is admitted to an SM only if <em>all</em> of its resources are available at once. It needs thread slots for all its threads, a block slot, registers for all its threads, and its shared memory. So four independent limits apply, and the tightest one wins:</p>
+    <table>
+      <tr><th>Resource per SM (CC 12.0)</th><th>Capacity</th><th>Consumed per block</th></tr>
+      <tr><td>Thread slots</td><td>1,536 (48 warps)</td><td>threads per block</td></tr>
+      <tr><td>Block slots</td><td>24</td><td>1</td></tr>
+      <tr><td>Registers</td><td>65,536 (32-bit)</td><td>registers/thread &times; threads, allocated per warp in units of 256</td></tr>
+      <tr><td>Shared memory</td><td>up to 100 KB</td><td>what the kernel declares, + 1 KB reserved by CUDA per block</td></tr>
+    </table>
+
+    <p>Worked through for your card, block size alone first:</p>
+    <table>
+      <tr><th>Threads/block</th><th>Blocks that fit</th><th>Warps</th><th>Occupancy</th><th>Why</th></tr>
+      <tr><td>32</td><td>24</td><td>24</td><td>50%</td><td>block slots run out first</td></tr>
+      <tr><td>64, 96, 128, 192, 256, 384, 512, 768</td><td>1536 / size</td><td>48</td><td>100%</td><td>divides 1,536 evenly</td></tr>
+      <tr><td>e.g. 448, 640</td><td>3, 2</td><td>42, 40</td><td>88%, 83%</td><td>doesn&rsquo;t divide 1,536: the leftover slots stay empty</td></tr>
+      <tr><td>1,024</td><td>1</td><td>32</td><td>67%</td><td>a second block doesn&rsquo;t fit in the remaining 512 slots</td></tr>
+    </table>
+    <p>That last row surprises people coming from datacenter GPUs, where an SM holds 2,048 threads and 1,024-thread blocks are perfect. 1,536 is not a power of two: on your card, 1,024-thread blocks are a bad default, and 256 or 512 are good ones.</p>
+
+    <p>Registers are where the real cliffs are. For full occupancy each of 1,536 threads can have at most 65,536 / 1,536 &asymp; 42 registers, and because allocation is per warp in units of 256 registers (8 per thread), the practical limit is <strong>40</strong>. At 41 registers each warp&rsquo;s allocation rounds up to 48 per thread and occupancy drops to 83%. At 64 it is 67%, at 80 it is 50%, at 128 it is 33%. One extra variable can cost you a sixth of your warps. Try it:</p>
+
+    <div id="w-occ" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: lab 1&rsquo;s <code>tile</code> kernel keeps 64 accumulators per thread and compiles to 80 registers. What is its occupancy with 256-thread blocks, and what happens if you force it to 100% with <code>__launch_bounds__(256, 6)</code>?</summary>
+      <p>At 80 registers: 80 &times; 32 = 2,560 registers per warp, so each quadrant (16,384 registers) holds 6 warps: 24 warps, 3 blocks, <strong>50%</strong>. <code>__launch_bounds__(256, 6)</code> tells the compiler &ldquo;I want 6 blocks of 256 per SM&rdquo;, which caps it at 40 registers. It obeys, but 64 accumulators don&rsquo;t fit in 40 registers, so it <strong>spills</strong> the rest to local memory (per-thread memory that lives in the cache hierarchy and ultimately DRAM). The build prints it: <code>Used 40 registers, 428 bytes spill stores, 504 bytes spill loads</code>. You get 100% occupancy and a kernel doing hundreds of extra memory operations per thread. Predict which is faster, then measure; most of the time the spilling version loses.</p>
+    </details>
+
+    <h3>Occupancy is a means, not a goal</h3>
+    <p>High occupancy helps only when the kernel needs more warps to hide latency. Section 8 says there is another source of in-flight work: independent instructions within a thread. Some of the fastest kernels you will write in Part II (matrix multiply with register tiling, FlashAttention) deliberately run at 25&ndash;50% occupancy, using many registers per thread to hold data close and keep many independent operations in flight. Vasily Volkov&rsquo;s talk <em>Better Performance at Lower Occupancy</em> made this point famous in 2010, and it has only become more true.</p>
+
+    <details class="ym">
+      <summary>Your move: lab 1 experiment C forces vecadd&rsquo;s occupancy down by reserving unused shared memory per block (100% &rarr; 17%). At what occupancy do you expect bandwidth to drop, and what should happen with vecadd4, which loads 4 floats per thread with 16-byte loads?</summary>
+      <p>Back to Little&rsquo;s law. Chapter 1 estimated that even 100% occupancy with one 4-byte load per thread was barely enough to cover DRAM latency. So vecadd should start losing bandwidth as soon as occupancy falls noticeably below 100%, and collapse toward the bottom of the range. vecadd4 keeps 4&times; more bytes in flight per thread, so it should hold its bandwidth down to a much lower occupancy, roughly a quarter of what vecadd needs, before it starts to drop. If your measurements show that, you have just seen TLP and ILP trade against each other on real hardware.</p>
+    </details>
+  </section>
+
+  <section id="s10">
+    <h2>10. Lab 1: warps and occupancy</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 1</span><span class="lab-title">Warps and occupancy</span><span class="idx-meta">~40 min · <code>mlsys/labs/lab01-warps-and-occupancy/</code></span></div>
+      <div class="lab-body">
+        <p>Two programs, four experiments, each one a prediction from this chapter. Write your predictions down before running.</p>
+<pre><code class="language-bash">cd mlsys/labs/lab01-warps-and-occupancy
+make          # read the ptxas lines: 10, 12, 22, 80 and 40 (+spills) registers
+make test     # every kernel against a CPU reference
+make bench    # A: divergence, then B, C, D: occupancy</code></pre>
+        <table>
+          <tr><th>Exp.</th><th>What it does</th><th>Prediction to write down</th></tr>
+          <tr><td>A</td><td>Five branch patterns over two arithmetic paths (section 7)</td><td>time of each, relative to all-A</td></tr>
+          <tr><td>B</td><td>vecadd with 32 &hellip; 1,024 threads per block</td><td>which block sizes lose bandwidth, and why</td></tr>
+          <tr><td>C</td><td>vecadd and vecadd4 at occupancy 100% &rarr; 17%</td><td>where each starts to lose bandwidth</td></tr>
+          <tr><td>D</td><td>80-register tile kernel, free vs. capped at 40</td><td>which one is faster</td></tr>
+        </table>
+        <p>Each experiment prints the theoretical occupancy from <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code>, the runtime&rsquo;s own calculator, next to the time. If it disagrees with the widget above, the runtime is right; tell me and I&rsquo;ll fix the widget. Paste the four <code>PASTE:</code> lines back.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>In <code>divergence.cu</code>, replace path B with the <em>same</em> FMA as path A but different constants. Rebuild, run, and look at the SASS with <code>cuobjdump -sass divergence | grep -E "BRA|FFMA|FSEL"</code>. Did the compiler keep the branch, or merge both paths into one instruction stream with a per-thread constant? Divergence is a property of the <em>machine code</em>, not of the source.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why does the kernel launch return before the kernel has run, and what does that mean for error checking?</summary>
+        <p>Launches are asynchronous: they enqueue work so the CPU can keep feeding the GPU. Configuration errors are reported immediately by <code>cudaGetLastError()</code>, but faults during execution (like an out-of-bounds access) only appear at the next synchronizing call, possibly far from the launch that caused them. When debugging, synchronize right after the launch.</p>
+      </details>
+      <details>
+        <summary>n = 5,000 and 256-thread blocks. How many blocks, how many threads, how many idle threads, and how many warps have idle lanes?</summary>
+        <p>(5,000 + 255) / 256 = 20 blocks = 5,120 threads, 120 idle. Threads 5,000&hellip;5,119: warp 156 (threads 4,992&hellip;5,023) is partially idle, and warps 157&hellip;159 are entirely idle and exit at once. So only one warp has a mix of active and idle lanes.</p>
+      </details>
+      <details>
+        <summary>Why is there no barrier across blocks, and what do you do when you need one?</summary>
+        <p>Blocks are scheduled independently, in any order, as resources free up; a grid can have more blocks than fit at once, so a block waiting for another that isn&rsquo;t resident yet could wait forever. Independence is what buys transparent scalability. For a global barrier, end the kernel and launch another: the kernel boundary is the grid-wide sync.</p>
+      </details>
+      <details>
+        <summary>What are PTX and SASS, and what does <code>-arch=sm_120</code> put in your binary?</summary>
+        <p>PTX is NVIDIA&rsquo;s virtual, forward-compatible instruction set; SASS is the real machine code for one GPU family. <code>-arch=sm_120</code> embeds SASS for sm_120 plus the PTX, so the program runs natively on compute capability 12.x and can be JIT-compiled by the driver on newer GPUs.</p>
+      </details>
+      <details>
+        <summary>State the cost model of a divergent branch in one sentence, and apply it to <code>if (lane == 0) { long work }</code>.</summary>
+        <p>A warp pays for every path that at least one of its threads takes. With <code>lane == 0</code>, every warp executes the long work (one lane active, 31 masked) in addition to whatever the others do, so it costs as much as if all 32 threads had done it.</p>
+      </details>
+      <details>
+        <summary>Which of these conditions can diverge: <code>blockIdx.x &lt; 10</code>, <code>threadIdx.x &lt; 16</code>, <code>threadIdx.x &lt; 64</code> (block of 256), <code>data[i] &gt; 0</code>?</summary>
+        <p><code>blockIdx.x &lt; 10</code>: never, it is uniform across the block. <code>threadIdx.x &lt; 16</code>: yes, it splits warp 0 in half. <code>threadIdx.x &lt; 64</code>: no, the boundary falls exactly between warps 1 and 2. <code>data[i] &gt; 0</code>: depends on the data; neighbouring values that agree mean no divergence.</p>
+      </details>
+      <details>
+        <summary>What did independent thread scheduling (Volta+) change for divergent code?</summary>
+        <p>Threads have individual program counters, so divergent paths can interleave and threads of a warp are not guaranteed to be in lockstep. Code that relied on implicit warp lockstep must use <code>__syncwarp()</code> or <code>*_sync</code> primitives. It did not make divergence cheaper: a warp still executes one path at a time.</p>
+      </details>
+      <details>
+        <summary>A kernel uses 256-thread blocks, 48 registers per thread, and 20 KB of shared memory per block. What is its occupancy on your card, and which limit binds?</summary>
+        <p>Threads allow 6 blocks. Registers: 48 &times; 32 = 1,536 per warp; 16,384 / 1,536 = 10 warps per quadrant = 40 warps, so 5 blocks. Shared memory: 100 KB / (20 + 1) KB = 4 blocks. Block slots allow 24. The minimum is <strong>4 blocks</strong> = 32 warps = <strong>67%</strong>, limited by shared memory.</p>
+      </details>
+      <details>
+        <summary>Why can a kernel at 33% occupancy beat one at 100%?</summary>
+        <p>Occupancy only matters as a source of independent work to hide latency. A kernel whose threads each have many independent operations in flight (instruction-level parallelism, typically using many registers to hold data) can saturate the hardware with fewer warps, and the registers that lowered its occupancy are what let it reuse data instead of re-reading memory.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed., ch. 2 (program structure, data transfer, kernels), ch. 3 (multidimensional grids, row-major layout), ch. 4 (block scheduling, synchronization, warps, control divergence, latency tolerance, occupancy). All occupancy numbers here are recomputed for compute capability 12.0.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html">CUDA Programming Guide, Compute Capabilities</a>: per-SM limits for 12.x.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html">Blackwell Tuning Guide</a>: 48 warps per SM for compute capability 12.0, 99 KB shared memory per block, 1 KB reserved per block.</li>
+      <li>NVIDIA, <a href="https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf"><em>RTX Blackwell GPU Architecture</em> whitepaper</a>: SM composition (128 cores, 4 tensor cores, 256 KB register file, 128 KB L1/shared).</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/"><em>nvcc</em> documentation</a>: virtual vs real architectures, the <code>-arch=sm_XX</code> shorthand.</li>
+      <li>Vasily Volkov, <em>Better Performance at Lower Occupancy</em>, GTC 2010: the classic argument that ILP can substitute for occupancy.</li>
+      <li>NVIDIA, <em>Inside Volta</em> (2017, developer blog): independent thread scheduling and why warp-synchronous code needs <code>__syncwarp</code>.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-01-the-job-and-the-machine.html">&larr; Ch. 1 — The job, the machine, and your bench</a>
+      <a href="index.html">Index</a>
+      <a href="cap-03-memory-hierarchy.html">Ch. 3 — The memory hierarchy &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part I · Chapter 2 · limits verified against the CUDA 13.4 documentation, September 2026; SASS excerpts from lab 1 compiled with CUDA 13.4 for sm_120</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    LessonKit.annotatedCode('#w-host', { lines: [
+      ['size_t bytes = n * sizeof(float);', 'CUDA APIs count BYTES, not elements. Forgetting sizeof is the classic first bug: you allocate a quarter of what you need and the kernel writes past the end.'],
+      ['float *d_a, *d_b, *d_c;', 'By convention d_ marks device pointers and h_ host pointers. They are the same C type (float*) but live in different address spaces: dereferencing d_a on the CPU crashes.'],
+      ['CUDA_CHECK(cudaMalloc(&d_a, bytes));', 'cudaMalloc takes the ADDRESS of your pointer and writes the device address into it, because its return value is reserved for the error code (every CUDA call returns a cudaError_t; CUDA_CHECK aborts with file:line if it is not cudaSuccess).'],
+      ['CUDA_CHECK(cudaMemcpy(d_a, h_a.data(), bytes, cudaMemcpyHostToDevice));', 'Destination first, like memcpy. The direction flag must match the pointers. This crosses PCIe: at best ~64 GB/s, about 10x slower than VRAM.'],
+      ['launch_vecadd(d_a, d_b, d_c, n);', 'Computes the number of blocks, (n + 255) / 256, and launches vecadd<<<blocks, 256>>>. The call returns immediately: the kernel is only queued.'],
+      ['CUDA_CHECK_LAUNCH(true);', 'cudaGetLastError() catches launch errors (bad configuration); with true it also synchronizes, so errors DURING the kernel (like an illegal address) surface here and not ten lines later.'],
+      ['CUDA_CHECK(cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost));', 'Copy the result back. cudaMemcpy on the default stream waits for all earlier GPU work, so this line is also an implicit synchronization.'],
+      ['CUDA_CHECK(cudaFree(d_a));', 'cudaFree takes the pointer VALUE (not its address). Freeing is not free: in real programs you allocate once and reuse; serving engines pre-allocate almost all of VRAM at startup.']
+    ]});
+    LessonKit.annotatedCode('#w-kernel', { lines: [
+      ['__global__ void vecadd(const float* a, const float* b, float* c, size_t n)', '__global__ = a kernel: runs on the GPU, launched from the CPU, returns void (results go through pointers). The arguments are copied to the GPU at launch; the pointers must point to device memory.'],
+      ['{', 'Every thread of the grid executes this body. There is no loop over elements: the grid of threads IS the loop, one thread per iteration.'],
+      ['    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;', 'The thread\'s global index. blockIdx.x = which block (uniform within the block), blockDim.x = threads per block (uniform everywhere), threadIdx.x = position inside the block (varying). Block 3, thread 5, 256 per block: i = 3*256+5 = 773. The cast to size_t comes first so the product is 64-bit.'],
+      ['    if (i < n)', 'The guard. The grid is a whole number of blocks, so it usually overhangs the array. Threads past the end must do nothing. Only one warp in the whole grid is affected, so the cost is negligible.'],
+      ['        c[i] = a[i] + b[i];', 'Two 4-byte loads, one add, one 4-byte store. Thread i touches element i, so the 32 threads of a warp touch 32 consecutive floats: one 128-byte chunk per array. That access pattern is why this kernel reaches ~90% of DRAM bandwidth (chapter 3).'],
+      ['}', 'The thread ends. Its registers are freed when its whole warp finishes, and the block\'s resources when the whole block finishes; then the SM can admit another block.']
+    ]});
+  </script>
+  <script src="assets/warp-stepper.js"></script>
+  <script src="assets/occupancy-calc.js"></script>
+</body>
+</html>

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 3 — The memory hierarchy: coalescing, shared memory, banks · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch3.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-02-execution-model.html">&larr; Ch. 2 — The execution model: grids, blocks, warps</a>
+    <a href="index.html">Index</a>
+    <span>Ch. 4 — The roofline (in writing)</span>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part I — The GPU · Chapter 3</div>
+    <h1>The memory hierarchy: coalescing, shared memory, banks</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>3 interactive widgets</span><span>4 plates</span><span>lab 2 · ~45 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Almost every kernel you will write is limited by memory, so this is the chapter that decides how fast your code runs. The GPU&rsquo;s memory is a ladder: registers, shared memory and L1 inside each SM, one L2 for the chip, and DRAM, each rung roughly ten times bigger and slower than the one above. Three rules get you most of the way. <strong>Coalescing:</strong> memory moves in 32-byte sectors, so the 32 threads of a warp should read neighbouring addresses; the same bytes read in the wrong pattern can cost 8&times; the traffic. <strong>Bytes in flight:</strong> bandwidth needs many outstanding requests, which you get from occupancy, from wide 16-byte loads, or from several independent loads per thread. <strong>Reuse on chip:</strong> data used more than once should be staged in shared memory, which you control explicitly, and read without <em>bank conflicts</em>. The matrix transpose ties all three together, and lab 2 measures every one of them on your card.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The ladder</a></li>
+      <li><a href="#s2">Memory spaces in CUDA</a></li>
+      <li><a href="#s3">How a warp talks to memory: sectors</a></li>
+      <li><a href="#s4">Access patterns in real code</a></li>
+      <li><a href="#s5">Bytes in flight: wide loads and ILP</a></li>
+      <li><a href="#s6">Shared memory: the cache you manage</a></li>
+      <li><a href="#s7">Bank conflicts</a></li>
+      <li><a href="#s8">Capstone: the matrix transpose</a></li>
+      <li><a href="#s9">Lab 2: measure the hierarchy</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. The ladder</h2>
+
+    <p>Fast memory is small, and big memory is slow. The reason is physical: a bit you can read in one cycle has to sit close to the arithmetic units, and there is only so much room close to them. DRAM stores a bit as a charge in a tiny capacitor that must drive a long wire before anyone can sense it, which takes tens of nanoseconds per access no matter how fast the rest of the chip is. So every processor builds a ladder of memories, and the GPU&rsquo;s has five rungs:</p>
+
+    <figure class="lk-fig" role="img" aria-label="The memory ladder of the RTX 5070. Registers: 256 KB per SM, 12 MB total. L1 and shared memory: 128 KB per SM, one pool split between the two. L2: 48 MB for the whole chip. DRAM: 12 GB of GDDR7 at 672 GB per second. Each rung is larger and slower than the one above.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 270" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>The memory ladder</title>
+        <g font-size="10" fill="var(--lk-ink-soft)"><text x="20" y="18">rung</text><text x="190" y="18">size on your RTX 5070</text><text x="430" y="18">shared by</text><text x="530" y="18">latency (rough)</text></g>
+        <line x1="20" y1="24" x2="640" y2="24" stroke="var(--lk-rule)"/>
+        <g font-size="11" fill="var(--lk-ink)">
+          <text x="20" y="50" font-weight="700">registers</text>
+          <rect x="190" y="38" width="60" height="18" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="256" y="51" font-size="10">256 KB / SM · 12 MB</text>
+          <text x="430" y="51" font-size="10">one thread</text><text x="530" y="51" font-size="10">~0: operands</text>
+
+          <text x="20" y="90" font-weight="700">shared memory</text><text x="20" y="104" font-size="9.5" fill="var(--lk-ink-soft)">+ L1 cache</text>
+          <rect x="190" y="80" width="42" height="18" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="238" y="93" font-size="10">128 KB / SM, one pool, split</text>
+          <text x="430" y="93" font-size="10">one block / SM</text><text x="530" y="93" font-size="10">tens of cycles</text>
+
+          <text x="20" y="140" font-weight="700">L2 cache</text>
+          <rect x="190" y="128" width="130" height="18" fill="var(--lk-hl)" stroke="var(--lk-cobalt)"/><text x="326" y="141" font-size="10">48 MB</text>
+          <text x="430" y="141" font-size="10">whole chip</text><text x="530" y="141" font-size="10">100s of cycles</text>
+
+          <text x="20" y="188" font-weight="700">DRAM (GDDR7)</text>
+          <rect x="190" y="176" width="230" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-vermilion)"/><text x="196" y="189" font-size="10">12 GB · 672 GB/s</text>
+          <text x="430" y="189" font-size="10">whole chip</text><text x="530" y="189" font-size="10">100s of ns</text>
+
+          <text x="20" y="232" font-weight="700" fill="var(--lk-ink-soft)">host RAM</text>
+          <text x="190" y="232" font-size="10" fill="var(--lk-ink-soft)">over PCIe 5.0 x16: ~64 GB/s, microseconds: 10&times; slower than DRAM</text>
+        </g>
+        <line x1="636" y1="40" x2="636" y2="200" stroke="var(--lk-vermilion)" stroke-width="1.3"/>
+        <path d="M632 196 L636 206 L640 196Z" fill="var(--lk-vermilion)"/>
+        <text x="644" y="90" font-size="9" fill="var(--lk-vermilion)" transform="rotate(90 644 90)">bigger, slower</text>
+        <text x="20" y="262" font-size="9" fill="var(--lk-ink-soft)">bar lengths are not to scale: DRAM is ~100,000&times; bigger than one SM&rsquo;s L1/shared pool</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The ladder on your card (sizes from NVIDIA&rsquo;s RTX Blackwell whitepaper). Registers and the L1/shared pool are private to one SM; L2 and DRAM are shared by all 48. Latencies are orders of magnitude only: lab 2 measures your card&rsquo;s, and you will fill in the table below.</figcaption>
+    </figure>
+
+    <table>
+      <tr><th>Rung</th><th>Latency, order of magnitude</th><th>Your card (lab 2, experiment A)</th></tr>
+      <tr><td>Shared memory</td><td>~20&ndash;40 cycles</td><td><em>to be measured</em></td></tr>
+      <tr><td>L1 hit</td><td>~30&ndash;50 cycles</td><td><em>to be measured</em></td></tr>
+      <tr><td>L2 hit</td><td>a few hundred cycles</td><td><em>to be measured</em></td></tr>
+      <tr><td>DRAM</td><td>several hundred ns (500&ndash;1,500 cycles)</td><td><em>to be measured</em></td></tr>
+    </table>
+
+    <p>Two numbers on this ladder matter more than the rest. The first is the ratio between compute and DRAM that chapter 1 turned into the ridge point: your SMs can do about 46 FP32 operations in the time DRAM delivers one byte. The second is how much faster the on-chip memories are. Shared memory has 32 banks per SM, each delivering 4 bytes per cycle: 128 bytes per cycle per SM, which across 48 SMs at 2.5 GHz is roughly <strong>15 TB/s, over 20&times; DRAM</strong>. Registers are faster still. Every optimization in this chapter is a way to serve more of your loads from the upper rungs.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Lab 0, revisited</span>
+      <p>Your vecadd benchmark has already met the L2. Look at the rows marked <code>(fits in L2)</code>: if they report more than 672 GB/s, it is because repeated runs found the arrays still on chip. That is not DRAM bandwidth; it is L2 bandwidth. Every benchmark in this course that claims to measure DRAM uses working sets several times larger than the L2 for this reason.</p>
+    </div>
+  </section>
+
+  <section id="s2">
+    <h2>2. Memory spaces in CUDA</h2>
+
+    <p>CUDA C++ names memory by <em>who can see it</em> and <em>how long it lives</em>, which is not the same thing as where it physically sits. The mapping is worth knowing exactly, because one row of it is a trap:</p>
+
+    <table>
+      <tr><th>You write</th><th>Space</th><th>Visible to</th><th>Lives</th><th>Physically</th></tr>
+      <tr><td><code>float x;</code> inside a kernel</td><td>register</td><td>one thread</td><td>the thread</td><td>register file</td></tr>
+      <tr><td><code>float a[8];</code> inside a kernel</td><td>register <em>or</em> local</td><td>one thread</td><td>the thread</td><td>registers if every index is a compile-time constant, otherwise <strong>local memory in DRAM</strong></td></tr>
+      <tr><td><code>__shared__ float t[32][33];</code></td><td>shared</td><td>one block</td><td>the block</td><td>the SM&rsquo;s L1/shared pool</td></tr>
+      <tr><td><code>cudaMalloc</code>, <code>__device__ float g[N];</code></td><td>global</td><td>all threads, all kernels, the host via copies</td><td>until freed / the program</td><td>DRAM, cached in L2 (and L1)</td></tr>
+      <tr><td><code>__constant__ float c[256];</code></td><td>constant</td><td>all threads, read-only</td><td>the program</td><td>DRAM, 64 KB max, with its own cache</td></tr>
+    </table>
+
+    <h3>&ldquo;Local&rdquo; memory is not local</h3>
+    <p>The name is the trap. Local memory is <em>private</em> to a thread, but it lives in DRAM, cached in L1 and L2 like any global access. Two things put data there. A per-thread array indexed with a value the compiler cannot resolve at compile time (<code>a[i]</code> where <code>i</code> comes from a loop it cannot unroll) goes to local memory, because registers cannot be indexed dynamically. And when a kernel needs more registers than it may use, the compiler <strong>spills</strong> the excess to local memory. That is exactly what lab 1&rsquo;s experiment D showed: <code>__launch_bounds__(256, 6)</code> capped the tile kernel at 40 registers, and <code>ptxas</code> reported <code>428 bytes spill stores, 504 bytes spill loads</code>: hundreds of bytes of extra memory traffic per thread, created by the compiler. Whenever <code>-Xptxas -v</code> prints a nonzero <code>stack frame</code> or <code>spill</code>, you are using local memory.</p>
+
+    <h3>Constant memory and the read-only path</h3>
+    <p><code>__constant__</code> data has its own small cache designed for one case: every thread of a warp reading the <em>same</em> address, which is served in one go. When lanes read different addresses, the accesses are serialized, so it suits kernel parameters and small lookup tables indexed uniformly, not arrays indexed by thread. A more generally useful cousin is the <strong>read-only data path</strong>. Mark a kernel&rsquo;s input <code>const float* __restrict__</code>, promising the compiler that nothing else writes to it during the kernel, and it may load it with a non-coherent read-only instruction. You can see it in lab 2&rsquo;s SASS: the copy kernels load with <code>LDG.E.CONSTANT</code>, the pointer-chasing kernel without <code>__restrict__</code> with plain <code>LDG.E</code>. Get in the habit of writing <code>const T* __restrict__</code> for inputs.</p>
+
+    <h3>One pool, two uses</h3>
+    <p>On your card each SM has a single 128 KB array that serves as both L1 cache and shared memory. The split, the <strong>carveout</strong>, is chosen per kernel from a fixed menu (0, 8, 16, 32, 64 or 100 KB of shared memory on compute capability 12.x), and whatever is not shared memory is L1. A kernel that declares a lot of shared memory therefore shrinks L1 for itself, and a kernel with none gets the whole 128 KB as cache. Two limits to remember: a single block can use at most <strong>99 KB</strong>, and anything above 48 KB must be allocated dynamically and explicitly allowed with <code>cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)</code>, a compatibility rule that trips everyone once.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. How a warp talks to memory: sectors</h2>
+
+    <p>Chapter 2 established that a warp executes one instruction for 32 threads at once. For a load, that means one instruction produces 32 addresses at the same moment, and the hardware serves them together. The rule that decides the cost is short, and it is the most important rule in this chapter:</p>
+
+    <div class="callout idea">
+      <span class="callout-label">The sector rule</span>
+      <p>Global memory is moved in <strong>32-byte sectors</strong>. A warp&rsquo;s load or store costs as many sectors as its 32 addresses touch. Bytes inside a sector that nobody asked for are moved anyway and thrown away.</p>
+    </div>
+
+    <p>So the question for every memory access in a kernel is: how many sectors do these 32 addresses span? With 4-byte floats, the answers bracket a factor of 8:</p>
+    <ul>
+      <li>32 threads reading 32 <strong>consecutive</strong> floats: 128 bytes, <strong>4 sectors</strong>, every byte used. This is a <em>coalesced</em> access.</li>
+      <li>32 threads reading floats <strong>8 or more apart</strong>: each lands in its own sector, <strong>32 sectors</strong> (1,024 bytes) moved for 128 bytes used. 12.5% efficiency.</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="Two warps loading floats. Top: lanes 0 to 31 read consecutive addresses, covering 4 sectors of 32 bytes, all bytes used. Bottom: lanes read addresses 32 bytes or more apart, touching 32 sectors, each only one eighth used.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 220" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Coalesced versus strided warp access</title>
+        <text x="20" y="18" font-size="11" font-weight="700" fill="var(--lk-cobalt-dark)">a[i]: consecutive — 4 sectors, 128 B moved, 100% used</text>
+        <g stroke="var(--lk-cobalt)" stroke-width="1">
+          <line x1="40" y1="30" x2="40" y2="58"/><line x1="56" y1="30" x2="56" y2="58"/><line x1="72" y1="30" x2="72" y2="58"/><line x1="88" y1="30" x2="88" y2="58"/><line x1="104" y1="30" x2="104" y2="58"/><line x1="120" y1="30" x2="120" y2="58"/><line x1="136" y1="30" x2="136" y2="58"/><line x1="152" y1="30" x2="152" y2="58"/>
+        </g>
+        <text x="170" y="42" font-size="10" fill="var(--lk-ink-soft)">… lanes 0–31, one float each</text>
+        <g fill="var(--lk-cobalt)" stroke="var(--lk-cobalt)">
+          <rect x="36" y="60" width="64" height="20"/><rect x="100" y="60" width="64" height="20"/><rect x="164" y="60" width="64" height="20"/><rect x="228" y="60" width="64" height="20"/>
+        </g>
+        <g fill="none" stroke="var(--lk-paper)" stroke-width="1.5"><line x1="100" y1="60" x2="100" y2="80"/><line x1="164" y1="60" x2="164" y2="80"/><line x1="228" y1="60" x2="228" y2="80"/></g>
+        <text x="300" y="74" font-size="10" fill="var(--lk-ink)">4 × 32-byte sectors</text>
+
+        <text x="20" y="118" font-size="11" font-weight="700" fill="var(--lk-vermilion)">a[8*i]: strided — 32 sectors, 1,024 B moved, 12.5% used</text>
+        <g stroke="var(--lk-vermilion)" stroke-width="1">
+          <line x1="40" y1="130" x2="40" y2="160"/><line x1="56" y1="130" x2="76" y2="160"/><line x1="72" y1="130" x2="112" y2="160"/><line x1="88" y1="130" x2="148" y2="160"/><line x1="104" y1="130" x2="184" y2="160"/><line x1="120" y1="130" x2="220" y2="160"/>
+        </g>
+        <g stroke="var(--lk-vermilion)" fill="var(--lk-paper-light)">
+          <rect x="36" y="162" width="32" height="20"/><rect x="72" y="162" width="32" height="20"/><rect x="108" y="162" width="32" height="20"/><rect x="144" y="162" width="32" height="20"/><rect x="180" y="162" width="32" height="20"/><rect x="216" y="162" width="32" height="20"/>
+        </g>
+        <g fill="var(--lk-vermilion)"><rect x="36" y="162" width="4" height="20"/><rect x="72" y="162" width="4" height="20"/><rect x="108" y="162" width="4" height="20"/><rect x="144" y="162" width="4" height="20"/><rect x="180" y="162" width="4" height="20"/><rect x="216" y="162" width="4" height="20"/></g>
+        <text x="258" y="176" font-size="10" fill="var(--lk-ink)">… × 32 sectors, 4 useful bytes in each</text>
+        <text x="20" y="208" font-size="9.5" fill="var(--lk-ink-soft)">filled = bytes a lane asked for · outlined = bytes moved and discarded</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; Same number of useful bytes, eight times the traffic. For a memory-bound kernel, traffic is time: the strided version runs at an eighth of the speed. (Sectors are grouped into 128-byte cache lines in L1 and L2, but the unit of transfer and of waste is the 32-byte sector.)</figcaption>
+    </figure>
+
+    <p>Chapter 2&rsquo;s uniform/varying lens predicts the pattern without drawing anything. In an index expression, find where the varying part (<code>threadIdx.x</code>, or anything derived from it) sits. If it is added at unit stride to a uniform base, consecutive lanes hit consecutive addresses: coalesced. If it is multiplied by a stride, the lanes spread out, and the sector count grows with the stride until every lane has its own sector. If the index is entirely uniform, all 32 lanes read the same address, which is a <em>broadcast</em>: one sector serves everyone, and it is cheap. The campaign&rsquo;s <a href="../play/gpu/level-1.html">level 1</a> walks this lens through a naive matrix multiply, where a two-letter swap of indices is worth 6&times;.</p>
+
+    <div id="w-coalesce" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: lab 2&rsquo;s experiment B1 reads <code>a[i * stride]</code> for stride 1, 2, 4, 8, 16 and 32. The sector rule predicts the useful bandwidth. Sketch the curve.</summary>
+      <p>Useful bandwidth &asymp; DRAM bandwidth &times; efficiency, and efficiency is 4 bytes used per 4&middot;<var>stride</var> bytes moved: 100%, 50%, 25%, 12.5%&hellip; and then it <em>flattens</em>. From stride 8 on, each lane already owns a whole sector, so strides 16 and 32 move exactly the same 32 sectors per warp. The curve is a halving staircase that stops at one eighth of the stride-1 value. If your measurement keeps falling past stride 8, you have learned something the documentation doesn&rsquo;t say: the DRAM itself transfers more than 32 bytes at a time (GDDR memories use bursts), and the L2 fetches pairs of sectors. Either way, measured is what counts.</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. Access patterns in real code</h2>
+
+    <h3>Rows and columns</h3>
+    <p>A row-major matrix stores <code>M[r][c]</code> at <code>r &times; width + c</code>. Walking along a row is unit stride and walking down a column is a stride of <code>width</code>, typically thousands of floats: every lane in its own sector, 12.5% efficiency. Hence the rule you already met in chapter 2&rsquo;s 2D grids: <strong><code>threadIdx.x</code> must drive the last, fastest-varying index</strong> of every large array you touch. When one array must be read by rows and another by columns (a transpose, a matrix multiply with a transposed operand), no single mapping of threads makes both coalesced. That is what shared memory is for (section 8).</p>
+
+    <h3>Structures: AoS versus SoA</h3>
+    <p>Suppose each particle is <code>struct { float x, y, z, w; }</code> and you store an <strong>array of structures</strong> (AoS). A kernel that only needs <code>x</code> reads every 16 bytes: stride 4 in floats, 16 sectors per warp for 128 useful bytes, 25% efficiency. Store a <strong>structure of arrays</strong> (SoA) instead, one array per field, and the same kernel reads <code>x[i]</code> contiguously: 100%. The general rule: lay data out by the order in which <em>neighbouring threads</em> read it, not by the order a human would group it. (If a kernel really does use all four fields, AoS with a single 16-byte load per thread is also perfectly efficient; that is section 5.)</p>
+
+    <h3>Misalignment costs little now</h3>
+    <p>A warp reading 128 contiguous bytes that start 12 bytes into a sector spans 5 sectors instead of 4: 80% efficiency for that request. Older GPUs punished misalignment much harder; modern ones only charge the extra sector, and neighbouring warps often find it in L2 anyway. Lab 2&rsquo;s experiment B2 shifts a copy by 1 to 32 floats; expect a few percent, not a cliff.</p>
+
+    <h3>Gathers: where ML meets the sector rule</h3>
+    <p>Some reads are inherently scattered. The first layer of every language model, the embedding lookup, reads row <code>token_id</code> of a big table for each token: random rows. It is still fast, because the <em>row</em> is contiguous: if a warp (or a whole block) cooperates to read one row, every access is coalesced, and the randomness only decides which rows. The lesson generalizes: when you cannot make the pattern regular, make the <em>unit of randomness</em> large. Sparse matrices, KV-cache pages (Part IV) and mixture-of-experts routing are all designed around this.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Bytes in flight: wide loads and ILP</h2>
+
+    <p>Coalescing decides how many bytes each request moves. It does not decide how many requests are outstanding, and chapter 1 showed that this matters just as much. Little&rsquo;s law asked for about 336 KB in flight to saturate 672 GB/s at ~500 ns of latency, about 7 KB per SM, and noticed that 1,536 threads per SM, each waiting on one 4-byte load, only put 6 KB in flight. One float per thread at a time is not enough, even at full occupancy. Chapter 2 named the two ways out. Here they are in code.</p>
+
+    <h3>Wider loads</h3>
+    <p>A thread can load 8 or 16 bytes with one instruction: <code>float2</code> or <code>float4</code>. The warp then moves 512 bytes per request instead of 128, still perfectly coalesced (16 sectors, all used), and each thread has four times the bytes in flight.</p>
+<pre><code class="language-cpp">// n4 = n / 4: each thread copies 16 bytes with a single load and a single store
+__global__ void copy_f4(const float4* __restrict__ in, float4* __restrict__ out, size_t n4)
+{
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n4) out[i] = in[i];          // SASS: LDG.E.128 / STG.E.128
+}</code></pre>
+    <p>The price is alignment: a <code>float4</code> access must be 16-byte aligned, so the pointer must be (<code>cudaMalloc</code> returns 256-byte-aligned memory) and the array length must be a multiple of 4, or you handle the tail separately. Vectorized loads are everywhere in production kernels for this reason.</p>
+
+    <h3>More independent loads per thread</h3>
+    <p>The other way keeps 4-byte loads but issues several before using any of them. Each is independent, so the hardware can have all of them in flight at once:</p>
+<pre><code class="language-cpp">float x0 = in[i], x1 = in[i + s], x2 = in[i + 2*s], x3 = in[i + 3*s];  // 4 loads in flight
+out[i] = x0;  out[i + s] = x1;  out[i + 2*s] = x2;  out[i + 3*s] = x3;</code></pre>
+    <p>Each of the four loads is still coalesced (consecutive threads, consecutive <code>i</code>), and the thread now waits once for four loads instead of four times for one. This is <strong>instruction-level parallelism</strong> (ILP), and it is what compilers produce when they unroll a loop. You rarely write it by hand like this, but you will write code whose structure allows it: loops with independent iterations and enough registers to hold the results.</p>
+
+    <details class="ym">
+      <summary>Your move: experiment C copies 256 MB with a fixed number of threads, at 17% occupancy (1 block of 256 per SM) and at 100% (6 blocks). Predict the bandwidth of float, float4 and 4&times; ILP at each.</summary>
+      <p>At <strong>17%</strong> each SM holds 256 threads. With one float each, that is 1 KB in flight per SM, a seventh of what Little&rsquo;s law asked for: <code>float</code> should collapse to a small fraction of peak. <code>float4</code> and <code>4&times; ILP</code> put 4 KB in flight, so they should recover most of the loss, probably not all. At <strong>100%</strong> all three have more work in flight: <code>float</code> sits somewhere near the practical ceiling you measured in lab 0, and the two others at or slightly above it. The shape to look for is the gap closing as occupancy rises: TLP and ILP are interchangeable sources of bytes in flight. This is also why the fastest kernels in Part II can run at low occupancy: they keep many loads in flight per thread.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Shared memory: the cache you manage</h2>
+
+    <p>L1 and L2 cache data automatically, and they help. But thousands of threads share each SM&rsquo;s L1, so the data one warp is about to reuse is often evicted by others before it gets there: a GPU cache is a poor place to <em>count on</em> reuse. Shared memory is the alternative: a scratchpad in the same 128 KB pool that a block allocates for itself and fills explicitly. Nothing is evicted unless you overwrite it. Its latency is close to L1&rsquo;s, its bandwidth is over 20&times; DRAM, and every thread of the block can read what any other thread wrote there, after a barrier.</p>
+
+    <h3>Why reuse is the whole game</h3>
+    <p>A matrix multiply is where the argument is cleanest (Part II builds the real kernel; the campaign&rsquo;s <a href="../play/gpu/level-2.html">level 2</a> plays it out). In the naive kernel, each thread computing one output element runs a loop that loads one element of <code>A</code> and one of <code>B</code> (8 bytes) for one multiply-add (2 FLOPs). That is <strong>0.25 FLOPs per byte</strong> from DRAM, a 184th of your card&rsquo;s ridge point: at 672 GB/s it is capped at about 170 GFLOPS, half a percent of the 30.9 TFLOPS peak. Yet every element of <code>A</code> is used by a whole row of outputs, and every element of <code>B</code> by a whole column. The data is reused thousands of times; the naive kernel just fetches it again every time.</p>
+    <p><strong>Tiling</strong> fixes that. A block computing a 32&times;32 tile of outputs loads a 32&times;32 tile of <code>A</code> and one of <code>B</code> into shared memory (each thread loads one element of each), then every thread reads 32 values from each shared tile. Each byte fetched from DRAM is now used 32 times, so the intensity rises 32-fold, to 8 FLOPs per byte. That is still below the ridge of 46; Part II gets the rest by tiling a second time, in registers.</p>
+
+    <h3>The two barriers</h3>
+    <p>Here is the skeleton of every tiled kernel. Click through it: both <code>__syncthreads()</code> are necessary, for two different reasons.</p>
+
+    <div id="w-tiled"></div>
+
+    <details class="ym">
+      <summary>Your move: a colleague deletes the <em>second</em> <code>__syncthreads()</code>, reasoning that the next iteration starts with loads anyway. What goes wrong, and would the tests catch it?</summary>
+      <p>A fast warp finishes its multiply-adds, loops around, and <strong>overwrites the tile</strong> with the next phase&rsquo;s data while slower warps of the same block are still reading the current phase. Those warps then compute with a mix of two tiles. The first barrier guards a <em>read-after-write</em> dependence (don&rsquo;t read before the data is there); the second guards a <em>write-after-read</em> dependence (don&rsquo;t overwrite before everyone has finished reading). The nasty part is that the bug is timing-dependent: on a small test it may pass every time, then fail on another GPU or another size. That is why the only defence is understanding the dependences, and why tests in this course use awkward sizes. (<code>compute-sanitizer --tool racecheck</code> can catch shared-memory races like this one; chapter 5 uses it.)</p>
+    </details>
+
+    <div class="callout warn">
+      <span class="callout-label">Never return before a barrier</span>
+      <p>A thread whose output falls outside the matrix must still help load the tile, and must still reach every <code>__syncthreads()</code>: a barrier that some threads of the block never reach is undefined behaviour and in practice a hang or garbage. So bounds checks in tiled kernels guard <em>individual loads and stores</em> (loading 0 for out-of-range elements, a value that adds nothing to a dot product), never the whole thread.</p>
+    </div>
+
+    <h3>What shared memory costs</h3>
+    <p>Shared memory counts against occupancy (chapter 2): 100 KB per SM, plus 1 KB reserved per block. Spread over the 1,536 threads of a full SM, that is only about 66 bytes per thread on average. The 32&times;32 tiles above use 8 KB per block, which is harmless; a kernel that wants 64 KB per block runs one block per SM. The trade is the same as with registers: on-chip storage buys reuse and costs parallelism, and the right amount is found by measurement. From Ampere on, GPUs can also copy global memory into shared memory <em>asynchronously</em>, without passing through registers, so that the next tile loads while the current one is used; on your card both the Ampere-style <code>cp.async</code> and the newer bulk-copy engine compile for <code>sm_120</code> (we checked the SASS). Part II uses them.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Bank conflicts</h2>
+
+    <p>Shared memory is fast because it is divided into <strong>32 banks</strong> that work in parallel, each able to deliver one 4-byte word per cycle. Consecutive 4-byte words go to consecutive banks, so the bank of a word is its index modulo 32: <code>s[0]</code> in bank 0, <code>s[31]</code> in bank 31, <code>s[32]</code> in bank 0 again. A warp&rsquo;s access is served in one pass if its 32 lanes hit 32 different banks. If several lanes want <em>different words in the same bank</em>, those words are fetched one after the other: an <strong>N-way bank conflict</strong> costs N passes. Lanes reading <em>the same word</em> do not conflict: that word is broadcast to all of them.</p>
+
+    <p>So the analysis is the coalescing analysis again, with a different modulus. Take the word index as a function of the lane:</p>
+    <ul>
+      <li><code>s[lane]</code>: banks 0&hellip;31, one pass.</li>
+      <li><code>s[2*lane]</code>: even banks only, two lanes per bank, <strong>2-way</strong>.</li>
+      <li><code>s[3*lane]</code>, or any <strong>odd</strong> stride: still 32 distinct banks, since an odd number has no factor in common with 32. One pass.</li>
+      <li><code>s[32*lane]</code>: every lane in bank 0, <strong>32-way</strong>: the access runs at 1/32 speed.</li>
+    </ul>
+    <p>The last case is not exotic. It is what happens when a warp reads a <em>column</em> of a 32&times;32 tile, <code>tile[lane][c]</code>: consecutive rows are 32 words apart, so the whole column lives in one bank. And reading columns of a tile is the entire point of the transpose, and of half the loads in a matrix multiply.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Bank numbers of the first rows of a shared-memory tile. With 32 columns, every row starts at bank 0, so a column lies entirely in one bank. With one column of padding, 33 columns, each row starts one bank later, so a column falls on 32 different banks.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 230" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Why padding removes the conflict</title>
+        <text x="20" y="18" font-size="11" font-weight="700" fill="var(--lk-vermilion)">float tile[32][32] — bank of tile[r][c]</text>
+        <text x="340" y="18" font-size="11" font-weight="700" fill="var(--lk-cobalt-dark)">float tile[32][33] — one pad column</text>
+        <g font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">
+          <!-- left grid: rows 0..5, cols 0..6 ; bank = c -->
+          <g stroke="var(--lk-rule-soft)" fill="var(--lk-paper)">
+            <rect x="50" y="30" width="36" height="24"/><rect x="86" y="30" width="36" height="24"/><rect x="122" y="30" width="36" height="24"/><rect x="158" y="30" width="36" height="24"/><rect x="194" y="30" width="36" height="24"/><rect x="230" y="30" width="36" height="24"/>
+            <rect x="50" y="54" width="36" height="24"/><rect x="86" y="54" width="36" height="24"/><rect x="122" y="54" width="36" height="24"/><rect x="158" y="54" width="36" height="24"/><rect x="194" y="54" width="36" height="24"/><rect x="230" y="54" width="36" height="24"/>
+            <rect x="50" y="78" width="36" height="24"/><rect x="86" y="78" width="36" height="24"/><rect x="122" y="78" width="36" height="24"/><rect x="158" y="78" width="36" height="24"/><rect x="194" y="78" width="36" height="24"/><rect x="230" y="78" width="36" height="24"/>
+            <rect x="50" y="102" width="36" height="24"/><rect x="86" y="102" width="36" height="24"/><rect x="122" y="102" width="36" height="24"/><rect x="158" y="102" width="36" height="24"/><rect x="194" y="102" width="36" height="24"/><rect x="230" y="102" width="36" height="24"/>
+            <rect x="50" y="126" width="36" height="24"/><rect x="86" y="126" width="36" height="24"/><rect x="122" y="126" width="36" height="24"/><rect x="158" y="126" width="36" height="24"/><rect x="194" y="126" width="36" height="24"/><rect x="230" y="126" width="36" height="24"/>
+          </g>
+          <g fill="var(--lk-warnbg)" stroke="var(--lk-vermilion)" stroke-width="1.5"><rect x="122" y="30" width="36" height="24"/><rect x="122" y="54" width="36" height="24"/><rect x="122" y="78" width="36" height="24"/><rect x="122" y="102" width="36" height="24"/><rect x="122" y="126" width="36" height="24"/></g>
+          <text x="68" y="46">0</text><text x="104" y="46">1</text><text x="140" y="46">2</text><text x="176" y="46">3</text><text x="212" y="46">4</text><text x="248" y="46">5</text>
+          <text x="68" y="70">0</text><text x="104" y="70">1</text><text x="140" y="70">2</text><text x="176" y="70">3</text><text x="212" y="70">4</text><text x="248" y="70">5</text>
+          <text x="68" y="94">0</text><text x="104" y="94">1</text><text x="140" y="94">2</text><text x="176" y="94">3</text><text x="212" y="94">4</text><text x="248" y="94">5</text>
+          <text x="68" y="118">0</text><text x="104" y="118">1</text><text x="140" y="118">2</text><text x="176" y="118">3</text><text x="212" y="118">4</text><text x="248" y="118">5</text>
+          <text x="68" y="142">0</text><text x="104" y="142">1</text><text x="140" y="142">2</text><text x="176" y="142">3</text><text x="212" y="142">4</text><text x="248" y="142">5</text>
+          <text x="280" y="94" fill="var(--lk-ink-soft)">…</text><text x="158" y="166" fill="var(--lk-ink-soft)">⋮</text>
+          <!-- right grid: bank = (33r + c) % 32 = (r + c) % 32 -->
+          <g stroke="var(--lk-rule-soft)" fill="var(--lk-paper)">
+            <rect x="370" y="30" width="36" height="24"/><rect x="406" y="30" width="36" height="24"/><rect x="442" y="30" width="36" height="24"/><rect x="478" y="30" width="36" height="24"/><rect x="514" y="30" width="36" height="24"/><rect x="550" y="30" width="36" height="24"/>
+            <rect x="370" y="54" width="36" height="24"/><rect x="406" y="54" width="36" height="24"/><rect x="442" y="54" width="36" height="24"/><rect x="478" y="54" width="36" height="24"/><rect x="514" y="54" width="36" height="24"/><rect x="550" y="54" width="36" height="24"/>
+            <rect x="370" y="78" width="36" height="24"/><rect x="406" y="78" width="36" height="24"/><rect x="442" y="78" width="36" height="24"/><rect x="478" y="78" width="36" height="24"/><rect x="514" y="78" width="36" height="24"/><rect x="550" y="78" width="36" height="24"/>
+            <rect x="370" y="102" width="36" height="24"/><rect x="406" y="102" width="36" height="24"/><rect x="442" y="102" width="36" height="24"/><rect x="478" y="102" width="36" height="24"/><rect x="514" y="102" width="36" height="24"/><rect x="550" y="102" width="36" height="24"/>
+            <rect x="370" y="126" width="36" height="24"/><rect x="406" y="126" width="36" height="24"/><rect x="442" y="126" width="36" height="24"/><rect x="478" y="126" width="36" height="24"/><rect x="514" y="126" width="36" height="24"/><rect x="550" y="126" width="36" height="24"/>
+          </g>
+          <g fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.5"><rect x="442" y="30" width="36" height="24"/><rect x="442" y="54" width="36" height="24"/><rect x="442" y="78" width="36" height="24"/><rect x="442" y="102" width="36" height="24"/><rect x="442" y="126" width="36" height="24"/></g>
+          <text x="388" y="46">0</text><text x="424" y="46">1</text><text x="460" y="46">2</text><text x="496" y="46">3</text><text x="532" y="46">4</text><text x="568" y="46">5</text>
+          <text x="388" y="70">1</text><text x="424" y="70">2</text><text x="460" y="70">3</text><text x="496" y="70">4</text><text x="532" y="70">5</text><text x="568" y="70">6</text>
+          <text x="388" y="94">2</text><text x="424" y="94">3</text><text x="460" y="94">4</text><text x="496" y="94">5</text><text x="532" y="94">6</text><text x="568" y="94">7</text>
+          <text x="388" y="118">3</text><text x="424" y="118">4</text><text x="460" y="118">5</text><text x="496" y="118">6</text><text x="532" y="118">7</text><text x="568" y="118">8</text>
+          <text x="388" y="142">4</text><text x="424" y="142">5</text><text x="460" y="142">6</text><text x="496" y="142">7</text><text x="532" y="142">8</text><text x="568" y="142">9</text>
+          <text x="600" y="94" fill="var(--lk-ink-soft)">…</text><text x="478" y="166" fill="var(--lk-ink-soft)">⋮</text>
+        </g>
+        <g font-size="9.5" fill="var(--lk-ink-soft)"><text x="20" y="46">r=0</text><text x="20" y="70">r=1</text><text x="20" y="94">r=2</text><text x="20" y="118">r=3</text><text x="20" y="142">r=4</text>
+        <text x="340" y="46">r=0</text><text x="340" y="70">r=1</text><text x="340" y="94">r=2</text><text x="340" y="118">r=3</text><text x="340" y="142">r=4</text></g>
+        <text x="20" y="190" font-size="10" fill="var(--lk-vermilion)">column 2: every row in bank 2 → 32-way</text>
+        <text x="340" y="190" font-size="10" fill="var(--lk-cobalt-dark)">column 2: banks 2, 3, … 31, 0, 1 → one pass</text>
+        <text x="20" y="214" font-size="9.5" fill="var(--lk-ink-soft)">bank of tile[r][c] = (r × row length + c) mod 32</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; The padding trick. With rows of 32 words, a column sits in a single bank. Make each row 33 words long, one unused word per row, and each row starts one bank later, so a column is spread over all 32 banks. The cost is 32 wasted words per tile: 3% of the tile&rsquo;s memory for a 32&times; faster column access.</figcaption>
+    </figure>
+
+    <div id="w-banks" class="w"></div>
+
+    <p>Two notes for later. First, padding is not the only fix. Production kernels (CUTLASS, FlashAttention) usually <strong>swizzle</strong> instead: they permute the column index with an XOR, <code>tile[r][c ^ r]</code>, which spreads columns over all banks without wasting memory and keeps rows 16-byte aligned for vector loads. It is the last option in the widget; Part II uses it. Second, accesses wider than 4 bytes are processed in several passes anyway (a warp&rsquo;s <code>float4</code> read moves 512 bytes, four times what the 32 banks deliver per cycle), and conflicts are counted within each pass, so the analysis changes slightly for vector types. Nsight Compute counts bank conflicts per instruction, and chapter 5 shows you where.</p>
+  </section>
+
+  <section id="s8">
+    <h2>8. Capstone: the matrix transpose</h2>
+
+    <p>Transposing a matrix, <code>out[c][r] = in[r][c]</code>, does no arithmetic at all. It is pure data movement, which makes it the perfect exam for this chapter: the right yardstick is a plain copy of the same bytes, and anything slower than the copy is wasted memory bandwidth. Lab 2&rsquo;s experiment D runs three versions on an 8192&times;8192 matrix (256 MB in, 256 MB out), with a copy as the ceiling. All use blocks of 32&times;8 threads, each block handling a 32&times;32 tile (each thread moves four elements), so that a warp is always one row of 32 threads.</p>
+
+    <h3>Version 1: naive</h3>
+<pre><code class="language-cpp">out[(size_t)c * R + r] = in[(size_t)r * C + c];     // c varies along the warp</code></pre>
+    <p>The read <code>in[r*C + c]</code> is coalesced: <code>c</code> is the varying index, in the last position. The write <code>out[c*R + r]</code> has the varying <code>c</code> multiplied by <code>R</code> = 8,192: every lane writes to its own sector, 8,192 floats from its neighbour. One coalesced side, one side at 12.5% efficiency. No mapping of threads can fix this, because whichever index you make vary along the warp, one of the two matrices is walked by columns.</p>
+
+    <h3>Version 2: through shared memory</h3>
+    <p>The fix is to do the transposition <em>inside the SM</em>, where column access is cheap. Read a 32&times;32 tile with coalesced row reads into shared memory, synchronize, then write the transposed tile with coalesced row writes of the output, reading the tile by columns:</p>
+
+    <figure class="lk-fig" role="img" aria-label="Transpose through shared memory. A block reads a 32 by 32 tile of the input row by row, coalesced, into a shared-memory tile. After a barrier it reads the tile column by column and writes each column as a row of the output tile, whose position is mirrored across the diagonal. Both global accesses are row-wise and coalesced; the column access happens in shared memory.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 640 200" style="width:640px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Transpose via a shared-memory tile</title>
+        <defs><marker id="c3-arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker></defs>
+        <text x="80" y="18" font-size="11" text-anchor="middle" font-weight="700" fill="var(--lk-ink)">input (global)</text>
+        <rect x="20" y="28" width="120" height="120" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+        <rect x="50" y="58" width="40" height="40" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <g stroke="var(--lk-cobalt)"><line x1="54" y1="64" x2="86" y2="64"/><line x1="54" y1="72" x2="86" y2="72"/><line x1="54" y1="80" x2="86" y2="80"/><line x1="54" y1="88" x2="86" y2="88"/></g>
+        <text x="80" y="166" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">tile (bx, by): read rows</text>
+        <line x1="145" y1="78" x2="240" y2="78" stroke="var(--lk-cobalt)" stroke-width="1.4" marker-end="url(#c3-arr)"/>
+        <text x="192" y="70" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">coalesced reads</text>
+
+        <text x="320" y="18" font-size="11" text-anchor="middle" font-weight="700" fill="var(--lk-ink)">shared tile[32][33]</text>
+        <rect x="250" y="38" width="140" height="84" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <g stroke="var(--lk-cobalt)"><line x1="258" y1="48" x2="372" y2="48"/><line x1="258" y1="58" x2="372" y2="58"/><line x1="258" y1="68" x2="372" y2="68"/></g>
+        <g stroke="var(--lk-forest)" stroke-width="1.6"><line x1="270" y1="80" x2="270" y2="116"/><line x1="284" y1="80" x2="284" y2="116"/><line x1="298" y1="80" x2="298" y2="116"/></g>
+        <rect x="378" y="38" width="12" height="84" fill="var(--lk-warnbg)" stroke="none"/>
+        <text x="320" y="140" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">write rows · __syncthreads() · read columns</text>
+        <text x="384" y="34" font-size="8.5" text-anchor="middle" fill="var(--lk-vermilion)">pad</text>
+        <line x1="400" y1="98" x2="495" y2="98" stroke="var(--lk-cobalt)" stroke-width="1.4" marker-end="url(#c3-arr)"/>
+        <text x="448" y="116" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">coalesced writes</text>
+
+        <text x="560" y="18" font-size="11" text-anchor="middle" font-weight="700" fill="var(--lk-ink)">output (global)</text>
+        <rect x="500" y="28" width="120" height="120" fill="var(--lk-paper)" stroke="var(--lk-rule)"/>
+        <rect x="560" y="48" width="40" height="40" fill="var(--lk-hl)" stroke="var(--lk-cobalt)" stroke-width="1.5"/>
+        <g stroke="var(--lk-forest)"><line x1="564" y1="54" x2="596" y2="54"/><line x1="564" y1="62" x2="596" y2="62"/><line x1="564" y1="70" x2="596" y2="70"/></g>
+        <text x="560" y="166" font-size="9.5" text-anchor="middle" fill="var(--lk-ink-soft)">tile (by, bx): write rows</text>
+        <text x="320" y="190" font-size="10" text-anchor="middle" fill="var(--lk-ink)">the column access (green) happens on chip: cheap, if it is free of bank conflicts</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; The shared-memory transpose. Both trips to DRAM are row-wise, so both are coalesced. The transposition itself, the column-wise access, happens on chip. The block&rsquo;s output tile is the mirror of its input tile across the diagonal, which is why the kernel swaps <code>blockIdx.x</code> and <code>blockIdx.y</code> when it writes.</figcaption>
+    </figure>
+
+<pre><code class="language-cpp">template &lt;int PAD&gt;
+__global__ void transpose_shared(const float* __restrict__ in, float* __restrict__ out, int R, int C)
+{
+    __shared__ float tile[32][32 + PAD];
+
+    int c  = blockIdx.x * 32 + threadIdx.x;                 // 1. load a tile, row by row
+    int r0 = blockIdx.y * 32 + threadIdx.y;
+    for (int k = 0; k &lt; 32; k += 8)
+        if (r0 + k &lt; R &amp;&amp; c &lt; C)
+            tile[threadIdx.y + k][threadIdx.x] = in[(size_t)(r0 + k) * C + c];
+
+    __syncthreads();                                        // the whole tile is loaded
+
+    int oc  = blockIdx.y * 32 + threadIdx.x;                // 2. write the mirrored tile
+    int or0 = blockIdx.x * 32 + threadIdx.y;
+    for (int k = 0; k &lt; 32; k += 8)
+        if (or0 + k &lt; C &amp;&amp; oc &lt; R)
+            out[(size_t)(or0 + k) * R + oc] = tile[threadIdx.x][threadIdx.y + k];   // column read
+}</code></pre>
+
+    <p>Only one barrier this time: each block handles a single tile, so nobody overwrites it (no write-after-read hazard). Both global accesses now have <code>threadIdx.x</code> in the last index. But look at the shared-memory read in the last line: <code>tile[threadIdx.x][&hellip;]</code>. The varying index is the <em>row</em>, so with <code>PAD = 0</code> a warp reads a column of a 32-word-wide tile: section 7&rsquo;s 32-way bank conflict, on every read out of the tile.</p>
+
+    <h3>Version 3: padded</h3>
+    <p>Set <code>PAD = 1</code>. The build output shows the cost (<code>4224 bytes smem</code> instead of <code>4096</code>), and the column read now spreads over all 32 banks. Nothing else changes.</p>
+
+    <details class="ym">
+      <summary>Your move: put numbers on it. Take the copy as 100%. Predict naive, shared (PAD = 0) and padded, before running experiment D.</summary>
+      <p>The copy runs near your practical DRAM ceiling. <strong>Padded</strong> should come close to it, typically 85&ndash;95% of the copy: both global sides are coalesced, and the only extra costs are the barrier and the shared-memory round trip. <strong>Naive</strong> is limited by its uncoalesced writes; the pure sector rule would say 12.5% efficiency on the write side, but in practice L2 absorbs part of the damage by merging partial writes to the same sectors from neighbouring warps, so expect something like a third to a half of the copy, not an eighth. <strong>Shared, unpadded</strong> is the instructive one: the DRAM traffic is already optimal, yet 32-way conflicts make every column read 32 passes long, which can make it little better than naive, or even worse. One extra word per row then gives the largest speedup in the lab. When your numbers come back, the gap between the last two rows is the price of bank conflicts on your card.</p>
+    </details>
+
+    <div class="callout idea">
+      <span class="callout-label">The pattern generalizes</span>
+      <p>&ldquo;Read coalesced into shared memory, do the awkward access pattern on chip, write coalesced&rdquo; is one of the core moves of GPU programming. The book calls its matrix-multiply form <em>corner turning</em>. It reappears in matrix multiplies with a transposed operand, in layout conversions between tensor formats, in attention kernels, and in every place where the natural order of computation differs from the order in memory.</p>
+    </div>
+  </section>
+
+  <section id="s9">
+    <h2>9. Lab 2: measure the hierarchy</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 2</span><span class="lab-title">The memory hierarchy</span><span class="idx-meta">~45 min · <code>mlsys/labs/lab02-memory/</code></span></div>
+      <div class="lab-body">
+        <p>Three programs, four experiments, every one of them a prediction from this chapter. In WSL2, keep the repo inside the Linux filesystem (<code>~/…</code>), not under <code>/mnt/c/</code>: builds on the Windows drive are many times slower.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab02-memory
+make          # ptxas: the two transpose_shared kernels, 4096 vs 4224 bytes smem
+make test     # every kernel against a CPU reference, awkward sizes included
+make bench    # A latency · B1 strides · B2 offsets · C bytes in flight · D transpose</code></pre>
+        <table>
+          <tr><th>Exp.</th><th>What it does</th><th>Prediction to write down</th></tr>
+          <tr><td>A</td><td>One thread chases pointers through 4 KB &hellip; 512 MB, plus shared memory (section 1)</td><td>where the steps of the staircase are, and their heights</td></tr>
+          <tr><td>B1</td><td>Reads <code>a[i * stride]</code>, stride 1 &hellip; 32 (section 3)</td><td>the useful-bandwidth curve</td></tr>
+          <tr><td>B2</td><td>A copy shifted by 0 &hellip; 32 floats (section 4)</td><td>the cost of misalignment</td></tr>
+          <tr><td>C</td><td>float / float4 / 4&times; ILP copies at 17% and 100% occupancy (section 5)</td><td>which ones starve at low occupancy</td></tr>
+          <tr><td>D</td><td>8192&times;8192 transpose: copy, naive, shared, padded (section 8)</td><td>each as a % of the copy</td></tr>
+        </table>
+        <p>Experiment B1 allocates a 4 GB array, so close games and video before benchmarking: under WSL2 the Windows desktop shares your GPU and its 12 GB. Paste all the <code>PASTE:</code> lines back (three from <code>make test</code>, five from <code>make bench</code>). Your latency staircase will replace the orders of magnitude in section 1&rsquo;s table.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">How the latency benchmark works</span>
+      <p>One thread follows a chain of pointers, <code>j = next[j]</code>, laid out in a random cycle with one node per 128-byte line. Every load needs the previous one&rsquo;s result, so nothing overlaps and no other warp hides anything: the time per step <em>is</em> the latency. It is the opposite of every other benchmark in the course, which is the point. Past a few hundred MB you may see the latency creep up again: that is the TLB (address translation) missing, a rung of the hierarchy nobody draws.</p>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Add a fourth transpose that removes the conflicts with the XOR swizzle instead of padding: declare <code>tile[32][32]</code>, store to <code>tile[ty + k][tx ^ (ty + k)]</code> and read from <code>tile[tx][(ty + k) ^ tx]</code>. Convince yourself that it is still a correct transpose, check it with <code>make test</code> (add it to the test list), and compare its speed with the padded version.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>State the sector rule, and use it to find the efficiency of a warp reading <code>a[4*i]</code> (floats).</summary>
+        <p>Global memory moves in 32-byte sectors; a warp&rsquo;s request costs as many sectors as its 32 addresses touch. With stride 4 the lanes are 16 bytes apart, so the warp spans 512 bytes = 16 sectors for 128 useful bytes: 25% efficiency.</p>
+      </details>
+      <details>
+        <summary>Why is <code>float a[16]</code> declared inside a kernel sometimes fast and sometimes slow?</summary>
+        <p>If every index into it is a compile-time constant (for example inside fully unrolled loops), the compiler keeps it in registers. If any index is only known at run time, it must live in local memory, which is private per thread but physically in DRAM, cached in L1/L2. <code>-Xptxas -v</code> reports a nonzero stack frame when this happens.</p>
+      </details>
+      <details>
+        <summary>A kernel reads only the <code>x</code> field of an array of <code>struct { float x, y, z, w; }</code>. What efficiency does it get, and what are the two fixes?</summary>
+        <p>Stride 16 bytes: 25%. Fix 1: structure of arrays, so <code>x</code> is contiguous (100%). Fix 2: if the kernel actually needs all four fields, load the whole struct with one 16-byte (<code>float4</code>) load per thread, which is also 100% efficient.</p>
+      </details>
+      <details>
+        <summary>Chapter 1 found that one 4-byte load per thread can&rsquo;t saturate DRAM even at full occupancy. Give two code-level fixes.</summary>
+        <p>Load more bytes per instruction (<code>float4</code>, 16 bytes, still coalesced), or issue several independent loads per thread before using them (instruction-level parallelism, e.g. from an unrolled loop). Both raise the bytes in flight per thread, and they work even at low occupancy.</p>
+      </details>
+      <details>
+        <summary>Why do GPU kernels use explicitly managed shared memory for reuse instead of relying on the L1 cache like CPU code does?</summary>
+        <p>Thousands of threads share one SM&rsquo;s L1, so data a warp intends to reuse is often evicted by other warps before the reuse happens. Shared memory is only overwritten when your code overwrites it, so the reuse is guaranteed, and the whole block can share what any of its threads loaded.</p>
+      </details>
+      <details>
+        <summary>In a tiled loop, what does each of the two <code>__syncthreads()</code> protect against?</summary>
+        <p>The first (after loading the tile) protects a read-after-write dependence: no thread may read the tile before all threads have written their part. The second (after using the tile) protects a write-after-read dependence: no thread may overwrite the tile with the next phase before all threads have finished reading the current one.</p>
+      </details>
+      <details>
+        <summary>Which of these shared-memory accesses conflict, and how badly: <code>s[lane]</code>, <code>s[2*lane]</code>, <code>s[5*lane]</code>, <code>s[lane/4]</code>, <code>s[32*lane]</code>?</summary>
+        <p><code>s[lane]</code>: none. <code>s[2*lane]</code>: 2-way. <code>s[5*lane]</code>: none (odd stride). <code>s[lane/4]</code>: none, groups of 4 lanes read the same word, which is broadcast. <code>s[32*lane]</code>: 32-way, every lane in bank 0.</p>
+      </details>
+      <details>
+        <summary>Why does <code>float tile[32][33]</code> make column reads conflict-free?</summary>
+        <p>The bank of <code>tile[r][c]</code> is (33&middot;<var>r</var> + <var>c</var>) mod 32 = (<var>r</var> + <var>c</var>) mod 32. Down a column (fixed <var>c</var>, <var>r</var> = 0&hellip;31) that takes 32 different values, so the 32 lanes hit 32 different banks. With 32 columns it would be <var>c</var> mod 32 for every row: one bank.</p>
+      </details>
+      <details>
+        <summary>In the shared-memory transpose, why are there no bank conflicts on the <em>load</em> into the tile, only on the read out of it?</summary>
+        <p>The load writes <code>tile[ty + k][tx]</code>: along a warp only <code>tx</code> varies, and it is the column index, so the 32 lanes write 32 consecutive words in 32 different banks. The read <code>tile[tx][ty + k]</code> has the varying index in the row position, 32 words apart, which is the conflicting pattern.</p>
+      </details>
+      <details>
+        <summary>You need more than 48 KB of shared memory in one block on your card. What do you have to do, and what is the hard limit?</summary>
+        <p>Allocate it dynamically (<code>extern __shared__</code> plus the third launch parameter) and raise the kernel&rsquo;s limit with <code>cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)</code>. The hard limit is 99 KB per block (100 KB per SM, 1 KB reserved per block).</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed., ch. 5 (memory types, tiling, the two barriers, boundary checks, shared memory and occupancy) and ch. 6 (DRAM bursts, coalescing, corner turning, latency hiding through memory parallelism, thread coarsening). All numbers here are recomputed for the RTX 5070; the book does not cover shared-memory banks.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html">CUDA C++ Best Practices Guide</a>, &ldquo;Coalesced Access to Global Memory&rdquo; (32-byte transactions, misaligned and strided examples) and &ldquo;Shared Memory&rdquo; (32 banks, 32 bits per bank per cycle, broadcast, serialization).</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html">CUDA Programming Guide, Compute Capabilities</a>: shared-memory carveouts for 12.x (0, 8, 16, 32, 64, 100 KB), 99 KB per block, 32 banks, 64 KB constant memory.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html">Blackwell Tuning Guide</a>: the 48 KB static shared-memory limit, the dynamic opt-in, 1 KB reserved per block.</li>
+      <li>NVIDIA, <a href="https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf"><em>RTX Blackwell GPU Architecture</em> whitepaper</a>, Appendix C: 128 KB L1/shared and 256 KB of registers per SM, 48 MB L2 on GB205.</li>
+      <li>Mark Harris, <a href="https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/"><em>An Efficient Matrix Transpose in CUDA C/C++</em></a> (NVIDIA blog, 2013): the classic 32&times;8-thread, padded-tile transpose that section 8 follows. His companion post <a href="https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/"><em>How to Access Global Memory Efficiently</em></a> has the strided and offset experiments.</li>
+      <li>Z. Jia, M. Maggioni, B. Staiger, D. Scarpazza, <em>Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking</em> (2018): pointer-chasing methodology for measuring each level&rsquo;s latency, the model for experiment A.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-02-execution-model.html">&larr; Ch. 2 — The execution model: grids, blocks, warps</a>
+      <a href="index.html">Index</a>
+      <span>Ch. 4 — The roofline (in writing)</span>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part I · Chapter 3 · rules checked against the CUDA 13.4 documentation, September 2026; SASS observations from lab 2 compiled with CUDA 13.4 for sm_120</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script>
+    LessonKit.annotatedCode('#w-tiled', { lines: [
+      ['__shared__ float As[32][32], Bs[32][32];', 'One tile of A and one of B, 4 KB each, shared by the whole block. Allocated when the block starts, gone when it ends.'],
+      ['float acc = 0.0f;', 'Each thread accumulates ONE output element in a register.'],
+      ['for (int t = 0; t < K / 32; ++t) {', 'Phases: walk along the shared dimension one 32-wide strip at a time. Each phase reuses the two small shared arrays.'],
+      ['    As[ty][tx] = A[row * K + t * 32 + tx];', 'Each thread loads ONE element of the A tile. threadIdx.x (tx) is the last index: coalesced.'],
+      ['    Bs[ty][tx] = B[(t * 32 + ty) * N + col];', 'And one element of the B tile. col contains tx: coalesced too. 1,024 threads load 1,024 + 1,024 elements, each once.'],
+      ['    __syncthreads();', 'BARRIER 1, read-after-write: nobody may read the tiles until every thread has stored its element. Without it, fast warps read stale or half-written tiles.'],
+      ['    for (int k = 0; k < 32; ++k)', 'The reuse: each thread reads 32 values from each tile. Every element fetched from DRAM is used by 32 threads: traffic divided by 32.'],
+      ['        acc += As[ty][k] * Bs[k][tx];', 'As[ty][k]: the same word for the whole warp (ty, k uniform): broadcast. Bs[k][tx]: consecutive words, 32 banks. Conflict-free.'],
+      ['    __syncthreads();', 'BARRIER 2, write-after-read: nobody may overwrite the tiles with the NEXT phase until every thread has finished reading THIS one. Easy to forget, timing-dependent when missing.'],
+      ['}', 'Next phase. After K/32 phases, acc holds the full dot product.'],
+      ['C[row * N + col] = acc;', 'One coalesced store per thread. (Bounds checks omitted here: out-of-range threads must still load zeros and reach both barriers.)']
+    ]});
+  </script>
+  <script src="assets/coalesce-viz.js"></script>
+  <script src="assets/bank-viz.js"></script>
+</body>
+</html>

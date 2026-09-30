@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the 23-card root course catalog in /home/ybc/hosted/unibo-lessons/index.html.
+"""Validate the 25-card root course catalog in /home/ybc/hosted/unibo-lessons/index.html.
 
 Checks:
 1. Tag balance of index.html.
@@ -57,8 +57,8 @@ def main():
 
     # 2-3. cards
     cards = re.findall(r'<a class="card" href="([^"]+)">\s*<h2>(.*?)</h2>\s*<p>(.*?)</p>\s*</a>', html, re.S)
-    if len(cards) != 23:
-        problems.append(f"EXPECTED 23 cards, found {len(cards)}")
+    if len(cards) != 25:
+        problems.append(f"EXPECTED 25 cards, found {len(cards)}")
     hrefs = [c[0] for c in cards]
     dupes = {h for h in hrefs if hrefs.count(h) > 1}
     if dupes:
