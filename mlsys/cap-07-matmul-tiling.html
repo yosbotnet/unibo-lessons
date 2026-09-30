@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 7 — Matmul I: tiling and shared memory · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch7.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-06-neural-networks-as-a-workload.html">&larr; Ch. 6 — Neural networks as a workload</a>
+    <a href="index.html">Index</a>
+    <a href="index.html">Ch. 8 — Matmul II (in writing) &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Kernels that matter · Chapter 7</div>
+    <h1>Matmul I: tiling and shared memory</h1>
+    <div class="lk-meta"><span>~60 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 6 · ~50 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Chapter 6 showed that the matrix multiply is where a model&rsquo;s arithmetic lives. This chapter and the next take one FP32 matmul from the obvious kernel to within reach of cuBLAS, one idea at a time, with a prediction and a measurement at every step. Here we cover the first half of the road. The naive kernel, one thread per output, runs at around 1% or 5% of peak depending on a single detail: <strong>which way the warp is laid across the output</strong>, which decides whether its loads are coalesced. <strong>Tiling</strong> then makes a block load a tile of each input into shared memory once and reuse every element <var>T</var> times, cutting global traffic by <var>T</var>. And then it stalls, at roughly a tenth of peak, for a reason that no tile size can fix: <strong>every multiply-add still needs two loads from shared memory</strong>, and shared memory serves only one warp-wide load per cycle per SM, while the FMA units could take four. That ratio, loads per FMA, is the number chapter 8 attacks.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The kernel that decides everything</a></li>
+      <li><a href="#s2">The naive kernel</a></li>
+      <li><a href="#s3">Which way the warp lies decides coalescing</a></li>
+      <li><a href="#s4">Where the naive kernel&rsquo;s loads really go</a></li>
+      <li><a href="#s5">Tiling: load once, use T times</a></li>
+      <li><a href="#s6">The tiled kernel, line by line</a></li>
+      <li><a href="#s7">Why tiling stops near a tenth of peak</a></li>
+      <li><a href="#s8">Predictions, and what the profiler should show</a></li>
+      <li><a href="#s9">Lab 6: from naive to tiled</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. The kernel that decides everything</h2>
+
+    <p>The problem, fixed for this chapter and the next: <strong>C = A &middot; B</strong> with <var>A</var> of shape [<var>M</var>, <var>K</var>], <var>B</var> of shape [<var>K</var>, <var>N</var>], <var>C</var> of shape [<var>M</var>, <var>N</var>], all row-major, all FP32. The BLAS name is <strong>SGEMM</strong> (single-precision general matrix multiply). Each of the <var>M</var>&middot;<var>N</var> outputs is a dot product of length <var>K</var>, so 2<var>MNK</var> FLOPs in total. The benchmark size is 4096 &times; 4096 &times; 4096: 137 GFLOPs, 4.4 ms at your card&rsquo;s 30.9 TFLOPS FP32 peak if every cycle of every FMA unit were used.</p>
+
+    <p>Nobody reaches the peak, so the course measures against the best real implementation: <strong>cuBLAS</strong>, NVIDIA&rsquo;s BLAS, with dozens of hand-tuned kernels per architecture. Lab 6 calls it in plain FP32 mode (no TF32 tensor cores, which would be a different contest; chapter 8) and reports every kernel as a <strong>percentage of cuBLAS</strong>. Expect cuBLAS itself at somewhere around 60&ndash;85% of the nominal peak: the peak assumes the boost clock, and under a long, power-hungry matmul the card clocks lower.</p>
+
+    <p>The road through these two chapters is well mapped. Simon Boehm&rsquo;s worklog, the standard modern account, took SGEMM on an RTX A6000 through ten kernels; his measurements, as a percentage of cuBLAS, are the landmarks we will predict against:</p>
+    <table>
+      <tr><th>Kernel</th><th>Idea</th><th>Boehm, A6000</th><th>Where</th></tr>
+      <tr><td>naive</td><td>one thread per output</td><td>1.3%</td><td rowspan="3">this chapter</td></tr>
+      <tr><td>coalesced</td><td>same kernel, warp across columns</td><td>8.5%</td></tr>
+      <tr><td>shared-memory tiles</td><td>load once, reuse <var>T</var> times</td><td>12.8%</td></tr>
+      <tr><td>1D register blocking</td><td>each thread computes 8 outputs</td><td>36.5%</td><td rowspan="4">chapter 8</td></tr>
+      <tr><td>2D register blocking</td><td>each thread computes 8&times;8</td><td>68.7%</td></tr>
+      <tr><td>vectorized loads</td><td>16-byte loads, transposed tile</td><td>78.4%</td></tr>
+      <tr><td>warp tiling</td><td>a level between block and thread</td><td>93.7%</td></tr>
+    </table>
+    <p>Look at the shape of that column before reading on. The ideas of <em>this</em> chapter, the ones every CUDA tutorial teaches, get you to about an eighth of cuBLAS. The big steps come after, and the reason they come after is the most important thing this chapter has to explain.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. The naive kernel</h2>
+
+    <p>One thread per output element, each running the dot product in a loop. You met it in lab 5 as <code>matmul_naive</code>; here is the general version with a 2D launch:</p>
+<pre><code class="language-cpp">__global__ void sgemm_naive(const float* A, const float* B, float* C, int M, int N, int K)
+{
+    int row = /* which row of C this thread owns */;
+    int col = /* which column */;
+    if (row &gt;= M || col &gt;= N) return;
+    float acc = 0.0f;
+    for (int k = 0; k &lt; K; ++k)
+        acc += A[row * K + k] * B[k * N + col];     // one FMA, two global loads
+    C[row * N + col] = acc;
+}</code></pre>
+
+    <p>Every iteration of the loop does one fused multiply-add (<code>FFMA</code>, 2 FLOPs) and <strong>two loads from global memory</strong>. If each load went to DRAM, that would be 2 FLOPs per 8 bytes, an intensity of 0.25, and a ceiling of 168 GFLOPS: half a percent of peak (chapter 4). Before measuring anything, the question is how the two blank lines at the top are filled in, because that decides what a warp&rsquo;s 32 loads look like.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Which way the warp lies decides coalescing</h2>
+
+    <p>A warp is 32 threads with consecutive <code>threadIdx.x</code> (chapter 2). So the mapping from <code>threadIdx.x</code> to the output decides which 32 outputs a warp computes, and therefore which addresses its loads hit at each step <var>k</var>. There are two natural choices:</p>
+<pre><code class="language-cpp">// v1: x walks the ROWS of C              // v2: x walks the COLUMNS of C
+int row = blockIdx.x * 32 + threadIdx.x;  int col = blockIdx.x * 32 + threadIdx.x;
+int col = blockIdx.y * 8  + threadIdx.y;  int row = blockIdx.y * 8  + threadIdx.y;</code></pre>
+
+    <figure class="lk-fig" role="img" aria-label="Two panels. Left, v1: a warp covers 32 rows of one column of C. At step k its A loads form a vertical strip down column k of A, one element per row, K floats apart: 32 sectors. Its B loads all hit the same element: one sector. Right, v2: a warp covers 32 columns of one row. Its A loads all hit the same element of A: one sector, broadcast. Its B loads are 32 consecutive floats of row k of B: 4 sectors.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 250" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>What one warp loads at step k</title>
+        <text x="160" y="16" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">v1 · warp = 32 rows of a column</text>
+        <text x="500" y="16" font-size="11" font-weight="700" text-anchor="middle" fill="var(--lk-ink)">v2 · warp = 32 columns of a row</text>
+        <line x1="330" y1="10" x2="330" y2="240" stroke="var(--lk-rule-soft)"/>
+        <!-- grids: 8x8 cells of 14px. A at x=24, B at x=172, y=44 -->
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)">
+          <rect x="24" y="44" width="112" height="112"/><rect x="172" y="44" width="112" height="112"/>
+          <rect x="364" y="44" width="112" height="112"/><rect x="512" y="44" width="112" height="112"/>
+        </g>
+        <g stroke="var(--lk-rule-soft)">
+          <path d="M38 44V156M52 44V156M66 44V156M80 44V156M94 44V156M108 44V156M122 44V156M24 58H136M24 72H136M24 86H136M24 100H136M24 114H136M24 128H136M24 142H136"/>
+          <path d="M186 44V156M200 44V156M214 44V156M228 44V156M242 44V156M256 44V156M270 44V156M172 58H284M172 72H284M172 86H284M172 100H284M172 114H284M172 128H284M172 142H284"/>
+          <path d="M378 44V156M392 44V156M406 44V156M420 44V156M434 44V156M448 44V156M462 44V156M364 58H476M364 72H476M364 86H476M364 100H476M364 114H476M364 128H476M364 142H476"/>
+          <path d="M526 44V156M540 44V156M554 44V156M568 44V156M582 44V156M596 44V156M610 44V156M512 58H624M512 72H624M512 86H624M512 100H624M512 114H624M512 128H624M512 142H624"/>
+        </g>
+        <g font-size="10" font-weight="700" fill="var(--lk-ink)" text-anchor="middle"><text x="80" y="38">A</text><text x="228" y="38">B</text><text x="420" y="38">A</text><text x="568" y="38">B</text></g>
+        <!-- v1: A column k (x=66..80), all 8 rows, each its own sector -->
+        <g fill="var(--lk-vermilion)" opacity=".85"><rect x="66" y="44" width="14" height="14"/><rect x="66" y="58" width="14" height="14"/><rect x="66" y="72" width="14" height="14"/><rect x="66" y="86" width="14" height="14"/><rect x="66" y="100" width="14" height="14"/><rect x="66" y="114" width="14" height="14"/><rect x="66" y="128" width="14" height="14"/><rect x="66" y="142" width="14" height="14"/></g>
+        <!-- v1: B single element row k, column col -->
+        <rect x="228" y="86" width="14" height="14" fill="var(--lk-cobalt)"/>
+        <!-- v2: A single element row, column k -->
+        <rect x="406" y="72" width="14" height="14" fill="var(--lk-cobalt)"/>
+        <!-- v2: B row k, 8 consecutive cells -->
+        <rect x="512" y="86" width="112" height="14" fill="var(--lk-cobalt)" opacity=".85"/>
+        <g font-size="9.5" fill="var(--lk-ink)">
+          <text x="24" y="176">column k: one float</text><text x="24" y="189">per row, K apart</text>
+          <text x="24" y="206" fill="var(--lk-vermilion)" font-weight="700">32 sectors / request</text>
+          <text x="172" y="176">one element,</text><text x="172" y="189">every lane the same</text>
+          <text x="172" y="206" fill="var(--lk-cobalt-dark)" font-weight="700">1 sector (broadcast)</text>
+          <text x="364" y="176">one element,</text><text x="364" y="189">every lane the same</text>
+          <text x="364" y="206" fill="var(--lk-cobalt-dark)" font-weight="700">1 sector (broadcast)</text>
+          <text x="512" y="176">32 consecutive floats</text><text x="512" y="189">of row k</text>
+          <text x="512" y="206" fill="var(--lk-cobalt-dark)" font-weight="700">4 sectors: coalesced</text>
+        </g>
+        <text x="160" y="232" font-size="9.5" text-anchor="middle" fill="var(--lk-vermilion)">store of C: 32 rows apart &rarr; 32 sectors</text>
+        <text x="500" y="232" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">store of C: 128 contiguous bytes &rarr; 4 sectors</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The loads of one warp at one step <var>k</var> of the loop (8 of the 32 lanes drawn). Same kernel, same arithmetic, different <code>threadIdx.x</code> mapping. In v1 the A loads are chapter 3&rsquo;s column walk: every lane touches a different row, so a single warp-wide load pulls 32 sectors of 32 bytes to use 4 bytes of each.</figcaption>
+    </figure>
+
+    <details class="ym">
+      <summary>Your move: count the sectors per warp per <var>k</var> step for both versions (A and B loads together), and guess the speed ratio between v1 and v2.</summary>
+      <p><strong>v1</strong>: 32 sectors for A + 1 for B = 33 sectors per step, of which only 128 + 4 bytes are useful. <strong>v2</strong>: 1 for A + 4 for B = 5 sectors, all of the fetched B bytes useful. That is about 6.6&times; less traffic between L1 and L2 per FMA, and v2&rsquo;s stores are coalesced too. The caches soften the difference (v1&rsquo;s A sectors are reused by the next 7 values of <var>k</var>, if they survive in L1 that long), so the speedup is not exactly the sector ratio, but it is large: Boehm measured 6.4&times; on the A6000. This is chapter 2&rsquo;s rule again, now with money on it: <strong><code>threadIdx.x</code> walks the dimension that is contiguous in memory</strong>, and for C and B that is the column.</p>
+    </details>
+
+    <p>v2&rsquo;s A load deserves a second look. All 32 lanes read the same address, and the hardware sends one request and <em>broadcasts</em> the value to every lane. That is as cheap as a load can be, and it will matter again when the same pattern appears in shared memory.</p>
+  </section>
+
+  <section id="s4">
+    <h2>4. Where the naive kernel&rsquo;s loads really go</h2>
+
+    <p>v2 does 2 FLOPs per 8 bytes loaded. If DRAM served every byte, it could not exceed 168 GFLOPS. Yet it will run at several TFLOP/s on your card, ten or more times faster. So most of its loads never reach DRAM. Look at who else needs the same data at the same moment:</p>
+    <ul>
+      <li>With 32&times;8 blocks, the <strong>8 warps of a block</strong> compute 8 rows of the same 32 columns. At step <var>k</var> they all load the same 128 bytes of row <var>k</var> of B. One of them brings it into L1; the other seven hit.</li>
+      <li>Each warp&rsquo;s A load is one float of its row, and consecutive <var>k</var> are consecutive floats: <strong>one 32-byte sector serves 8 iterations</strong>, so 7 of every 8 A loads hit L1.</li>
+      <li>Blocks in the same column of C, possibly on other SMs, read the same B columns; blocks in the same row read the same A rows. <strong>L2 (48 MB)</strong> catches much of that reuse between blocks.</li>
+    </ul>
+    <p>So the caches recover a good part of the reuse the math allows, by luck of timing. But notice what they do <em>not</em> change: every FMA still issues two load instructions, each of which has to travel through the L1/texture pipeline, be checked against the cache tags and come back hundreds of cycles later if it missed. The kernel spends its time waiting for loads and issuing loads. The fix is to stop relying on luck: bring the data the block will reuse into on-chip storage once, on purpose, and read it from there.</p>
+
+    <details class="ym">
+      <summary>Your move: in v2, what would you expect the profiler&rsquo;s top stall reason to be, and why is higher occupancy only a partial fix?</summary>
+      <p><code>long_scoreboard</code>: warps waiting for global loads to come back (chapter 5). More warps in flight hide more of that latency, which is why v2 benefits from full occupancy. But the loads still have to be issued, two per FMA, through the same L1 pipeline, and the data volume between L2 and L1 stays high. More warps cannot reduce the number of loads; only reuse can.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. Tiling: load once, use T times</h2>
+
+    <p>Give each block a <var>T</var>&times;<var>T</var> <strong>tile of C</strong>, one thread per element as before. To compute it the block needs a strip of <var>T</var> full rows of A and a strip of <var>T</var> full columns of B, far too much to hold at once. So it walks along <var>K</var> in <strong>phases</strong> of width <var>T</var>. In phase <var>p</var>:</p>
+    <ol>
+      <li>every thread loads one element of the <var>T</var>&times;<var>T</var> <strong>A tile</strong> (the block&rsquo;s rows, columns <var>pT</var>&hellip;<var>pT</var>+<var>T</var>&minus;1) and one element of the <strong>B tile</strong> (rows <var>pT</var>&hellip;, the block&rsquo;s columns) into shared memory;</li>
+      <li>the block waits at a barrier until both tiles are complete;</li>
+      <li>every thread does <var>T</var> multiply-adds, reading a row of the A tile and a column of the B tile from shared memory;</li>
+      <li>the block waits again, so that nobody overwrites a tile someone is still reading.</li>
+    </ol>
+
+    <figure class="lk-fig" role="img" aria-label="Matrices A, B and C divided into 4 by 4 tiles. The block computing the C tile in row 1, column 2 walks along K: in phase 1 it loads the A tile at row 1, column 1 and the B tile at row 1, column 2 into shared memory, shown below as two small squares labelled As and Bs. The A strip of row 1 and the B strip of column 2 are shaded lightly; the phase-1 tiles are shaded darker.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 320" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One block, one phase</title>
+        <defs><marker id="c7-a1" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--lk-cobalt)"/></marker></defs>
+        <g font-size="11" font-weight="700" fill="var(--lk-ink)" text-anchor="middle"><text x="100" y="22">A  [M, K]</text><text x="330" y="22">B  [K, N]</text><text x="560" y="22">C  [M, N]</text></g>
+        <!-- matrices 160x160, tiles 40 -->
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-rule)"><rect x="20" y="30" width="160" height="160"/><rect x="250" y="30" width="160" height="160"/><rect x="480" y="30" width="160" height="160"/></g>
+        <!-- strips -->
+        <rect x="20" y="70" width="160" height="40" fill="var(--lk-hl)"/>
+        <rect x="330" y="30" width="40" height="160" fill="var(--lk-hl)"/>
+        <!-- phase tiles -->
+        <rect x="60" y="70" width="40" height="40" fill="var(--lk-cobalt)" opacity=".75"/>
+        <rect x="330" y="70" width="40" height="40" fill="var(--lk-cobalt)" opacity=".75"/>
+        <rect x="560" y="70" width="40" height="40" fill="var(--lk-vermilion)" opacity=".8"/>
+        <g stroke="var(--lk-rule-soft)">
+          <path d="M60 30V190M100 30V190M140 30V190M20 70H180M20 110H180M20 150H180"/>
+          <path d="M290 30V190M330 30V190M370 30V190M250 70H410M250 110H410M250 150H410"/>
+          <path d="M520 30V190M560 30V190M600 30V190M480 70H640M480 110H640M480 150H640"/>
+        </g>
+        <g font-size="9" fill="var(--lk-ink-soft)">
+          <text x="20" y="204">the block&rsquo;s T rows, all of K</text>
+          <text x="250" y="204">all of K, the block&rsquo;s T columns</text>
+          <text x="480" y="204">the block&rsquo;s T &times; T tile</text>
+        </g>
+        <g font-size="9" fill="var(--lk-paper-light)" text-anchor="middle"><text x="80" y="94">p = 1</text><text x="350" y="94">p = 1</text><text x="580" y="94">tile</text></g>
+        <!-- shared memory -->
+        <rect x="150" y="240" width="300" height="66" rx="3" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.3"/>
+        <text x="300" y="232" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">shared memory</text>
+        <rect x="190" y="252" width="40" height="40" fill="var(--lk-cobalt)" opacity=".75"/><text x="240" y="276" font-size="10" fill="var(--lk-ink)">As[T][T]</text>
+        <rect x="320" y="252" width="40" height="40" fill="var(--lk-cobalt)" opacity=".75"/><text x="370" y="276" font-size="10" fill="var(--lk-ink)">Bs[T][T]</text>
+        <g stroke="var(--lk-cobalt)" stroke-width="1.3" fill="none" marker-end="url(#c7-a1)">
+          <path d="M80 110 C 80 200, 170 230, 205 250"/>
+          <path d="M350 110 C 350 180, 345 220, 340 250"/>
+        </g>
+        <text x="96" y="226" font-size="9" fill="var(--lk-cobalt-dark)">each thread loads 1</text>
+        <text x="360" y="226" font-size="9" fill="var(--lk-cobalt-dark)">each thread loads 1</text>
+        <path d="M455 272 C 520 272, 560 200, 575 112" stroke="var(--lk-vermilion)" stroke-width="1.3" fill="none" marker-end="url(#c7-a1)"/>
+        <text x="500" y="262" font-size="9" fill="var(--lk-vermilion)">T FMAs per thread,</text>
+        <text x="500" y="274" font-size="9" fill="var(--lk-vermilion)">all from shared</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; One block, phase 1 of 4. The block needs the shaded strips of A and B, and brings them in one <var>T</var>&times;<var>T</var> tile at a time. Every element of a tile, loaded once from global memory, is read by <var>T</var> threads from shared memory: a row of the A tile by the <var>T</var> threads of one row of C, a column of the B tile by the <var>T</var> threads of one column.</figcaption>
+    </figure>
+
+    <p>Count the global loads. The naive kernel issues 2<var>K</var> loads per output. The tiled kernel issues 2 per thread per phase, and there are <var>K</var>/<var>T</var> phases: <strong>2<var>K</var>/<var>T</var> per output</strong>, <var>T</var> times fewer. If every one of them went to DRAM, the intensity would be <var>T</var>/4 FLOP/B: 4 for 16&times;16 tiles, 8 for 32&times;32 (chapter 4&rsquo;s numbers). Walk through it:</p>
+
+    <div id="w-tilewalk" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: with <var>T</var> = 32 at 4096&sup3;, how many bytes does the tiled kernel request from L2 in total, and what ceiling would that give if all of it came from DRAM?</summary>
+      <p>2<var>MNK</var>/<var>T</var> = 2 &times; 4096<sup>3</sup> / 32 &asymp; 4.3 billion loads of 4 bytes: <strong>17 GB</strong>. At ~590 GB/s that is 29 ms, a ceiling of about 4.7 TFLOP/s (8 FLOP/B &times; 590 GB/s). In reality L2 serves much of it: the A strip of one block row (32 rows &times; 4096 &times; 4 B = 512 KB) is read by all 128 blocks of that row, and many of them run at the same time. So the DRAM ceiling is higher than 4.7, and, as section 7 shows, it is not the one that binds.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. The tiled kernel, line by line</h2>
+<pre><code class="language-cpp">template &lt;int T&gt;
+__global__ void sgemm_tiled(const float* A, const float* B, float* C, int M, int N, int K)
+{
+    __shared__ float As[T][T];
+    __shared__ float Bs[T][T];
+    const int tx = threadIdx.x, ty = threadIdx.y;
+    const int row = blockIdx.y * T + ty;          // this thread's element of C
+    const int col = blockIdx.x * T + tx;
+
+    float acc = 0.0f;
+    for (int k0 = 0; k0 &lt; K; k0 += T) {                                              // one phase
+        As[ty][tx] = (row &lt; M &amp;&amp; k0 + tx &lt; K) ? A[row * K + k0 + tx]   : 0.0f;       // (1)
+        Bs[ty][tx] = (k0 + ty &lt; K &amp;&amp; col &lt; N) ? B[(k0 + ty) * N + col] : 0.0f;       // (2)
+        __syncthreads();                                                             // (3)
+        #pragma unroll
+        for (int k = 0; k &lt; T; ++k)
+            acc += As[ty][k] * Bs[k][tx];                                            // (4)
+        __syncthreads();                                                             // (5)
+    }
+    if (row &lt; M &amp;&amp; col &lt; N) C[row * N + col] = acc;                                  // (6)
+}
+// launch: dim3 block(T, T), grid(ceil(N / T), ceil(M / T))</code></pre>
+
+    <ol>
+      <li><strong>(1) and (2), the loads, are both coalesced.</strong> In (1), consecutive <code>tx</code> read consecutive columns of a row of A; in (2), consecutive <code>tx</code> read consecutive columns of a row of B. That is the point of choosing which thread loads which element: the thread that <em>loads</em> an element is not the one that <em>uses</em> it, so loads can be arranged for coalescing independently of the math.</li>
+      <li><strong>Out-of-range elements load as 0</strong>, which adds nothing to a dot product. That is how one kernel handles any <var>M</var>, <var>N</var>, <var>K</var>. Threads outside C do not return early: they still load and still reach both barriers (chapter 3&rsquo;s rule), and only the final store (6) is guarded.</li>
+      <li><strong>(3) and (5) are chapter 3&rsquo;s two barriers</strong>: read-after-write (the tile must be complete before anyone reads it) and write-after-read (nobody overwrites it for the next phase until everyone is done). On a GPU a missing barrier shows up only sometimes, depending on timing, which is what makes it dangerous. (The CPU emulator these labs were checked with, <code>dev/cudasim</code> in the repository, runs each thread as far as it can before switching to the next, which turns a missing barrier into a wrong answer every time.)</li>
+      <li><strong>(4), the inner loop, is conflict-free.</strong> With <var>T</var> = 32, a warp is one row of the block (one <code>ty</code>, <code>tx</code> = 0&hellip;31). <code>As[ty][k]</code> is the same word for all 32 lanes: a broadcast. <code>Bs[k][tx]</code> is 32 consecutive words, one per bank. With <var>T</var> = 16 a warp spans two rows: two distinct <code>As</code> words 16 banks apart, and the two half-warps read the same 16 <code>Bs</code> words, still one pass each.</li>
+    </ol>
+
+    <details class="ym">
+      <summary>Your move: a colleague &ldquo;simplifies&rdquo; by putting the whole body inside <code>if (row &lt; M &amp;&amp; col &lt; N) { ... }</code>. On square 4096 matrices the tests pass. What breaks, and where?</summary>
+      <p>On any shape that is not a multiple of <var>T</var>, the threads of an edge block that fall outside C skip the barriers, while the others wait at them: undefined behaviour, in practice a hang or garbage (chapter 2). And those skipped threads were also responsible for loading tile elements that the in-range threads need: <code>As[ty][tx]</code> for a thread with <code>col &ge; N</code> is still a valid element of A&rsquo;s tile. Tests on multiples of 32 never create such a block, which is why lab 6 tests shapes like 257 &times; 129 &times; 513.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. Why tiling stops near a tenth of peak</h2>
+
+    <p>Tiling divides global traffic by <var>T</var>. Look at the inner loop again, though, and count per FMA: <strong>one load from <code>As</code>, one load from <code>Bs</code></strong>. The loads now come from shared memory instead of L1/L2, which is faster and never misses, but there are still two of them per multiply-add. Now compare the two pipes they compete for, per SM, per clock cycle:</p>
+    <ul>
+      <li><strong>FMA</strong>: 128 FP32 lanes, so up to <strong>4 warp-wide FFMA instructions per cycle</strong> (one per quadrant scheduler).</li>
+      <li><strong>Shared memory</strong>: 32 banks of 4 bytes, so <strong>one warp-wide load per cycle</strong> (one pass through the banks, whether it is 32 different words or one broadcast).</li>
+    </ul>
+
+    <figure class="lk-fig" role="img" aria-label="A timeline of eight clock cycles in one SM. The shared-memory pipe is busy every cycle, alternating a load from As and a load from Bs. The FMA pipes, four slots per cycle, are used once every two cycles: one slot out of eight.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 220" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Two shared loads per FMA, one shared load per cycle</title>
+        <g font-size="9" fill="var(--lk-ink-soft)" text-anchor="middle">
+          <text x="207" y="24">1</text><text x="262" y="24">2</text><text x="317" y="24">3</text><text x="372" y="24">4</text><text x="427" y="24">5</text><text x="482" y="24">6</text><text x="537" y="24">7</text><text x="592" y="24">8</text>
+        </g>
+        <text x="620" y="24" font-size="9" fill="var(--lk-ink-soft)">clock</text>
+        <text x="10" y="50" font-size="10" fill="var(--lk-ink)">shared memory</text>
+        <text x="10" y="63" font-size="8.5" fill="var(--lk-ink-soft)">1 warp-wide load / clk</text>
+        <g stroke="var(--lk-paper)" font-size="9" text-anchor="middle">
+          <rect x="180" y="38" width="55" height="28" fill="var(--lk-cobalt)"/><rect x="235" y="38" width="55" height="28" fill="var(--lk-cobalt-dark)"/>
+          <rect x="290" y="38" width="55" height="28" fill="var(--lk-cobalt)"/><rect x="345" y="38" width="55" height="28" fill="var(--lk-cobalt-dark)"/>
+          <rect x="400" y="38" width="55" height="28" fill="var(--lk-cobalt)"/><rect x="455" y="38" width="55" height="28" fill="var(--lk-cobalt-dark)"/>
+          <rect x="510" y="38" width="55" height="28" fill="var(--lk-cobalt)"/><rect x="565" y="38" width="55" height="28" fill="var(--lk-cobalt-dark)"/>
+        </g>
+        <g font-size="9" fill="var(--lk-paper-light)" text-anchor="middle"><text x="207" y="56">As</text><text x="262" y="56">Bs</text><text x="317" y="56">As</text><text x="372" y="56">Bs</text><text x="427" y="56">As</text><text x="482" y="56">Bs</text><text x="537" y="56">As</text><text x="592" y="56">Bs</text></g>
+        <text x="10" y="110" font-size="10" fill="var(--lk-ink)">FMA pipes</text>
+        <text x="10" y="123" font-size="8.5" fill="var(--lk-ink-soft)">4 warp FFMAs / clk</text>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)">
+          <rect x="180" y="84" width="440" height="80"/>
+        </g>
+        <g stroke="var(--lk-rule-soft)"><path d="M235 84V164M290 84V164M345 84V164M400 84V164M455 84V164M510 84V164M565 84V164M180 104H620M180 124H620M180 144H620"/></g>
+        <g fill="var(--lk-forest)"><rect x="236" y="85" width="53" height="18"/><rect x="346" y="85" width="53" height="18"/><rect x="456" y="85" width="53" height="18"/><rect x="566" y="85" width="53" height="18"/></g>
+        <text x="400" y="190" font-size="10" text-anchor="middle" fill="var(--lk-vermilion)">4 FFMAs issued in 8 clocks, room for 32: the FMA units are 1/8 busy</text>
+        <text x="400" y="208" font-size="9" text-anchor="middle" fill="var(--lk-ink-soft)">(every FFMA needs its As and Bs values first; with many warps the pattern repeats)</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; The ceiling of the tiled kernel, drawn per SM. Each FFMA consumes two shared loads, and shared memory delivers one per cycle, so the SM completes at most one FFMA every two cycles while it could do four per cycle. No number of warps and no tile size changes that ratio: it is a property of the inner loop.</figcaption>
+    </figure>
+
+    <p>So the tiled kernel&rsquo;s ceiling is <strong>one eighth of peak, about 3.9 TFLOP/s</strong> on your card, and it does not depend on <var>T</var>. One caveat, in the spirit of chapter 5&rsquo;s &ldquo;check the SASS&rdquo;: in the unrolled inner loop a thread reads <code>As[ty][k]</code>, <code>As[ty][k+1]</code>, &hellip; four consecutive, aligned floats, and the compiler may merge them into a single 16-byte <code>LDS.128</code>. That makes one A load per four FMAs, 1.25 shared loads per FMA instead of 2, and raises the ceiling to about a fifth of peak. <code>make sass</code> in lab 6 counts the instructions so you can see which one your compiler produced. Either way the ceiling is 12&ndash;20% of peak, and real kernels land below their ceiling (barriers, latency, the loads themselves take issue slots).</p>
+
+    <p>Here is the whole picture for any tile size: occupancy, the global-traffic ceiling, and the shared-memory ceiling:</p>
+
+    <div id="w-tilecalc" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: <var>T</var> = 32 has twice the global intensity of <var>T</var> = 16. Which one will be faster, and why might the answer surprise you?</summary>
+      <p>Probably neither by much, and <var>T</var> = 32 may even lose. The binding limit is the shared-memory ceiling, which is identical for both. Meanwhile <var>T</var> = 32 means 1,024-thread blocks: only one fits on an SM (1,536 threads maximum), so occupancy drops to 32 of 48 warps (67%), and every barrier makes 1,024 threads wait for the slowest. <var>T</var> = 16 fits six 256-thread blocks per SM at 100% occupancy with smaller barriers. Tiling has done its job, removing global traffic as a limit; the next gains must come from the other side of the ratio.</p>
+    </details>
+
+    <h3>The ratio that remains</h3>
+    <p>To go further, each value loaded from shared memory must be used by more than one FMA. There is only one place faster than shared memory to keep it: the thread&rsquo;s own registers. If a thread computes not one output but a small block of them, say <var>TM</var> rows by <var>TN</var> columns, then at each step <var>k</var> it can load <var>TM</var> values of A and <var>TN</var> values of B into registers once and combine every pair: <var>TM</var>&middot;<var>TN</var> FMAs for <var>TM</var> + <var>TN</var> loads.</p>
+    <table>
+      <tr><th>Outputs per thread</th><th>Shared loads per step</th><th>FMAs per step</th><th>Loads per FMA</th><th>Shared ceiling</th></tr>
+      <tr><td>1 &times; 1 (this chapter)</td><td>2</td><td>1</td><td>2</td><td>1/8 of peak</td></tr>
+      <tr><td>8 &times; 1</td><td>9</td><td>8</td><td>1.125</td><td>&asymp; 1/4.5</td></tr>
+      <tr><td>4 &times; 4</td><td>8</td><td>16</td><td>0.5</td><td>1/2</td></tr>
+      <tr><td>8 &times; 8</td><td>16</td><td>64</td><td>0.25</td><td>no longer the limit</td></tr>
+    </table>
+    <p>That is <strong>register blocking</strong>, and it is where chapter 8 starts. It is also why the table in section 1 jumps from 13% to 69% of cuBLAS in two steps.</p>
+  </section>
+
+  <section id="s8">
+    <h2>8. Predictions, and what the profiler should show</h2>
+
+    <p>At 4096&sup3;, before you run anything. These ranges come from the mechanisms above and from Boehm&rsquo;s ratios, not from measurements on your card:</p>
+    <table>
+      <tr><th>Kernel</th><th>% of FP32 peak</th><th>Global ld sectors / request</th><th>Top stall</th><th>What limits it</th></tr>
+      <tr><td>v1 naive, x walks rows</td><td>&lt; 2%</td><td>&asymp; 16 (A: 32, B: 1)</td><td><code>long_scoreboard</code></td><td>uncoalesced A loads and C stores</td></tr>
+      <tr><td>v2 naive, x walks cols</td><td>4&ndash;8%</td><td>&asymp; 2.5 (A: 1, B: 4)</td><td><code>long_scoreboard</code></td><td>two global loads per FMA</td></tr>
+      <tr><td>v3 tiled, <var>T</var> = 16</td><td>8&ndash;15%</td><td>4 (tile loads)</td><td><code>mio_throttle</code> / <code>short_scoreboard</code></td><td>two shared loads per FMA</td></tr>
+      <tr><td>v3 tiled, <var>T</var> = 32</td><td>8&ndash;15%</td><td>4</td><td>same, plus <code>barrier</code></td><td>same, at 67% occupancy</td></tr>
+      <tr><td>cuBLAS</td><td>60&ndash;85%</td><td>&mdash;</td><td>&mdash;</td><td>chapter 8</td></tr>
+    </table>
+    <p>The two stall names for the tiled kernels are new. <code>mio_throttle</code> means a warp could not issue because the memory-input/output queue, which feeds shared memory, was full; <code>short_scoreboard</code> means a warp is waiting for the result of a shared-memory load (a short-latency dependency, as opposed to <code>long_scoreboard</code>&rsquo;s global loads). Together they are the profiler&rsquo;s way of saying &ldquo;shared memory is the bottleneck&rdquo;: exactly figure 3.</p>
+    <details class="ym">
+      <summary>Your move: in <code>make ncu-table</code>, how do you compute &ldquo;shared loads per warp-wide FMA&rdquo; for v3, and what value confirms section 7?</summary>
+      <p>Divide <code>smsp__inst_executed_op_shared_ld_pred_on_any.sum</code> (warp-level shared-load instructions) by <code>smsp__sass_thread_inst_executed_op_ffma_pred_on.sum</code> / 32 (the FFMA count is per thread, so divide by the warp size). About 2 means the compiler kept one load per operand; about 1.25 means it merged the A loads into <code>LDS.128</code>. <code>make sass</code> shows the same thing statically. Either value is far above the 0.25 that chapter 8 will reach.</p>
+    </details>
+  </section>
+
+  <section id="s9">
+    <h2>9. Lab 6: from naive to tiled</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 6</span><span class="lab-title">SGEMM: naive rows, naive columns, tiled 16 and 32, cuBLAS</span><span class="idx-meta">~50 min · <code>mlsys/labs/lab06-matmul-tiling/</code></span></div>
+      <div class="lab-body">
+        <p>One program, <code>sgemm</code>, with the four kernels of this chapter and cuBLAS. The test runs nine awkward shapes (1&times;1&times;1, 257&times;129&times;513, a <var>K</var> of 1&hellip;) against a double-precision reference; the benchmark reports TFLOP/s, % of peak and % of cuBLAS at 1024, 2048 and 4096 cubed. The harness lives in <code>labs/common/gemm.h</code> and lab 7 reuses it.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab06-matmul-tiling
+make test        # every kernel on every shape: PASS
+make bench       # the table; v1 at 4096 takes a few seconds
+make sass        # FFMA and LDS counts per kernel: is it 2 loads per FMA, or 1.25?
+make ncu-table   # sectors per request, shared loads, FFMAs, stall reasons at 2048 cubed</code></pre>
+        <table>
+          <tr><th>Step</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>bench</code>: v2 / v1</td><td>several times faster (section 3)</td></tr>
+          <tr><td><code>bench</code>: v3 / v2</td><td>faster, but less than 2&times; (section 4 vs 7)</td></tr>
+          <tr><td><code>bench</code>: T = 32 vs T = 16</td><td>about the same (section 7)</td></tr>
+          <tr><td><code>sass</code>: LDS per FFMA in <code>sgemm_tiled</code></td><td>2, or 1.25 with <code>LDS.128</code></td></tr>
+          <tr><td><code>ncu-table</code>: stalls</td><td>the table in section 8</td></tr>
+        </table>
+        <p>Paste back the <code>PASTE:</code> lines and the text output of <code>make sass</code> and <code>make ncu-table</code>. The v3 row of your bench is the baseline chapter 8 will measure every improvement against.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Make each thread of the tiled kernel compute <em>two</em> outputs of C, one below the other: the block becomes <var>T</var> &times; <var>T</var>/2 threads for a <var>T</var>&times;<var>T</var> tile, each thread loads two elements of each tile per phase, and in the inner loop it reuses one <code>Bs</code> value for two FMAs. Before measuring, work out its shared loads per FMA and its ceiling from section 7&rsquo;s table. You will have written the first step of chapter 8.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Two naive kernels differ only in whether <code>threadIdx.x</code> maps to the row or the column of C. Why is one several times faster?</summary>
+        <p>A warp is 32 consecutive <code>threadIdx.x</code>. Mapped to columns, its B loads are 32 consecutive floats (4 sectors) and its A load is one broadcast address; mapped to rows, its A loads are 32 addresses a full row apart (32 sectors) and its stores to C are scattered. Same FLOPs, about 6&times; more memory traffic per FMA.</p>
+      </details>
+      <details>
+        <summary>The coalesced naive kernel has an intensity of 0.25 FLOP/B from DRAM&rsquo;s point of view, yet runs at several TFLOP/s. How?</summary>
+        <p>Most of its loads hit in cache: the 8 warps of a block share each B row segment in L1, one A sector serves 8 consecutive <var>k</var>, and blocks sharing rows or columns meet in L2. The effective DRAM traffic is a small fraction of what the load count suggests. What caches cannot remove is the two load instructions per FMA.</p>
+      </details>
+      <details>
+        <summary>By how much does a <var>T</var>&times;<var>T</var> tiling reduce global loads, and why?</summary>
+        <p>By a factor of <var>T</var>. Each element of an A or B tile is loaded once from global memory and then read by <var>T</var> threads from shared memory: a row of the A tile by the <var>T</var> threads computing one row of the C tile, a column of the B tile by the <var>T</var> threads of one column.</p>
+      </details>
+      <details>
+        <summary>Why is the tiled kernel limited to about one eighth of FP32 peak, independently of <var>T</var>?</summary>
+        <p>Its inner loop needs two shared-memory loads per FMA. Shared memory serves one warp-wide load per cycle per SM, and the SM can issue four warp-wide FFMAs per cycle, so at most 0.5 FFMA per cycle gets its operands: 1/8 of peak. <var>T</var> changes global traffic, not this ratio. (If the compiler merges four A loads into one <code>LDS.128</code>, the ratio is 1.25 and the ceiling about 1/5.)</p>
+      </details>
+      <details>
+        <summary>Why must a thread whose output lies outside C still execute the loads and barriers of the tiled kernel?</summary>
+        <p>Because the barriers must be reached by every thread of the block (otherwise the behaviour is undefined), and because that thread is responsible for loading one element of the A and B tiles that other, in-range threads need.</p>
+      </details>
+      <details>
+        <summary>What do <code>mio_throttle</code> and <code>short_scoreboard</code> stalls tell you, together?</summary>
+        <p>That warps are waiting on shared memory: <code>mio_throttle</code> when the queue feeding the shared-memory pipe is full, <code>short_scoreboard</code> when an instruction needs the result of a shared-memory load that has not returned yet. It is the profiler&rsquo;s signature of a shared-bandwidth-bound kernel like the tiled matmul.</p>
+      </details>
+      <details>
+        <summary>A thread computes an 8&times;8 block of outputs. How many shared loads and FMAs per step <var>k</var>, and why does that help?</summary>
+        <p>8 loads from the A tile and 8 from the B tile into registers, then 64 FMAs combining every pair: 0.25 loads per FMA instead of 2, eight times less shared traffic per FLOP. Registers are the only storage fast enough to feed the FMA units, and each register value is now used 8 times.</p>
+      </details>
+      <details>
+        <summary>Why does <var>T</var> = 32 give only 67% occupancy on your card?</summary>
+        <p>A 32&times;32 block has 1,024 threads. An SM holds at most 1,536 threads, so only one such block fits: 32 warps out of 48.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>S. Boehm, <a href="https://siboehm.com/articles/22/CUDA-MMM"><em>How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog</em></a> (2022): the kernel sequence and the A6000 percentages quoted in section 1.</li>
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (2023), ch. 3 (the naive matmul), ch. 5 (tiling with shared memory, boundary conditions), ch. 6 (coalescing and thread coarsening).</li>
+      <li>NVIDIA, <em>CUDA C++ Best Practices Guide</em>, &ldquo;Shared Memory in Matrix Multiplication (C=AB)&rdquo;: the coalescing and reuse argument for the tiled kernel.</li>
+      <li>NVIDIA, <em>CUDA C++ Programming Guide</em>: shared memory, bank behaviour, <code>__syncthreads()</code> semantics; <em>Nsight Compute Profiling Guide</em>: the <code>mio_throttle</code> and <code>short_scoreboard</code> stall reasons.</li>
+      <li>V. Volkov, J. Demmel, <em>Benchmarking GPUs to Tune Dense Linear Algebra</em> (SC 2008): the original argument that register blocking, not more threads, is what feeds the math units.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cublas/">cuBLAS documentation</a>: <code>cublasSgemm</code>, column-major conventions, math modes.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-06-neural-networks-as-a-workload.html">&larr; Ch. 6 — Neural networks as a workload</a>
+      <a href="index.html">Index</a>
+      <a href="index.html">Ch. 8 — Matmul II (in writing) &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part II · Chapter 7 · kernels checked for correctness on awkward shapes; performance figures are predictions until lab 6 replaces them, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch7.js"></script>
+</body>
+</html>

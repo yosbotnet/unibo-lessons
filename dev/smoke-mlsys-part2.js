@@ -24,7 +24,18 @@ const PAGES = [
       await page.locator('#w-formats select').nth(1).selectOption('FP32');
       check('06: FP32 total does not stall', /never/.test(await page.locator('#w-formats .w-out').textContent()));
     } },
-  { file: 'cap-07-matmul-tiling.html', widgets: ['#w-tilewalk', '#w-tilecalc'], optional: true },
+  { file: 'cap-07-matmul-tiling.html', widgets: ['#w-tilewalk', '#w-tilecalc'],
+    async interact(page) {
+      await page.locator('#w-tilewalk .c7-btns button', { hasText: 'phase \u25b6' }).click();
+      check('07: tile walker steps to phase 2', /2 of 4/.test(await page.locator('#w-tilewalk .w-out').textContent()));
+      await page.locator('#w-tilewalk .c7-cbtn').nth(0).click();
+      check('07: clicking a C tile resets the phase', /1 of 4/.test(await page.locator('#w-tilewalk .w-out').textContent()));
+      check('07: T=16 is shared-bound at 3.9 TF', /3\.9 TF/.test(await page.locator('#w-tilecalc .w-bars').textContent()));
+      await page.locator('#w-tilecalc select').selectOption('32');
+      check('07: T=32 gives 67% occupancy', /67%/.test(await page.locator('#w-tilecalc .w-out').textContent()));
+      await page.locator('#w-tilecalc input[type=checkbox]').check();
+      check('07: LDS.128 lifts the ceiling to 6.2 TF', /6\.2 TF/.test(await page.locator('#w-tilecalc .w-bars').textContent()));
+    } },
   { file: 'cap-08-matmul-tensor-cores.html', widgets: ['#w-hier', '#w-ratio'], optional: true },
 ];
 
