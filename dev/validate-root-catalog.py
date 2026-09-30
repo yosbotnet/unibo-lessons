@@ -103,6 +103,8 @@ def main():
                 extras += 1
             if "written test" in desc.lower():
                 extras += 1
+            if "film" in desc.lower():
+                extras += 1
             mprep = re.search(r"(\d+)\s+exam-prep pages", desc)
             if mprep:
                 extras += int(mprep.group(1))
