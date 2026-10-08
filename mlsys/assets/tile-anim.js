@@ -47,37 +47,42 @@
   // A flight: { t0, t1, kind: 'a'|'b', from: fn, to: fn, land: {dram:[mat,i,j]} | {slot:[mat,r,c]} | {shared:true} }
   // Positions are functions so a layout switch needs no rebuild of the schedule.
   function naive() {
-    var S = { flights: [], fmas: [], bars: [], marks: [], caps: [], end: 0 }, D = 1.5, t0 = .3;
+    var S = { flights: [], fmas: [], bars: [], marks: [], caps: [], end: 0, code: NAIVE_CODE, pov: [] }, D = 1.5, t0 = .3;
+    for (var q = 0; q < T * T; q++) S.pov.push([[0, [2], {}, 'start']]);
     S.caps.push([0, 'Naive kernel: each thread computes C[r, c] by walking k from 0 to 7, loading A[r, k] and B[k, c] straight from DRAM.']);
     for (var k = 0; k < K; k++) {
       var b = t0 + k * D;
       for (var r = 0; r < T; r++) for (var c = 0; c < T; c++) {
         var i = r * T + c, st = b + .25 * i / 15;
         (function (r, c, k) {
-          S.flights.push({ t0: st, t1: st + .75, kind: 'a', from: function () { return cA(r, k); }, to: function () { return cTh(r, c, -6); }, land: { dram: ['a', r, k] } });
-          S.flights.push({ t0: st, t1: st + .75, kind: 'b', from: function () { return cB(k, c); }, to: function () { return cTh(r, c, 6); }, land: { dram: ['b', k, c] } });
+          S.flights.push({ t0: st, t1: st + .75, kind: 'a', from: function () { return cA(r, k); }, to: function () { return cTh(r, c, -6); }, land: { dram: ['a', r, k] }, who: [r, c] });
+          S.flights.push({ t0: st, t1: st + .75, kind: 'b', from: function () { return cB(k, c); }, to: function () { return cTh(r, c, 6); }, land: { dram: ['b', k, c] }, who: [r, c] });
         })(r, c, k);
         S.fmas.push([b + 1.05, r, c]);
+        S.pov[i].push([b, [4, 5], { k: k }, 'nload'], [st + .75, [6], { k: k }, 'nfma']);
       }
       S.marks.push({ t0: b, t1: b + D, aCols: [k, k + 1], bRows: [k, k + 1] });
       S.caps.push([b, 'k = ' + k + ': all 16 threads load from DRAM at once. The 4 threads of a row all ask for the same A[r, ' + k + '], the 4 threads of a column for the same B[' + k + ', c], and each request is a separate load.']);
     }
     S.end = t0 + K * D;
+    S.pov.forEach(function (l) { l.push([S.end, [8], {}, 'nend']); });
     S.caps.push([S.end, 'Done. 256 DRAM loads (1,024 bytes) for 128 FMAs (256 FLOPs): 0.25 FLOPs per byte. Every element was fetched 4 times, once per thread that needed it. With bigger matrices the reuse grows but the naive kernel still fetches every element once per use.']);
     S.total = S.end + 2.5;
     return S;
   }
 
   function tiled() {
-    var S = { flights: [], fmas: [], bars: [], marks: [], caps: [], end: 0 }, P = 5.3, t0 = .3;
+    var S = { flights: [], fmas: [], bars: [], marks: [], caps: [], end: 0, code: TILED_CODE, pov: [] }, P = 5.3, t0 = .3;
+    for (var q = 0; q < T * T; q++) S.pov.push([[0, [3], {}, 'start']]);
     S.caps.push([0, 'Tiled kernel, T = 4: the block walks k in phases of 4. Each phase, it loads one 4×4 tile of A and one of B into shared memory, then computes from there.']);
     for (var p = 0; p < K / T; p++) {
       var pb = t0 + p * P;
       for (var r = 0; r < T; r++) for (var c = 0; c < T; c++) {
         var i = r * T + c, st = pb + .25 * i / 15;
         (function (r, c, p) {
-          S.flights.push({ t0: st, t1: st + .8, kind: 'a', from: function () { return cA(r, p * T + c); }, to: function () { return cAs(r, c); }, land: { dram: ['a', r, p * T + c], slot: ['a', r, c] } });
-          S.flights.push({ t0: st, t1: st + .8, kind: 'b', from: function () { return cB(p * T + r, c); }, to: function () { return cBs(r, c); }, land: { dram: ['b', p * T + r, c], slot: ['b', r, c] } });
+          S.flights.push({ t0: st, t1: st + .8, kind: 'a', from: function () { return cA(r, p * T + c); }, to: function () { return cAs(r, c); }, land: { dram: ['a', r, p * T + c], slot: ['a', r, c] }, who: [r, c] });
+          S.pov[r * T + c].push([st, [5, 6], { t: p }, 'tload'], [st + .8, [7], { t: p }, 'twait'], [pb + 1.2, [7], { t: p }, 'tbar1']);
+          S.flights.push({ t0: st, t1: st + .8, kind: 'b', from: function () { return cB(p * T + r, c); }, to: function () { return cBs(r, c); }, land: { dram: ['b', p * T + r, c], slot: ['b', r, c] }, who: [r, c] });
         })(r, c, p);
       }
       S.marks.push({ t0: pb, t1: pb + P, aCols: [p * T, p * T + T], bRows: [p * T, p * T + T] });
@@ -89,25 +94,54 @@
         for (r = 0; r < T; r++) for (c = 0; c < T; c++) {
           i = r * T + c; st = kb + .1 * i / 15;
           (function (r, c, kk) {
-            S.flights.push({ t0: st, t1: st + .4, kind: 'a', from: function () { return cAs(r, kk); }, to: function () { return cTh(r, c, -6); }, land: { shared: true } });
-            S.flights.push({ t0: st, t1: st + .4, kind: 'b', from: function () { return cBs(kk, c); }, to: function () { return cTh(r, c, 6); }, land: { shared: true } });
+            S.flights.push({ t0: st, t1: st + .4, kind: 'a', from: function () { return cAs(r, kk); }, to: function () { return cTh(r, c, -6); }, land: { shared: true }, who: [r, c] });
+            S.flights.push({ t0: st, t1: st + .4, kind: 'b', from: function () { return cBs(kk, c); }, to: function () { return cTh(r, c, 6); }, land: { shared: true }, who: [r, c] });
           })(r, c, kk);
           S.fmas.push([kb + .55, r, c]);
+          S.pov[i].push([kb, [9], { t: p, k: kk }, 'tread']);
         }
         S.marks.push({ t0: kb, t1: kb + .8, sCol: kk });
         S.caps.push([kb, 'k = ' + (p * T + kk) + ': As[r][' + kk + '] goes to the 4 threads of row r, Bs[' + kk + '][c] to the 4 threads of column c. These are shared-memory reads: no DRAM traffic at all.']);
       }
       S.bars.push([pb + 4.9, pb + 5.3, 'war']);
+      S.pov.forEach(function (l) { l.push([pb + 4.9, [10], { t: p, last: p === K / T - 1 }, 'tbar2']); });
       S.caps.push([pb + 4.9, '__syncthreads(): nobody overwrites the tiles with the next phase until all 16 threads have finished reading them (write after read).']);
     }
     S.end = t0 + (K / T) * P;
+    S.pov.forEach(function (l) { l.push([S.end, [12], {}, 'tend']); });
     S.caps.push([S.end, 'Done. Same 16 outputs, 64 DRAM loads instead of 256: 1 FLOP per byte, 4× the naive kernel, because each loaded element was used by 4 threads. The gain is T: with 32×32 tiles it is 32×, 8 FLOPs per byte.']);
     S.total = S.end + 2.5;
     return S;
   }
 
+  var NAIVE_CODE = [
+    'int tx = threadIdx.x, ty = threadIdx.y;',
+    'int row = blockIdx.y*4 + ty, col = blockIdx.x*4 + tx;',
+    'float acc = 0.0f;',
+    'for (int k = 0; k < K; ++k) {             // K = 8',
+    '    float a = A[row * K + k];            // DRAM',
+    '    float b = B[k * N + col];            // DRAM',
+    '    acc += a * b;',
+    '}',
+    'C[row * N + col] = acc;'
+  ];
+  var TILED_CODE = [
+    '__shared__ float As[4][4], Bs[4][4];',
+    'int tx = threadIdx.x, ty = threadIdx.y;',
+    'int row = blockIdx.y*4 + ty, col = blockIdx.x*4 + tx;',
+    'float acc = 0.0f;',
+    'for (int t = 0; t < K / 4; ++t) {         // 2 phases',
+    '    As[ty][tx] = A[row * K + t * 4 + tx];    // DRAM',
+    '    Bs[ty][tx] = B[(t * 4 + ty) * N + col];  // DRAM',
+    '    __syncthreads();',
+    '    for (int k = 0; k < 4; ++k)',
+    '        acc += As[ty][k] * Bs[k][tx];        // shared',
+    '    __syncthreads();',
+    '}',
+    'C[row * N + col] = acc;'
+  ];
   var MODES = { naive: naive(), tiled: tiled() };
-  var st = { mode: 'naive', t: 0, playing: false, last: 0, started: false };
+  var st = { mode: 'naive', t: 0, playing: false, last: 0, started: false, view: 'block', me: [1, 2] };
 
   /* ---------- DOM ---------- */
   host.innerHTML = '';
@@ -127,10 +161,34 @@
   scrub.type = 'range'; scrub.min = 0; scrub.step = 0.01; scrub.setAttribute('aria-label', 'Animation time');
   host.appendChild(scrub);
 
+  var tabs = el('div', 'ta-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Point of view');
+  var tBlock = btn('The whole block'), tThread = btn('One thread’s view');
+  [tBlock, tThread].forEach(function (b, i) { b.setAttribute('role', 'tab'); b.id = 'ta-tab-' + i; b.setAttribute('aria-controls', 'ta-pane-' + i); tabs.appendChild(b); });
+  host.appendChild(tabs);
+
+  var paneBlock = el('div', 'ta-pane'), paneThread = el('div', 'ta-pane');
+  [paneBlock, paneThread].forEach(function (p, i) { p.id = 'ta-pane-' + i; p.setAttribute('role', 'tabpanel'); p.setAttribute('aria-labelledby', 'ta-tab-' + i); host.appendChild(p); });
+
   var out = el('div', 'w-out');
   var vLoads = stat(out, 'DRAM loads'), vShared = stat(out, 'shared-memory reads'), vFma = stat(out, 'FMAs'), vInt = stat(out, 'FLOPs per DRAM byte');
-  host.appendChild(out);
-  var cap = el('div', 'w-verdict ta-cap'); cap.setAttribute('aria-live', 'polite'); host.appendChild(cap);
+  paneBlock.appendChild(out);
+  var cap = el('div', 'w-verdict ta-cap'); cap.setAttribute('aria-live', 'polite'); paneBlock.appendChild(cap);
+
+  // thread view: pick a thread, its code with the current line lit, its variables, its story
+  var pick = el('div', 'ta-pick');
+  var pickL = el('label', null, 'Follow thread (ty, tx) ');
+  var sel = el('select');
+  for (var q = 0; q < T * T; q++) { var o = el('option', null, '(' + (q / T | 0) + ', ' + (q % T) + ')'); o.value = q; sel.appendChild(o); }
+  sel.value = 1 * T + 2;
+  pickL.appendChild(sel); pick.appendChild(pickL);
+  pick.appendChild(el('span', 'ta-hint', 'or click a thread in the picture'));
+  paneThread.appendChild(pick);
+  var pov = el('div', 'ta-pov');
+  var codeBox = el('pre', 'ta-code'); pov.appendChild(codeBox);
+  var varsBox = el('dl', 'ta-vars'); pov.appendChild(varsBox);
+  paneThread.appendChild(pov);
+  var said = el('div', 'w-verdict ta-cap ta-said'); said.setAttribute('aria-live', 'polite'); paneThread.appendChild(said);
+  var codeFor = null, codeLines = [];
 
   /* ---------- SVG, rebuilt when the layout changes ---------- */
   var N = {};       // node handles
@@ -198,6 +256,11 @@
       var x = G.th[0] + c * G.ts, y = G.th[1] + r * G.ts;
       var box = sv('rect', { x: x + 2, y: y + 2, width: G.ts - 4, height: G.ts - 4, rx: 2, class: 'ta-th' }, s);
       var acc = sv('rect', { x: x + 5, width: G.ts - 10, class: 'ta-acc' }, s);
+      (function (r, c) {
+        var hit = sv('rect', { x: x, y: y, width: G.ts, height: G.ts, class: 'ta-hit' }, s);
+        sv('title', {}, hit).textContent = 'Follow thread (' + r + ', ' + c + ')';
+        hit.addEventListener('click', function () { follow(r, c); });
+      })(r, c);
       N.th[r].push({ box: box, acc: acc, x: x, y: y });
     } }
 
@@ -207,18 +270,59 @@
     N.capIdx = -1;
   }
 
+  /* ---------- one thread's story ---------- */
+  function others(r, c, axis) {     // the 3 other threads of my row (axis 'row') or column
+    var l = [];
+    for (var j = 0; j < T; j++) if (axis === 'row' ? j !== c : j !== r) l.push(axis === 'row' ? '(' + r + ', ' + j + ')' : '(' + j + ', ' + c + ')');
+    return l.slice(0, -1).join(', ') + ' and ' + l[l.length - 1];
+  }
+  function owner(a, b, r, c) { return a === r && b === c ? 'which I loaded myself' : 'which thread (' + a + ', ' + b + ') loaded'; }
+  function story(key, v, r, c) {
+    var k = v.k, p = v.t;
+    switch (key) {
+      case 'start': return st.mode === 'naive'
+        ? 'I am thread (ty, tx) = (' + r + ', ' + c + '). My job is one output, C[' + r + ', ' + c + ']: row ' + r + ' of A times column ' + c + ' of B, 8 terms. acc starts at 0, in a register only I can see.'
+        : 'I am thread (ty, tx) = (' + r + ', ' + c + '). My job is still one output, C[' + r + ', ' + c + '], but I also help my block fill two 4×4 tiles in shared memory, which all 16 of us will read.';
+      case 'nload': return 'k = ' + k + '. I ask DRAM for A[' + r + ', ' + k + '] and B[' + k + ', ' + c + ']. Threads ' + others(r, c, 'row') + ' want the same A[' + r + ', ' + k + '] right now, and threads ' + others(r, c, 'col') + ' the same B[' + k + ', ' + c + ']. Each of us gets a separate copy, and I can do nothing until mine arrive.';
+      case 'nfma': return 'Both values are in my registers: acc += a * b, term ' + (k + 1) + ' of 8. I used each value once and will never touch it again. ' + (k < K - 1 ? 'Next k: two more trips to DRAM.' : 'That was the last term.');
+      case 'nend': return 'I store C[' + r + ', ' + c + ']. My count: 16 DRAM loads for 8 FMAs. Every other thread did the same, and 12 of my 16 loads fetched values a neighbour also fetched.';
+      case 'tload': return 'Phase t = ' + p + '. I load one element of each tile, the one at my own position: A[' + r + ', ' + (p * T + c) + '] into As[' + r + '][' + c + '] and B[' + (p * T + r) + ', ' + c + '] into Bs[' + r + '][' + c + ']. I load them for the block: each will be read by 4 threads, me included.';
+      case 'twait': {
+        var need = c !== 0 ? 'As[' + r + '][0], which thread (' + r + ', 0) loads' : r !== 0 ? 'Bs[0][' + c + '], which thread (0, ' + c + ') loads' : 'As[0][1], which thread (0, 1) loads';
+        return 'My two stores are done, so I wait at __syncthreads(). I can’t go on alone: soon I need ' + need + ', and not every thread has stored yet.';
+      }
+      case 'tbar1': return '__syncthreads(): all 16 threads have arrived, so both tiles are complete. Reading them is safe now.';
+      case 'tread': return 'k = ' + k + ' (term ' + (p * T + k + 1) + ' of 8). I read As[' + r + '][' + k + '], ' + owner(r, k, r, c) + ', and Bs[' + k + '][' + c + '], ' + owner(k, c, r, c) + '. Both come from shared memory, no DRAM: acc += As[' + r + '][' + k + '] * Bs[' + k + '][' + c + '].';
+      case 'tbar2': return '__syncthreads() again. I am done with these tiles, but others may still be reading them, so nobody overwrites them with the next phase until all 16 are done.' + (v.last ? ' (In the last phase nothing overwrites them, but the loop runs the barrier anyway.)' : '');
+      case 'tend': return 'I store C[' + r + ', ' + c + ']. My count: 4 DRAM loads for 8 FMAs. Of the 16 values I multiplied, 12 came from tiles my neighbours loaded.';
+    }
+    return '';
+  }
+  function accText(n, r, c) {
+    if (!n) return '0';
+    var term = function (j) { return 'A[' + r + ',' + j + ']·B[' + j + ',' + c + ']'; };
+    return n === 1 ? term(0) : n === 2 ? term(0) + ' + ' + term(1) : term(0) + ' + … + ' + term(n - 1);
+  }
+  function follow(r, c) { st.me = [r, c]; sel.value = r * T + c; setView('thread'); }
+  function setView(v) { st.view = v; render(); }
+
   /* ---------- render(t): everything from the schedule ---------- */
   function render() {
     var S = MODES[st.mode], t = st.t;
+    var TV = st.view === 'thread', mr = st.me[0], mc = st.me[1];
+    var seg = null;
+    S.pov[mr * T + mc].forEach(function (g) { if (t >= g[0]) seg = g; });
     var dA = [], dB = [], i, r, c, k;
     for (r = 0; r < T; r++) { dA.push([0, 0, 0, 0, 0, 0, 0, 0]); }
     for (k = 0; k < K; k++) dB.push([0, 0, 0, 0]);
-    var slotA = {}, slotB = {}, loads = 0, shared = 0, dot = 0;
+    var slotA = {}, slotB = {}, loads = 0, shared = 0, dot = 0, myLoads = 0, myShared = 0;
 
     for (i = 0; i < S.flights.length; i++) {
       var f = S.flights[i];
+      var mine = f.who[0] === mr && f.who[1] === mc;
       if (t >= f.t1) {
         var L = f.land;
+        if (mine) { if (L.dram) myLoads++; if (L.shared) myShared++; }
         if (L.dram) { loads++; if (L.dram[0] === 'a') dA[L.dram[1]][L.dram[2]]++; else dB[L.dram[1]][L.dram[2]]++; }
         if (L.slot) (L.slot[0] === 'a' ? slotA : slotB)[L.slot[1] * T + L.slot[2]] = f.t1;
         if (L.shared) shared++;
@@ -228,7 +332,7 @@
         var d = N.dots[dot++];
         d.setAttribute('cx', (a[0] + (b[0] - a[0]) * u).toFixed(1));
         d.setAttribute('cy', (a[1] + (b[1] - a[1]) * u - bulge).toFixed(1));
-        d.setAttribute('class', 'ta-pk ' + f.kind);
+        d.setAttribute('class', 'ta-pk ' + f.kind + (TV && !mine ? ' dim' : ''));
         d.setAttribute('visibility', 'visible');
       }
     }
@@ -249,6 +353,8 @@
       var ta = slotA[r * T + c], tb = slotB[r * T + c];
       N.sA[r][c].setAttribute('class', 'ta-slot a' + (ta != null ? ' full' : '') + (ta != null && t - ta < .25 ? ' fresh' : ''));
       N.sB[r][c].setAttribute('class', 'ta-slot b' + (tb != null ? ' full' : '') + (tb != null && t - tb < .25 ? ' fresh' : ''));
+      var myslot = TV && st.mode === 'tiled' && r === mr && c === mc;
+      if (myslot) { N.sA[r][c].classList.add('mine'); N.sB[r][c].classList.add('mine'); }
     }
     N.sh.setAttribute('class', 'ta-sh' + (st.mode === 'naive' ? ' idle' : ''));
     N.shIdle.style.display = st.mode === 'naive' ? '' : 'none';
@@ -262,20 +368,25 @@
       var th = N.th[r][c], n = accN[r * T + c] || 0, h = (G.ts - 10) * n / K;
       th.acc.setAttribute('y', (th.y + G.ts - 5 - h).toFixed(1));
       th.acc.setAttribute('height', h.toFixed(1));
-      th.box.setAttribute('class', 'ta-th' + (hot[r * T + c] ? ' hot' : ''));
+      th.box.setAttribute('class', 'ta-th' + (hot[r * T + c] ? ' hot' : '') + (TV ? (r === mr && c === mc ? ' me' : ' other') : ''));
     }
 
     // highlights: which part of A and B is in play, which shared row/column is being read
     var hA = null, hS = null;
     S.marks.forEach(function (m) { if (t >= m.t0 && t < m.t1) { if (m.aCols) hA = m; if (m.sCol != null) hS = m; } });
-    if (hA && t < S.end) {
+    if (TV) {
+      hA = hS = null; hide(N.hiA); hide(N.hiB); hide(N.hiS); hide(N.hiS2);
+      if (seg && seg[3] === 'nload') { box(N.hiA, G.A[0] + seg[2].k * G.cs, G.A[1] + mr * G.cs, G.cs, G.cs); box(N.hiB, G.B[0] + mc * G.cs, G.B[1] + seg[2].k * G.cs, G.cs, G.cs); }
+      if (seg && seg[3] === 'tload') { box(N.hiA, G.A[0] + (seg[2].t * T + mc) * G.cs, G.A[1] + mr * G.cs, G.cs, G.cs); box(N.hiB, G.B[0] + mc * G.cs, G.B[1] + (seg[2].t * T + mr) * G.cs, G.cs, G.cs); }
+      if (seg && seg[3] === 'tread') { box(N.hiS, G.As[0] + seg[2].k * G.ss, G.As[1] + mr * G.ss, G.ss, G.ss); box(N.hiS2, G.Bs[0] + mc * G.ss, G.Bs[1] + seg[2].k * G.ss, G.ss, G.ss); }
+    } else if (hA && t < S.end) {
       box(N.hiA, G.A[0] + hA.aCols[0] * G.cs, G.A[1], (hA.aCols[1] - hA.aCols[0]) * G.cs, T * G.cs);
       box(N.hiB, G.B[0], G.B[1] + hA.bRows[0] * G.cs, T * G.cs, (hA.bRows[1] - hA.bRows[0]) * G.cs);
     } else { hide(N.hiA); hide(N.hiB); }
-    if (hS) {
+    if (hS && !TV) {
       box(N.hiS, G.As[0] + hS.sCol * G.ss, G.As[1], G.ss, T * G.ss);
       box(N.hiS2, G.Bs[0], G.Bs[1] + hS.sCol * G.ss, T * G.ss, G.ss);
-    } else { hide(N.hiS); hide(N.hiS2); }
+    } else if (!TV) { hide(N.hiS); hide(N.hiS2); }
     function box(e, x, y, w, h) { e.setAttribute('x', x - 1.5); e.setAttribute('y', y - 1.5); e.setAttribute('width', w + 3); e.setAttribute('height', h + 3); e.setAttribute('visibility', 'visible'); }
     function hide(e) { e.setAttribute('visibility', 'hidden'); }
 
@@ -295,6 +406,27 @@
     for (i = 0; i < S.caps.length; i++) if (t >= S.caps[i][0]) ci = i;
     if (ci !== N.capIdx || cap.dataset.mode !== st.mode) { cap.textContent = S.caps[ci][1]; N.capIdx = ci; cap.dataset.mode = st.mode; }
     cap.className = 'w-verdict ta-cap ' + (t >= S.end ? (st.mode === 'naive' ? 'mem' : 'comp') : '');
+
+    tBlock.setAttribute('aria-selected', String(!TV)); tThread.setAttribute('aria-selected', String(TV));
+    tBlock.tabIndex = TV ? -1 : 0; tThread.tabIndex = TV ? 0 : -1;
+    paneBlock.hidden = TV; paneThread.hidden = !TV;
+    if (TV) {
+      if (codeFor !== st.mode) {
+        codeBox.innerHTML = ''; codeLines = [];
+        S.code.forEach(function (line) { var sp = el('span', 'ta-ln', line); codeBox.appendChild(sp); codeLines.push(sp); });
+        codeFor = st.mode;
+      }
+      var lit = seg ? seg[1] : [];
+      codeLines.forEach(function (sp, j) { sp.className = 'ta-ln' + (lit.indexOf(j) >= 0 ? ' on' : ''); });
+      var v = seg ? seg[2] : {}, myN = accN[mr * T + mc] || 0;
+      var rows = [['tx, ty', mc + ', ' + mr], ['row, col', mr + ', ' + mc]];
+      if (st.mode === 'tiled') rows.push(['t', v.t != null ? v.t : '—']);
+      rows.push(['k', v.k != null ? v.k : '—'], ['acc', accText(myN, mr, mc)], ['terms done', myN + ' of 8'], ['my DRAM loads', myLoads], ['my shared reads', st.mode === 'tiled' ? myShared : '— (none)']);
+      varsBox.innerHTML = '';
+      rows.forEach(function (rw) { varsBox.appendChild(el('dt', null, rw[0])); varsBox.appendChild(el('dd', null, String(rw[1]))); });
+      var txt = seg ? story(seg[3], seg[2], mr, mc).replace(/\]\[/g, ']\u2060[') : '';   // keep As[1][2] on one line
+      if (said.textContent !== txt) said.textContent = txt;
+    }
 
     scrub.max = S.total; scrub.value = t;
     bPlay.textContent = st.playing ? '❚❚ Pause' : (t >= S.total ? '↻ Replay' : '▶ Play');
@@ -324,13 +456,20 @@
   bNaive.addEventListener('click', function () { setMode('naive'); });
   bTiled.addEventListener('click', function () { setMode('tiled'); });
   bPlay.addEventListener('click', function () { st.playing ? pause() : play(); });
+  tBlock.addEventListener('click', function () { setView('block'); });
+  tThread.addEventListener('click', function () { setView('thread'); });
+  tabs.addEventListener('keydown', function (e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    var v = st.view === 'block' ? 'thread' : 'block'; setView(v); (v === 'block' ? tBlock : tThread).focus(); e.preventDefault();
+  });
+  sel.addEventListener('change', function () { follow(+sel.value / T | 0, +sel.value % T); });
   scrub.addEventListener('input', function () { st.playing = false; st.t = +scrub.value; render(); });
 
   // layout follows the widget's width
-  function pick() { return host.clientWidth < 540 ? 'tall' : 'wide'; }
-  build(pick());
+  function layoutFor() { return host.clientWidth < 540 ? 'tall' : 'wide'; }
+  build(layoutFor());
   render();
-  if (window.ResizeObserver) new ResizeObserver(function () { var p = pick(); if (p !== G.name) { build(p); render(); } }).observe(host);
+  if (window.ResizeObserver) new ResizeObserver(function () { var p = layoutFor(); if (p !== G.name) { build(p); render(); } }).observe(host);
 
   // start once, the first time it scrolls into view (never with reduced motion)
   if (!reduced && window.IntersectionObserver) {
