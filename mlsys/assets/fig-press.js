@@ -39,7 +39,7 @@
     fig: 'Fig. 2', title: 'The roofline as a press line', W: W, H: H,
     hint: 'Turn the knob: click it, or ← →',
     label: 'An isometric press line. A magazine feeds blanks onto a conveyor that runs into a stamping press. A knob sets how many strokes each blank needs; two gauges show how busy the feed and the press are.',
-    keys: [['lit', 'the ram: the arithmetic units'], ['raised', 'a blank: bytes from DRAM'], ['void', 'the magazine: DRAM']]
+    keys: [['lit', 'the ram: the arithmetic units'], ['mempale', 'a blank: bytes from DRAM'], ['workpale', 'the press, and blanks it has stamped'], ['mem', 'feed gauge: memory busy'], ['work', 'press gauge: arithmetic busy']]
   });
   var svg = ui.svg;
   svg.innerHTML = '<defs><filter id="iso-blur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter></defs>';
@@ -62,42 +62,42 @@
   s += I.ticks(P, RUL.y + 3, RUL.y + RUL.d - 3, 4, 5, RUL.x + RUL.w, 0.8, [2.2, 4.2], 'y');
   // press bolster with its hold-down screws
   var BOL = { x: -34, y: 22, w: 68, d: 36, r: 2 };
-  s += I.solid(P, I.slab(BOL, 0, 12, 3), { tone: 'mid', inner: I.sideSeam(P, BOL, 3, 'faint', 3) });
+  s += I.solid(P, I.slab(BOL, 0, 12, 3), { tone: 'mid', mat: 'work', inner: I.sideSeam(P, BOL, 3, 'work', 3) });
   [[-30, 26], [30, 26], [-30, 54], [30, 54]].forEach(function (c) { s += I.screw(P, c[0], c[1], 12); });
   // legs under both belt rails (not under the bolster), back rail, belt, rollers
   var legs = [];
   [-16.5, 16.5].forEach(function (x) { [-150, -84, -18, 86].forEach(function (y) { legs.push([x, y]); }); });
   byDepth(legs).forEach(function (q) {
     s += I.solid(P, I.cyl(q[0], q[1], 3.2, 0, 1.2, 16), { tone: 'lo' });
-    s += I.solid(P, I.cyl(q[0], q[1], 2, 1.2, 10.8, 16), { tone: 'lo' });
+    s += I.solid(P, I.cyl(q[0], q[1], 2, 1.2, 10.8, 16), { tone: 'lo', mat: 'steel' });
   });
   // the press's back column stands behind the belt, so it is drawn before the back rail
-  s += I.solid(P, I.cyl(-26, PY, 6.4, 12, 3, 24), { tone: 'mid' });
-  s += I.solid(P, I.cyl(-26, PY, 4.2, 15, 59, 24), { tone: 'mid', inner: I.arcFront(P, -26, PY, 4.2, 20, 'faint') });
-  s += I.solid(P, I.drum('x', [0, BY0, 16], 4.5, 34, 28), { tone: 'mid' });
-  s += I.solid(P, I.slab({ x: -18, y: BY0, w: 3, d: BY1 - BY0, r: 0.6 }, 12, 9.5, 2), { tone: 'mid' });
-  s += I.solid(P, I.box(-15, BY0, 30, BY1 - BY0, 17.6, 2.4), { tone: 'lo' });
+  s += I.solid(P, I.cyl(-26, PY, 6.4, 12, 3, 24), { tone: 'mid', mat: 'steel' });
+  s += I.solid(P, I.cyl(-26, PY, 4.2, 15, 59, 24), { tone: 'mid', mat: 'steel', inner: I.arcFront(P, -26, PY, 4.2, 20, 'faint') });
+  s += I.solid(P, I.drum('x', [0, BY0, 16], 4.5, 34, 28), { tone: 'mid', mat: 'steel' });
+  s += I.solid(P, I.slab({ x: -18, y: BY0, w: 3, d: BY1 - BY0, r: 0.6 }, 12, 9.5, 2), { tone: 'mid', mat: 'steel' });
+  s += I.solid(P, I.box(-15, BY0, 30, BY1 - BY0, 17.6, 2.4), { tone: 'lo', mat: 'mem' });
   I.group(s, gBack);
-  var slats = I.el('path', { class: 'ln faint' }, gBack);
+  var slats = I.el('path', { class: 'ln mem' }, gBack);
 
   /* ---------- blanks on the belt: a pool, placed by belt position ---------- */
   function blankSvg(stamped) {
-    var t = I.solid(P, I.slab({ x: -9, y: -8, w: 18, d: 16, r: 1.2 }, BZ, 2.6, 2), { tone: 'mid' });
+    var t = I.solid(P, I.slab({ x: -9, y: -8, w: 18, d: 16, r: 1.2 }, BZ, 2.6, 2), { tone: 'mid', cls: 'soft', mat: 'mem' });
     return t;
   }
   var blanks = [];
   for (var i = 0; i < 16; i++) {
     var g = I.group(blankSvg(), gBlanks);
     var mark = I.el('g', {}, g);
-    mark.innerHTML = I.ringTop(P, 0, 0, 4.2, BZ + 2.6, 'mid', 24) + I.ringTop(P, 0, 0, 2.2, BZ + 2.6, 'lo', 18);
+    mark.innerHTML = I.ringTop(P, 0, 0, 4.2, BZ + 2.6, 'workl', 24) + I.ringTop(P, 0, 0, 2.2, BZ + 2.6, 'work', 18);
     blanks.push({ node: g, mark: mark, key: 0 });
   }
   var O = I.p(P, [0, 0, 0]);
 
   /* ---------- front rail (in front of every blank), front roller ---------- */
-  I.group(I.solid(P, I.slab({ x: 15, y: BY0, w: 3, d: BY1 - BY0, r: 0.6 }, 12, 9.5, 2), { tone: 'mid' }) +
+  I.group(I.solid(P, I.slab({ x: 15, y: BY0, w: 3, d: BY1 - BY0, r: 0.6 }, 12, 9.5, 2), { tone: 'mid', mat: 'steel' }) +
     I.dots(P, [-160, -100, -40, 100].map(function (y) { return [18, y, 16.75]; }), 0.45, 'mid') +
-    I.solid(P, I.drum('x', [0, BY1, 16], 4.5, 34, 28), { tone: 'mid' }), gRail);
+    I.solid(P, I.drum('x', [0, BY1, 16], 4.5, 34, 28), { tone: 'mid', mat: 'steel' }), gRail);
 
   /* ---------- live items, sorted by depth ---------- */
   var items = [];
@@ -107,11 +107,11 @@
   // the magazine over the belt's start: back posts, the stack, front posts, cap
   (function () {
     var t = '', MY = -172;
-    [[-16.5, MY - 12], [-16.5, MY + 12]].forEach(function (q) { t += I.solid(P, I.cyl(q[0], q[1], 1.6, 21.5, 33, 14), { tone: 'mid' }); });
-    for (var j = 0; j < 9; j++) t += I.solid(P, I.slab({ x: -9, y: MY - 8, w: 18, d: 16, r: 1.2 }, 24 + j * 3.1, 2.6, 2), { tone: 'mid' });
-    [[16.5, MY - 12], [16.5, MY + 12]].forEach(function (q) { t += I.solid(P, I.cyl(q[0], q[1], 1.6, 21.5, 33, 14), { tone: 'mid' }); });
+    [[-16.5, MY - 12], [-16.5, MY + 12]].forEach(function (q) { t += I.solid(P, I.cyl(q[0], q[1], 1.6, 21.5, 33, 14), { tone: 'mid', mat: 'steel' }); });
+    for (var j = 0; j < 9; j++) t += I.solid(P, I.slab({ x: -9, y: MY - 8, w: 18, d: 16, r: 1.2 }, 24 + j * 3.1, 2.6, 2), { tone: 'mid', cls: 'soft', mat: 'mem' });
+    [[16.5, MY - 12], [16.5, MY + 12]].forEach(function (q) { t += I.solid(P, I.cyl(q[0], q[1], 1.6, 21.5, 33, 14), { tone: 'mid', mat: 'steel' }); });
     var cap = { x: -19, y: MY - 15, w: 38, d: 30, r: 2 };
-    t += I.solid(P, I.slab(cap, 54.5, 2.4, 3), { tone: 'mid' });
+    t += I.solid(P, I.slab(cap, 54.5, 2.4, 3), { tone: 'mid', mat: 'steel' });
     t += '<path class="void" d="' + I.d(I.ring({ x: -10.5, y: MY - 9.5, w: 21, d: 19, r: 1.5 }, 2).map(function (q) { return I.p(P, [q[0], q[1], 56.9]); }), true) + '"/>';
     [[-16.5, MY - 12], [16.5, MY - 12], [-16.5, MY + 12], [16.5, MY + 12]].forEach(function (q) { t += I.dots(P, [[q[0], q[1], 56.9]], 0.5, 'mid'); });
     item(t, keyAt(0, MY, 40));
@@ -121,23 +121,23 @@
   var ram = item('', 0);
   var RAM_UP = 46, RAM_DOWN = BZ + 2.6 + 2.6;   // the punch (2.4 tall) just meets the blank
   function ramSvg(z) {
-    var t = I.solid(P, I.cyl(0, PY, 3, z + 14, 74 - z - 14, 18), { tone: 'mid' });
+    var t = I.solid(P, I.cyl(0, PY, 3, z + 14, 74 - z - 14, 18), { tone: 'mid', mat: 'steel' });
     t += I.solid(P, I.box(-21.6, PY - 4, 2, 8, z + 3, 8), { tone: 'mid' });
     t += I.solid(P, I.cyl(0, PY, 5, z - 2.4, 2.4, 24), { lit: true, tone: 'hi' });
     t += I.solid(P, I.slab({ x: -20, y: PY - 10, w: 40, d: 20, r: 1.5 }, z, 14, 3), { lit: true, tone: 'hi', inner: I.sideSeam(P, { x: -20, y: PY - 10, w: 40, d: 20, r: 1.5 }, z + 4, 'faint', 3) });
     t += I.solid(P, I.box(19.6, PY - 4, 2, 8, z + 3, 8), { tone: 'mid' });
     return t;
   }
-  item(I.solid(P, I.cyl(26, PY, 6.4, 12, 3, 24), { tone: 'mid' }) +
-       I.solid(P, I.cyl(26, PY, 4.2, 12, 62, 24), { tone: 'mid', inner: I.arcFront(P, 26, PY, 4.2, 20, 'faint') }), keyAt(26, PY, 43));
+  item(I.solid(P, I.cyl(26, PY, 6.4, 12, 3, 24), { tone: 'mid', mat: 'steel' }) +
+       I.solid(P, I.cyl(26, PY, 4.2, 12, 62, 24), { tone: 'mid', mat: 'steel', inner: I.arcFront(P, 26, PY, 4.2, 20, 'faint') }), keyAt(26, PY, 43));
   (function () {
     var CR = { x: -34, y: 24, w: 68, d: 32, r: 3 };
-    var t = I.solid(P, I.slab(CR, 74, 14, 4), { tone: 'mid', inner: I.sideSeam(P, CR, 78, 'faint', 4) });
-    t += I.planTop(P, I.inset(CR, 3), 88, 'faint', 4);
+    var t = I.solid(P, I.slab(CR, 74, 14, 4), { tone: 'mid', mat: 'work', inner: I.sideSeam(P, CR, 78, 'work', 4) });
+    t += I.planTop(P, I.inset(CR, 3), 88, 'work', 4);
     [[-30, 28], [30, 28], [-30, 52], [30, 52]].forEach(function (c) { t += I.screw(P, c[0], c[1], 88); });
     item(t, keyAt(0, PY, 81));
     var MO = { x: -16, y: 30, w: 26, d: 20, r: 4 };
-    var m = I.solid(P, I.slab(MO, 88, 13, 6), { tone: 'mid', inner: I.sideSeam(P, MO, 91, 'faint', 6) + I.sideSeam(P, MO, 94, 'faint', 6) + I.sideSeam(P, MO, 97, 'faint', 6) });
+    var m = I.solid(P, I.slab(MO, 88, 13, 6), { tone: 'mid', mat: 'work', inner: I.sideSeam(P, MO, 91, 'faint', 6) + I.sideSeam(P, MO, 94, 'faint', 6) + I.sideSeam(P, MO, 97, 'faint', 6) });
     m += I.solid(P, I.drum('x', [12.5, 40, 94.5], 4.2, 5, 24), { tone: 'mid' });
     m += I.planTop(P, I.inset(MO, 3), 101, 'faint', 6);
     item(m, keyAt(0, 40, 95));
@@ -158,27 +158,27 @@
     var t = I.solid(P, I.slab(BIN, 0, 5, 4), { tone: 'mid', inner: I.sideSeam(P, BIN, 1.6, 'faint', 4) });
     t += I.planTop(P, I.inset(BIN, 3), 5, 'faint', 3);
     [[-9.6, 141, 5], [9.6, 141, 3], [-9.6, 160, 2], [9.6, 160, 4]].sort(function (a, b) { return I.depth(P, [a[0], a[1], 0]) - I.depth(P, [b[0], b[1], 0]); }).forEach(function (q) {
-      for (var j = 0; j < q[2]; j++) t += I.solid(P, I.slab({ x: q[0] - 9, y: q[1] - 8, w: 18, d: 16, r: 1.2 }, 5 + j * 2.7, 2.6, 2), { tone: 'mid' });
+      for (var j = 0; j < q[2]; j++) t += I.solid(P, I.slab({ x: q[0] - 9, y: q[1] - 8, w: 18, d: 16, r: 1.2 }, 5 + j * 2.7, 2.6, 2), { tone: 'mid', cls: 'soft', mat: 'work' });
       var top = 5 + q[2] * 2.7 - 0.1;
-      t += I.ringTop(P, q[0], q[1], 4.2, top, 'mid', 24) + I.ringTop(P, q[0], q[1], 2.2, top, 'lo', 18);
+      t += I.ringTop(P, q[0], q[1], 4.2, top, 'work', 24) + I.ringTop(P, q[0], q[1], 2.2, top, 'work', 18);
     });
     item(t, keyAt(0, 150, 7));
   })();
 
   // gauges: feed (left, by the magazine) and press (by the press)
   var G0 = -0.75 * Math.PI, GSPAN = 1.5 * Math.PI, GZ = 11;
-  function gauge(x, y) {
+  function gauge(x, y, kind) {
     var it = item(I.solid(P, I.cyl(x, y, 8, 0, 6, 28), { tone: 'lo' }) +
       I.solid(P, I.cyl(x, y, 12.5, 6, 5, 56), { tone: 'hi', crease: 'lo', inner: I.knurl(P, x, y, 12.5, 7.2, 10.4, 40, 'faint') }) +
       I.ringTop(P, x, y, 11.6, GZ, 'lo', 56) +
       I.radialTicks(P, x, y, 11, 20, 5, GZ, [1.1, 2.4], G0, GSPAN) +
       I.solid(P, I.box(x - 2, y - 15.5, 4, 3.2, 7, 2.6), { tone: 'mid' }), keyAt(x, y, 6));
-    it.needle = I.el('path', { class: 'ln hi', 'stroke-width': 1 }, it.node);
-    I.group(I.solid(P, I.cyl(x, y, 1.4, GZ, 0.8, 12), { tone: 'hi' }), it.node);
+    it.needle = I.el('path', { class: 'ln ' + kind + 'l' }, it.node);
+    I.group(I.solid(P, I.cyl(x, y, 1.4, GZ, 0.8, 12), { tone: 'hi', mat: kind + 'x' }), it.node);
     it.x = x; it.y = y; it.v = 0;
     return it;
   }
-  var gFeed = gauge(52, -146), gPress = gauge(52, -6);
+  var gFeed = gauge(52, -146, 'mem'), gPress = gauge(52, -6, 'work');
 
   // the intensity knob, six stops on a dial plate
   var STOPS = KERNELS.map(function (_, j) { return -2.1 + 4.2 * j / (KERNELS.length - 1); });

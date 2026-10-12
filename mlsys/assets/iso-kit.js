@@ -113,6 +113,18 @@
     faces.push(B.slice()); faces.push(A.slice().reverse());
     var s = mk(faces); s.round = true; return s;
   };
+  // any convex six-sided solid from its bottom and top quads (same winding): sloped plates, ribbons
+  ISO.hexa = function (b, t) {
+    var faces = [b.slice().reverse(), t.slice()];
+    for (var i = 0; i < 4; i++) { var j = (i + 1) % 4; faces.push([b[i], b[j], t[j], t[i]]); }
+    return mk(faces);
+  };
+  // a flat plate of thickness th lying from a to b (3D points), width w across in the floor plane
+  ISO.plate = function (a, b, w, th) {
+    var dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1, nx = -dy / l * w / 2, ny = dx / l * w / 2;
+    var q = [[a[0] + nx, a[1] + ny, a[2]], [b[0] + nx, b[1] + ny, b[2]], [b[0] - nx, b[1] - ny, b[2]], [a[0] - nx, a[1] - ny, a[2]]];
+    return ISO.hexa(q, q.map(function (p) { return [p[0], p[1], p[2] + th]; }));
+  };
   function mk(faces) {
     var all = [], cen = [0, 0, 0];
     faces.forEach(function (f) { f.forEach(function (q) { all.push(q); cen[0] += q[0]; cen[1] += q[1]; cen[2] += q[2]; }); });
@@ -138,12 +150,14 @@
     var k = Math.max(0, Math.min(3, Math.floor((l + 0.75) / 1.5 * 4)));
     return 's' + k;
   }
-  // solid → SVG string. opts: tone (outline: hi|mid|lo), lit, crease (default faint), bevel, cls
+  // solid → SVG string. opts: tone (outline: hi|mid|lo), lit, mat, crease (default faint), bevel, cls
+  // mat names a material from the course palette (iso.css): mem / memx (vermilion: memory, bytes),
+  // work / workx (forest: compute, useful work), steel (cool structure). x = saturated, for small parts.
   ISO.solid = function (P, S, o) {
     o = o || {};
     var V = ISO.view(P), vis = [], out = '', i, j;
     S.faces.forEach(function (f) { if (dot(f.n, V) > 1e-4) vis.push(f); });
-    var cls = 'iso-sol' + (o.lit ? ' lit' : '') + (o.cls ? ' ' + o.cls : '');
+    var cls = 'iso-sol' + (o.lit ? ' lit' : '') + (o.mat ? ' m-' + o.mat : '') + (o.cls ? ' ' + o.cls : '');
     out += '<g class="' + cls + '">';
     vis.forEach(function (f) {
       var t = toneOf(f.n, P);

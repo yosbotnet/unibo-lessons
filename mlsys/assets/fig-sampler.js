@@ -49,6 +49,10 @@
       if (ready.length) (cur || ready[Math.floor(rnd() * ready.length)]).sel = true;
     }
   }
+  // colour families, the same in every figure: forest = issuing / compute, vermilion = memory
+  // (saturated: global memory, DRAM; pale: shared memory and the MIO queue), paper = the rest
+  var FAM = { selected: 'workx', not_selected: 'work', math_pipe_throttle: 'work', long_scoreboard: 'memx', lg_throttle: 'memx',
+              short_scoreboard: 'mem', mio_throttle: 'mem', barrier: '', wait: '' };
   function stateOf(wp) { return wp.sel ? 'selected' : wp.ready ? 'not_selected' : wp.stall; }
   function reset() { st.counts = REASONS.map(function () { return 0; }); st.total = 0; }
 
@@ -66,7 +70,9 @@
     fig: 'Fig. 3', title: 'Warp sampling, as a tabulator', W: W, H: H,
     hint: 'Knob or ← →: kernel · Space: speed',
     label: 'An isometric tabulator. Four trays hold 12 warp pegs each, the four quadrants of an SM. A stylus on a gantry taps one warp at a fixed interval, and a bank of nine counters, one per state, counts what the tapped warps were doing.',
-    keys: [['lit', 'the sampling stylus'], ['raised', 'tall peg: issuing · middle: ready, not picked · low: stalled']]
+    keys: [['lit', 'the sampling stylus'], ['raised', 'tall peg: issuing · middle: ready, not picked · low: stalled'],
+           ['work', 'issuing'], ['workpale', 'ready, or waiting on the math pipes'], ['mem', 'waiting on global memory'],
+           ['mempale', 'waiting on shared memory (MIO)']]
   });
   var svg = ui.svg;
   svg.innerHTML = '<defs><filter id="iso-blur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter></defs>';
@@ -109,10 +115,11 @@
   pegOrder.forEach(function (wp) { wp.g = I.el('g', {}, L1); wp.drawn = -1; });
   function drawPeg(wp) {
     var hq = Math.round(wp.h * 4) / 4;
-    if (hq === wp.drawn && wp.lit === wp.wasLit) return;
-    wp.drawn = hq; wp.wasLit = wp.lit;
+    var fam = FAM[stateOf(wp)] || '';
+    if (hq === wp.drawn && wp.lit === wp.wasLit && fam === wp.fam) return;
+    wp.drawn = hq; wp.wasLit = wp.lit; wp.fam = fam;
     var q = pegXY(wp.lane, wp.i);
-    wp.g.innerHTML = I.solid(P, I.cyl(q[0], q[1], 3.1, 2.6, hq, 18), { tone: hq > 6 ? 'hi' : 'mid' }) +
+    wp.g.innerHTML = I.solid(P, I.cyl(q[0], q[1], 3.1, 2.6, hq, 18), { tone: hq > 6 ? 'hi' : 'mid', mat: fam }) +
       I.ringTop(P, q[0], q[1], 1.4, 2.6 + hq, hq > 6 ? 'lo' : 'faint', 12);
   }
 
@@ -141,8 +148,9 @@
   for (var j = 0; j < REASONS.length; j++) {
     var y0 = cy(j), HP = { x: CX0, y: y0, w: CX1 - CX0, d: CW, r: 1.2 };
     var g = I.el('g', {}, L3);
-    var t = I.solid(P, I.slab(HP, 2, CZ - 2, 2), { tone: 'mid', inner: I.sideSeam(P, HP, 6, 'faint', 2) });
-    t += I.planTop(P, I.inset(HP, 1.6), CZ, 'faint', 2);
+    var hf = (FAM[REASONS[j]] || '').replace('x', '');
+    var t = I.solid(P, I.slab(HP, 2, CZ - 2, 2), { tone: 'mid', mat: hf, inner: I.sideSeam(P, HP, 6, hf || 'faint', 2) });
+    t += I.planTop(P, I.inset(HP, 1.6), CZ, hf || 'faint', 2);
     // the window in the front face (face coordinates: u along +y, v down from z = 17)
     t += '<g transform="' + faceM(CX1, y0, 17) + '">' +
       '<rect class="void" x="1.6" y="0" width="10.8" height="6.4" rx="0.6"/>' +
@@ -180,6 +188,7 @@
   var hist = document.createElement('ol'); hist.className = 'smp-hist'; hist.setAttribute('aria-label', 'Samples per state, in counter order from left to right');
   var rows = REASONS.map(function (r) {
     var li = document.createElement('li');
+    li.dataset.fam = (FAM[r] || 'none').replace('x', '') + (/x$/.test(FAM[r] || '') ? ' strong' : '');
     li.innerHTML = '<code>' + r + '</code><span class="bar"><i></i></span><span class="pc"></span>';
     hist.appendChild(li);
     return { bar: li.querySelector('i'), pc: li.querySelector('.pc'), li: li };
@@ -290,7 +299,7 @@
       var d = calm ? 0 : Math.max(0, 1 - (clock - c.hit) / 0.18) * (clock >= c.hit ? 1 : 0);
       var z0 = CZ + 3.4 - 1.6 * d;
       var key = Math.round(z0 * 10);
-      if (key !== c.tk) { c.tk = key; c.tap.innerHTML = I.solid(P, I.cyl((CX0 + CX1) / 2, c.y, 2.6, CZ, 0.9, 18), { tone: 'lo' }) + I.solid(P, I.cyl((CX0 + CX1) / 2, c.y, 1.6, CZ + 0.9, z0 - CZ - 0.9, 14), { tone: 'mid' }); }
+      if (key !== c.tk) { c.tk = key; c.tap.innerHTML = I.solid(P, I.cyl((CX0 + CX1) / 2, c.y, 2.6, CZ, 0.9, 18), { tone: 'lo' }) + I.solid(P, I.cyl((CX0 + CX1) / 2, c.y, 1.6, CZ + 0.9, z0 - CZ - 0.9, 14), { tone: 'mid', mat: FAM[REASONS[j]] }); }
     });
     // the sample clock's hand: one turn per sampling interval
     var turn = st.fast ? (clock / PERIOD_FAST) % 1 : Math.max(0, Math.min(1, 1 - (sampleAt - clock) / PERIOD_SLOW));

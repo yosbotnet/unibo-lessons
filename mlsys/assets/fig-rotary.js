@@ -40,7 +40,7 @@
     fig: 'Fig. 5', title: 'One decode step, as a rotary press', W: W, H: H,
     hint: 'Turn the knobs: click them, or ← → and ↑ ↓',
     label: 'An isometric rotary press between two side frames. The plate cylinder carries the model weights and turns once per decode step; sheets fed side by side are the sequences of the batch and come out printed with one new token each. Each lane has its own small ink roller, its KV cache. Knobs set the batch size and the number format; a gauge shows tokens per second.',
-    keys: [['lit', 'printed sheet: one new token per sequence'], ['raised', 'plate cylinder: all the weights, read once per turn'], ['void', 'ink roller: one sequence’s own KV cache']]
+    keys: [['work', 'printed sheet: one new token per sequence'], ['mempale', 'plate cylinder: all the weights, read once per turn'], ['mem', 'ink roller in use: one sequence’s own KV cache'], ['lit', 'the gauge: tokens per second']]
   });
   var svg = ui.svg;
   svg.innerHTML = '<defs><filter id="iso-blur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter></defs>';
@@ -109,7 +109,7 @@
   // ink fountain (trough) behind the rollers
   (function () {
     var tr = { x: -56, y: -32, w: 112, d: 12, r: 2 };
-    var t = I.solid(P, I.slab(tr, 69, 9, 3), { tone: 'mid' });
+    var t = I.solid(P, I.slab(tr, 69, 9, 3), { tone: 'mid', mat: 'mem' });
     var lip = I.ring(I.inset(tr, 1.6), 3).map(function (q) { return I.p(P, [q[0], q[1], 78]); });
     t += '<path class="void" d="' + I.d(lip, true) + '"/>';
     item(t, keyAt(0, -26, 60));
@@ -118,12 +118,17 @@
   var rollers = [];
   for (var i = 0; i < LANES; i++) {
     var x = laneX(i);
-    var it = item(I.solid(P, I.drum('x', [x, RY, RZ], RR, 12, 28), { tone: 'mid' }), keyAt(x, RY, RZ) - 30);
+    // two finishes: a lane in use is inked (KV cache read every turn), an idle one is bare
+    var it = item('', keyAt(x, RY, RZ) - 30);
+    it.inked = I.group(I.solid(P, I.drum('x', [x, RY, RZ], RR, 12, 28), { tone: 'mid', mat: 'memx' }), it.node);
+    it.bare = I.group(I.solid(P, I.drum('x', [x, RY, RZ], RR, 12, 28), { tone: 'mid' }), it.node);
     it.marks = I.el('path', { class: 'ln lo' }, it.node);
     it.x = x; rollers.push(it);
   }
   // roller shaft through all lanes (seen between rollers)
-  item(I.solid(P, I.drum('x', [0, RY, RZ], 2, 120, 14), { tone: 'lo' }), keyAt(0, RY, RZ) - 31);
+  // (keyed just behind the nearest-to-the-back roller, so every roller covers it)
+  item(I.solid(P, I.drum('x', [0, RY, RZ], 2, 120, 14), { tone: 'lo', mat: 'steel' }),
+    Math.min.apply(null, rollers.map(function (r) { return r.key; })) - 0.5);
 
   // feed table on legs, with lane guides and the paper stacks
   var FEED = { x: -54, y: -140, w: 108, d: 124, r: 2 };
@@ -140,9 +145,9 @@
   var feedStacks = item('', keyAt(0, -110, 30) - 40);
 
   // impression cylinder and the plate cylinder (the weights)
-  item(I.solid(P, I.drum('x', [0, 0, ZI], RI, 2 * XF, 40), { tone: 'mid' }), keyAt(0, 0, ZI));
+  item(I.solid(P, I.drum('x', [0, 0, ZI], RI, 2 * XF, 40), { tone: 'mid', mat: 'steel' }), keyAt(0, 0, ZI));
   var impMarks = I.el('path', { class: 'ln faint' }, items[items.length - 1].node);
-  var plate = item(I.solid(P, I.drum('x', [0, 0, ZP], RP, 2 * XF, 56), { tone: 'hi', crease: 'lo' }), keyAt(0, 0, ZP));
+  var plate = item(I.solid(P, I.drum('x', [0, 0, ZP], RP, 2 * XF, 56), { tone: 'hi', crease: 'lo', mat: 'mem' }), keyAt(0, 0, ZP));
   var plateMarks = I.el('g', {}, plate.node);
 
   // sheets in flight: an unprinted piece before the nip, a printed piece after it
@@ -185,7 +190,7 @@
   })();
   // gears: built at rest, teeth and spokes redrawn as they turn
   function gear(cy, cz, r, x0) {
-    var g = I.group(I.solid(P, I.drum('x', [x0 + 1.5, cy, cz], r, 3, 64), { tone: 'mid' }) +
+    var g = I.group(I.solid(P, I.drum('x', [x0 + 1.5, cy, cz], r, 3, 64), { tone: 'mid', mat: 'steel' }) +
       '<path class="ln faint" d="' + I.d(sideCircle(x0 + 3, cy, cz, r - 3.4, 64)) + '"/>' +
       '<path class="ln lo" d="' + I.d(sideCircle(x0 + 3, cy, cz, Math.max(2.4, r * 0.28), 32)) + '"/>', gGears);
     var teeth = I.el('path', { class: 'ln lo' }, g), spokes = I.el('path', { class: 'ln mid' }, g);
@@ -202,8 +207,8 @@
     I.ringTop(P, GX, GY, 11.6, GZ, 'lo', 56) +
     I.radialTicks(P, GX, GY, 11, 25, 5, GZ, [1.1, 2.4], G0, GSPAN) +
     I.solid(P, I.box(GX - 2, GY - 15.5, 4, 3.2, 7, 2.6), { tone: 'mid' }), keyAt(GX, GY, 6));
-  var needle = I.el('path', { class: 'ln hi', 'stroke-width': 1 }, gauge.node);
-  I.group(I.solid(P, I.cyl(GX, GY, 1.4, GZ, 0.8, 12), { tone: 'hi' }), gauge.node);
+  var needle = I.el('path', { class: 'ln litl' }, gauge.node);
+  I.group(I.solid(P, I.cyl(GX, GY, 1.4, GZ, 0.8, 12), { tone: 'hi', lit: true }), gauge.node);
 
   function knob(x, y, stops) {
     var t = I.solid(P, I.cyl(x, y, 10, 0, 0.9, 40), { tone: 'lo' });
@@ -247,7 +252,7 @@
     var t = '', hh = Math.min(n, 6) * thick;
     if (hh > 0) for (var i = 0; i < lanes; i++) {
       var x = laneX(i);
-      t += I.solid(P, I.slab({ x: x - 5.5, y: 104, w: 11, d: 30, r: 0.6 }, 25, hh, 1), { lit: true, tone: 'mid' });
+      t += I.solid(P, I.slab({ x: x - 5.5, y: 104, w: 11, d: 30, r: 0.6 }, 25, hh, 1), { mat: 'workx', cls: 'soft', tone: 'mid' });
     }
     outStacks.node.innerHTML = t;
   }
@@ -308,17 +313,18 @@
   }
   function sheetSlab(x, y0, y1, z, lit) {
     if (y1 - y0 < 0.4) return '';
-    return I.solid(P, I.slab({ x: x - 5.5, y: y0, w: 11, d: y1 - y0, r: 0.4 }, z, thick, 1), lit ? { lit: true, tone: 'mid' } : { tone: 'lo', crease: 'faint' });
+    return I.solid(P, I.slab({ x: x - 5.5, y: y0, w: 11, d: y1 - y0, r: 0.4 }, z, thick, 1), lit ? { mat: 'workx', tone: 'mid' } : { tone: 'lo', crease: 'faint' });
   }
   function draw() {
     // plate: 10 engraved plate lines turning with the cylinder
     var pm = drumMarks(0, 0, ZP, RP + 0.05, -XF + 3, XF - 3, 10, st.theta);
-    plateMarks.innerHTML = pm.map(function (m) { return '<path class="ln lo" stroke-opacity="' + m.o.toFixed(2) + '" d="' + m.d + '"/>'; }).join('');
+    plateMarks.innerHTML = pm.map(function (m) { return '<path class="ln mem" stroke-opacity="' + m.o.toFixed(2) + '" d="' + m.d + '"/>'; }).join('');
     // impression cylinder turns the other way at the same surface speed
     impMarks.setAttribute('d', drumMarks(0, 0, ZI, RI + 0.05, -XF + 3, XF - 3, 6, -st.theta * RP / RI).map(function (m) { return m.d; }).join(''));
     // ink rollers: active lanes turn with the plate, idle ones stand still
     rollers.forEach(function (r, i) {
       var on = i < lanes;
+      if (r.on !== on) { r.on = on; r.inked.style.display = on ? '' : 'none'; r.bare.style.display = on ? 'none' : ''; }
       r.marks.setAttribute('d', drumMarks(0, RY, RZ, RR + 0.05, r.x - 5.4, r.x + 5.4, 6, on ? -st.theta * RP / RR : 0.3).map(function (m) { return m.d; }).join(''));
     });
     // gears

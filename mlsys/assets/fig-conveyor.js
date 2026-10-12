@@ -56,7 +56,7 @@
     fig: 'Fig. 3', title: 'One SM’s memory pipe, as a conveyor', W: W, H: H,
     hint: 'Turn the knobs: click them, or ← → and ↑ ↓',
     label: 'An isometric conveyor between an SM station and a DRAM cabinet. Cups leave the SM empty, are filled with 128 bytes under the DRAM nozzle and come back. Knobs set the resident warps and the load width; a gauge shows the bandwidth this pattern can reach.',
-    keys: [['lit', '128 bytes of data in a cup'], ['void', 'empty cup: a request on its way'], ['raised', 'raised peg: a resident warp']]
+    keys: [['mem', '128 bytes of data in a cup'], ['void', 'empty cup: a request on its way'], ['work', 'raised peg: a resident warp'], ['lit', 'the gauge: bandwidth reached']]
   });
   var svg = ui.svg;
   svg.innerHTML = '<defs><filter id="iso-blur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter></defs>';
@@ -82,18 +82,18 @@
   var posts = [];
   [-R, R].forEach(function (x) { [-60, -20, 20, 60].forEach(function (y) { posts.push([x, y]); }); });
   posts.sort(function (a, b) { return I.depth(P, [a[0], a[1], 0]) - I.depth(P, [b[0], b[1], 0]); }).forEach(function (q) {
-    s += I.solid(P, I.cyl(q[0], q[1], 2.4, 0, 5, 16), { tone: 'lo' });
+    s += I.solid(P, I.cyl(q[0], q[1], 2.4, 0, 5, 16), { tone: 'lo', mat: 'steel' });
   });
   var railY = YS - Math.sqrt(37 * 37 - R * R);
   [-R, R].forEach(function (x) {
-    s += I.solid(P, I.slab({ x: x - 3, y: -railY, w: 6, d: 2 * railY, r: 1 }, 5, 3, 2), { tone: 'mid' });
+    s += I.solid(P, I.slab({ x: x - 3, y: -railY, w: 6, d: 2 * railY, r: 1 }, 5, 3, 2), { tone: 'mid', mat: 'steel' });
   });
   // the two sprocket wheels with teeth marks and hubs
   [-YS, YS].forEach(function (y) {
     s += I.solid(P, I.cyl(0, y, 37, 4, 4, 64), { tone: 'mid', inner: I.arcFront(P, 0, y, 37, 6, 'faint') });
     s += I.radialTicks(P, 0, y, 36.6, 48, 4, 8, [1.6, 3], 0, 2 * Math.PI, ['faint', 'lo']);
     s += I.ringTop(P, 0, y, 26, 8, 'faint', 48);
-    s += I.solid(P, I.cyl(0, y, 7, 8, 3, 24), { tone: 'mid' });
+    s += I.solid(P, I.cyl(0, y, 7, 8, 3, 24), { tone: 'mid', mat: 'steel' });
     s += I.ringTop(P, 0, y, 3, 11, 'lo', 16);
     [0, 1, 2, 3].forEach(function (i) { var t = i * Math.PI / 2 + Math.PI / 4; s += I.dots(P, [[5 * Math.cos(t), y + 5 * Math.sin(t), 11]], 0.5, 'mid'); });
   });
@@ -115,42 +115,42 @@
   var SM = { x: -40, y: -184, w: 80, d: 44, r: 3 };
   var smBody = item('', keyAt(0, -162, 15));
   function buildSM() {
-    var t = I.solid(P, I.slab(SM, 0, 30, 4), { tone: 'mid', inner: I.sideSeam(P, SM, 24, 'faint', 4) });
-    t += I.planTop(P, I.inset(SM, 3), 30, 'faint', 4);
+    var t = I.solid(P, I.slab(SM, 0, 30, 4), { tone: 'mid', mat: 'work', inner: I.sideSeam(P, SM, 24, 'work', 4) });
+    t += I.planTop(P, I.inset(SM, 3), 30, 'work', 4);
     var pegs = [];
     for (var r = 0; r < 6; r++) for (var c = 0; c < 8; c++) pegs.push([-30.6 + c * 8.75, -178 + r * 6.4, r * 8 + c]);
     pegs.sort(function (a, b) { return I.depth(P, [a[0], a[1], 0]) - I.depth(P, [b[0], b[1], 0]); });
     pegs.forEach(function (q) {
       var on = q[2] < st.W;
-      t += I.ringTop(P, q[0], q[1], 2.3, 30, 'faint', 14);
-      t += I.solid(P, I.cyl(q[0], q[1], 1.6, 30, on ? 4.6 : 1.1, 14), { tone: on ? 'hi' : 'lo' });
+      t += I.ringTop(P, q[0], q[1], 2.3, 30, 'work', 14);
+      t += I.solid(P, I.cyl(q[0], q[1], 1.6, 30, on ? 4.6 : 1.1, 14), on ? { tone: 'hi', mat: 'workx' } : { tone: 'lo', mat: 'work' });
     });
     smBody.node.innerHTML = t;
   }
-  item(I.solid(P, I.box(-4, -141, 8, 20, 21, 4), { tone: 'mid' }) +
-       I.solid(P, I.cyl(0, -124, 3.4, 17.6, 3.4, 18), { tone: 'mid' }) +
+  item(I.solid(P, I.box(-4, -141, 8, 20, 21, 4), { tone: 'mid', mat: 'work' }) +
+       I.solid(P, I.cyl(0, -124, 3.4, 17.6, 3.4, 18), { tone: 'mid', mat: 'work' }) +
        I.arcFront(P, 0, -124, 3.4, 19.2, 'faint') +
        I.dots(P, [[0, -136, 25], [0, -130, 25]], 0.5, 'mid'), keyAt(0, -124, 26));
 
   // DRAM cabinet: drawers on the front, a hopper on top, a spout over the track with a gate knob
   var DR = { x: -34, y: 140, w: 68, d: 44, r: 3 };
   (function () {
-    var t = I.solid(P, I.slab(DR, 0, 26, 4), { tone: 'mid', inner: I.sideSeam(P, DR, 2.5, 'faint', 4) });
+    var t = I.solid(P, I.slab(DR, 0, 26, 4), { tone: 'mid', mat: 'mem', inner: I.sideSeam(P, DR, 2.5, 'mem', 4) });
     [3.5, 11, 18.5].forEach(function (z) {
-      t += I.solid(P, I.box(34, 145, 1.6, 34, z, 6), { tone: 'lo' });
-      t += I.solid(P, I.box(35.6, 159, 1.6, 6, z + 2.3, 1.4), { tone: 'mid' });
+      t += I.solid(P, I.box(34, 145, 1.6, 34, z, 6), { tone: 'lo', mat: 'mem' });
+      t += I.solid(P, I.box(35.6, 159, 1.6, 6, z + 2.3, 1.4), { tone: 'mid', mat: 'steel' });
       t += I.dots(P, [[35.6, 147.5, z + 3], [35.6, 176.5, z + 3]], 0.45, 'mid');
     });
-    t += I.planTop(P, I.inset(DR, 3), 26, 'faint', 4);
-    t += I.solid(P, I.frustum(I.circle(0, 162, 9, 28), 26, I.circle(0, 162, 19, 28), 44), { tone: 'mid' });
-    t += I.solid(P, I.cyl(0, 162, 20, 44, 2, 40), { tone: 'mid' });
+    t += I.planTop(P, I.inset(DR, 3), 26, 'mem', 4);
+    t += I.solid(P, I.frustum(I.circle(0, 162, 9, 28), 26, I.circle(0, 162, 19, 28), 44), { tone: 'mid', mat: 'mem' });
+    t += I.solid(P, I.cyl(0, 162, 20, 44, 2, 40), { tone: 'mid', mat: 'mem' });
     var lip = I.circle(0, 162, 17.4, 40).map(function (q) { return I.p(P, [q[0], q[1], 46]); });
     t += '<path class="void" d="' + I.d(lip, true) + '"/>';
     [0, 1, 2, 3, 4, 5].forEach(function (i) { var a = i * Math.PI / 3; t += I.dots(P, [[18.7 * Math.cos(a), 162 + 18.7 * Math.sin(a), 46]], 0.45, 'mid'); });
     item(t, keyAt(0, 162, 13));
   })();
-  item(I.solid(P, I.box(-4, 119, 8, 21, 21, 4), { tone: 'mid' }) +
-       I.solid(P, I.cyl(0, 124, 3.4, 17.6, 3.4, 18), { tone: 'mid' }) +
+  item(I.solid(P, I.box(-4, 119, 8, 21, 21, 4), { tone: 'mid', mat: 'mem' }) +
+       I.solid(P, I.cyl(0, 124, 3.4, 17.6, 3.4, 18), { tone: 'mid', mat: 'mem' }) +
        I.arcFront(P, 0, 124, 3.4, 19.2, 'faint') +
        I.solid(P, I.cyl(0, 132, 2.6, 25, 3.2, 18), { tone: 'mid', inner: I.knurl(P, 0, 132, 2.6, 25.3, 27.9, 12, 'lo') }), keyAt(0, 124, 26));
 
@@ -161,8 +161,8 @@
     I.ringTop(P, GX, GY, 11.6, GZ, 'lo', 56) +
     I.radialTicks(P, GX, GY, 11, 28, 4, GZ, [1.1, 2.4], G0, GSPAN) +
     I.solid(P, I.box(GX - 2, GY - 15.5, 4, 3.2, 7, 2.6), { tone: 'mid' }), keyAt(GX, GY, 6));
-  var needle = I.el('path', { class: 'ln hi', 'stroke-width': 1 }, gauge.node);
-  var hub = I.el('g', {}, gauge.node); hub.innerHTML = I.solid(P, I.cyl(GX, GY, 1.4, GZ, 0.8, 12), { tone: 'hi' });
+  var needle = I.el('path', { class: 'ln litl' }, gauge.node);
+  var hub = I.el('g', {}, gauge.node); hub.innerHTML = I.solid(P, I.cyl(GX, GY, 1.4, GZ, 0.8, 12), { tone: 'hi', lit: true });
 
   // the two knobs on dial plates: resident warps and load width
   function knob(x, y, stops) {
@@ -186,7 +186,7 @@
     var rim = I.circle(0, 0, 3.3, 24).map(function (q) { return I.p(P, [q[0], q[1], 15.6]); });
     t += '<path class="void" d="' + I.d(rim, true) + '"/>';
     var it = item(t, 0);
-    var load = I.el('g', { class: 'lit' }, it.node);
+    var load = I.el('g', { class: 'm-memx' }, it.node);
     var mound = I.circle(0, 0, 3.0, 24).map(function (q) { return I.p(P, [q[0], q[1], 15.3]); });
     load.innerHTML = '<path class="f tp" d="' + I.d(mound, true) + '"/><path class="ol" d="' + I.d(mound, true) + '"/>';
     // translate is relative to the origin's screen position
