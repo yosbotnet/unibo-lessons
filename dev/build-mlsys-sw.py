@@ -16,6 +16,7 @@ files = ["./"]
 files += sorted(p.relative_to(COURSE).as_posix() for p in COURSE.glob("*.html"))
 files += ["manifest.webmanifest"]
 files += sorted(p.relative_to(COURSE).as_posix() for p in (COURSE / "assets").iterdir() if p.is_file())
+files += sorted(p.relative_to(COURSE).as_posix() for p in (COURSE / "assets/xp").glob("*") if p.is_file())   # the explainer kit
 files += sorted(p.relative_to(COURSE).as_posix() for p in (COURSE / "labs").rglob("*")
                 if p.is_file() and p.suffix in {".cu", ".h", ".md"} or p.name == "Makefile")
 files += ["../assets/course-figures.css", "../assets/fonts.css"]
