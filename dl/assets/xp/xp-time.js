@@ -117,12 +117,41 @@
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', o.label || '');
     stage.appendChild(svg);
-    var svgR = XP.svgRenderer(svg, S), glR = null, canvas = null;
-    if (o.gl !== false && XP.glRenderer) {
-      canvas = document.createElement('canvas');
-      stage.appendChild(canvas);
-      try { glR = XP.glRenderer(canvas, S, {}); } catch (e) { glR = null; }
-      if (!glR || !glR.supported) { canvas.remove(); canvas = null; glR = null; }
+    var svgR = XP.svgRenderer(svg, S), glR = null, canvas = null, glOff = null;
+    /* WebGL starts late on purpose: when the film nears the screen, after the page has painted, and with the shader
+       compiling in the background. Until it is ready the frame stays blank paper. Scripts (setTime) get it at once. */
+    var glWant = o.gl !== false && !!XP.glRenderer, glWait = glWant;
+    function startGL(now) {
+      if (!glWait) return; glWait = false;
+      canvas = document.createElement('canvas'); stage.insertBefore(canvas, svg.nextSibling);
+      try { glR = XP.glRenderer(canvas, S, { async: !now && !navigator.webdriver }); } catch (e) { glR = null; }
+      if (!glR || !glR.supported) { noGL(); draw(); return; }
+      Q.max = glR.scale();
+      glR.onReady(function (ok) { if (!ok) noGL(); draw(); perfText(); });
+    }
+    function noGL() {                                             // no usable WebGL: the SVG renderer, and no style menu
+      glOff = glR; glR = null; if (canvas) canvas.remove(); canvas = null;
+      var w = card.querySelector('.xp-menu-w'); if (w) w.remove();
+    }
+    /* quality: while the film plays, watch the frame interval. When the GPU can't keep up (frames slow, but not
+       because of our own JavaScript), draw fewer pixels: 2× → 1.5× → 1.25× → 1× → 0.75×. Climb back at most twice. */
+    var Q = { steps: [0.75, 1, 1.25, 1.5, 2], ema: 0, js: 0, n: 0, since: 0, ups: 0, up: false, max: 1, box: null };
+    if (/[?&]perf\b/.test(location.search)) { Q.box = document.createElement('div'); Q.box.className = 'xp-perf'; card.appendChild(Q.box); }
+    function adapt(dtMs, jsMs) {
+      if (dtMs == null || !glR || forced === 'svg' || window.XP_PIXEL_RATIO) return;
+      if (++Q.n < 6) return;                                     // the first frames after a start include warm-up
+      Q.ema = Q.ema ? Q.ema * 0.9 + dtMs * 0.1 : dtMs; Q.js = Q.js ? Q.js * 0.9 + jsMs * 0.1 : jsMs; Q.since++;
+      var sc = glR.scale(), i = 0;
+      Q.steps.forEach(function (x, k) { if (Math.abs(x - sc) < Math.abs(Q.steps[i] - sc)) i = k; });
+      if (Q.ema > 26 && Q.ema - Q.js > 8 && Q.since > 20 && i > 0) { glR.setScale(Q.steps[i - 1]); if (Q.up) Q.ups = 9; reQ(); }
+      else if (Q.ema < 18.5 && Q.since > 240 && Q.ups < 2 && i + 1 < Q.steps.length && Q.steps[i + 1] <= Q.max) { glR.setScale(Q.steps[i + 1]); Q.ups++; Q.up = true; reQ(); }
+    }
+    function reQ() { Q.n = 0; Q.since = 0; Q.ema = 0; Q.js = 0; }
+    function perfText() {
+      if (!Q.box) return;
+      var r = glR ? (glR.gpu || 'WebGL').replace(/^ANGLE \((.*)\)$/, '$1') + ' · ' + glR.scale() + '×' + (canvas ? ' · ' + canvas.width + '×' + canvas.height + ' px' : '')
+        : 'SVG' + (glOff && glOff.software ? ' (software GPU: ' + glOff.gpu + ')' : '');
+      Q.box.textContent = r + (Q.ema ? ' · ' + Q.ema.toFixed(1) + ' ms/frame · js ' + Q.js.toFixed(1) + ' ms' : '');
     }
     /* labels: HTML text pinned to 3D points (o.labels(t, S) → [{ p:[x,y,z], text, short, wide, cls, align: 'r'|'l', o }]), the same in both renderers */
     var labLayer = null, labEls = [];
@@ -143,7 +172,7 @@
         e.style.opacity = it.o == null ? '' : String(it.o);
       });
     }
-    var mode = glR ? 'gl' : 'svg';
+    var mode = glWant ? 'gl' : 'svg';
     stage.setAttribute('data-renderer', mode);
     var hasVoice = !!(tl.lines && tl.lines.some(function (l) { return l.src; }));
     var styleNames = o.styles || (XP.STYLES ? Object.keys(XP.STYLES) : []);
@@ -174,7 +203,7 @@
       '<span class="time">0:00 / ' + mmss(total) + '</span><span class="now"></span>' +
       (hasVoice ? '<button type="button" class="b-snd" title="Sound (M)" aria-label="Sound" aria-pressed="false">' + ICON.mute + '</button>' : '') +
       '<button type="button" class="b-cc" title="Subtitles (C)" aria-label="Subtitles" aria-pressed="true">' + ICON.cc + '</button>' +
-      (glR ? '<span class="xp-menu-w"><button type="button" class="b-style" title="Style" aria-label="Style" aria-haspopup="true" aria-expanded="false">' + ICON.style + '</button>' +
+      (glWant ? '<span class="xp-menu-w"><button type="button" class="b-style" title="Style" aria-label="Style" aria-haspopup="true" aria-expanded="false">' + ICON.style + '</button>' +
         '<div class="xp-menu" role="menu" hidden>' + [['', 'As directed']].concat(styleNames.map(function (n) { return [n, n]; }), [['svg', 'svg (fallback)']]).map(function (m) {
           return '<button type="button" role="menuitemradio" data-s="' + m[0] + '" aria-checked="' + (m[0] === '') + '">' + m[1] + '</button>'; }).join('') + '</div></span>' : '') +
       (canFs ? '<button type="button" class="b-fs" title="Full screen (F)" aria-label="Full screen">' + ICON.fs + '</button>' : '');
@@ -200,20 +229,134 @@
     try { if (localStorage.getItem('xp-cc') === '0') card.classList.add('nocc'); } catch (e) {}
     ccBtn.setAttribute('aria-pressed', String(!card.classList.contains('nocc')));
 
-    /* sound: one <audio> per voice line, kept in step with T (the film clock stays the master) */
-    var sound = false, clips = [];
-    if (hasVoice) tl.lines.forEach(function (l) { if (l.src) { var au = new Audio(l.src); au.preload = 'auto'; clips.push({ l: l, au: au }); } });
+    /* sound: Web Audio, and the sound is the clock. Voice clips are decoded once and scheduled on the
+       audio timeline; while the film plays with sound, T is read back from what the speakers are playing,
+       so a slow frame drops a frame instead of cutting the voice. An optional score (o.score, see
+       references/api.md) plays under the voice and ducks while a line is spoken. */
+    var sound = false, clips = [], AU = null, hasScore = typeof o.score === 'function';
+    if (hasVoice) tl.lines.forEach(function (l) { if (l.src) clips.push({ l: l, p: null, buf: null, dead: false }); });
+    var DEC = null;
+    function load(c) {                                            // fetch and decode one clip, once. An offline context decodes without a gesture,
+      if (c.p) return c.p;                                        // so the opening lines are ready before anyone presses play
+      if (!DEC) { var O = window.OfflineAudioContext || window.webkitOfflineAudioContext; DEC = O ? new O(1, 1, 48000) : null; }
+      if (!DEC) { c.dead = true; return (c.p = Promise.resolve()); }
+      return (c.p = fetch(c.l.src).then(function (r) { if (!r.ok) throw r.status; return r.arrayBuffer(); })
+        .then(function (ab) { return new Promise(function (ok, no) { DEC.decodeAudioData(ab, ok, no); }); })
+        .then(function (b) { c.buf = b; }, function () { c.dead = true; })
+        .then(function () { if (AU && AU.run) voiceAt(c); }));
+    }
+    function prefetch(n) {                                        // the n lines nearest where the film will start, one after another
+      var from = started ? T : 0;
+      clips.slice().sort(function (a, b) { return Math.abs(a.l.t0 - from) - Math.abs(b.l.t0 - from); }).slice(0, n)
+        .reduce(function (p, c) { return p.then(function () { return load(c); }); }, Promise.resolve());
+    }
+    function audio() {                                            // made inside the first play gesture
+      if (AU) { if (AU.ctx.state !== 'running') AU.ctx.resume(); return AU; }
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}   // iOS: play with the ringer switch off
+      var ctx = new AC({ latencyHint: 'playback' }), A = AU = { ctx: ctx, run: false, gate: null, srcs: [] };
+      A.master = ctx.createGain(); A.master.connect(ctx.destination);
+      A.voice = ctx.createGain(); A.voice.connect(A.master);
+      A.duck = ctx.createGain(); A.duck.gain.value = 0; A.duck.connect(A.master);
+      if (hasScore) { A.sc = scoreOn(ctx, A.duck); A.ev = (A.sc.events || []).slice().sort(function (a, b) { return a[0] - b[0]; }); }
+      prefetch(clips.length);
+      return A;
+    }
+    // the score's own graph: K.out persists (drones, pads); K.tone and K.noise are one-shots on the current gate, cut on pause or seek
+    function scoreOn(ctx, out) {
+      var nb = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate), nd = nb.getChannelData(0);
+      for (var i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+      var K = { ctx: ctx, out: ctx.createGain(), bus: null };
+      K.out.gain.value = o.scoreGain != null ? o.scoreGain : 1; K.out.connect(out);
+      function dest() { return K.bus || K.out; }
+      K.tone = function (when, f, dur, vol, type, f2) {
+        var os = ctx.createOscillator(), g = ctx.createGain();
+        os.type = type || 'sine'; os.frequency.setValueAtTime(f, when);
+        if (f2) os.frequency.exponentialRampToValueAtTime(f2, when + dur);
+        g.gain.setValueAtTime(0.0001, when); g.gain.exponentialRampToValueAtTime(vol, when + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+        os.connect(g); g.connect(dest()); os.start(when); os.stop(when + dur + 0.05);
+      };
+      K.noise = function (when, dur, vol, f0, f1, q) {
+        var sr = ctx.createBufferSource(); sr.buffer = nb; sr.loop = true;
+        var bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = q || 1.2;
+        bp.frequency.setValueAtTime(f0, when); if (f1) bp.frequency.exponentialRampToValueAtTime(f1, when + dur);
+        var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, when); g.gain.exponentialRampToValueAtTime(vol, when + Math.min(0.05, dur / 3)); g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+        sr.connect(bp); bp.connect(g); g.connect(dest()); sr.start(when); sr.stop(when + dur + 0.05);
+      };
+      var sc = o.score(K) || {}; sc.K = K; return sc;
+    }
+    // the duck: the score dips under every spoken line, planned ahead on the audio timeline
+    function duckPlan(g, fromT, at, now) {
+      var lo = o.duck != null ? o.duck : 0.3, inLine = (tl.lines || []).some(function (l) { return fromT >= l.t0 - 0.25 && fromT < l.t0 + l.dur; });
+      g.cancelScheduledValues(0); g.setValueAtTime(inLine ? lo : 1, now);
+      (tl.lines || []).forEach(function (l) {
+        if (l.t0 + l.dur <= fromT) return;
+        if (l.t0 - 0.25 > fromT) g.setTargetAtTime(lo, at(l.t0 - 0.25), 0.08);
+        g.setTargetAtTime(1, at(l.t0 + l.dur + 0.1), 0.4);
+      });
+    }
+    function heard() {                                            // the context time the speakers are playing right now
+      var ctx = AU.ctx, ts = ctx.getOutputTimestamp ? ctx.getOutputTimestamp() : null;
+      if (ts && ts.performanceTime > 0) return ts.contextTime + (performance.now() - ts.performanceTime) / 1000;
+      return ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0);
+    }
+    function at(t) { return AU.c0 + (t - AU.t0); }
+    function voiceAt(c) {
+      if (!c.buf || !AU.run) return;
+      var now = AU.ctx.currentTime + 0.02, w = at(c.l.t0), off = Math.max(0, now - w);
+      if (off >= c.buf.duration) return;
+      var s = AU.ctx.createBufferSource(); s.buffer = c.buf; s.connect(AU.gate.v); s.start(Math.max(w, now), off); AU.srcs.push(s);
+    }
+    function ready() { return clips.every(function (c) { return c.buf || c.dead || c.l.t0 + c.l.dur <= T || c.l.t0 > T + 1; }); }
+    // (re)lay the audio timeline from T: on play, pause, seek and mute. Never touched while the film simply plays.
+    function relay(hush) {
+      var A = AU; if (!A) return;
+      var ctx = A.ctx, now = ctx.currentTime, go = playing && sound && !hush && ready();
+      A.srcs.forEach(function (s) { try { s.stop(); } catch (e) {} }); A.srcs = [];
+      if (A.gate) { var old = A.gate; old.v.gain.setTargetAtTime(0, now, 0.015); old.e.gain.setTargetAtTime(0, now, 0.015); setTimeout(function () { old.v.disconnect(); old.e.disconnect(); }, 250); }
+      A.gate = null; A.run = go; A.dirty = false;
+      if (A.sc) A.sc.K.bus = null;
+      if (!go) { A.duck.gain.cancelScheduledValues(0); A.duck.gain.setTargetAtTime(0, now, 0.05); return; }
+      A.gate = { v: ctx.createGain(), e: ctx.createGain() }; A.gate.v.connect(A.voice);
+      A.c0 = now + 0.08; A.t0 = T;
+      clips.forEach(voiceAt);
+      if (A.sc) {
+        A.gate.e.connect(A.sc.K.out); A.sc.K.bus = A.gate.e;
+        if (A.sc.at) A.sc.at(T, now, 'set');
+        A.ei = 0; while (A.ei < A.ev.length && A.ev[A.ei][0] < T) A.ei++;
+        duckPlan(A.duck.gain, T, at, now);
+      }
+    }
+    function scoreTick() {                                        // continuous parameters follow T; one-shots are scheduled 0.4 s ahead
+      var A = AU; if (!A || !A.run || !A.sc) return;
+      var now = A.ctx.currentTime;
+      if (A.sc.at) A.sc.at(T, now, 'glide');
+      while (A.ei < A.ev.length && A.ev[A.ei][0] < T + 0.4) { var w = at(A.ev[A.ei][0]); if (w > now - 0.03) A.ev[A.ei][1](Math.max(w, now)); A.ei++; }
+    }
     function setSound(on) {
       sound = !!on && hasVoice;
+      if (sound) audio();
       if (soundBtn) { soundBtn.innerHTML = sound ? ICON.snd : ICON.mute; soundBtn.setAttribute('aria-pressed', String(sound)); soundBtn.setAttribute('aria-label', sound ? 'Mute' : 'Sound'); }
-      syncAudio();
+      relay();
     }
-    function syncAudio() {
-      clips.forEach(function (c) {
-        var local = T - c.l.t0, on = sound && playing && local >= 0 && local < c.l.dur + 0.4;
-        if (!on) { if (!c.au.paused) c.au.pause(); return; }
-        if (c.au.paused) { try { c.au.currentTime = local; } catch (e) {} c.au.play().catch(function () {}); }
-        else if (Math.abs(c.au.currentTime - local) > 0.18) c.au.currentTime = local;
+    // the score alone, rendered offline (mono WAV, base64) for render.js, which mixes the voice clips on top
+    function scoreWav(sr) {
+      if (!hasScore) return Promise.resolve(null);
+      sr = sr || 44100;
+      var ctx = new OfflineAudioContext(1, Math.ceil(total * sr), sr), duck = ctx.createGain(); duck.connect(ctx.destination);
+      var sc = scoreOn(ctx, duck), ev = sc.events || [];
+      if (sc.at) { sc.at(0, 0, 'set'); for (var t = 0.05; t <= total; t += 0.05) sc.at(t, t, 'ramp'); }
+      ev.forEach(function (e) { e[1](e[0]); });
+      duckPlan(duck.gain, 0, function (t) { return Math.max(0, t); }, 0);
+      return ctx.startRendering().then(function (buf) {
+        var d = buf.getChannelData(0), n = d.length, ab = new ArrayBuffer(44 + n * 2), v = new DataView(ab);
+        function str(q, x) { for (var i = 0; i < x.length; i++) v.setUint8(q + i, x.charCodeAt(i)); }
+        str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+        v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+        for (var i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, d[i])) * 32767, true);
+        var bytes = new Uint8Array(ab), bin = '';
+        for (i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(bin);
       });
     }
 
@@ -243,13 +386,13 @@
 
     function draw() {
       tl.apply(T, S);
-      var useSvg = !glR || forced === 'svg';
+      var useSvg = forced === 'svg' || (!glR && !glWait);
       stage.setAttribute('data-renderer', useSvg ? 'svg' : 'gl');
       if (useSvg) svgR.render();
-      else {
+      else if (glR && glR.ready()) {
         var st = forced ? { a: forced, b: forced, mix: 0 } : (o.styleAt ? o.styleAt(T) : { a: 'ink', b: 'ink', mix: 0 });
         glR.setStyles(st.a, st.b, st.mix, st.wipe);
-        glR.render(T);
+        var g0 = performance.now(); glR.render(T); glMs = performance.now() - g0;
       }
       drawLabels();
       if (o.readout) { var r = o.readout(T, S) || ''; if (readout.textContent !== r) readout.textContent = r; readout.classList.toggle('on', !!r); }
@@ -269,27 +412,41 @@
       var since = T - beatsOf[si].t;
       actEl.classList.toggle('on', tl.beats.length > 1 && started && !calm && since >= 0.15 && since < 3.2);
       subtitle();
-      syncAudio();
     }
     function setPlaying(on) {
       playing = on && !calm;
       if (playing && !started) { started = true; T = 0; }          // leave the poster frame: films start at the start
       playBtn.innerHTML = playing ? ICON.pause : ICON.play; playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play'); playBtn.title = (playing ? 'Pause' : 'Play') + ' (Space)';
       card.classList.toggle('playing', playing);
-      wake(); kick(); syncAudio(); if (!frame) draw();
+      wake(); kick(); relay(); if (!frame) draw();
     }
+    var glMs = 0;
     function tick(now) {
-      var dt = last ? Math.min((now - last) / 1000, 1 / 20) : 1 / 60; last = now;
-      if (playing) { T += dt; if (T >= total) { if (o.loop !== false && !hasVoice) T = 0; else { T = total; setPlaying(false); } } }
+      var raw = last ? now - last : null, dt = raw != null ? Math.min(raw / 1000, 1 / 20) : 1 / 60; last = now;
+      if (playing) {
+        if (AU && sound) {                                        // the audio clock: T is what the speakers are playing
+          if (AU.ctx.state !== 'running') { T += dt; AU.dirty = true; }   // no audio device yet: the wall clock, and re-lay when it wakes
+          else {
+            if (AU.dirty && !dragging) relay();
+            if (!AU.run) { if (ready() && !dragging) relay(); }     // still decoding the next line: hold the picture, like a buffering video
+            else T = Math.max(T, AU.t0 + Math.max(0, heard() - AU.c0));
+          }
+          scoreTick();
+        } else T += dt;
+        if (T >= total) { if (o.loop !== false && !hasVoice) T = 0; else { T = total; setPlaying(false); } }
+      }
+      var d0 = performance.now(); glMs = 0;
       draw();
+      if (playing) { adapt(raw, performance.now() - d0 - glMs); if (Q.box && Q.n % 15 === 0) perfText(); }
       frame = visible && playing ? requestAnimationFrame(tick) : 0;
     }
-    function kick() { if (!frame && visible && playing) { last = 0; frame = requestAnimationFrame(tick); } }
-    function seek(t) { started = true; T = Math.max(0, Math.min(total, t)); draw(); }
+    function kick() { if (!frame && visible && playing) { last = 0; Q.n = 0; frame = requestAnimationFrame(tick); } }
+    function seek(t) { started = true; T = Math.max(0, Math.min(total, t)); if (AU) { if (dragging) { relay(true); AU.dirty = true; } else relay(); } draw(); }
     function goBeat(i) { i = Math.max(0, Math.min(beatsOf.length - 1, i)); var b = beatsOf[i]; seek(calm && b.still != null ? b.still : b.t + 0.01); }
     function toggle(showFlash) {
       if (hasVoice && !playing && !host.dataset.heard) { host.dataset.heard = '1'; setSound(true); }   // the first play is the gesture that allows sound
       if (!playing && T >= total - 0.05) T = 0;
+      if (sound) audio();                                         // resume the context inside the gesture
       setPlaying(!playing);
       if (showFlash) { flash.innerHTML = playing ? ICON.play : ICON.pause; flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go'); }
     }
@@ -388,20 +545,28 @@
       e.preventDefault(); wake();
     });
     if (calm) { playBtn.disabled = true; card.classList.add('calm'); }
+    if (glWant && window.IntersectionObserver) {
+      var near = new IntersectionObserver(function (es) {
+        if (!es[es.length - 1].isIntersecting) return;
+        near.disconnect(); requestAnimationFrame(function () { setTimeout(startGL, 0); });
+      }, { rootMargin: '400px 0px' });
+      near.observe(stage);
+    } else if (glWant) startGL();
     new IntersectionObserver(function (es) {
       var was = visible; visible = es[es.length - 1].isIntersecting;
       if (visible && !was && !calm && autoplay && !host.dataset.started) { host.dataset.started = '1'; setPlaying(true); }
       if (!visible && playing && hasVoice) setPlaying(false);       // scrolled away: a narrator should not keep talking off screen
-      if (visible) kick();
+      if (visible) { kick(); if (hasVoice) prefetch(3); }
     }, { rootMargin: '0px 0px -10% 0px' }).observe(stage);
     var lastW = 0;
     if (window.ResizeObserver) new ResizeObserver(function () { if (stage.clientWidth === lastW) return; lastW = stage.clientWidth; if (glR) glR.resize(); if (!playing) draw(); }).observe(stage);
     setPlaying(false);
-    draw();
+    draw(); perfText();
 
-    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, setTime: function (t, style) { forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? 'gl' : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
+    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? 'gl' : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
       lines: function () { return (tl.lines || []).map(function (l) { return { id: l.id, text: l.text, t0: l.t0, dur: l.dur }; }); },
-      audio: function () { return (tl.lines || []).filter(function (l) { return l.src; }).map(function (l) { return { src: new URL(l.src, location.href).href, t0: l.t0 }; }); } };
+      audio: function () { return (tl.lines || []).filter(function (l) { return l.src; }).map(function (l) { return { src: new URL(l.src, location.href).href, t0: l.t0 }; });  },
+      score: scoreWav };
     XP.films = XP.films || {};
     XP.films[o.id || host.id || 'film'] = api;
     return api;

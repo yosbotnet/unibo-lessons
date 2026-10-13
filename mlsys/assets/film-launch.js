@@ -357,6 +357,74 @@
       return Lb;
     }
 
+    /* ---------- the score: the first cut's synthesized soundtrack, its sounds pinned to the words ----------
+       A low pad that opens up when the launch reaches the GPU and darkens for the wait; a thin tone that
+       climbs an octave while I wait for memory; one-shots for the moments. The player ducks it under the voice. */
+    function score(K) {
+      var ctx = K.ctx, tone = K.tone, noise = K.noise;
+      var padF = ctx.createBiquadFilter(); padF.type = 'lowpass'; padF.frequency.value = 380; padF.Q.value = 0.7;
+      var padG = ctx.createGain(); padG.gain.value = 0; padF.connect(padG); padG.connect(K.out);
+      [55, 55.35, 82.4, 110.2].forEach(function (f, i) {
+        var os = ctx.createOscillator(); os.type = i < 2 ? 'sawtooth' : 'triangle'; os.frequency.value = f;
+        var g = ctx.createGain(); g.gain.value = i < 2 ? 0.5 : 0.25; os.connect(g); g.connect(padF); os.start();
+      });
+      var waitO = ctx.createOscillator(); waitO.type = 'sine'; waitO.frequency.value = 196;
+      var waitG = ctx.createGain(); waitG.gain.value = 0; waitO.connect(waitG); waitG.connect(K.out); waitO.start();
+      var gpu = tl.end('a3'), w0 = C.behind + 1, w1 = C.there, home = C.copy + 2.2;
+      function r(t, a, b) { return XP.seg(t, a, b); }
+      function cont(t) {                                          // pad level, pad brightness (lowpass Hz), wait level, wait pitch
+        var pad = 0.05 * r(t, 0, 6) + 0.03 * r(t, gpu - 1, gpu + 5) - 0.03 * r(t, w0, w0 + 5) + 0.03 * r(t, w1, w1 + 4) + 0.05 * r(t, home, home + 12) - 0.13 * r(t, TOT - 4, TOT);
+        var cut = 380 + 900 * r(t, gpu - 1, gpu + 9) - 700 * r(t, w0, w0 + 12) + 700 * r(t, w1, w1 + 8) + 1400 * r(t, home, home + 18);
+        var wait = 0.045 * r(t, w0, w0 + 5) * (1 - r(t, w1 - 1.5, w1));
+        return [Math.max(0, pad), cut, wait, 196 * Math.pow(2, XP.clamp((t - w0) / (w1 - w0), 0, 1))];
+      }
+      function at(t, when, mode) {
+        var c = cont(t);
+        [[padG.gain, c[0]], [padF.frequency, c[1]], [waitG.gain, c[2]], [waitO.frequency, c[3]]].forEach(function (q) {
+          if (mode === 'set') { q[0].cancelScheduledValues(when); q[0].setValueAtTime(q[1], when); }
+          else if (mode === 'ramp') q[0].linearRampToValueAtTime(q[1], when);
+          else q[0].setTargetAtTime(q[1], when, 0.06);
+        });
+      }
+      var SFX = {
+        key: function (w) { noise(w, 0.04, 0.05, 3500, 0, 3); },
+        thump: function (w) { tone(w, 90, 0.5, 0.35, 'sine', 45); noise(w, 0.15, 0.08, 800); },
+        land: function (w) { tone(w, 220, 0.4, 0.18, 'triangle', 110); },
+        blip: function (w) { tone(w, 660, 0.12, 0.06, 'square'); },
+        birth: function (w) { tone(w, 523, 1.8, 0.1); tone(w + 0.12, 784, 1.8, 0.07); tone(w + 0.24, 1047, 1.8, 0.05); },
+        tick: function (w) { noise(w, 0.06, 0.2, 2200, 0, 4); tone(w, 880, 0.08, 0.05, 'square'); },
+        soft: function (w) { noise(w, 0.03, 0.035, 2600 + 800 * Math.random(), 0, 5); },
+        zap: function (w) { tone(w, 1200, 0.35, 0.08, 'sawtooth', 300); },
+        miss: function (w) { tone(w, 330, 0.25, 0.08, 'square', 247); },
+        clunk: function (w) { tone(w, 70, 0.6, 0.3, 'sine', 50); noise(w, 0.3, 0.1, 400); },
+        ding: function (w) { tone(w, 988, 1.4, 0.12); tone(w, 1480, 1.0, 0.05); },
+        two: function (w) { tone(w, 440, 0.3, 0.08, 'triangle'); tone(w + 0.3, 466, 0.5, 0.08, 'triangle'); },
+        thunk: function (w) { tone(w, 110, 0.35, 0.25, 'sine', 70); },
+        chord: function (w) { [262, 330, 392].forEach(function (f) { tone(w, f, 1.6, 0.06, 'triangle'); }); },
+        bell: function (w) { [880, 1320, 1760].forEach(function (f, i) { tone(w + i * 0.01, f, 2.2 - i * 0.5, 0.07 / (i + 1)); }); },
+        exit: function (w) { tone(w, 660, 1.6, 0.09, 'sine', 165); },
+        resolve: function (w) { [196, 247, 294, 392].forEach(function (f) { tone(w, f, 2.5, 0.06, 'triangle'); }); },
+        low: function (w) { tone(w, 65, 3.5, 0.12, 'sine'); },
+        final: function (w) { [131, 196, 262, 330, 392].forEach(function (f, i) { tone(w + i * 0.08, f, 7, 0.05, 'triangle'); }); }
+      };
+      var E = [], t, b, lastSoft = -1;
+      function on(t, name) { if (t >= 0 && t < TOT) E.push([t, SFX[name]]); }
+      function whoosh(t, d) { E.push([t, function (w) { noise(w, d, 0.07, 300, 2400, 0.8); }]); }
+      for (t = C.cxx - 0.9; t < C.cxx + 0.4; t += 0.13) on(t, 'key');
+      on(C.launch, 'thump'); whoosh(C.cross, Math.max(1, gpu - C.cross)); on(gpu, 'land');
+      for (b = 0; b < 11; b++) on(tAt(A[b]), 'blip');
+      on(C.hello, 'birth'); on(C.first, 'tick'); on(C.ask, 'zap'); on(C.behind, 'zap'); on(C.misses, 'miss'); on(C.board, 'clunk');
+      whoosh(C.tues, 6.5);
+      for (var k = Math.ceil(C.tues / 0.24); k * 0.24 < act.fork + 0.5; k++) on(k * 0.24, 'soft');   // the scheduler's gold pick, every beat
+      on(C.there, 'ding'); on(C.addIt, 'tick'); on(C.disagree, 'two'); on(C.oddGo, 'thunk'); on(C.turn, 'thunk'); on(C.again, 'chord');
+      on(C.store, 'bell'); on(C.exit, 'exit');
+      for (b = 0; b < NB; b++) {                                  // the pull back: a click for every block that leaves, on the real clock
+        t = tAt(LV[b]); if (t > C.pull && t < C.tells && t - lastSoft > 0.06) { on(t, 'soft'); lastSoft = t; }
+      }
+      whoosh(C.tells, Math.min(6.5, C.copy - C.tells + 1)); on(home, 'resolve'); on(home, 'low'); on(C.place, 'final'); on(C.story, 'low');
+      return { at: at, events: E };
+    }
+
     var stills = [C.launch + 1.5, C.hello + 0.6, C.nb + 1, C.forever, C.masked, C.lived, C.tail];
     stills.forEach(function (s, n) { if (tl.beats[n]) tl.beats[n].still = s; });
     if (opt.bare) return { scene: S, tl: tl, realAt: realAt };
@@ -367,6 +435,7 @@
       label: 'One kernel launch on an RTX 5070, told by thread 2,690: the CPU, the PCIe bus, the GPU die with 48 SMs, an L2 strip and six GDDR7 chips. Blocks land in the SMs’ six slots; SM 10 opens into four quadrants of warps; one warp unfolds into 32 lanes; a memory request leaves the die and comes back; the lanes diverge and rejoin.',
       readout: function (t, S) { return S.state.line; },
       keys: [['subject', 'me: thread 2,690, its block and its warp'], ['work', 'a resident block, a warp, a lane'], ['gold', 'my neighbour 2,691; a warp issuing'], ['mem', 'memory: L2 and GDDR7'], ['memx', 'my request: 4 sectors'], ['steel', 'waiting, masked, or an empty slot']],
+      score: opt.mute ? null : score, scoreGain: 1.4,
       caption: opt.caption || '', gl: opt.gl
     });
   };

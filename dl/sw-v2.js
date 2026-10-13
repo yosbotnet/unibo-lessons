@@ -1,6 +1,6 @@
 /* Deep Learning course PWA. Network-first for course files, cache fallback offline. */
 'use strict';
-const CACHE = 'dl-v7-player';
+const CACHE = 'dl-v13-d1';
 const FILES = [
   "../assets/course-figures.css",
   "../assets/fonts.css",

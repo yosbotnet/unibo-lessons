@@ -143,9 +143,11 @@
     '#version 300 es',
     'precision highp float;',
     'uniform sampler2D uT0, uT1, uDepth;',
+    'uniform vec4 uPartBounds, uGlowBounds; // conservative device-pixel bounds, recomputed with the geometry',
     'uniform vec2 uRes;          // device px',
     'uniform float uScale;       // device px per CSS px',
     'uniform float uTime, uMix, uWipeAng;',
+    'uniform int uN;             // always 1: loop bounds the compiler cannot see, so Direct3D keeps loops instead of unrolling them',
     'uniform float uWpp;         // world units per device px',
     'uniform float uD2W;         // depth-buffer delta -> world units',
     'uniform vec3 uLight, uView, uRgt, uDown;   // camera basis: right, screen-down, toward viewer',
@@ -165,47 +167,66 @@
     'float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);',
     '  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y); }',
     '',
+    'bool nearBounds(vec2 px, vec4 b, float r){',
+    '  vec2 p = clamp(px, vec2(0.5), uRes - 0.5);',
+    '  return all(greaterThanEqual(p, b.xy - r)) && all(lessThanEqual(p, b.zw + r));',
+    '}',
+    '',
     '// the geometry buffer at a device-pixel position',
     'struct G { float mat; float glow; vec3 n; float id; float z; };',
     'G fetchG(vec2 px){',
-    '  vec2 uv = clamp(px, vec2(0.5), uRes - 0.5) / uRes;',
-    '  vec4 a = texture(uT0, uv), b = texture(uT1, uv);',
-    '  G g; g.mat = floor(a.r * 255.0 + 0.5); g.glow = a.g; g.n = normalize(b.xyz * 2.0 - 1.0 + 1e-6); g.id = b.a; g.z = texture(uDepth, uv).r;',
+    '  ivec2 ip = ivec2(clamp(px, vec2(0.5), uRes - 0.5));        // texelFetch, not texture(): no filtering, so Direct3D keeps loops and branches',
+    '  vec4 a = texelFetch(uT0, ip, 0), b = texelFetch(uT1, ip, 0);',
+    '  G g; g.mat = floor(a.r * 255.0 + 0.5); g.glow = a.g; g.n = normalize(b.xyz * 2.0 - 1.0 + 1e-6); g.id = b.a; g.z = texelFetch(uDepth, ip, 0).r;',
     '  return g;',
     '}',
     '',
     '// is there an edge between c and a sample s at distance r px? returns silhouette, sets crease',
-    'float disc(G c, G s, float r, out float crease){',
+    'float disc(G c, vec2 px, float r, out float crease){',
     '  crease = 0.0;',
-    '  if (c.mat != s.mat) return 1.0;            // different material, or object vs background',
+    '  ivec2 ip = ivec2(clamp(px, vec2(0.5), uRes - 0.5));',
+    '  float mat = floor(texelFetch(uT0, ip, 0).r * 255.0 + 0.5);',
+    '  if (c.mat != mat) return 1.0;            // different material, or object vs background',
     '  if (c.mat < 0.5) return 0.0;               // background on both sides',
-    '  if (abs(c.id - s.id) > 0.002) return 1.0;  // two different parts touching',
-    '  float dz = abs(c.z - s.z) * uD2W, allow = uWpp * (r * 2.6 + 0.6);',
+    '  vec4 b = texelFetch(uT1, ip, 0);',
+    '  if (abs(c.id - b.a) > 0.002) return 1.0;  // two different parts touching',
+    '  float dz = abs(c.z - texelFetch(uDepth, ip, 0).r) * uD2W, allow = uWpp * (r * 2.6 + 0.6);',
     '  if (dz > allow) return smoothstep(allow, allow * 1.7, dz);',
-    '  crease = 1.0 - smoothstep(0.80, 0.93, dot(c.n, s.n));   // a fold between faces of one part',
+    '  crease = 1.0 - smoothstep(0.80, 0.93, dot(c.n, normalize(b.xyz * 2.0 - 1.0 + 1e-6)));   // a fold between faces of one part',
     '  return 0.0;',
     '}',
-    'vec2 edgeRing(vec2 px, float r){',
-    '  G c = fetchG(px); float sil = 0.0, cr = 0.0, k;',
-    '  for (int i = 0; i < 8; i++){ float a = float(i) * 0.7853982 + 0.39;',
-    '    G s = fetchG(px + vec2(cos(a), sin(a)) * r); sil = max(sil, disc(c, s, r, k)); cr = max(cr, k); }',
+    'vec2 edgeRing(vec2 px, float r, G c){',
+    '  if (!nearBounds(px, uPartBounds, r)) return vec2(0.0);',
+    '  float sil = 0.0, cr = 0.0, k;',
+    '  for (int i = 0; i < 8 * uN; i++){ float a = float(i) * 0.7853982 + 0.39;',
+    '    sil = max(sil, disc(c, px + vec2(cos(a), sin(a)) * r, r, k)); cr = max(cr, k); }',
     '  return vec2(sil, cr);',
     '}',
-    '// outline strength at px for style s: two rings give a soft (antialiased) line of the set width',
-    'float edges(int s, vec2 px, float seed){',
-    '  float w = max(uOutW[s] * uScale, 0.9);',
+    '// Share the two soft outline rings and pooling; keep the double stroke separate to preserve depth-threshold rounding.',
+    'vec2 styleEdges(int s, vec2 px, vec2 fp, float seed, bool fill){',
+    '  float r = max(uOutW[s] * uScale, 0.9) * 0.5, e = 0.0, pool = 0.0;',
     '  vec2 p = px;',
-    '  if (uWobble[s] > 0.0) p += (vec2(vnoise(px / 38.0 + seed), vnoise(px / 38.0 + seed + 17.3)) - 0.5) * 2.0 * uWobble[s] * uScale;',
-    '  float r = w * 0.5;',
-    '  vec2 e1 = edgeRing(p, r), e2 = edgeRing(p, r + 0.75);',
-    '  float e = 0.5 * (max(e1.x, e1.y * uCrease[s]) + max(e2.x, e2.y * uCrease[s]));',
-    '  if (uDouble[s] > 0.0){',
+    '  if (uOutA[s] > 0.0 && uWobble[s] > 0.0) p += (vec2(vnoise(px / 38.0 + seed), vnoise(px / 38.0 + seed + 17.3)) - 0.5) * 2.0 * uWobble[s] * uScale;',
+    '  vec2 first = vec2(0.0); G center;',
+    '  for (int j = 0; j < 3 * uN; j++){',
+    '    if (j < 2 && uOutA[s] <= 0.0) continue;',
+    '    if (j == 2 && (!fill || uPool[s] <= 0.0)) continue;',
+    '    vec2 q = p; float rr = r;',
+    '    if (j == 1) rr = r + 0.75;',
+    '    if (j == 2){ q = fp; rr = 3.0 * uScale; }',
+    '    if (j != 1) center = fetchG(q); // the two soft outline rings have the same center',
+    '    vec2 v = edgeRing(q, rr, center);',
+    '    if (j == 0) first = v;',
+    '    else if (j == 1) e = 0.5 * (max(first.x, first.y * uCrease[s]) + max(v.x, v.y * uCrease[s]));',
+    '    else pool = max(v.x, v.y * 0.5);',
+    '  }',
+    '  if (uOutA[s] > 0.0 && uDouble[s] > 0.0){',
     '    vec2 q = px + (vec2(vnoise(px / 23.0 + seed + 5.1), vnoise(px / 23.0 + seed + 41.7)) - 0.5) * 2.4 * uWobble[s] * uScale;',
-    '    vec2 e3 = edgeRing(q, r * 0.7);',
+    '    vec2 e3 = edgeRing(q, r * 0.7, fetchG(q));',
     '    e = max(e, max(e3.x, e3.y * uCrease[s]) * uDouble[s]);',
     '  }',
-    '  if (uPressure[s] > 0.0) e *= mix(1.0, 0.35 + 0.65 * vnoise(px / 55.0 + seed * 0.37), uPressure[s]);',
-    '  return clamp(e, 0.0, 1.0);',
+    '  if (uOutA[s] > 0.0 && uPressure[s] > 0.0) e *= mix(1.0, 0.35 + 0.65 * vnoise(px / 55.0 + seed * 0.37), uPressure[s]);',
+    '  return vec2(clamp(e, 0.0, 1.0), pool);',
     '}',
     '',
     '// shaded fill colour (rgb) and its lightness 0..1 (a), for style s',
@@ -235,6 +256,8 @@
     '  vec2 fp = px;',
     '  if (uOffReg[s] > 0.0) fp += (vec2(vnoise(px / 140.0 + 3.0), vnoise(px / 140.0 + 31.0)) - 0.5) * 2.0 * uOffReg[s] * uScale;',
     '  G g = fetchG(fp);',
+    '  vec2 ed = vec2(0.0);',
+    '  if (uOutA[s] > 0.0 || (g.mat > 0.5 && uPool[s] > 0.0)) ed = styleEdges(s, px, fp, seed, g.mat > 0.5);',
     '  vec3 col = bg;',
     '  if (g.mat > 0.5){',
     '    vec4 sh = shade(s, g);',
@@ -250,9 +273,9 @@
     '      // hemisphere AO in screen space: rebuild each sample\'s 3D offset from its screen offset and',
     '      // depth; it occludes only if it is near in 3D and above this surface (in front of its normal)',
     '      float occ = 0.0, jit = ign(px) * 6.2832, Rw = 22.0 * uScale * uWpp;',
-    '      for (int i = 0; i < 16; i++){ float fi = float(i) + 0.5, a = fi * 2.39996 + jit, rr = sqrt(fi / 16.0) * 22.0 * uScale;',
+    '      for (int i = 0; i < 16 * uN; i++){ float fi = float(i) + 0.5, a = fi * 2.39996 + jit, rr = sqrt(fi / 16.0) * 22.0 * uScale;',
     '        vec2 o = vec2(cos(a), sin(a)) * rr;',
-    '        float zs = texture(uDepth, clamp(fp + o, vec2(0.5), uRes - 0.5) / uRes).r;',
+    '        float zs = texelFetch(uDepth, ivec2(clamp(fp + o, vec2(0.5), uRes - 0.5)), 0).r;',
     '        vec3 off = (uRgt * o.x - uDown * o.y) * uWpp + uView * (g.z - zs) * uD2W;',
     '        float L = length(off) + 1e-5, up = dot(g.n, off) / L;',
     '        occ += smoothstep(0.1, 0.5, up) * (1.0 - smoothstep(Rw * 0.6, Rw * 1.2, L)); }',
@@ -260,27 +283,26 @@
     '    }',
     '    if (uRim[s] > 0.0){                         // a light rim just inside the silhouette',
     '      float far = 0.0;',
-    '      for (int i = 0; i < 8; i++){ float a = float(i) * 0.7853982; G q = fetchG(fp + vec2(cos(a), sin(a)) * 3.5 * uScale);',
+    '      for (int i = 0; i < 8 * uN; i++){ float a = float(i) * 0.7853982; G q = fetchG(fp + vec2(cos(a), sin(a)) * 3.5 * uScale);',
     '        far += (q.mat < 0.5 || (q.z - g.z) * uD2W > uWpp * 12.0) ? 1.0 : 0.0; }',
     '      c = mix(c, vec3(1.0), uRim[s] * smoothstep(0.1, 0.5, far / 8.0) * 0.7);',
     '    }',
     '    if (uPool[s] > 0.0){                        // watercolour: pigment pools at the edges of a wash',
-    '      vec2 pe = edgeRing(fp, 3.0 * uScale);',
-    '      c = mix(c, c * 0.8, max(pe.x, pe.y * 0.5) * uPool[s]);',
+    '      c = mix(c, c * 0.8, ed.y * uPool[s]);',
     '    }',
     '    col = mix(bg, c, uFill[s]);',
     '  }',
     '  // glow: a soft halo around glowing parts (blur of the glow channel), tinted by the style',
-    '  if (uGlowA[s] > 0.0){',
+    '  if (uGlowA[s] > 0.0 && nearBounds(px, uGlowBounds, 20.0 * uScale)){',
     '    float h = 0.0, ws = 0.0, jit = ign(px + 17.0) * 6.2832;',
-    '    for (int i = 0; i < 24; i++){ float fi = float(i) + 0.5, a = fi * 2.39996 + jit, rr = sqrt(fi / 24.0) * 20.0 * uScale;',
+    '    for (int i = 0; i < 24 * uN; i++){ float fi = float(i) + 0.5, a = fi * 2.39996 + jit, rr = sqrt(fi / 24.0) * 20.0 * uScale;',
     '      float wt = exp(-rr * rr / (2.0 * 81.0 * uScale * uScale));',
-    '      h += texture(uT0, clamp(px + vec2(cos(a), sin(a)) * rr, vec2(0.5), uRes - 0.5) / uRes).g * wt; ws += wt; }',
+    '      h += texelFetch(uT0, ivec2(clamp(px + vec2(cos(a), sin(a)) * rr, vec2(0.5), uRes - 0.5)), 0).g * wt; ws += wt; }',
     '    h = clamp(h / ws * 2.2, 0.0, 1.0) * (1.0 - g.glow);             // a halo around the part, not over it',
     '    col = mix(col, uGlowC[s], h * uGlowA[s] * 0.6);',
     '  }',
     '  // outlines on top',
-    '  if (uOutA[s] > 0.0) col = mix(col, uOutC[s], edges(s, px, seed) * uOutA[s]);',
+    '  if (uOutA[s] > 0.0) col = mix(col, uOutC[s], ed.x * uOutA[s]);',
     '  // paper grain',
     '  if (uGrain[s] > 0.0){',
     '    float n = vnoise(px / (1.2 * uScale)) * 0.55 + vnoise(px / (7.0 * uScale) + 9.0) * 0.45;',
@@ -298,9 +320,11 @@
     '  float e = mix(-0.06, 1.06, uMix) + (vnoise(vec2(along * 16.0, floor(uTime * 6.0))) - 0.5) * 0.012 + (vnoise(vec2(along * 3.0, 4.0)) - 0.5) * 0.01;',
     '  float m = smoothstep(e - 0.004, e + 0.004, w);                    // 1 = style A side',
     '  vec3 col;',
-    '  if (m > 0.999) col = styleColor(0, px);',
-    '  else if (m < 0.001) col = styleColor(1, px);',
-    '  else col = mix(styleColor(1, px), styleColor(0, px), m);',
+    '  // one call site in a real loop: inlined once, not four times (Direct3D compile time grows with every copy)',
+    '  int s0 = m < 0.001 ? 1 : 0, s1 = m > 0.999 ? 0 : 1;',
+    '  vec3 cs[2]; cs[0] = vec3(0.0); cs[1] = vec3(0.0);',
+    '  for (int s = s0; s <= s1; s++) cs[s] = styleColor(s, px);',
+    '  col = s0 == s1 ? cs[s0] : mix(cs[1], cs[0], m);',
     '  if (uMix > 0.001 && uMix < 0.999){                               // the wipe edge, drawn in ink',
     '    float d = abs(w - e) * span;',
     '    col = mix(col, vec3(0.1, 0.09, 0.08), (1.0 - smoothstep(0.9 * uScale, 2.0 * uScale, d)) * 0.8);',
@@ -309,17 +333,19 @@
     '}'
   ].join('\n');
 
-  function compile(gl, type, src) {
-    var s = gl.createShader(type);
-    gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('xp-gl shader: ' + gl.getShaderInfoLog(s));
-    return s;
+  // start compiling and linking; nothing here waits for the driver (finish() does)
+  function startProgram(gl, vs, fs) {
+    var p = gl.createProgram(), a = gl.createShader(gl.VERTEX_SHADER), b = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(a, vs); gl.compileShader(a); gl.shaderSource(b, fs); gl.compileShader(b);
+    gl.attachShader(p, a); gl.attachShader(p, b); gl.linkProgram(p);
+    return { p: p, vs: a, fs: b };
   }
-  function program(gl, vs, fs) {
-    var p = gl.createProgram();
-    gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs));
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('xp-gl link: ' + gl.getProgramInfoLog(p));
+  function finish(gl, q) {
+    var p = q.p;
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      var log = gl.getShaderInfoLog(q.vs) || gl.getShaderInfoLog(q.fs) || gl.getProgramInfoLog(p);
+      throw new Error('xp-gl shader: ' + log);
+    }
     var u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
     for (var i = 0; i < n; i++) { var info = gl.getActiveUniform(p, i), name = info.name.replace(/\[0\]$/, ''); u[name] = gl.getUniformLocation(p, info.name); }
     return { p: p, u: u };
@@ -328,11 +354,34 @@
   XP.glRenderer = function (canvas, scene, opts) {
     opts = opts || {};
     var off = { supported: false, render: function () {}, setStyles: function () {}, resize: function () {}, styles: XP.STYLES };
-    var gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: opts.preserve !== false });
+    // keep the last frame only for the capture scripts (Playwright sets navigator.webdriver): retaining it costs every frame on phones
+    var keep = opts.preserve != null ? opts.preserve : !!navigator.webdriver;
+    var gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: keep, powerPreference: 'high-performance' });
     if (!gl) return off;
-    var geo, comp;
-    try { geo = program(gl, GEO_VS, GEO_FS); comp = program(gl, FS_VS, COMP_FS); }
-    catch (err) { if (window.console) console.warn(err.message); return off; }
+    // which GPU: a software rasterizer draws one frame in seconds, so the caller falls back to SVG (the capture scripts still get GL)
+    var dbg = gl.getExtension('WEBGL_debug_renderer_info'), gpu = '';
+    try { gpu = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || ''); } catch (e) {}
+    off.gpu = gpu;
+    if (/swiftshader|llvmpipe|softpipe|lavapipe|basic render|software/i.test(gpu) && !navigator.webdriver && !window.XP_FORCE_GL && opts.allowSoftware !== true) {
+      var lose = gl.getExtension('WEBGL_lose_context'); if (lose) lose.loseContext();
+      off.software = true; return off;
+    }
+    /* the style shader is big, and on Windows the driver compiles it through Direct3D, which can take a second or more.
+       With { async: true } and KHR_parallel_shader_compile the compile runs in the background: render() draws nothing
+       until it is done, and onReady(fn) says when. Without the extension, or without async, it waits here. */
+    var geo, comp, qg = startProgram(gl, GEO_VS, GEO_FS), qc = startProgram(gl, FS_VS, COMP_FS);
+    var par = opts.async ? gl.getExtension('KHR_parallel_shader_compile') : null, ready = false, failed = false, waiters = [];
+    function settle() {
+      try { geo = finish(gl, qg); comp = finish(gl, qc); ready = true; }
+      catch (err) { failed = true; if (window.console) console.warn(err.message); }
+      var w = waiters; waiters = []; w.forEach(function (fn) { fn(ready); });
+    }
+    if (!par) { settle(); if (failed) return off; }
+    else (function poll() {
+      if (gl.isContextLost()) { failed = true; return; }
+      if (gl.getProgramParameter(qg.p, par.COMPLETION_STATUS_KHR) && gl.getProgramParameter(qc.p, par.COMPLETION_STATUS_KHR)) settle();
+      else setTimeout(poll, 16);
+    })();
 
     /* meshes → vertex buffers (fan-triangulated convex faces, flat normals), one VAO each */
     var meshes = {}, STRIDE = 9;
@@ -355,6 +404,10 @@
 
     /* the off-screen geometry buffer */
     var fbo = null, tex0, tex1, texD, bw = 0, bh = 0, cssW = 0, cssH = 0, dpr = 1;
+    /* resolution: 2× supersamples the fills (pass 1 has no MSAA), but the style pass reads ~100 texels a pixel, which an
+       integrated GPU can't afford at 2× on a big screen. Start at the screen's density (at least 1.5×, at most 2×);
+       the player lowers it with setScale when frames run slow. */
+    var scale = opts.pixelRatio || window.XP_PIXEL_RATIO || Math.min(2, Math.max(1.5, window.devicePixelRatio || 1));
     function makeTex(fmt, ifmt, type) {
       var t = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, t);
@@ -365,7 +418,7 @@
     }
     function resize() {
       cssW = canvas.clientWidth || opts.width || scene.cam.W; cssH = canvas.clientHeight || opts.height || scene.cam.H;
-      dpr = opts.pixelRatio || window.XP_PIXEL_RATIO || 2;   // 2× even on 1× screens: pass 1 has no MSAA, so this supersamples the fills
+      dpr = scale;
       var w = Math.max(1, Math.round(cssW * dpr)), h = Math.max(1, Math.round(cssH * dpr));
       if (w === bw && h === bh && fbo) return;
       bw = w; bh = h; canvas.width = w; canvas.height = h;
@@ -407,7 +460,29 @@
       for (var k in F) if (u[k]) gl.uniform1fv(u[k], f2(F[k], A, B));
     }
 
+    // Project a mesh AABB, including negative scales. Padding covers texel centers and float32 rounding.
+    // Clamp bounds to the viewport conservatively: samples clamp to its edge too.
+    function extendBounds(box, p, B, C, k, ox, oy) {
+      var m = p.mesh, s = typeof p.scale === 'number' ? [p.scale, p.scale, p.scale] : p.scale;
+      var q = [], h = [], err = 0;
+      for (var j = 0; j < 3; j++) {
+        q[j] = (m.lo[j] + m.hi[j]) * 0.5 * s[j] + p.pos[j] - C.center[j];
+        h[j] = (m.hi[j] - m.lo[j]) * 0.5 * Math.abs(s[j]);
+        err += Math.max(Math.abs(m.lo[j]), Math.abs(m.hi[j])) * Math.abs(s[j]) + Math.abs(p.pos[j]) + Math.abs(C.center[j]);
+      }
+      var z = Math.abs(C.zoom * k), pad = 2 + err * z * 0.00001;
+      var x = ox + (C.W * 0.5 + XP.v.dot(B.r, q) * C.zoom) * k;
+      var y = cssH - oy - (C.H * 0.5 + XP.v.dot(B.dn, q) * C.zoom) * k;
+      var rx = (Math.abs(B.r[0]) * h[0] + Math.abs(B.r[1]) * h[1] + Math.abs(B.r[2]) * h[2]) * z + pad;
+      var ry = (Math.abs(B.dn[0]) * h[0] + Math.abs(B.dn[1]) * h[1] + Math.abs(B.dn[2]) * h[2]) * z + pad;
+      box[0] = Math.min(box[0], Math.max(0, Math.min(bw, (x - rx) * bw / cssW)));
+      box[1] = Math.min(box[1], Math.max(0, Math.min(bh, (y - ry) * bh / cssH)));
+      box[2] = Math.max(box[2], Math.max(0, Math.min(bw, (x + rx) * bw / cssW)));
+      box[3] = Math.max(box[3], Math.max(0, Math.min(bh, (y + ry) * bh / cssH)));
+    }
+
     function render(t) {
+      if (!ready) return;
       t = t || 0;
       if ((canvas.clientWidth && Math.round(canvas.clientWidth * dpr) !== bw) || !fbo) resize();
       var C = scene.cam, B = XP.basis(C);
@@ -415,11 +490,14 @@
 
       // visible parts grouped by mesh; depth range from their bounding spheres
       var groups = {}, order = [], n = 0, R = 1;
+      var partBounds = [1e30, 1e30, -1e30, -1e30], glowBounds = [1e30, 1e30, -1e30, -1e30];
       scene.parts.forEach(function (p, i) {
         if (!p.show) return;
         var g = groups[p.mesh.id];
         if (!g) { g = groups[p.mesh.id] = { mesh: p.mesh, list: [] }; order.push(g); }
         g.list.push({ p: p, i: i }); n++;
+        extendBounds(partBounds, p, B, C, k, ox, oy);
+        if (p.glow > 0) extendBounds(glowBounds, p, B, C, k, ox, oy);
         var s = typeof p.scale === 'number' ? [p.scale, p.scale, p.scale] : p.scale, m = p.mesh;
         var c = XP.partCenter(p), rad = 0.5 * Math.hypot((m.hi[0] - m.lo[0]) * s[0], (m.hi[1] - m.lo[1]) * s[1], (m.hi[2] - m.lo[2]) * s[2]);
         R = Math.max(R, Math.abs(XP.v.dot(B.d, XP.v.sub(c, C.center))) + rad);
@@ -470,15 +548,20 @@
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex0); gl.uniform1i(u.uT0, 0);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tex1); gl.uniform1i(u.uT1, 1);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texD); gl.uniform1i(u.uDepth, 2);
-      gl.uniform2f(u.uRes, bw, bh); gl.uniform1f(u.uScale, dpr); gl.uniform1f(u.uTime, t);
+      gl.uniform2f(u.uRes, bw, bh); gl.uniform1i(u.uN, 1); gl.uniform1f(u.uScale, dpr); gl.uniform1f(u.uTime, t);
       gl.uniform1f(u.uMix, cur.mix); gl.uniform1f(u.uWipeAng, cur.wipe * Math.PI / 180);
       gl.uniform1f(u.uWpp, 1 / (C.zoom * k * dpr)); gl.uniform1f(u.uD2W, 2 * R);
       gl.uniform3fv(u.uLight, XP.LIGHT); gl.uniform3fv(u.uView, B.d); gl.uniform3fv(u.uRgt, B.r); gl.uniform3fv(u.uDown, B.dn);
+      gl.uniform4fv(u.uPartBounds, partBounds); gl.uniform4fv(u.uGlowBounds, glowBounds);
       uploadStyles();
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
 
     resize();
-    return { supported: true, render: render, setStyles: setStyles, resize: resize, styles: XP.STYLES, gl: gl, state: cur };
+    function setScale(x) { if (x === scale) return; scale = x; resize(); }
+    function release() { var l = gl.getExtension('WEBGL_lose_context'); if (l) l.loseContext(); }
+    function onReady(fn) { if (ready || failed) fn(ready); else waiters.push(fn); }
+    return { supported: true, ready: function () { return ready; }, failed: function () { return failed; }, onReady: onReady, render: render, setStyles: setStyles, resize: resize, styles: XP.STYLES, gl: gl, state: cur,
+      setScale: setScale, scale: function () { return scale; }, gpu: gpu, release: release };
   };
 })();
