@@ -1,6 +1,6 @@
 /* Deep Learning course PWA. Network-first for course files, cache fallback offline. */
 'use strict';
-const CACHE = 'dl-v5-fonts';
+const CACHE = 'dl-v7-player';
 const FILES = [
   "../assets/course-figures.css",
   "../assets/fonts.css",
@@ -33,7 +33,14 @@ const FILES = [
   "assets/highlight.min.js",
   "assets/icon-180.png",
   "assets/icon-192.png",
-  "assets/icon-512.png"
+  "assets/icon-512.png",
+  "assets/xp/xp.css",
+  "assets/xp/xp-core.js",
+  "assets/xp/xp-svg.js",
+  "assets/xp/xp-gl.js",
+  "assets/xp/xp-time.js",
+  "assets/film-attention.js",
+  "assets/film-attention.voice.js"
 ];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting()));
