@@ -41,6 +41,29 @@
     C.center = [B.r[0] * mx + B.dn[0] * my, B.r[1] * mx + B.dn[1] * my, B.r[2] * mx + B.dn[2] * my];
     return C;
   };
+  /* For cuts between scenes (a player's shots): a part's box corners in the world; where points (or a part) land
+     on screen, [x0, y0, x1, y1] in viewBox px; and the camera that puts them exactly onto a screen rectangle, so the
+     first frame of a new scene can match the last of the old one. fitRect keeps az/el and sets zoom and center. */
+  XP.corners = function (part) {
+    var m = part.mesh, s = typeof part.scale === 'number' ? [part.scale, part.scale, part.scale] : part.scale, t = part.pos, out = [];
+    for (var i = 0; i < 8; i++) out.push([0, 1, 2].map(function (k) { return ((i >> k) & 1 ? m.hi[k] : m.lo[k]) * s[k] + t[k]; }));
+    return out;
+  };
+  XP.screenRect = function (C, pts) {
+    if (!Array.isArray(pts)) pts = XP.corners(pts);
+    var B = XP.basis(C), r = [1e9, 1e9, -1e9, -1e9];
+    pts.forEach(function (p) { var q = XP.project(C, p, B); r[0] = Math.min(r[0], q[0]); r[1] = Math.min(r[1], q[1]); r[2] = Math.max(r[2], q[0]); r[3] = Math.max(r[3], q[1]); });
+    return r;
+  };
+  XP.fitRect = function (C, pts, rect) {
+    if (!Array.isArray(pts)) pts = XP.corners(pts);
+    var B = XP.basis(C), x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    pts.forEach(function (p) { var x = dot(B.r, p), y = dot(B.dn, p); x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); });
+    C.zoom = Math.min((rect[2] - rect[0]) / (x1 - x0 || 1), (rect[3] - rect[1]) / (y1 - y0 || 1));
+    var mx = (x0 + x1) / 2 - ((rect[0] + rect[2]) / 2 - C.W / 2) / C.zoom, my = (y0 + y1) / 2 - ((rect[1] + rect[3]) / 2 - C.H / 2) / C.zoom;
+    C.center = [B.r[0] * mx + B.dn[0] * my, B.r[1] * mx + B.dn[1] * my, B.r[2] * mx + B.dn[2] * my];
+    return C;
+  };
   // the light: from the left, a little behind and above, so the two visible sides read differently
   XP.LIGHT = unit([-0.35, 0.55, 0.9]);
 

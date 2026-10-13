@@ -561,7 +561,8 @@
     function setScale(x) { if (x === scale) return; scale = x; resize(); }
     function release() { var l = gl.getExtension('WEBGL_lose_context'); if (l) l.loseContext(); }
     function onReady(fn) { if (ready || failed) fn(ready); else waiters.push(fn); }
-    return { supported: true, ready: function () { return ready; }, failed: function () { return failed; }, onReady: onReady, render: render, setStyles: setStyles, resize: resize, styles: XP.STYLES, gl: gl, state: cur,
+    function setScene(s) { scene = s; }                            // a film's shots: one renderer, several scenes (meshes are cached by id)
+    return { supported: true, ready: function () { return ready; }, failed: function () { return failed; }, onReady: onReady, render: render, setScene: setScene, setStyles: setStyles, resize: resize, styles: XP.STYLES, gl: gl, state: cur,
       setScale: setScale, scale: function () { return scale; }, gpu: gpu, release: release };
   };
 })();

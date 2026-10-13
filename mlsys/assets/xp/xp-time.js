@@ -104,7 +104,17 @@
   function esc(x) { return String(x).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   XP.player = function (host, o) {
     host.classList.add('xp');
-    var S = o.scene, tl = o.tl, total = o.total || tl.duration;
+    var tl = o.tl, total = o.total || tl.duration;
+    /* shots: a film can cut between scenes. o.shots = [{ scene, at, tl, cut }] in film time (the first starts at 0).
+       A shot's scene is driven by its own timeline (tl) when it has one, else by the film's. cut says how a shot comes in:
+       { kind: 'zoom' | 'wipe' | 'dissolve' | 'cut', dur (s), focus (zoom: a world point or part of the OLD scene, default
+       the middle), scale (zoom: how far the old frame grows; below 1 it shrinks, for a pull-back), angle (wipe, degrees) }.
+       The old shot's last frame is frozen and laid over the new one while it starts (scaled, faded or wiped away), so a cut
+       costs one extra frame, not a second renderer. Without o.shots a film is one shot of o.scene. Scenes share cam.W × H. */
+    var shots = (o.shots || [{ scene: o.scene }]).map(function (s, i) { return { scene: s.scene, at: i ? s.at : 0, tl: s.tl || null, cut: s.cut || null, i: i }; });
+    var S = shots[0].scene;
+    function shotAt(t) { var k = 0; for (var i = 1; i < shots.length; i++) if (t >= shots[i].at - 1e-9) k = i; return shots[k]; }
+    function applyShot(sh, t) { (sh.tl || tl).apply(t, sh.scene); }
     host.innerHTML = '';
     var card = document.createElement('div'); card.className = 'xp-card';
     card.className = 'xp-card xp-film';
@@ -118,16 +128,39 @@
     svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', o.label || '');
     stage.appendChild(svg);
     var svgR = XP.svgRenderer(svg, S), glR = null, canvas = null, glOff = null;
+    var snap = document.createElement('div'); snap.className = 'xp-snap'; snap.setAttribute('aria-hidden', 'true'); stage.appendChild(snap);
+    var views = [{ scene: S, svg: svg, svgR: svgR }];               // one SVG renderer per scene, made when its shot first shows
+    function viewOf(sc) {
+      for (var i = 0; i < views.length; i++) if (views[i].scene === sc) return views[i];
+      var e = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); e.setAttribute('class', 'xp-shot'); e.setAttribute('aria-hidden', 'true');
+      stage.insertBefore(e, snap);
+      var v = { scene: sc, svg: e, svgR: XP.svgRenderer(e, sc) }; views.push(v); return v;
+    }
     /* WebGL starts late on purpose: when the film nears the screen, after the page has painted, and with the shader
        compiling in the background. Until it is ready the frame stays blank paper. Scripts (setTime) get it at once. */
     var glWant = o.gl !== false && !!XP.glRenderer, glWait = glWant;
+    /* WebGPU (xp-gpu.js, when loaded) draws the same picture and never blocks on its compile. For now it is opt-in:
+       ?webgpu, o.webgpu or window.XP_WEBGPU; ?gl forces WebGL. Scripts (setTime) always get WebGL: they need a frame at once. */
+    var gpuWant = glWant && !!XP.gpuRenderer && !!navigator.gpu && !/[?&]gl\b/.test(location.search) &&
+      (/[?&]webgpu\b/.test(location.search) || ((o.webgpu || window.XP_WEBGPU) && !navigator.webdriver));
     function startGL(now) {
       if (!glWait) return; glWait = false;
       canvas = document.createElement('canvas'); stage.insertBefore(canvas, svg.nextSibling);
+      if (gpuWant && !now) {
+        glR = XP.gpuRenderer(canvas, S, {});
+        if (glR.supported) {
+          Q.max = glR.scale();
+          glR.onReady(function (ok) { if (ok) { draw(); perfText(); } else toGL(); });
+          return;
+        }
+      }
       try { glR = XP.glRenderer(canvas, S, { async: !now && !navigator.webdriver }); } catch (e) { glR = null; }
       if (!glR || !glR.supported) { noGL(); draw(); return; }
       Q.max = glR.scale();
       glR.onReady(function (ok) { if (!ok) noGL(); draw(); perfText(); });
+    }
+    function toGL() {                                             // no WebGPU device, or it was lost: WebGL on a fresh canvas
+      glOff = glR; glR = null; if (canvas) canvas.remove(); canvas = null; gpuWant = false; glWait = true; startGL(); draw();
     }
     function noGL() {                                             // no usable WebGL: the SVG renderer, and no style menu
       glOff = glR; glR = null; if (canvas) canvas.remove(); canvas = null;
@@ -384,16 +417,89 @@
     function segOf(t) { var k = 0; for (var i = 0; i < beatsOf.length; i++) if (t >= beatsOf[i].t - 1e-6) k = i; return k; }
     function segEnd(i) { return i + 1 < beatsOf.length ? beatsOf[i + 1].t : total; }
 
+    /* cuts: while a shot's cut plays, the previous shot's last frame (frozen once, at the cut) lies over the new shot */
+    var snapKey = '', snapEl = null, snapInk = null, snapFocus = [0.5, 0.5], snapRect = null;
+    function styleNow(t) { return forced ? { a: forced, b: forced, mix: 0 } : (o.styleAt ? o.styleAt(t) : { a: 'ink', b: 'ink', mix: 0 }); }
+    function cutAt(sh, t) {
+      var c = sh.cut; if (!sh.i || !c || c.kind === 'cut' || !(c.dur > 0)) return null;
+      var p = (t - sh.at) / c.dur; return p < 1 ? { prev: shots[sh.i - 1], c: c, p: XP.clamp(p, 0, 1) } : null;
+    }
+    function freeze(tr, at, gl) {
+      var prev = tr.prev, key = prev.i + '|' + (gl ? 'gl ' + canvas.width + 'x' + canvas.height : 'svg') + '|' + forced + '|' + stage.clientWidth;
+      if (key === snapKey && snapEl) return; snapKey = key;
+      var t = at - 1e-3; applyShot(prev, t);
+      if (snapEl) snapEl.remove();
+      if (gl) {
+        var st = styleNow(t); glR.setScene(prev.scene); glR.setStyles(st.a, st.b, st.mix, st.wipe); glR.render(t);
+        snapEl = document.createElement('canvas'); snapEl.width = canvas.width; snapEl.height = canvas.height;
+        snapEl.getContext('2d').drawImage(canvas, 0, 0);            // same task as the render, so the drawing buffer is still there
+      } else {
+        var v = viewOf(prev.scene); v.svgR.render(); snapEl = v.svg.cloneNode(true); snapEl.setAttribute('class', 'xp-svg'); snapEl.style.visibility = '';   // keeps the material styles, drops xp-shot
+      }
+      snap.insertBefore(snapEl, snap.firstChild);
+      var f = tr.c.focus, C = prev.scene.cam, q = !f ? [C.W / 2, C.H / 2] : XP.project(C, Array.isArray(f) ? f : XP.partCenter(f));
+      snapFocus = [q[0] / C.W, q[1] / C.H];
+      snapRect = f ? XP.screenRect(C, f) : null;                     // where the focus sat in the frozen frame (viewBox px)
+    }
+    function paintCut(tr) {
+      snap.style.display = tr && snapEl ? 'block' : '';
+      if (labLayer) labLayer.style.opacity = tr ? String(XP.ease.smooth(XP.clamp((tr.p - 0.45) / 0.55, 0, 1))) : '';   // the new shot's labels arrive late
+      if (!tr || !snapEl) return;
+      var c = tr.c, e = XP.ease.inOut(tr.p), x = snapEl.style;
+      x.transform = ''; x.opacity = ''; x.clipPath = ''; x.maskImage = ''; x.webkitMaskImage = '';
+      if (snapInk) snapInk.style.display = 'none';
+      if (c.kind === 'dissolve') x.opacity = String(1 - e);
+      else if (c.kind === 'zoom' && c.to && snapRect) {            // match cut: the old focus rides on the new scene's `to`, frame by frame
+        var r1 = XP.screenRect(S.cam, c.to), r0 = snapRect, k = stage.clientWidth / S.cam.W;
+        var sc = Math.sqrt(Math.max(1e-6, (r1[2] - r1[0]) * (r1[3] - r1[1])) / Math.max(1e-6, (r0[2] - r0[0]) * (r0[3] - r0[1])));
+        var tx = ((r1[0] + r1[2]) / 2 - sc * (r0[0] + r0[2]) / 2) * k, ty = ((r1[1] + r1[3]) / 2 - sc * (r0[1] + r0[3]) / 2) * k;
+        x.transformOrigin = '0 0'; x.transform = 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + sc.toFixed(4) + ')';
+        // and closes in on the focus, so a shrinking frame never shows its edges
+        var g = XP.lerp(2.0, 1.15, XP.ease.smooth(XP.clamp(tr.p / 0.4, 0, 1))), CW0 = S.cam.W, CH0 = S.cam.H;
+        var m = 'radial-gradient(ellipse ' + ((r0[2] - r0[0]) / CW0 * 50 * g).toFixed(1) + '% ' + ((r0[3] - r0[1]) / CH0 * 50 * g).toFixed(1) + '% at '
+          + ((r0[0] + r0[2]) / CW0 * 50).toFixed(1) + '% ' + ((r0[1] + r0[3]) / CH0 * 50).toFixed(1) + '%, #000 72%, transparent 100%)';
+        x.webkitMaskImage = m; x.maskImage = m;
+        x.opacity = String(1 - XP.ease.smooth(XP.clamp((tr.p - 0.1) / 0.65, 0, 1)));
+      } else if (c.kind === 'zoom') {                               // the old frame keeps diving (or pulling back) and fades
+        x.transformOrigin = (snapFocus[0] * 100).toFixed(2) + '% ' + (snapFocus[1] * 100).toFixed(2) + '%';
+        x.transform = 'scale(' + Math.pow(c.scale || 3, e).toFixed(4) + ')';
+        x.opacity = String(1 - XP.ease.smooth(XP.clamp((tr.p - 0.15) / 0.7, 0, 1)));
+      } else if (c.kind === 'wipe') {                               // a hand-drawn edge sweeps the old frame away, like the style wipe
+        var W = stage.clientWidth, H = stage.clientHeight, a = (c.angle == null ? 35 : c.angle) * Math.PI / 180, d = [Math.cos(a), Math.sin(a)];
+        var span = Math.abs(d[0]) * W + Math.abs(d[1]) * H, ex = XP.lerp(-0.06, 1.06, e), Lg = Math.hypot(W, H), n = 28, pts = [], seed = Math.floor(T * 6);
+        var b0 = [W / 2 + d[0] * (ex - 0.5) * span, H / 2 + d[1] * (ex - 0.5) * span];
+        for (var i = 0; i <= n; i++) {
+          var u = (i / n - 0.5) * 2 * Lg, j = (XP.hash(i * 7 + seed * 131) - 0.5) * 2.4 + Math.sin(i * 0.9 + 1.3) * 1.6;
+          pts.push([b0[0] - d[1] * u + d[0] * j, b0[1] + d[0] * u + d[1] * j]);
+        }
+        var poly = pts.concat([[pts[n][0] + d[0] * 2 * Lg, pts[n][1] + d[1] * 2 * Lg], [pts[0][0] + d[0] * 2 * Lg, pts[0][1] + d[1] * 2 * Lg]]);
+        x.clipPath = 'polygon(' + poly.map(function (q) { return q[0].toFixed(1) + 'px ' + q[1].toFixed(1) + 'px'; }).join(',') + ')';
+        if (!snapInk) {
+          snapInk = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); snapInk.setAttribute('class', 'xp-snap-ink');
+          snapInk.innerHTML = '<path fill="none" stroke="#1a1813" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>';
+          snap.appendChild(snapInk);
+        }
+        snapInk.style.display = ''; snapInk.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        snapInk.firstChild.setAttribute('d', 'M' + pts.map(function (q) { return q[0].toFixed(1) + ' ' + q[1].toFixed(1); }).join('L'));
+      }
+    }
+
     function draw() {
-      tl.apply(T, S);
-      var useSvg = forced === 'svg' || (!glR && !glWait);
+      var sh = shotAt(T), tr = cutAt(sh, T);
+      var useSvg = forced === 'svg' || (!glR && !glWait), glOK = !useSvg && glR && glR.ready() && !(glR.kind === 'webgpu' && glR.failed());
+      if (tr && (useSvg || glOK)) freeze(tr, sh.at, glOK);
+      S = sh.scene; applyShot(sh, T);
+      var view = viewOf(S);
+      views.forEach(function (v) { v.svg.style.visibility = v === view ? '' : 'hidden'; });
       stage.setAttribute('data-renderer', useSvg ? 'svg' : 'gl');
-      if (useSvg) svgR.render();
+      if (useSvg) view.svgR.render();
+      else if (glR && glR.kind === 'webgpu' && glR.failed()) toGL();
       else if (glR && glR.ready()) {
-        var st = forced ? { a: forced, b: forced, mix: 0 } : (o.styleAt ? o.styleAt(T) : { a: 'ink', b: 'ink', mix: 0 });
-        glR.setStyles(st.a, st.b, st.mix, st.wipe);
+        var st = styleNow(T);
+        glR.setScene(S); glR.setStyles(st.a, st.b, st.mix, st.wipe);
         var g0 = performance.now(); glR.render(T); glMs = performance.now() - g0;
       }
+      paintCut(tr);
       drawLabels();
       if (o.readout) { var r = o.readout(T, S) || ''; if (readout.textContent !== r) readout.textContent = r; readout.classList.toggle('on', !!r); }
       card.classList.toggle('poster', !started);
@@ -563,7 +669,7 @@
     setPlaying(false);
     draw(); perfText();
 
-    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? 'gl' : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
+    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? (glR.kind || 'gl') : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
       lines: function () { return (tl.lines || []).map(function (l) { return { id: l.id, text: l.text, t0: l.t0, dur: l.dur }; }); },
       audio: function () { return (tl.lines || []).filter(function (l) { return l.src; }).map(function (l) { return { src: new URL(l.src, location.href).href, t0: l.t0 }; });  },
       score: scoreWav };
