@@ -241,36 +241,19 @@
   if (typeof module !== 'undefined' && module.exports) { module.exports = core; return; }
 
   /* ================= page code ================= */
-  var SVGNS = 'http://www.w3.org/2000/svg';
+  var XP = window.XP;
   function $(id) { return document.getElementById(id); }
-  function svgEl(tag, attrs, parent) {
-    var e = document.createElementNS(SVGNS, tag);
-    for (var k in attrs) e.setAttribute(k, attrs[k]);
-    if (parent) parent.appendChild(e);
-    return e;
+  // charts are the explainer kit's (assets/xp/xp-plot.js): sized to their box, redrawn from a spec
+  function chart(host, shared) {
+    var P = null;
+    return function (spec) { if (shared) spec.legend = false; if (P) P.draw(spec); else P = XP.plot(host, spec); };
   }
-  function txt(parent, x, y, s, attrs) { var a = attrs || {}; a.x = x; a.y = y; var t = svgEl('text', a, parent); t.textContent = s; return t; }
-  function fmt(v) { return v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toExponential(1); }
-  function pathOf(pts) { return pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' '); }
-
-  // A plot sized to its container in CSS pixels, so 11px text stays 11px on a phone.
-  function frame(svg, h, pad) {
-    var W = Math.max(278, Math.floor((svg.parentNode.clientWidth || 600) - 2));
-    while (svg.firstChild) svg.removeChild(svg.firstChild);
-    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + h);
-    svg.setAttribute('width', W); svg.setAttribute('height', h);
-    return { W: W, H: h, x0: pad[3], x1: W - pad[1], y0: pad[0], y1: h - pad[2] };
-  }
-  function onResize(el, fn) {
-    var last = 0;
-    if (window.ResizeObserver) new ResizeObserver(function () { var w = el.clientWidth; if (Math.abs(w - last) > 4) { last = w; fn(); } }).observe(el);
-    else window.addEventListener('resize', fn);
-  }
+  function supE(e) { return String(e).replace(/[-0-9]/g, function (c) { return '⁻⁰¹²³⁴⁵⁶⁷⁸⁹'['-0123456789'.indexOf(c)]; }); }
 
   /* ---------- widget 1: coordinate check ---------- */
   function initCoord() {
     var box = $('w-coord'); if (!box) return;
-    var svg = $('cc-plot'), run = $('cc-run'), note = $('cc-note'), stepsSel = $('cc-steps'), qSel = $('cc-q'), big = $('cc-big');
+    var plot = chart($('cc-plot')), run = $('cc-run'), note = $('cc-note'), stepsSel = $('cc-steps'), qSel = $('cc-q'), big = $('cc-big');
     var cache = {}, busy = false, D = ccData();
     var NAMES = { h1: 'hidden layer 1 (fan-in 32, fixed)', h2: 'hidden layer 2 (fan-in n)', z: 'logits' };
 
@@ -278,43 +261,23 @@
     function widths() { return big.checked ? [64, 128, 256, 512, 1024, 2048] : [64, 128, 256, 512, 1024]; }
 
     function draw() {
-      var res = cache[key()], qty = qSel.value, steps = +stepsSel.value;
-      var F = frame(svg, 270, [16, 16, 42, 58]);
-      var ws = widths(), lx0 = Math.log2(ws[0]), lx1 = Math.log2(ws[ws.length - 1]);
-      function X(n) { return F.x0 + (Math.log2(n) - lx0) / (lx1 - lx0) * (F.x1 - F.x0); }
+      var res = cache[key()], qty = qSel.value, steps = +stepsSel.value, ws = widths();
       // y range: decades covering the data, at least 1e-2 .. 1e1
       var lo = -2, hi = 1;
       if (res) ['sp', 'mup'].forEach(function (p) { res[p].forEach(function (o) { var v = o[qty][steps - 1]; lo = Math.min(lo, Math.floor(Math.log10(v))); hi = Math.max(hi, Math.ceil(Math.log10(v))); }); });
-      function Y(v) { return F.y1 - (Math.log10(v) - lo) / (hi - lo) * (F.y1 - F.y0); }
-      var g = svgEl('g', {}, svg);
-      for (var e = lo; e <= hi; e++) {
-        svgEl('line', { x1: F.x0, x2: F.x1, y1: Y(Math.pow(10, e)), y2: Y(Math.pow(10, e)), class: 'grid' }, g);
-        txt(g, F.x0 - 6, Y(Math.pow(10, e)) + 4, e >= 0 ? String(Math.pow(10, e)) : e >= -3 ? Math.pow(10, e).toFixed(-e) : '1e' + e, { 'text-anchor': 'end' });
+      var yt = []; for (var e = lo; e <= hi; e++) yt.push(Math.pow(10, e));
+      var series = [
+        { kind: 'line', shape: 'sq', mat: 'memx', dash: true, data: res ? res.sp.map(function (o) { return [o.n, o[qty][steps - 1]]; }) : [], label: 'standard parametrization (SP)' },
+        { kind: 'line', shape: 'dot', r: 4.5, data: res ? res.mup.map(function (o) { return [o.n, o[qty][steps - 1]]; }) : [], label: 'µP' }
+      ];
+      if (res) {                                                   // a slope-1 guide from the SP start
+        var r0 = res.sp[0][qty][steps - 1], nA = ws[0], nB = ws[ws.length - 1];
+        if (r0 * nB / nA <= Math.pow(10, hi) * 1.01) series.push({ kind: 'line', data: [[nA, r0], [nB, r0 * nB / nA]], mat: 'ink', dash: true, o: 0.6, label: 'slope 1 guide' });
       }
-      ws.forEach(function (n) {
-        svgEl('line', { x1: X(n), x2: X(n), y1: F.y0, y2: F.y1, class: 'grid' }, g);
-        txt(g, X(n), F.y1 + 15, String(n), { 'text-anchor': 'middle' });
-      });
-      svgEl('path', { d: 'M' + F.x0 + ' ' + F.y0 + 'V' + F.y1 + 'H' + F.x1, class: 'ax' }, g);
-      txt(g, (F.x0 + F.x1) / 2, F.H - 6, 'width n (log scale)', { 'text-anchor': 'middle' });
-      var yl = txt(g, 12, (F.y0 + F.y1) / 2, 'RMS change, log', { 'text-anchor': 'middle' });
-      yl.setAttribute('transform', 'rotate(-90 12 ' + ((F.y0 + F.y1) / 2) + ')');
-      if (!res) {
-        txt(g, (F.x0 + F.x1) / 2, (F.y0 + F.y1) / 2, busy ? 'computing…' : 'press “Run the check”', { 'text-anchor': 'middle', class: 'lbl-a' });
-        return;
-      }
-      [['sp', 'c-b c-dash', 'pt-b'], ['mup', 'c-a', 'pt-a']].forEach(function (s) {
-        var pts = res[s[0]].map(function (o) { return [X(o.n), Y(o[qty][steps - 1])]; });
-        svgEl('path', { d: pathOf(pts), class: s[1] }, g);
-        pts.forEach(function (p) {
-          if (s[0] === 'sp') svgEl('rect', { x: p[0] - 4, y: p[1] - 4, width: 8, height: 8, class: s[2] }, g);
-          else svgEl('circle', { cx: p[0], cy: p[1], r: 4.5, class: s[2] }, g);
-        });
-      });
-      // a reference slope-1 guide from the SP start
-      var r0 = res.sp[0][qty][steps - 1], nA = ws[0], nB = ws[ws.length - 1];
-      var guide = [[X(nA), Y(r0)], [X(nB), Y(r0 * nB / nA)]];
-      if (Y(r0 * nB / nA) > F.y0 - 1) svgEl('path', { d: pathOf(guide), class: 'c-k c-dash', opacity: 0.6 }, g);
+      plot({ label: 'Log-log plot of RMS feature change after training against width, for SP and µP.', height: 270,
+        x: { log: 2, min: ws[0], max: ws[ws.length - 1], ticks: ws, label: 'width n (log scale)', grid: true },
+        y: { log: true, min: yt[0], max: yt[yt.length - 1], ticks: yt, fmt: function (v) { var e = Math.round(Math.log10(v)); return e >= 0 ? String(v) : e >= -3 ? v.toFixed(-e) : '10' + supE(e); }, label: 'RMS change, log' },
+        series: series, message: res ? '' : busy ? 'computing…' : 'press “Run the check”' });
     }
 
     function stats() {
@@ -359,34 +322,25 @@
     });
     [stepsSel, big].forEach(function (s) { s.addEventListener('change', function () { note.textContent = cache[key()] ? '' : 'settings changed: press Run'; render(); }); });
     qSel.addEventListener('change', render);
-    onResize(box, draw);
     render();
   }
 
   /* ---------- widget 2: Newton–Schulz ---------- */
   function initNS() {
     var box = $('w-ns'); if (!box) return;
-    var kSel = $('ns-k'), kOut = $('ns-k-out'), mSel = $('ns-m'), svgA = $('ns-plot'), svgB = $('ns-map');
+    var kSel = $('ns-k'), kOut = $('ns-k-out'), mSel = $('ns-m'), plotA = chart($('ns-plot'), true), plotB = chart($('ns-map'), true), leg = $('ns-legend');
     var cache = {};
     function spectra() { var m = mSel.value; if (!cache[m]) cache[m] = nsSpectra(m, 5); return cache[m]; }
 
+    var KEYS = [{ kind: 'bars', label: 'singular values at k (bars)' }, { mat: 'ink', dash: true, label: 'k = 0, for comparison' }, { mat: 'workx', label: 'the target, 1' },
+                { label: 'p iterated k times' }, { mat: 'ink', o: 0.3, label: 'other k (faint)' }];
     function drawSpectrum() {
-      var S = spectra(), k = +kSel.value, F = frame(svgA, 240, [14, 14, 40, 46]), R = S[0].length;
-      var top = 1.3;
-      function X(i) { return F.x0 + (i + 0.5) / R * (F.x1 - F.x0); }
-      function Y(v) { return F.y1 - Math.min(v, top) / top * (F.y1 - F.y0); }
-      var g = svgEl('g', {}, svgA);
-      [0, 0.5, 1].forEach(function (v) {
-        svgEl('line', { x1: F.x0, x2: F.x1, y1: Y(v), y2: Y(v), class: v === 1 ? 'c-g' : 'grid', opacity: v === 1 ? 0.7 : 1 }, g);
-        txt(g, F.x0 - 6, Y(v) + 4, String(v), { 'text-anchor': 'end' });
-      });
-      svgEl('path', { d: 'M' + F.x0 + ' ' + F.y0 + 'V' + F.y1 + 'H' + F.x1, class: 'ax' }, g);
-      [1, 16, 32, 48, 64].forEach(function (i) { txt(g, X(i - 1), F.y1 + 15, String(i), { 'text-anchor': 'middle' }); });
-      txt(g, (F.x0 + F.x1) / 2, F.H - 6, 'singular value, largest to smallest (index)', { 'text-anchor': 'middle' });
-      var bw = Math.max(1.5, (F.x1 - F.x0) / R - 1.2);
-      // k = 0 as a ghost outline, the chosen k filled
-      if (k > 0) svgEl('path', { d: pathOf(S[0].map(function (v, i) { return [X(i), Y(v)]; })), class: 'c-k c-dash' }, g);
-      S[k].forEach(function (v, i) { svgEl('rect', { x: X(i) - bw / 2, y: Y(v), width: bw, height: F.y1 - Y(v), class: 'pt-a', opacity: 0.85 }, g); });
+      var S = spectra(), k = +kSel.value, R = S[0].length;
+      var series = [{ kind: 'bars', data: S[k].map(function (v, i) { return [i + 1, Math.min(v, 1.3)]; }), o: 0.85, w: 0.8 }];
+      if (k > 0) series.push({ kind: 'line', data: S[0].map(function (v, i) { return [i + 1, v]; }), mat: 'ink', dash: true });
+      plotA({ label: 'Bar chart of the 64 singular values after k Newton–Schulz iterations.', height: 240,
+        x: { min: 0.3, max: R + 0.7, ticks: [1, 16, 32, 48, 64], label: 'singular value, largest to smallest (index)', short: 'index, largest first' },
+        y: { min: 0, max: 1.3, ticks: [0, 0.5, 1] }, series: series, refs: [{ y: 1, mat: 'workx', dash: false }] });
       var mx = S[k][0], mn = S[k][R - 1];
       $('ns-max').textContent = mx.toFixed(3);
       $('ns-min').textContent = mn < 0.001 ? mn.toExponential(1) : mn.toFixed(3);
@@ -399,28 +353,20 @@
     }
 
     function drawMap() {
-      var k = +kSel.value, F = frame(svgB, 220, [14, 14, 40, 46]);
-      function X(s) { return F.x0 + s / 1.2 * (F.x1 - F.x0); }
-      function Y(v) { return F.y1 - Math.max(0, Math.min(v, 1.4)) / 1.4 * (F.y1 - F.y0); }
-      var g = svgEl('g', {}, svgB);
-      [0, 0.5, 1].forEach(function (v) { svgEl('line', { x1: F.x0, x2: F.x1, y1: Y(v), y2: Y(v), class: v === 1 ? 'c-g' : 'grid', opacity: v === 1 ? 0.7 : 1 }, g); txt(g, F.x0 - 6, Y(v) + 4, String(v), { 'text-anchor': 'end' }); });
-      [0, 0.3, 0.6, 0.9, 1.2].forEach(function (s) { txt(g, X(s), F.y1 + 15, String(s), { 'text-anchor': 'middle' }); });
-      svgEl('path', { d: 'M' + F.x0 + ' ' + F.y0 + 'V' + F.y1 + 'H' + F.x1, class: 'ax' }, g);
-      txt(g, (F.x0 + F.x1) / 2, F.H - 6, 'input singular value σ', { 'text-anchor': 'middle' });
+      var k = +kSel.value, series = [];
       // earlier iterates faint, the chosen one bold; k = 0 is the identity
-      for (var j = 0; j <= k; j++) {
-        var pts = [];
-        for (var i = 0; i <= 240; i++) { var s = 1.2 * i / 240; pts.push([X(s), Y(pScalar(s, j))]); }
-        svgEl('path', { d: pathOf(pts), class: j === k ? 'c-a' : 'c-k', opacity: j === k ? 1 : 0.3 }, g);
-      }
-      if (k === 0) txt(g, X(0.62), Y(0.62) - 10, 'k = 0: output = input', { 'text-anchor': 'end', class: 'lbl-a' });
+      for (var j = 0; j <= k; j++) (function (j) { series.push({ kind: 'line', fn: function (x) { return Math.max(0, Math.min(pScalar(x, j), 1.4)); }, from: 0, to: 1.2, n: 240, mat: j === k ? 'subject' : 'ink', o: j === k ? 1 : 0.3 }); })(j);
+      plotB({ label: 'Curves of the Newton–Schulz polynomial iterated one to five times.', height: 220,
+        x: { min: 0, max: 1.2, ticks: [0, 0.3, 0.6, 0.9, 1.2], label: 'input singular value σ' }, y: { min: 0, max: 1.4, ticks: [0, 0.5, 1] },
+        series: series, refs: [{ y: 1, mat: 'workx', dash: false }], notes: k === 0 ? [{ x: 0.62, y: 0.62, text: 'k = 0: output = input', align: 'r', mat: 'subject', dy: -10 }] : [] });
+      leg.innerHTML = XP.plot.keys(KEYS);
     }
     function render() { kOut.textContent = kSel.value; drawSpectrum(); drawMap(); }
     kSel.addEventListener('input', render);
     mSel.addEventListener('change', render);
     // computed lazily, the first time the widget comes near the screen
     var started = false;
-    function start() { if (started) return; started = true; render(); onResize(box, render); }
+    function start() { if (started) return; started = true; render(); }
     if (window.IntersectionObserver) new IntersectionObserver(function (es, ob) { if (es.some(function (e) { return e.isIntersecting; })) { ob.disconnect(); start(); } }, { rootMargin: '400px' }).observe(box);
     else start();
   }
@@ -428,36 +374,28 @@
   /* ---------- widget 3 (illustrative): loss against LR at four widths ---------- */
   function initTransfer() {
     var box = $('w-xfer'); if (!box) return;
-    var svg = $('xf-plot'), btns = box.querySelectorAll('[data-param]'), mode = 'sp';
+    var plot = chart($('xf-plot')), btns = box.querySelectorAll('[data-param]'), mode = 'sp';
     var WS = [128, 256, 512, 1024], E = 2.4, A = 4, al = 0.25, kap = 0.02, base = 0.003;
     // made-up model: L = E + A n^-al + kap * (log2(eta / eta*(n)))^2 with eta*(n) = base*512/n under SP, base under µP
     function L(n, eta) { var st = mode === 'sp' ? base * 512 / n : base; var d = Math.log2(eta / st); return E + A * Math.pow(n, -al) + kap * d * d; }
     function draw() {
-      var F = frame(svg, 250, [14, 16, 40, 52]), l0 = Math.log2(0.0003), l1 = Math.log2(0.03);
-      function X(eta) { return F.x0 + (Math.log2(eta) - l0) / (l1 - l0) * (F.x1 - F.x0); }
-      var ylo = 3.0, yhi = 4.2;
-      function Y(v) { return F.y1 - (Math.min(v, yhi) - ylo) / (yhi - ylo) * (F.y1 - F.y0); }
-      var g = svgEl('g', {}, svg);
-      [3.0, 3.2, 3.4, 3.6, 3.8, 4.0, 4.2].forEach(function (v) { svgEl('line', { x1: F.x0, x2: F.x1, y1: Y(v), y2: Y(v), class: 'grid' }, g); txt(g, F.x0 - 6, Y(v) + 4, v.toFixed(1), { 'text-anchor': 'end' }); });
-      [0.0003, 0.001, 0.003, 0.01, 0.03].forEach(function (e) { svgEl('line', { x1: X(e), x2: X(e), y1: F.y0, y2: F.y1, class: 'grid' }, g); txt(g, X(e), F.y1 + 15, String(e), { 'text-anchor': 'middle' }); });
-      svgEl('path', { d: 'M' + F.x0 + ' ' + F.y0 + 'V' + F.y1 + 'H' + F.x1, class: 'ax' }, g);
-      txt(g, (F.x0 + F.x1) / 2, F.H - 6, 'base learning rate (log scale)', { 'text-anchor': 'middle' });
-      var dash = ['c-dash', '', 'c-dash', ''];
+      var mat = mode === 'sp' ? 'memx' : 'subject', series = [], best = [];
       WS.forEach(function (n, wi) {
-        var pts = [];
-        for (var i = 0; i <= 120; i++) { var eta = Math.pow(2, l0 + (l1 - l0) * i / 120); pts.push([X(eta), Y(L(n, eta))]); }
-        var col = mode === 'sp' ? 'c-b' : 'c-a';
-        svgEl('path', { d: pathOf(pts), class: col + ' ' + dash[wi], opacity: 0.45 + 0.18 * wi }, g);
-        var st = mode === 'sp' ? base * 512 / n : base, lab = txt(g, X(st), Y(L(n, st)) + 16, String(n), { 'text-anchor': 'middle', class: mode === 'sp' ? 'lbl-b' : 'lbl-a' });
-        svgEl('circle', { cx: X(st), cy: Y(L(n, st)), r: 4, class: mode === 'sp' ? 'pt-b' : 'pt-a' }, g);
-        lab.setAttribute('font-size', '11');
+        var st = mode === 'sp' ? base * 512 / n : base;
+        series.push({ kind: 'line', fn: function (eta) { return L(n, eta); }, from: 0.0003, to: 0.03, n: 120, mat: mat, dash: wi < 2, o: 0.45 + 0.18 * wi,
+                      label: wi === 0 ? 'widths 128 and 256 (dashed); lighter = narrower' : wi === 3 ? 'widths 512 and 1024' : null });
+        best.push([st, L(n, st)]);
       });
+      series.push({ kind: 'points', data: best, mat: mat, r: 4, label: (mode === 'sp' ? 'SP' : 'µP') + ': best LR at each width' });
+      plot({ label: 'Illustrative loss against learning rate curves for widths 128, 256, 512 and 1024.', height: 250,
+        x: { log: 2, min: 0.0003, max: 0.03, ticks: [0.0003, 0.001, 0.003, 0.01, 0.03], fmt: String, label: 'base learning rate (log scale)', grid: true },
+        y: { min: 3.0, max: 4.2, ticks: [3.0, 3.2, 3.4, 3.6, 3.8, 4.0, 4.2], fmt: function (v) { return v.toFixed(1); }, label: 'loss' },
+        series: series, notes: best.map(function (b, i) { return { x: b[0], y: b[1], text: String(WS[i]), align: 'l', dy: 4, mat: mat }; }) });
       $('xf-note').textContent = mode === 'sp' ? 'Standard parametrization: each doubling of width halves the best LR. A rate tuned at 128 is 8× too hot at 1024.'
         : 'µP: the best base LR sits in the same place at every width, so you tune once at the small width.';
       [].forEach.call(btns, function (b) { b.classList.toggle('alt', b.getAttribute('data-param') !== mode); b.setAttribute('aria-pressed', b.getAttribute('data-param') === mode); });
     }
     [].forEach.call(btns, function (b) { b.addEventListener('click', function () { mode = b.getAttribute('data-param'); draw(); }); });
-    onResize(box, draw);
     draw();
   }
 

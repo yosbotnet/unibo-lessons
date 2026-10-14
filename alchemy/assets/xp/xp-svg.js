@@ -63,7 +63,7 @@
         if (!p.show) { if (p._g.parentNode) p._g.style.display = 'none'; return; }
         var sc = typeof p.scale === 'number' ? [p.scale, p.scale, p.scale] : p.scale;
         if (sc[0] <= 1e-4 || sc[1] <= 1e-4 || sc[2] <= 1e-4) { if (p._g.parentNode) p._g.style.display = 'none'; return; }
-        var key = ck + '|' + p.pos.map(function (v) { return v.toFixed(3); }).join(',') + '|' + sc.map(function (v) { return v.toFixed(3); }).join(',') + '|' + p.mesh.id;
+        var key = ck + '|' + p.pos.map(function (v) { return v.toFixed(3); }).join(',') + '|' + sc.map(function (v) { return v.toFixed(3); }).join(',') + '|' + (p.rot || 0).toFixed(3) + '|' + p.mesh.id;
         if (key !== p._key) { p._key = key; p._g.innerHTML = XP.partSVG(C, B, p); }
         var cls = 'xp-sol m-' + p.mat + (p.glow > 0.02 ? ' glow' : '');
         if (cls !== p._cls) { p._cls = cls; p._g.setAttribute('class', cls); }

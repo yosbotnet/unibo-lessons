@@ -1,25 +1,12 @@
 /* u1.js — Unit 1 widgets.
    1. The ladder at one learning rate (illustrative model from fig-surface.js, anchored to CS 312's measured gaps).
    2. Seeds and noise: what a difference between runs can tell you (exact Gaussian arithmetic; sigma measured by CS 312).
-   3. Two charts of CS 312's measured quiz-1 numbers (jitter vs batch, WSD decay gaps). */
+   3. Two charts of CS 312's measured quiz-1 numbers (jitter vs batch, WSD decay gaps).
+   Charts are the explainer kit's (assets/xp/xp-plot.js): drawn at the box's width, redrawn when it changes. */
 (function () {
   'use strict';
-  var NS = 'http://www.w3.org/2000/svg';
-  function svg(tag, attrs, parent) {
-    var e = document.createElementNS(NS, tag);
-    for (var k in attrs) e.setAttribute(k, attrs[k]);
-    if (parent) parent.appendChild(e);
-    return e;
-  }
-  function txt(parent, x, y, s, attrs) { var t = svg('text', Object.assign({ x: x, y: y }, attrs || {}), parent); t.textContent = s; return t; }
+  var XP = window.XP || {};
   function $(id) { return document.getElementById(id); }
-  function width(el, max) { var w = Math.round(el.clientWidth || 0); return w ? Math.max(300, Math.min(max, w)) : max; }
-  function watch(el, draw) {                                  // redraw when the box changes width (also when a hidden answer opens)
-    if (!window.ResizeObserver) return;
-    var last = 0;
-    new ResizeObserver(function () { var w = Math.round(el.clientWidth); if (w && w !== last) { last = w; draw(); } }).observe(el);
-  }
-  function line(pts) { return pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(''); }
 
   /* ---------- statistics helpers ---------- */
   function erf(x) {                                            // Abramowitz-Stegun 7.1.26, |error| < 1.5e-7
@@ -62,37 +49,27 @@
 
   /* ---------- 1. the ladder at one learning rate ---------- */
   function ladder() {
-    var root = $('w-ladder'); if (!root || !window.Alchemy || !Alchemy.loss) return;
+    var root = $('w-ladder'); if (!root || !window.Alchemy || !Alchemy.loss || !XP.plot) return;
     var M = Alchemy.loss, lrIn = $('lad-lr'), lrOut = $('lad-lr-o'), tuneIn = $('lad-tune'), plot = $('lad-plot');
-    var W = 640, H = 300, L = 58, R = 18, T = 16, B = 40;
-    var RUNGS = [4, 6, 8, 12, 16];
-    function xOf(X) { return L + (Math.log2(X) - 2) / 2 * (W - L - R); }
-    var y0 = 2.70, y1 = 3.50;
-    function yOf(v) { return T + (y1 - Math.min(Math.max(v, y0), y1)) / (y1 - y0) * (H - T - B); }
+    var RUNGS = [4, 6, 8, 12, 16], P = null;
     function lrAt(v) { return 0.0005 * Math.pow(100, v / 100); }
     function draw() {
-      W = width(plot, 640);
       var lr = lrAt(+lrIn.value), tune = tuneIn.checked;
       lrOut.textContent = lr < 0.001 ? lr.toFixed(5) : lr.toFixed(4);
-      plot.innerHTML = '';
-      var s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'w-plot', role: 'img', 'aria-label': 'Final validation loss against model size, at one learning rate for every rung and at each rung’s own best rate.' }, plot);
-      for (var v = 2.8; v <= 3.41; v += 0.1) {
-        svg('line', { x1: L, x2: W - R, y1: yOf(v), y2: yOf(v), class: 'grid' }, s);
-        txt(s, L - 6, yOf(v) + 4, v.toFixed(1), { 'text-anchor': 'end' });
-      }
-      RUNGS.forEach(function (X) { svg('line', { x1: xOf(X), x2: xOf(X), y1: T, y2: H - B, class: 'grid' }, s); txt(s, xOf(X), H - B + 16, 'd' + X, { 'text-anchor': 'middle' }); });
-      svg('path', { d: 'M' + L + ' ' + T + 'V' + (H - B) + 'H' + (W - R), class: 'ax' }, s);
-      txt(s, (L + W - R) / 2, H - 6, W < 480 ? 'model dX (depth X, width 64X)' : 'model dX (depth X, width 64X): parameters grow as X³', { 'text-anchor': 'middle' });
-      txt(s, 14, T + (H - T - B) / 2, 'final val loss', { transform: 'rotate(-90 14 ' + (T + (H - T - B) / 2) + ')', 'text-anchor': 'middle' });
-      var xs = []; for (var X = 4; X <= 16.001; X *= Math.pow(2, 1 / 16)) xs.push(X);
-      var fixed = xs.map(function (X) { return [xOf(X), yOf(M.loss(X, lr))]; });
-      var best = xs.map(function (X) { return [xOf(X), yOf(M.lbest(X))]; });
-      if (tune) svg('path', { d: line(best), class: 'c-g c-dash' }, s);
-      svg('path', { d: line(fixed), class: 'c-a' }, s);
-      RUNGS.forEach(function (X) {
-        svg('circle', { cx: xOf(X), cy: yOf(M.loss(X, lr)), r: 4, class: 'pt-a' }, s);
-        if (tune) svg('rect', { x: xOf(X) - 3.5, y: yOf(M.lbest(X)) - 3.5, width: 7, height: 7, class: 'pt-g' }, s);
-      });
+      var series = [
+        { kind: 'line', fn: function (X) { return M.loss(X, lr); }, from: 4, to: 16, label: 'every rung at the chosen rate' },
+        { kind: 'points', data: RUNGS.map(function (X) { return [X, M.loss(X, lr)]; }) }
+      ];
+      if (tune) series.push({ kind: 'line', fn: M.lbest, from: 4, to: 16, mat: 'workx', dash: true, label: 'each rung at its best rate' },
+                            { kind: 'points', shape: 'sq', mat: 'workx', data: RUNGS.map(function (X) { return [X, M.lbest(X)]; }) });
+      var spec = {
+        label: 'Final validation loss against model size, at one learning rate for every rung' + (tune ? ' and at each rung’s own best rate.' : '.'),
+        x: { log: 2, min: 4, max: 16, ticks: RUNGS, fmt: function (X) { return 'd' + X; }, grid: true,
+             label: 'model dX (depth X, width 64X): parameters grow as X³', short: 'model dX (depth X, width 64X)' },
+        y: { min: 2.7, max: 3.5, label: 'final val loss' },
+        series: series, aspect: 0.47
+      };
+      if (P) P.draw(spec); else P = XP.plot(plot, spec);
       var gFix = M.loss(8, lr) - M.loss(16, lr), gTrue = M.lbest(8) - M.lbest(16), ratio = gFix / gTrue;
       $('lad-gfix').textContent = gFix.toFixed(3);
       $('lad-gtrue').textContent = gTrue.toFixed(3);
@@ -104,16 +81,14 @@
       else { vd.className = 'w-verdict good'; vd.innerHTML = 'Within 15% of the true gain: this rate sits between the rungs&rsquo; optima, so the errors roughly cancel. That is luck, not a property of the ladder.'; }
     }
     lrIn.addEventListener('input', draw); tuneIn.addEventListener('change', draw);
-    draw(); watch(plot, draw);
+    draw();
   }
 
   /* ---------- 2. seeds and noise ---------- */
   function noise() {
-    var root = $('w-noise'); if (!root) return;
-    var SIG = 0.0029, dIn = $('nz-d'), nIn = $('nz-n'), rIn = $('nz-r'), plot = $('nz-plot');
-    var W = 640, H = 230, L = 20, R = 20, T = 18, B = 40;
+    var root = $('w-noise'); if (!root || !XP.plot) return;
+    var SIG = 0.0029, dIn = $('nz-d'), nIn = $('nz-n'), rIn = $('nz-r'), plot = $('nz-plot'), P = null;
     function draw() {
-      W = width(plot, 640);
       var d = +dIn.value / 10000, n = +nIn.value, rho = +rIn.value / 100;
       $('nz-d-o').textContent = d.toFixed(4) + ' (' + (d / SIG).toFixed(1) + 'σ)';
       $('nz-n-o').textContent = n;
@@ -128,35 +103,23 @@
       $('nz-need').textContent = need === Infinity ? '∞' : need > 999 ? '> 999' : String(need);
       var lo = n > 1 ? Math.sqrt((n - 1) / chi2q(0.975, n - 1)) : null, hi = n > 1 ? Math.sqrt((n - 1) / chi2q(0.025, n - 1)) : null;
       $('nz-sig').textContent = n > 1 ? lo.toFixed(2) + '× to ' + (hi < 10 ? hi.toFixed(1) : hi.toFixed(0)) + '×' : 'unknown';
-      plot.innerHTML = '';
-      var s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'w-plot', role: 'img', 'aria-label': 'The spread of the difference you would measure between the two arms, with the region where it has the wrong sign shaded.' }, plot);
-      var span = Math.max(d + 4 * se, 4 * se, 0.004), xa = -span, xb = span;
-      function xOf(v) { return L + (v - xa) / (xb - xa) * (W - L - R); }
-      var peak = 1 / (se * Math.sqrt(2 * Math.PI));
-      function yOf(p) { return H - B - p / peak * (H - T - B) * 0.92; }
+      var span = Math.max(d + 4 * se, 4 * se, 0.004), peak = 1 / (se * Math.sqrt(2 * Math.PI));
       function pdf(v) { return Math.exp(-0.5 * Math.pow((v - d) / se, 2)) * peak; }
-      var N = 160, k, v, pts = [];
-      for (k = 0; k <= N; k++) { v = xa + (xb - xa) * k / N; pts.push([xOf(v), yOf(pdf(v))]); }
-      // regions: wrong sign (vermilion) and "passes a 2-standard-error test" (forest)
-      function area(a, b, cls) {
-        if (b <= a) return;
-        var q = [[xOf(a), H - B]];
-        for (k = 0; k <= 60; k++) { v = a + (b - a) * k / 60; q.push([xOf(v), yOf(pdf(v))]); }
-        q.push([xOf(b), H - B]);
-        svg('path', { d: line(q) + 'Z', class: cls }, s);
-      }
-      area(xa, Math.min(0, xb), 'nz-wrong');
-      area(Math.max(2 * se, xa), xb, 'nz-pass');
-      svg('path', { d: 'M' + L + ' ' + (H - B) + 'H' + (W - R), class: 'ax' }, s);
-      svg('path', { d: line(pts), class: 'c-a' }, s);
-      svg('line', { x1: xOf(0), x2: xOf(0), y1: T - 4, y2: H - B, class: 'c-k' }, s);
-      txt(s, xOf(0), H - B + 15, '0', { 'text-anchor': 'middle' });
-      if (d > 0) { svg('line', { x1: xOf(d), x2: xOf(d), y1: T - 4, y2: H - B, class: 'c-g c-dash' }, s); txt(s, xOf(d) + 4, T + 6, 'true Δ', { class: 'lbl-g' }); }
-      svg('line', { x1: xOf(2 * se), x2: xOf(2 * se), y1: H - B, y2: H - B + 6, class: 'ax' }, s);
-      txt(s, xOf(2 * se), H - B + 15, '2 SE', { 'text-anchor': 'middle' });
-      txt(s, xOf(xa) + 2, H - B + 15, (-span).toFixed(3), { 'text-anchor': 'start' });
-      txt(s, xOf(xb) - 2, H - B + 15, '+' + span.toFixed(3), { 'text-anchor': 'end' });
-      txt(s, (L + W - R) / 2, H - 6, W < 480 ? 'measured difference (B better →)' : 'measured difference in final val loss (B better than A →)', { 'text-anchor': 'middle' });
+      var series = [
+        { kind: 'area', fn: pdf, from: -span, to: Math.min(0, span), mat: 'memx', label: 'wrong winner' },
+        { kind: 'area', fn: pdf, from: Math.min(2 * se, span), to: span, mat: 'workx', label: 'passes a 2-standard-error test' },
+        { kind: 'line', fn: pdf, from: -span, to: span, n: 200, label: 'spread of the difference you would measure' }
+      ];
+      var refs = [{ x: 0, mat: 'ink', dash: false }, { x: 2 * se, label: '2 SE', mat: 'ink' }];
+      if (d > 0) { refs.push({ x: d, label: 'true Δ', mat: 'workx' }); series.push({ legendOnly: true, mat: 'workx', dash: true, label: 'the true difference' }); }
+      var spec = {
+        label: 'The spread of the difference you would measure between the two arms, with the region where it has the wrong sign shaded.',
+        x: { min: -span, max: span, fmt: function (v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(3).replace(/^0\.000$/, '0'); },
+             label: 'measured difference in final val loss (B better than A →)', short: 'measured difference (B better →)' },
+        y: { min: 0, max: peak * 1.09, ticks: [], grid: false },
+        series: series, refs: refs, aspect: 0.36
+      };
+      if (P) P.draw(spec); else P = XP.plot(plot, spec);
       var vd = $('nz-verdict');
       if (n === 1 && rho === 0) { vd.className = 'w-verdict bad'; vd.innerHTML = 'One run per arm, unpaired: you cannot even estimate the noise from these runs, and the difference you see carries the full noise of two runs.'; }
       else if (pWrong > 0.1) { vd.className = 'w-verdict bad'; vd.innerHTML = 'About <b>' + Math.round(100 * pWrong) + '%</b> of the time this design shows the wrong winner. More seeds, or pairing, or both.'; }
@@ -164,52 +127,41 @@
       else { vd.className = 'w-verdict good'; vd.innerHTML = 'This design detects the difference ' + Math.round(100 * pPass) + '% of the time and almost never shows the wrong winner.'; }
     }
     [dIn, nIn, rIn].forEach(function (e) { e.addEventListener('input', draw); });
-    draw(); watch(plot, draw);
+    draw();
   }
 
   /* ---------- 3. measured charts ---------- */
   function jitterChart() {
-    var host = $('c-jitter'); if (!host) return;
-    draw(); watch(host, draw);
-    function draw() {
-    host.innerHTML = '';
-    var W = width(host, 520), H = 230, L = 56, R = 20, T = 16, B = 40;
+    var host = $('c-jitter'); if (!host || !XP.plot) return;
     var pts = [[16, 0.0769], [64, 0.0404], [256, 0.0198]];
-    function xOf(b) { return L + (Math.log2(b) - 3) / 6 * (W - L - R); }
-    function yOf(v) { return T + (Math.log2(0.16) - Math.log2(v)) / (Math.log2(0.16) - Math.log2(0.01)) * (H - T - B); }
-    var s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'w-plot', role: 'img', 'aria-label': 'Late-training jitter against batch size on log axes: three measured points on a line of slope minus one half.' }, host);
-    [0.01, 0.02, 0.04, 0.08, 0.16].forEach(function (v) { svg('line', { x1: L, x2: W - R, y1: yOf(v), y2: yOf(v), class: 'grid' }, s); txt(s, L - 6, yOf(v) + 4, String(v), { 'text-anchor': 'end' }); });
-    [8, 16, 32, 64, 128, 256, 512].forEach(function (b) { svg('line', { x1: xOf(b), x2: xOf(b), y1: T, y2: H - B, class: 'grid' }, s); txt(s, xOf(b), H - B + 16, String(b), { 'text-anchor': 'middle' }); });
-    svg('path', { d: 'M' + L + ' ' + T + 'V' + (H - B) + 'H' + (W - R), class: 'ax' }, s);
-    var ref = function (b) { return 0.0404 * Math.sqrt(64 / b); };
-    svg('path', { d: line([[xOf(8), yOf(ref(8))], [xOf(512), yOf(ref(512))]]), class: 'c-k c-dash' }, s);
-    pts.forEach(function (p) { svg('circle', { cx: xOf(p[0]), cy: yOf(p[1]), r: 5, class: 'pt-a' }, s); txt(s, xOf(p[0]) + 8, yOf(p[1]) - 7, p[1].toFixed(3), { class: 'lbl-a' }); });
-    txt(s, (L + W - R) / 2, H - 6, 'batch size (sequences)', { 'text-anchor': 'middle' });
-    txt(s, W - R - 4, yOf(ref(512)) - 8, '∝ 1/√B', { 'text-anchor': 'end' });
-    }
+    XP.plot(host, {
+      label: 'Late-training jitter against batch size on log axes: three measured points on a line of slope minus one half.',
+      x: { log: 2, min: 8, max: 512, ticks: [16, 64, 256], label: 'batch size (sequences)', grid: true },
+      y: { log: 2, min: 0.01, max: 0.16, ticks: [0.01, 0.02, 0.04, 0.08, 0.16], fmt: String, label: 'jitter' },
+      series: [
+        { kind: 'line', fn: function (b) { return 0.0404 * Math.sqrt(64 / b); }, mat: 'ink', dash: true, label: '∝ 1/√B through batch 64' },
+        { kind: 'points', data: pts, r: 4.5, label: 'measured (CS 312)' }
+      ],
+      notes: pts.map(function (p) { return { x: p[0], y: p[1], text: p[1].toFixed(3), align: 'l', dy: -9, mat: 'subject' }; }),
+      aspect: 0.5
+    });
   }
   function wsdChart() {
-    var host = $('c-wsd'); if (!host) return;
-    draw(); watch(host, draw);
-    function draw() {
-    host.innerHTML = '';
-    var W = width(host, 520), H = 220, L = 56, R = 20, T = 16, B = 40;
+    var host = $('c-wsd'); if (!host || !XP.plot) return;
     var pts = [['2%', 0.085], ['5%', 0.051], ['10%', 0.030], ['20%', 0.009]];
-    var bw = (W - L - R) / pts.length;
-    function yOf(v) { return T + (0.1 - v) / 0.1 * (H - T - B); }
-    var s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'w-plot', role: 'img', 'aria-label': 'Final-loss gap of each WSD run to the linear-decay run, for decay fractions of 2, 5, 10 and 20 percent, with the 0.02 threshold drawn.' }, host);
-    [0, 0.02, 0.04, 0.06, 0.08, 0.1].forEach(function (v) { svg('line', { x1: L, x2: W - R, y1: yOf(v), y2: yOf(v), class: 'grid' }, s); txt(s, L - 6, yOf(v) + 4, v.toFixed(2), { 'text-anchor': 'end' }); });
-    pts.forEach(function (p, i) {
-      var x = L + i * bw + bw * 0.22, w = bw * 0.56, ok = p[1] < 0.02;
-      svg('rect', { x: x, y: yOf(p[1]), width: w, height: yOf(0) - yOf(p[1]), class: ok ? 'pt-g' : 'pt-a' }, s);
-      txt(s, x + w / 2, yOf(p[1]) - 5, '+' + p[1].toFixed(3), { 'text-anchor': 'middle', class: ok ? 'lbl-g' : 'lbl-a' });
-      txt(s, x + w / 2, H - B + 16, p[0], { 'text-anchor': 'middle' });
+    function bars(ok) { return pts.map(function (p, i) { return [i + 1, (p[1] < 0.02) === ok ? p[1] : null]; }); }
+    XP.plot(host, {
+      label: 'Final-loss gap of each WSD run to the linear-decay run, for decay fractions of 2, 5, 10 and 20 percent, with the 0.02 threshold drawn.',
+      x: { min: 0.4, max: 4.6, ticks: [1, 2, 3, 4], fmt: function (i) { return pts[i - 1][0]; }, label: 'fraction of training spent decaying' },
+      y: { min: 0, max: 0.1, label: 'gap to linear decay' },
+      series: [
+        { kind: 'bars', data: bars(false), w: 0.56, mat: 'memx', label: 'more than 0.02 worse' },
+        { kind: 'bars', data: bars(true), w: 0.56, mat: 'workx', label: 'within 0.02' }
+      ],
+      refs: [{ y: 0.02, label: 'within 0.02', mat: 'subject' }],
+      notes: pts.map(function (p, i) { return { x: i + 1, y: p[1], text: '+' + p[1].toFixed(3), mat: p[1] < 0.02 ? 'workx' : 'memx' }; }),
+      aspect: 0.5
     });
-    svg('line', { x1: L, x2: W - R, y1: yOf(0.02), y2: yOf(0.02), class: 'c-b c-dash' }, s);
-    txt(s, W - R - 4, yOf(0.02) - 5, 'within 0.02', { 'text-anchor': 'end', class: 'lbl-b' });
-    svg('path', { d: 'M' + L + ' ' + T + 'V' + yOf(0) + 'H' + (W - R), class: 'ax' }, s);
-    txt(s, (L + W - R) / 2, H - 6, 'fraction of training spent decaying', { 'text-anchor': 'middle' });
-    }
   }
 
   function init() { ladder(); noise(); jitterChart(); wsdChart(); }

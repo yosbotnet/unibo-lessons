@@ -20,6 +20,10 @@
 
    3. The ledger page: <div id="ledger"></div> lists every locked prediction and checked drill, with calibration.
 
+   4. Predictions inside films: an explainer-kit film (assets/xp/xp-time.js) stops at each tl.ask and sends the answer
+      as an 'xp-ask' event. Answers land here like a locked and revealed prediction (the film shows the answer right
+      away); a film whose questions are already in the ledger doesn't stop for them again.
+
    State lives in localStorage under one key, per browser. Export / import moves it between devices.
    Every storage access is wrapped: in a private window the components still work, they just forget. */
 (function () {
@@ -239,7 +243,7 @@
         t2.innerHTML = '<tr><th>Unit</th><th>Question</th><th>Your answer</th><th>Conf.</th><th>Result</th></tr>';
         ids.sort(function (a, b) { return S.preds[a].locked - S.preds[b].locked; }).forEach(function (i) {
           var p = S.preds[i], tr = el('tr');
-          var a = el('a', null, p.title.replace(/^Unit\s+/i, '')); a.href = p.page + '#' + i;
+          var a = el('a', null, p.title.replace(/^Unit\s+/i, '')); a.href = p.href || p.page + '#' + i;
           var td0 = el('td'); td0.appendChild(a); tr.appendChild(td0);
           tr.appendChild(el('td', null, p.q.length > 140 ? p.q.slice(0, 137) + '…' : p.q));
           tr.appendChild(el('td', null, p.choiceText));
@@ -297,7 +301,27 @@
     draw();
   }
 
+  /* ---------- 4. predictions inside films ---------- */
+  document.addEventListener('xp-ask', function (e) {
+    var d = e.detail || {}; if (!d.id || d.skipped || d.choice == null) return;
+    var S = load(); if (S.preds[d.id]) return;                    // locked once, like the boxes
+    var host = e.target && e.target.closest ? e.target.closest('[id]') : null;
+    S.preds[d.id] = { q: String(d.question || '').slice(0, 220), page: page(), title: pageTitle(), href: page() + (host ? '#' + host.id : ''), film: d.film,
+                      choice: d.choice, choiceText: String(d.answer || ''), conf: d.confidence || 50, ok: !!d.correct,
+                      okText: d.right != null && d.options ? String(d.options[d.right]) : '', locked: Date.now(), revealed: Date.now() };
+    save(S);
+  });
+  function seedFilms() {                                          // answers already in the ledger: the films don't ask again
+    var films = window.XP && window.XP.films; if (!films) return;
+    var S = load();
+    Object.keys(S.preds).forEach(function (id) {
+      var p = S.preds[id], f = p.film && films[p.film];
+      if (f && f.answer) f.answer(id, p.choice, p.conf);
+    });
+  }
+
   function init() {
+    seedFilms();
     [].forEach.call(document.querySelectorAll('.pred'), initPred);
     [].forEach.call(document.querySelectorAll('.drill'), initDrill);
     var L = document.getElementById('ledger'); if (L) initLedger(L);

@@ -178,17 +178,8 @@
   if (typeof module === 'object' && module.exports) module.exports = CORE;
   if (typeof document === 'undefined') return;
 
-  /* ================= drawing ================= */
-  var NS = 'http://www.w3.org/2000/svg', clipN = 0;
-  function S(tag, at, parent, txt) {
-    var e = document.createElementNS(NS, tag);
-    for (var k in at) if (at[k] != null) e.setAttribute(k, at[k]);
-    if (txt != null) e.textContent = txt;
-    if (parent) parent.appendChild(e);
-    return e;
-  }
-  function clear(svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); }
-  function sup(n) { return '1e' + n; }
+  /* ================= drawing: the explainer kit's charts (assets/xp/xp-plot.js) ================= */
+  var XP = window.XP;
   function fmtE(x) {
     if (x == null || !isFinite(x)) return '–';
     if (x === 0) return '0';
@@ -199,85 +190,22 @@
   }
   function fmtEta(x) { return x >= 0.01 ? x.toPrecision(3).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '') : x.toPrecision(2); }
   function nice(x) { return x.toLocaleString('en-US'); }
-
-  // a plot frame: W x H viewBox, margins, linear or log axes; returns mappers and a clipped group
-  function frame(svg, o) {
-    clear(svg);
-    svg.setAttribute('viewBox', '0 0 ' + o.W + ' ' + o.H);
-    var l = o.l, r = o.W - o.r, t = o.t, b = o.H - o.b;
-    function map(ax, lo, hi) {
-      var a0 = ax.log ? Math.log10(ax.min) : ax.min, a1 = ax.log ? Math.log10(ax.max) : ax.max;
-      return function (v) { var u = ax.log ? Math.log10(Math.max(v, 1e-300)) : v; return lo + (u - a0) / (a1 - a0) * (hi - lo); };
-    }
-    var X = map(o.x, l, r), Y = map(o.y, b, t);
-    var id = 'u2a-clip-' + (++clipN);
-    var cp = S('clipPath', { id: id }, S('defs', {}, svg));
-    S('rect', { x: l, y: t, width: r - l, height: b - t }, cp);
-    S('rect', { x: l, y: t, width: r - l, height: b - t, fill: 'var(--lk-paper)', stroke: 'none' }, svg);
-    (o.x.ticks || []).forEach(function (v) {
-      var x = X(v);
-      S('line', { x1: x, y1: t, x2: x, y2: b, 'class': 'grid' }, svg);
-      S('text', { x: x, y: b + 14, 'text-anchor': 'middle' }, svg, o.x.fmt ? o.x.fmt(v) : String(v));
-    });
-    (o.y.ticks || []).forEach(function (v) {
-      var y = Y(v);
-      S('line', { x1: l, y1: y, x2: r, y2: y, 'class': 'grid' }, svg);
-      S('text', { x: l - 5, y: y + 4, 'text-anchor': 'end' }, svg, o.y.fmt ? o.y.fmt(v) : String(v));
-    });
-    S('rect', { x: l, y: t, width: r - l, height: b - t, 'class': 'ax' }, svg);
-    if (o.x.label) S('text', { x: (l + r) / 2, y: o.H - 4, 'text-anchor': 'middle', fill: 'var(--lk-ink)' }, svg, o.x.label);
-    if (o.y.label) S('text', { x: l, y: t - 7, 'text-anchor': 'start', fill: 'var(--lk-ink)' }, svg, o.y.label);
-    var g = S('g', { 'clip-path': 'url(#' + id + ')' }, svg);
-    return { X: X, Y: Y, g: g, l: l, r: r, t: t, b: b, svg: svg };
-  }
-  function line(F, pts, cls, extra) {
-    var d = [];
-    pts.forEach(function (p) {
-      if (p == null || !isFinite(p[0]) || !isFinite(p[1])) return;
-      var x = F.X(p[0]), y = F.Y(p[1]);
-      if (!isFinite(x) || !isFinite(y)) return;
-      x = Math.max(F.l - 40, Math.min(F.r + 40, x));
-      y = Math.max(F.t - 40, Math.min(F.b + 40, y));
-      d.push(x.toFixed(1) + ',' + y.toFixed(1));
-    });
-    var at = { points: d.join(' '), 'class': cls };
-    for (var k in extra || {}) at[k] = extra[k];
-    return S('polyline', at, F.g);
-  }
-  function marker(F, x, y, shape, cls, size) {
-    var px = F.X(x), py = F.Y(y), s = size || 3.6;
-    if (!isFinite(px) || !isFinite(py)) return;
-    if (shape === 'sq') S('rect', { x: px - s, y: py - s, width: 2 * s, height: 2 * s, 'class': cls }, F.g);
-    else if (shape === 'tri') S('polygon', { points: [px, py - s * 1.2, px - s * 1.1, py + s * 0.8, px + s * 1.1, py + s * 0.8].map(function (v) { return v.toFixed(1); }).join(' '), 'class': cls }, F.g);
-    else if (shape === 'ring') S('circle', { cx: px, cy: py, r: s + 2.5, fill: 'none', stroke: 'var(--lk-vermilion)', 'stroke-width': 2 }, F.g);
-    else S('circle', { cx: px, cy: py, r: s, 'class': cls }, F.g);
-  }
   function stat(k, v) { return '<div class="w-stat"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'; }
-  // legend swatches drawn like the marks they explain: colour, dash and marker shape (two cues, never colour alone)
-  var COL = { a: 'var(--lk-cobalt)', b: 'var(--lk-vermilion)', g: 'var(--lk-forest)', k: 'var(--lk-ink-soft)' };
-  function icon(sp) {
-    var c = COL[sp.c], s = '<svg class="u2a-sw" width="28" height="12" viewBox="0 0 28 12" aria-hidden="true">';
-    if (sp.line !== false) s += '<line x1="1" y1="6" x2="27" y2="6" stroke="' + c + '" stroke-width="' + (sp.w || 2) + '"' +
-      (sp.dash === 'dot' ? ' stroke-dasharray="1 3"' : sp.dash ? ' stroke-dasharray="5 3"' : '') + (sp.op ? ' opacity="' + sp.op + '"' : '') + '/>';
-    if (sp.mk === 'dot') s += '<circle cx="14" cy="6" r="3.4" fill="' + c + '"/>';
-    if (sp.mk === 'sq') s += '<rect x="11" y="3" width="6" height="6" fill="' + c + '"/>';
-    if (sp.mk === 'tri') s += '<polygon points="14,1.8 10.2,8.8 17.8,8.8" fill="' + c + '"/>';
-    if (sp.mk === 'ring') s += '<circle cx="14" cy="6" r="4.6" fill="none" stroke="' + c + '" stroke-width="2"/>';
-    if (sp.mk === 'cross') s += '<path d="M9 6h10M14 1v10" stroke="' + c + '" stroke-width="2"/>';
-    return s + '</svg>';
+  // a chart per host, made on first use and redrawn from a spec after that; one legend shared by the widget's charts
+  function chart(host) {
+    var P = null;
+    return function (spec) { spec.legend = false; if (P) P.draw(spec); else P = XP.plot(host, spec); };
   }
-  function legend(items) {
-    return items.map(function (it) { return '<span>' + icon(it[0]) + it[1] + '</span>'; }).join('');
-  }
+  function clamp(v, lo, hi) { return v == null || !isFinite(v) ? null : Math.max(lo, Math.min(hi, v)); }
   var LOGT = [1e-4, 1e-3, 1e-2, 1e-1, 1, 10];
-  function fmtPow(v) { var e = Math.round(Math.log10(v)); return e === 0 ? '1' : e === 1 ? '10' : sup(e); }
+  function fmtPow(v) { var e = Math.round(Math.log10(v)); return e === 0 ? '1' : e === 1 ? '10' : '10' + String(e).replace(/[-0-9]/g, function (c) { return '⁻⁰¹²³⁴⁵⁶⁷⁸⁹'['-0123456789'.indexOf(c)]; }); }
 
   /* ================= widget 1: the noisy quadratic ================= */
   function initNQM(root) {
     var q = function (s) { return root.querySelector(s); };
     var cOpt = q('[data-k=opt]'), cB = q('[data-k=b]'), cLR = q('[data-k=lr]'), cMu = q('[data-k=mu]'), cView = q('[data-k=view]');
     var oB = q('[data-o=b]'), oLR = q('[data-o=lr]'), oMu = q('[data-o=mu]'), muBox = q('[data-box=mu]');
-    var svgA = q('svg[data-k=a]'), svgB = q('svg[data-k=b]'), leg = q('.w-legend'), out = q('.w-out'), ver = q('.w-verdict'), cap = q('[data-k=cap]');
+    var plotA = chart(q('.u2a-plot[data-k=a]')), plotB = chart(q('.u2a-plot[data-k=b]')), leg = q('.w-legend'), out = q('.w-out'), ver = q('.w-verdict'), cap = q('[data-k=cap]');
     var sweep = null;
     function getSweep() {
       if (sweep) return sweep;
@@ -306,37 +234,34 @@
       var floor = exact && !diverged ? floorExact(c.opt, c.eta, c.B, c.mu) : null;
 
       // left: contours and one run's path
-      var Fa = frame(svgA, { W: 340, H: 214, l: 34, r: 10, t: 22, b: 32,
-        x: { min: -2.4, max: 2.4, ticks: [-2, -1, 0, 1, 2], label: 'w1 (flat direction, h = 1)' },
-        y: { min: -1.2, max: 1.2, ticks: [-1, 0, 1], label: 'w2 (steep, h = 10)' } });
-      [0.02, 0.1, 0.3, 0.7, 1.4, 2.4].forEach(function (L) {
-        var rx = Math.sqrt(2 * L), ry = Math.sqrt(2 * L / 10);
-        S('ellipse', { cx: Fa.X(0), cy: Fa.Y(0), rx: Fa.X(rx) - Fa.X(0), ry: Fa.Y(0) - Fa.Y(ry), fill: 'none', stroke: 'var(--lk-rule-soft)', 'stroke-width': 1 }, Fa.g);
+      var contours = [0.02, 0.1, 0.3, 0.7, 1.4, 2.4].map(function (L) {
+        var rx = Math.sqrt(2 * L), ry = Math.sqrt(2 * L / 10), d = [];
+        for (var k = 0; k <= 72; k++) { var u = 2 * Math.PI * k / 72; d.push([rx * Math.cos(u), ry * Math.sin(u)]); }
+        return { kind: 'line', data: d, mat: 'steel', width: 1, o: 0.45 };
       });
       var P = sim.path, n = P.length, keep = [];
-      for (var i = 0; i < n; i++) if (i < 400 || i % Math.ceil(n / 1200) === 0 || i === n - 1) keep.push(P[i]);
-      line(Fa, keep, 'c-a', { 'stroke-width': 1.3, 'stroke-linejoin': 'round' });
-      S('path', { d: 'M' + (Fa.X(0) - 5) + ' ' + Fa.Y(0) + 'h10M' + Fa.X(0) + ' ' + (Fa.Y(0) - 5) + 'v10', stroke: 'var(--lk-forest)', 'stroke-width': 2 }, Fa.g);
-      marker(Fa, P[0][0], P[0][1], 'dot', 'pt-k', 3.6);
-      var last = P[n - 1];
-      if (Math.abs(last[0]) < 2.4 && Math.abs(last[1]) < 1.2) marker(Fa, last[0], last[1], 'sq', 'pt-a', 3.2);
+      for (var i = 0; i < n; i++) if (i < 400 || i % Math.ceil(n / 1200) === 0 || i === n - 1) keep.push([clamp(P[i][0], -9, 9), clamp(P[i][1], -9, 9)]);
+      var last = P[n - 1], inside = Math.abs(last[0]) < 2.4 && Math.abs(last[1]) < 1.2;
+      var sA = contours.concat([
+        { kind: 'line', data: keep, width: 1.3, label: 'one run’s path' },
+        { kind: 'points', data: [[0, 0]], shape: 'cross', mat: 'workx', label: 'the minimum' },
+        { kind: 'points', data: [P[0]], mat: 'ink', label: 'its start' },
+        { kind: 'points', data: inside ? [last] : [], shape: 'sq', label: 'where it ends' }
+      ]);
+      plotA({ label: 'The loss surface’s contours and the path of one seeded run, in the plane of the two weights.', equal: true,
+        x: { min: -2.4, max: 2.4, ticks: [-2, -1, 0, 1, 2], label: 'w1 (flat, h = 1)', grid: true },
+        y: { min: -1.2, max: 1.2, ticks: [-1, 0, 1], label: 'w2 (steep, h = 10)' }, series: sA });
 
       // right: expected loss against examples seen
-      var Fb = frame(svgB, { W: 340, H: 214, l: 40, r: 10, t: 22, b: 32,
-        x: { min: 1, max: NTOT, log: true, ticks: [1, 8, 64, 512, 4096], fmt: nice, label: 'examples seen (steps × B)' },
-        y: { min: 1e-4, max: 10, log: true, ticks: LOGT, fmt: fmtPow, label: 'loss' } });
-      function pts(arr) { var o = []; for (var t = 0; t <= c.T; t++) o.push([Math.max(1, t * c.B), Math.max(arr[t], 1e-6)]); return o; }
-      if (floor != null) line(Fb, [[1, floor], [NTOT, floor]], 'c-b c-dash', { 'stroke-width': 1.4 });
-      line(Fb, pts(sim.one), 'c-k', { 'stroke-width': 0.9, opacity: 0.55 });
-      line(Fb, pts(sim.mean), exact ? 'c-k c-dash' : 'c-a c-dash', { 'stroke-width': 1.6 });
-      if (cur) line(Fb, pts(cur), 'c-a');
-
-      var items = [[{ c: 'k', line: false, mk: 'dot' }, 'start of one run'], [{ c: 'a', w: 1.3 }, 'its path (left)'],
-                   [{ c: 'a', line: false, mk: 'sq' }, 'where it ends'], [{ c: 'g', line: false, mk: 'cross' }, 'the minimum']];
-      var items2 = exact ? [[{ c: 'a' }, 'expected loss, exact'], [{ c: 'k', dash: true }, 'mean of ' + RUNS + ' simulated runs'], [{ c: 'k', w: 1, op: 0.6 }, 'the one run']]
-                         : [[{ c: 'a', dash: true }, 'mean of ' + RUNS + ' simulated runs (Adam has no closed form)'], [{ c: 'k', w: 1, op: 0.6 }, 'the one run']];
-      if (floor != null) items2.push([{ c: 'b', dash: true }, 'noise floor if it ran forever']);
-      leg.innerHTML = legend(items.concat(items2));
+      function pts(arr) { var o = []; for (var t = 0; t <= c.T; t++) o.push([Math.max(1, t * c.B), clamp(arr[t], 1e-6, 1e4)]); return o; }
+      var sB = [{ kind: 'line', data: pts(sim.one), mat: 'ink', width: 0.9, o: 0.55, label: 'the one run' },
+                { kind: 'line', data: pts(sim.mean), mat: exact ? 'ink' : 'subject', dash: true, width: 1.6, label: 'mean of ' + RUNS + ' simulated runs' + (exact ? '' : ' (Adam has no closed form)') }];
+      if (cur) sB.push({ kind: 'line', data: pts(cur), label: 'expected loss, exact' });
+      if (floor != null) sB.push({ kind: 'line', data: [[1, floor], [NTOT, floor]], mat: 'memx', dash: true, width: 1.4, label: 'noise floor if it ran forever' });
+      plotB({ label: 'Loss against examples seen, on log axes: the exact expected loss, the mean of simulated runs and one run.',
+        x: { log: true, min: 1, max: NTOT, ticks: [1, 8, 64, 512, 4096], fmt: nice, label: 'examples seen (steps × B)', grid: true },
+        y: { log: true, min: 1e-4, max: 10, ticks: LOGT, fmt: fmtPow, label: 'loss' }, series: sB });
+      leg.innerHTML = XP.plot.keys(sA.concat(sB));
 
       // readout
       var best = exact ? (c.opt === 'mom' ? bestAt('mom', c.B, c.mu) : bestAt(c.opt, c.B, 0)) : null;
@@ -366,42 +291,32 @@
     }
     function drawSweep(c) {
       var sw = getSweep();
-      var Fa = frame(svgA, { W: 340, H: 214, l: 44, r: 10, t: 22, b: 32,
-        x: { min: 0.8, max: 640, log: true, ticks: [1, 4, 16, 64, 256], label: 'batch size B' },
-        y: { min: 1e-4, max: 1, log: true, ticks: [1e-4, 1e-3, 1e-2, 1e-1, 1], fmt: fmtPow, label: 'best step size (momentum: η/(1−μ))' } });
-      line(Fa, [[0.8, 0.2], [640, 0.2]], 'c-b c-dash', { 'stroke-width': 1.3 });
-      var lt = S('text', { x: Fa.l + 5, y: Fa.Y(0.2) - 5, 'class': 'lbl-b' }, Fa.g, 'SGD limit 2/h');
-      S('tspan', { dy: 3, 'font-size': 9 }, lt, 'max');
-      var e1 = sw[0].sgd.eta;
-      line(Fa, [[0.8, e1 * 0.8], [640, e1 * 640]], 'c-k', { 'stroke-width': 1, 'stroke-dasharray': '2 3' });
-      line(Fa, sw.map(function (r) { return [r.B, r.sgd.eta]; }), 'c-a');
-      line(Fa, sw.map(function (r) { return [r.B, r.mom.eta / (1 - r.mom.mu)]; }), 'c-g c-dash');
-      line(Fa, sw.map(function (r) { return [r.B, r.pre.eta]; }), 'c-k', { 'stroke-dasharray': '1 3', 'stroke-width': 1.8 });
-      sw.forEach(function (r) {
-        marker(Fa, r.B, r.sgd.eta, 'dot', 'pt-a');
-        marker(Fa, r.B, r.mom.eta / (1 - r.mom.mu), 'sq', 'pt-g', 3);
-        marker(Fa, r.B, r.pre.eta, 'tri', 'pt-k', 3.4);
-      });
-      var effEta = c.opt === 'mom' ? c.eta / (1 - c.mu) : c.eta;
-      marker(Fa, c.B, effEta, 'ring');
-
-      var Fb = frame(svgB, { W: 340, H: 214, l: 44, r: 10, t: 22, b: 32,
-        x: { min: 0.8, max: 640, log: true, ticks: [1, 4, 16, 64, 256], label: 'batch size B' },
-        y: { min: 1e-4, max: 1e-2, log: true, ticks: [1e-4, 1e-3, 1e-2], fmt: fmtPow, label: 'best final loss, η tuned' } });
-      line(Fb, sw.map(function (r) { return [r.B, r.sgd.loss]; }), 'c-a');
-      line(Fb, sw.map(function (r) { return [r.B, r.mom.loss]; }), 'c-g c-dash');
-      line(Fb, sw.map(function (r) { return [r.B, r.pre.loss]; }), 'c-k', { 'stroke-dasharray': '1 3', 'stroke-width': 1.8 });
-      sw.forEach(function (r) {
-        marker(Fb, r.B, r.sgd.loss, 'dot', 'pt-a');
-        marker(Fb, r.B, r.mom.loss, 'sq', 'pt-g', 3);
-        marker(Fb, r.B, r.pre.loss, 'tri', 'pt-k', 3.4);
-      });
+      var effEta = c.opt === 'mom' ? c.eta / (1 - c.mu) : c.eta, e1 = sw[0].sgd.eta;
+      var X = { log: true, min: 0.8, max: 640, ticks: [1, 4, 16, 64, 256], label: 'batch size B', grid: true };
+      function row(f) { return sw.map(function (r) { return [r.B, f(r)]; }); }
+      var sgd = { kind: 'line', shape: 'dot', label: 'SGD' },
+          mom = { kind: 'line', shape: 'sq', mat: 'workx', dash: true, label: 'SGD + momentum, μ and η tuned' },
+          pre = { kind: 'line', shape: 'tri', mat: 'ink', dash: '1 3', width: 1.8, label: 'preconditioned SGD (H⁻¹ᐟ²)' };
+      var sA = [
+        Object.assign({ data: row(function (r) { return r.sgd.eta; }) }, sgd),
+        Object.assign({ data: row(function (r) { return r.mom.eta / (1 - r.mom.mu); }) }, mom),
+        Object.assign({ data: row(function (r) { return r.pre.eta; }) }, pre),
+        { kind: 'line', data: [[0.8, e1 * 0.8], [640, e1 * 640]], mat: 'ink', width: 1, dash: '2 3', label: 'slope 1: η ∝ B' },
+        { kind: 'points', data: [[c.B, effEta]], shape: 'ring', mat: 'memx', label: 'your current setting' }
+      ];
+      plotA({ label: 'The best step size against batch size for SGD, momentum and preconditioned SGD, with the stability limit.',
+        x: X, y: { log: true, min: 1e-4, max: 1, ticks: [1e-4, 1e-3, 1e-2, 1e-1, 1], fmt: fmtPow, label: 'best step (momentum: η/(1−μ))', short: 'best step size' },
+        series: sA, refs: [{ y: 0.2, label: 'SGD limit 2/hₘₐₓ', mat: 'memx' }] });
       var here = c.opt !== 'adam' ? finalExact(c.opt, c.eta, c.B, c.T, c.mu).loss : null;
-      if (here != null && isFinite(here) && here < 1e-2) marker(Fb, c.B, here, 'ring');
-
-      leg.innerHTML = legend([[{ c: 'a', mk: 'dot' }, 'SGD'], [{ c: 'g', dash: true, mk: 'sq' }, 'SGD + momentum, μ and η tuned'],
-        [{ c: 'k', dash: 'dot', mk: 'tri' }, 'preconditioned SGD (H<sup>−1/2</sup>)'], [{ c: 'k', w: 1, dash: 'dot' }, 'slope 1: η ∝ B'],
-        [{ c: 'b', dash: true }, 'SGD stability limit 2/h<sub>max</sub>'], [{ c: 'b', line: false, mk: 'ring' }, 'your current setting']]);
+      var sB = [
+        Object.assign({ data: row(function (r) { return r.sgd.loss; }) }, sgd),
+        Object.assign({ data: row(function (r) { return r.mom.loss; }) }, mom),
+        Object.assign({ data: row(function (r) { return r.pre.loss; }) }, pre),
+        { kind: 'points', data: here != null && isFinite(here) && here < 1e-2 ? [[c.B, here]] : [], shape: 'ring', mat: 'memx' }
+      ];
+      plotB({ label: 'The best final loss against batch size for each optimizer, its step size tuned.',
+        x: X, y: { log: true, min: 1e-4, max: 1e-2, ticks: [1e-4, 1e-3, 1e-2], fmt: fmtPow, label: 'best final loss, η tuned' }, series: sB });
+      leg.innerHTML = XP.plot.keys(sA.concat([{ legendOnly: true, mat: 'memx', dash: true, label: 'SGD stability limit 2/hₘₐₓ' }]));
 
       var crit = sw[sw.length - 1].B;
       for (var i = 0; i < sw.length; i++) if (sw[i].sgd.loss > 1.1 * sw[0].sgd.loss) { crit = sw[i].B; break; }
@@ -425,7 +340,7 @@
     var q = function (s) { return root.querySelector(s); };
     var cMode = q('[data-k=mode]'), cEta = q('[data-k=eta]'), cLam = q('[data-k=lam]'), cSched = q('[data-k=sched]'), cTwin = q('[data-k=twin]');
     var oEta = q('[data-o=eta]'), oLam = q('[data-o=lam]'), lamBox = q('[data-box=lam]'), twinBox = q('[data-box=twin]');
-    var svgP = q('svg[data-k=plane]'), svgR = q('svg[data-k=r]'), svgA = q('svg[data-k=ang]'), leg = q('.w-legend'), out = q('.w-out'), ver = q('.w-verdict');
+    var plotP = chart(q('.u2a-plot[data-k=plane]')), plotR = chart(q('.u2a-plot[data-k=r]')), plotA = chart(q('.u2a-plot[data-k=ang]')), leg = q('.w-legend'), out = q('.w-out'), ver = q('.w-verdict');
     function draw() {
       var mode = cMode.value, eta = ETAS[+cEta.value], lam = mode === 'ball' ? 0 : LAMS[+cLam.value], sched = cSched.value;
       oEta.textContent = String(eta); oLam.textContent = String(lam);
@@ -440,45 +355,43 @@
       var tick = Math.pow(10, Math.floor(Math.log10(rmax))), tks = [];
       for (var v = -Math.floor(rmax / tick) * tick; v <= rmax + 1e-12; v += tick) tks.push(+v.toPrecision(3));
       if (tks.length > 7) tks = tks.filter(function (v, i) { return i % 2 === 0; });
-      var Fp = frame(svgP, { W: 300, H: 300, l: 42, r: 10, t: 22, b: 32,
-        x: { min: -rmax, max: rmax, ticks: tks }, y: { min: -rmax, max: rmax, ticks: tks, label: 'the weight w, in its plane' } });
-      var ox = Fp.X(0), oy = Fp.Y(0), sc = Fp.X(1) - Fp.X(0);
-      S('line', { x1: ox, y1: oy, x2: ox + Math.cos(PHI_STAR) * rmax * sc, y2: oy - Math.sin(PHI_STAR) * rmax * sc, stroke: 'var(--lk-ink-soft)', 'stroke-width': 1, 'stroke-dasharray': '6 3' }, Fp.g);
-      var req = mode === 'ball' ? R0 : eqRadius(eta, lam);
-      if (req && sched === 'const') S('circle', { cx: ox, cy: oy, r: req * sc, fill: 'none', stroke: 'var(--lk-forest)', 'stroke-width': 1.6, 'stroke-dasharray': '5 3' }, Fp.g);
-      // the paths jitter along their circle (a noisy sign each step), so draw them thin and mark where they end
-      if (Bt) line(Fp, Bt.pts, 'c-k', { 'stroke-width': 0.7, opacity: 0.5 });
-      line(Fp, A.pts, 'c-a', { 'stroke-width': 0.8, opacity: 0.6 });
-      marker(Fp, R0, 0, 'dot', 'pt-k', 3.4);
-      if (Bt) { var eb = Bt.pts[Bt.pts.length - 1]; marker(Fp, eb[0], eb[1], 'sq', 'pt-k', 3.6); }
-      var ea = A.pts[A.pts.length - 1]; marker(Fp, ea[0], ea[1], 'sq', 'pt-a', 3.6);
+      var req = mode === 'ball' ? R0 : eqRadius(eta, lam), aeq = mode === 'ball' ? Math.atan(eta) : lam > 0 ? eqAngle(eta, lam) : null, deg = 180 / Math.PI;
+      function circle(r) { var d = []; for (var k = 0; k <= 96; k++) { var u = 2 * Math.PI * k / 96; d.push([r * Math.cos(u), r * Math.sin(u)]); } return d; }
+      var aLab = 'w: η = ' + eta + (mode === 'ball' ? ' (Hyperball)' : ', λ = ' + lam), bLab = Bt ? 'twin: η = ' + +(eta * 4).toPrecision(3) + ', λ = ' + +(lam / 4).toPrecision(3) + ' (same η·λ)' : '';
+      var eqOn = sched === 'const' && (req || aeq), eqLab = mode === 'ball' ? 'fixed radius; angle per step = arctan η' : 'predicted equilibrium';
+      var ea = A.pts[A.pts.length - 1], eb = Bt ? Bt.pts[Bt.pts.length - 1] : null;
+      var sP = [{ kind: 'line', data: [[0, 0], [Math.cos(PHI_STAR) * rmax * 1.5, Math.sin(PHI_STAR) * rmax * 1.5]], mat: 'ink', width: 1, dash: '6 3', label: 'direction of lowest loss' }];
+      if (req && sched === 'const') sP.push({ kind: 'line', data: circle(req), mat: 'workx', width: 1.6, dash: '5 3' });
+      if (Bt) sP.push({ kind: 'line', data: Bt.pts, mat: 'ink', width: 0.7, o: 0.5 });
+      sP.push({ kind: 'line', data: A.pts, width: 0.8, o: 0.6 },
+              { kind: 'points', data: [[R0, 0]], mat: 'ink', r: 3.4, label: 'start, |w| = ' + R0 },
+              { kind: 'points', data: eb ? [eb] : [], mat: 'ink', shape: 'sq', r: 3.6 },
+              { kind: 'points', data: [ea], shape: 'sq', r: 3.6, label: 'where each run ends (paths are thin: they jitter along the circle)' });
+      plotP({ label: 'The weight’s path in its plane, spiralling out from a small start and settling on a circle when weight decay is on.', equal: true, aspect: 1,
+        x: { min: -rmax, max: rmax, ticks: tks, grid: true }, y: { min: -rmax, max: rmax, ticks: tks, label: 'the weight w, in its plane' }, series: sP });
 
       // |w| and the angular step over time
       var stepT = function (arr) { var o = []; for (var t = 0; t < arr.length; t += 6) o.push([t + 1, arr[t]]); o.push([arr.length, arr[arr.length - 1]]); return o; };
       var rr0 = rmax / 1.12 * 1.05, mag = Math.pow(10, Math.floor(Math.log10(rr0))), rTop = Math.ceil(rr0 / mag) * mag;
-      var Fr = frame(svgR, { W: 340, H: 150, l: 46, r: 18, t: 22, b: 30,
-        x: { min: 0, max: NT, ticks: [0, 1000, 2000, 3000], fmt: nice, label: 'step' },
-        y: { min: 0, max: rTop, ticks: [0, +(rTop / 2).toPrecision(2), +rTop.toPrecision(2)], label: '|w|' } });
-      if (req && sched === 'const') line(Fr, [[0, req], [NT, req]], 'c-g c-dash', { 'stroke-width': 1.4 });
-      if (Bt) { var rq2 = eqRadius(eta * 4, lam / 4); if (sched === 'const' && rq2 < rTop) line(Fr, [[0, rq2], [NT, rq2]], 'c-g c-dash', { 'stroke-width': 1 }); line(Fr, stepT(Bt.r), 'c-k'); }
-      line(Fr, stepT(A.r), 'c-a');
+      var X = { min: 0, max: NT, ticks: [0, 1000, 2000, 3000], fmt: nice, label: 'step' };
+      var sR = [];
+      if (req && sched === 'const') sR.push({ kind: 'line', data: [[0, req], [NT, req]], mat: 'workx', dash: true, width: 1.4 });
+      if (Bt) { var rq2 = eqRadius(eta * 4, lam / 4); if (sched === 'const' && rq2 < rTop) sR.push({ kind: 'line', data: [[0, rq2], [NT, rq2]], mat: 'workx', dash: true, width: 1 }); sR.push({ kind: 'line', data: stepT(Bt.r), mat: 'ink', width: 1.4 }); }
+      sR.push({ kind: 'line', data: stepT(A.r) });
+      plotR({ label: 'The weight’s norm against step.', aspect: 0.42, x: X, y: { min: 0, max: rTop, ticks: [0, +(rTop / 2).toPrecision(2), +rTop.toPrecision(2)], label: '|w|' }, series: sR });
 
-      var deg = 180 / Math.PI;
-      var Fa = frame(svgA, { W: 340, H: 150, l: 46, r: 18, t: 22, b: 30,
-        x: { min: 0, max: NT, ticks: [0, 1000, 2000, 3000], fmt: nice, label: 'step' },
-        y: { min: 0.03, max: 60, log: true, ticks: [0.1, 1, 10], fmt: function (v) { return v + '°'; }, label: 'angle turned per step' } });
-      var aeq = mode === 'ball' ? Math.atan(eta) : lam > 0 ? eqAngle(eta, lam) : null;
-      if (aeq && sched === 'const') line(Fa, [[0, aeq * deg], [NT, aeq * deg]], 'c-g c-dash', { 'stroke-width': 1.4 });
       var degs = function (run) { return run.ang.map(function (a) { return Math.max(a * deg, 0.031); }); };
-      if (Bt) line(Fa, stepT(degs(Bt)), 'c-k');
-      line(Fa, stepT(degs(A)), 'c-a');
+      var sA = [];
+      if (aeq && sched === 'const') sA.push({ kind: 'line', data: [[0, aeq * deg], [NT, aeq * deg]], mat: 'workx', dash: true, width: 1.4 });
+      if (Bt) sA.push({ kind: 'line', data: stepT(degs(Bt)), mat: 'ink', width: 1.4 });
+      sA.push({ kind: 'line', data: stepT(degs(A)) });
+      plotA({ label: 'Angle turned per step against step, log scale.', aspect: 0.42, x: X,
+        y: { log: true, min: 0.03, max: 60, ticks: [0.1, 1, 10], fmt: function (v) { return v + '°'; }, label: 'angle per step', short: 'angle/step' }, series: sA });
 
-      var L = [[{ c: 'a' }, 'w: η = ' + eta + (mode === 'ball' ? ' (Hyperball)' : ', λ = ' + lam)]];
-      if (Bt) L.push([{ c: 'k', w: 1.4 }, 'twin: η = ' + +(eta * 4).toPrecision(3) + ', λ = ' + +(lam / 4).toPrecision(3) + ' (same η·λ)']);
-      if (sched === 'const' && (req || aeq)) L.push([{ c: 'g', dash: true }, mode === 'ball' ? 'fixed radius; angle per step = arctan η' : 'predicted equilibrium']);
-      L.push([{ c: 'k', w: 1, dash: true }, 'direction of lowest loss'], [{ c: 'k', line: false, mk: 'dot' }, 'start, |w| = ' + R0],
-             [{ c: 'a', line: false, mk: 'sq' }, 'where each run ends (paths are thin: they jitter along the circle)']);
-      leg.innerHTML = legend(L);
+      var L = [{ label: aLab }];
+      if (Bt) L.push({ label: bLab, mat: 'ink', width: 1.4 });
+      if (eqOn) L.push({ label: eqLab, mat: 'workx', dash: '5 3' });
+      leg.innerHTML = XP.plot.keys(L.concat(sP.filter(function (x) { return x.label; })));
 
       var tail = function (arr) { var s = 0, n = 0; for (var t = Math.floor(arr.length * 0.9); t < arr.length; t++) { s += arr[t]; n++; } return s / n; };
       var peak = Math.max.apply(null, A.r), fin = A.r[A.r.length - 1];

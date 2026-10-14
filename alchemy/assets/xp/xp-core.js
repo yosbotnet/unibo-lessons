@@ -45,8 +45,8 @@
      on screen, [x0, y0, x1, y1] in viewBox px; and the camera that puts them exactly onto a screen rectangle, so the
      first frame of a new scene can match the last of the old one. fitRect keeps az/el and sets zoom and center. */
   XP.corners = function (part) {
-    var m = part.mesh, s = typeof part.scale === 'number' ? [part.scale, part.scale, part.scale] : part.scale, t = part.pos, out = [];
-    for (var i = 0; i < 8; i++) out.push([0, 1, 2].map(function (k) { return ((i >> k) & 1 ? m.hi[k] : m.lo[k]) * s[k] + t[k]; }));
+    var m = part.mesh, out = [];
+    for (var i = 0; i < 8; i++) out.push(XP.partPoint(part, [0, 1, 2].map(function (k) { return (i >> k) & 1 ? m.hi[k] : m.lo[k]; })));
     return out;
   };
   XP.screenRect = function (C, pts) {
@@ -147,6 +147,69 @@
   };
   XP.mesh.fromFaces = mk;
 
+  /* A surface z = fn(x, y) (a loss landscape, a heightfield), as parts: o.x = [x0, x1], o.y = [y0, y1], o.nx × o.ny cells
+     (default 16 × 16), each split into two triangular columns standing on z0 (default 0) and topped by the surface. The
+     columns are convex, so every renderer orders, shades and outlines them like any other part, and the outlines draw
+     the surface's mesh. o.mat: a material, or fn(x, y, z) → material per column; o.layer, o.tag (default 'surface').
+     Returns the parts. A surface is built once: for a different shape, build another and switch with show. */
+  XP.surface = function (S, fn, o) {
+    o = o || {};
+    var nx = o.nx || 16, ny = o.ny || 16, X = o.x || [0, 1], Y = o.y || [0, 1], z0 = o.z0 || 0, H = [], i, j, out = [];
+    for (i = 0; i <= nx; i++) { H.push([]); for (j = 0; j <= ny; j++) H[i].push(Math.max(z0 + 1e-3, fn(X[0] + (X[1] - X[0]) * i / nx, Y[0] + (Y[1] - Y[0]) * j / ny))); }
+    function pt(i, j) { return [X[0] + (X[1] - X[0]) * i / nx, Y[0] + (Y[1] - Y[0]) * j / ny, H[i][j]]; }
+    function column(a, b, c) {                                       // a triangle of surface points, extruded down to z0
+      var lo = [a, b, c].map(function (q) { return [q[0], q[1], z0]; });
+      var faces = [[a, b, c], [lo[2], lo[1], lo[0]], [lo[0], lo[1], b, a], [lo[1], lo[2], c, b], [lo[2], lo[0], a, c]];
+      var m = mk(faces), cz = (a[2] + b[2] + c[2]) / 3;
+      out.push(S.add(m, { mat: typeof o.mat === 'function' ? o.mat(m.c[0], m.c[1], cz) : (o.mat || 'paper'), layer: o.layer || 0, tag: o.tag || 'surface' }));
+    }
+    for (i = 0; i < nx; i++) for (j = 0; j < ny; j++) {
+      var A = pt(i, j), B = pt(i + 1, j), C = pt(i + 1, j + 1), D = pt(i, j + 1);
+      if (Math.abs(A[2] - C[2]) <= Math.abs(B[2] - D[2])) { column(A, B, C); column(A, C, D); }   // split along the flatter diagonal
+      else { column(A, B, D); column(B, C, D); }
+    }
+    return out;
+  };
+
+  /* Shapes for things that turn (pair them with a part's rot). Both point along +x from the origin, the pivot, so
+     rot turns them about it. */
+  // the convex hull of 2-D points, counter-clockwise
+  function hull2(pts) {
+    pts = pts.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    function cr(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+    var lo = [], hi = [], i;
+    for (i = 0; i < pts.length; i++) { while (lo.length > 1 && cr(lo[lo.length - 2], lo[lo.length - 1], pts[i]) <= 1e-12) lo.pop(); lo.push(pts[i]); }
+    for (i = pts.length - 1; i >= 0; i--) { while (hi.length > 1 && cr(hi[hi.length - 2], hi[hi.length - 1], pts[i]) <= 1e-12) hi.pop(); hi.push(pts[i]); }
+    return lo.slice(0, -1).concat(hi.slice(0, -1));
+  }
+  // a dial needle: w0 wide at the pivot, narrowing to w1 (default 0.4·w0), with a rounded tip at len; h tall
+  XP.mesh.needle = function (len, w0, w1, h, steps) {
+    w1 = w1 == null ? w0 * 0.4 : w1; steps = steps || 6;
+    var r = w1 / 2, pts = [[0, -w0 / 2], [0, w0 / 2]];
+    for (var i = 0; i <= steps; i++) { var a = -Math.PI / 2 + Math.PI * i / steps; pts.push([len - r + r * Math.cos(a), r * Math.sin(a)]); }
+    return XP.mesh.prism(hull2(pts), 0, h);
+  };
+  /* A slice of a disc from angle a0 to a1 (degrees, counter-clockwise from +x), radius r1, h tall, for drawing an angle
+     as a filled wedge. r0 > 0 cuts the slice off at r0 with a straight inner edge (a band's segment). A part must be
+     convex, so the span is at most 180°: draw a wider angle or a long band as several sectors.
+     Memoized on its arguments (angles to 0.25°). For an angle that animates, build the span from 0 and turn the part
+     with rot = a0: frames then share a few meshes instead of making a new one each. */
+  var sectors = {};
+  XP.mesh.sector = function (r0, r1, a0, a1, h, steps) {
+    a0 = Math.round(a0 * 4) / 4; a1 = Math.round(a1 * 4) / 4;
+    var key = [r0, r1, a0, a1, h, steps].join(',');
+    if (sectors[key]) return sectors[key];
+    var span = a1 - a0;
+    if (!(span > 0 && span <= 180)) throw new Error('XP.mesh.sector: the span must be in (0°, 180°], got ' + span + '°');
+    steps = steps || Math.max(2, Math.ceil(span / 6));
+    var ring = r0 > 0 ? [] : [[0, 0]], i, a;
+    if (r0 > 0) { a = a0 * Math.PI / 180; ring.push([r0 * Math.cos(a), r0 * Math.sin(a)]); }
+    for (i = 0; i <= steps; i++) { a = (a0 + span * i / steps) * Math.PI / 180; ring.push([r1 * Math.cos(a), r1 * Math.sin(a)]); }
+    if (r0 > 0) { a = a1 * Math.PI / 180; ring.push([r0 * Math.cos(a), r0 * Math.sin(a)]); }
+    if (span === 180 && !(r0 > 0)) ring.shift();                    // a half disc: the centre lies on its straight edge
+    return (sectors[key] = XP.mesh.prism(ring, 0, h));
+  };
+
   /* ---------- materials: semantic names, coloured by the renderer's style or the site palette ----------
      paper: neutral bodies · steel: structure · subject: the one thing to watch (lit) ·
      mem / memx: memory, bytes, cost (pale / strong) · work / workx: compute, useful output ·
@@ -155,14 +218,15 @@
   XP.matIndex = function (m) { var i = XP.MATS.indexOf(m); return i < 0 ? 1 : i; };
 
   /* ---------- scene ----------
-     A part: { mesh, mat, pos [x,y,z], scale [sx,sy,sz] (or a number), show (bool), glow 0..1, layer, id }.
-     Renderers read parts every frame; animations write pos / scale / show / glow / mat.     */
+     A part: { mesh, mat, pos [x,y,z], scale [sx,sy,sz] (or a number), rot (degrees about the vertical z axis, around the
+     part's own origin), show (bool), glow 0..1, layer, id }. A mesh point q lands at pos + rotate(rot, q * scale).
+     Renderers read parts every frame; animations write pos / scale / rot / show / glow / mat.     */
   XP.scene = function (o) {
     o = o || {};
     var S = { parts: [], cam: XP.camera(o.camera), bg: o.bg || null, rev: 0 };
     S.add = function (mesh, p) {
       p = p || {};
-      var part = { mesh: mesh, mat: p.mat || 'paper', pos: p.pos || [0, 0, 0], scale: p.scale == null ? [1, 1, 1] : p.scale, show: p.show !== false,
+      var part = { mesh: mesh, mat: p.mat || 'paper', pos: p.pos || [0, 0, 0], scale: p.scale == null ? [1, 1, 1] : p.scale, rot: p.rot || 0, show: p.show !== false,
         glow: p.glow || 0, layer: p.layer || 0, id: p.id || ('p' + S.parts.length), tone: p.tone || 'mid', tag: p.tag || null };
       S.parts.push(part);
       return part;
@@ -170,18 +234,23 @@
     S.find = function (tag) { return S.parts.filter(function (p) { return p.tag === tag; }); };
     return S;
   };
-  // world-space faces of a part (scale, then translate); normals follow the inverse scale
+  // a part's transform: scale, then rotate about z by rot degrees, then translate
+  XP.scaleOf = function (part) { return typeof part.scale === 'number' ? [part.scale, part.scale, part.scale] : part.scale; };
+  XP.rotOf = function (part) { var a = (part.rot || 0) * Math.PI / 180; return [Math.cos(a), Math.sin(a)]; };   // [cos, sin]
+  XP.partPoint = function (part, q, s, cs) {                      // a mesh point in the world (s, cs: precomputed, optional)
+    s = s || XP.scaleOf(part); cs = cs || XP.rotOf(part);
+    var x = q[0] * s[0], y = q[1] * s[1], t = part.pos;
+    return [cs[0] * x - cs[1] * y + t[0], cs[1] * x + cs[0] * y + t[1], q[2] * s[2] + t[2]];
+  };
+  // world-space faces of a part; normals follow the inverse scale, then the rotation
   XP.partFaces = function (part) {
-    var s = typeof part.scale === 'number' ? [part.scale, part.scale, part.scale] : part.scale, t = part.pos;
+    var s = XP.scaleOf(part), cs = XP.rotOf(part);
     return part.mesh.faces.map(function (f) {
-      return { p: f.p.map(function (q) { return [q[0] * s[0] + t[0], q[1] * s[1] + t[1], q[2] * s[2] + t[2]]; }),
-               n: unit([f.n[0] / (s[0] || 1e-6), f.n[1] / (s[1] || 1e-6), f.n[2] / (s[2] || 1e-6)]) };
+      var n = unit([f.n[0] / (s[0] || 1e-6), f.n[1] / (s[1] || 1e-6), f.n[2] / (s[2] || 1e-6)]);
+      return { p: f.p.map(function (q) { return XP.partPoint(part, q, s, cs); }), n: [cs[0] * n[0] - cs[1] * n[1], cs[1] * n[0] + cs[0] * n[1], n[2]] };
     });
   };
-  XP.partCenter = function (part) {
-    var s = typeof part.scale === 'number' ? [part.scale, part.scale, part.scale] : part.scale, c = part.mesh.c, t = part.pos;
-    return [c[0] * s[0] + t[0], c[1] * s[1] + t[1], c[2] * s[2] + t[2]];
-  };
+  XP.partCenter = function (part) { return XP.partPoint(part, part.mesh.c); };
   // four side tones by facing plus a lighter top: 'tp' or 's0'..'s3' (s0 darkest)
   XP.toneOf = function (n) {
     if (n[2] > 0.72) return 'tp';

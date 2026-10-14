@@ -34,7 +34,8 @@
     L.forEach(function (row, i) { if (row[rowBest[i]] < L[bi][bj]) { bi = i; bj = rowBest[i]; } });
     return { L: L, rowBest: rowBest, best: [bi, bj], min: L[bi][bj] };
   }
-  var G8 = grid(8), G16 = grid(16);
+  var G8 = grid(8), G16 = grid(16), GC = { 8: G8, 16: G16 };
+  function gridAt(X) { return GC[X] || (GC[X] = grid(X)); }
   Alchemy.surface = { LRS: LRS, BS: BS, G8: G8, G16: G16, fmtLR: fmtLR };
 
   Alchemy.figSurface = function (host, opt) {
@@ -97,6 +98,10 @@
       caps.forEach(function (r) { r.forEach(function (c) { c.show = false; c.mat = 'paper'; c.glow = 0; }); });
     } });
     ACTS.forEach(function (a, k) { tl.at(a.t0); tl.beat(a.title, a.say, { still: (ACTS[k + 1] ? ACTS[k + 1].t0 : TOTAL) - 1.2 }); });
+    // a prediction before the other batch sizes rise (the film stops here once; answers go to the ledger)
+    tl.at(ACTS[1].t0);
+    tl.ask('u1-fig1-b512', 'At batch 64, d8’s best rate is 0.006. Train at batch 512, eight times the batch: where is the best rate now?',
+      ['About the same, 0.006', 'One step up, 0.012', 'Three steps up, 0.048: 8× the batch, 8× the rate', 'One step down, 0.003'], { answer: 1, hold: 3 });
     tl.at(0);
     tl.play(TOTAL, function (p, S, t) {
       var act = actAt(t), m = morphAt(t), G = m < 0.5 ? G8 : G16;
@@ -117,12 +122,16 @@
     }, { at: 0, ease: XP.ease.linear });
 
     /* ---------- labels and readout ---------- */
-    function labels(t) {
-      var Lb = [], act = actAt(t), m = morphAt(t), G = m < 0.5 ? G8 : G16;
-      LRS.forEach(function (lr, j) { Lb.push({ p: [cx(j), RY - 0.9, -0.4], text: fmtLR(lr), cls: 'dim', wide: j % 2 === 1 }); });
-      BS.forEach(function (B, i) { Lb.push({ p: [RX - 0.8, cy(i), -0.4], text: String(B), cls: 'dim', align: 'r' }); });
+    function rulers(Lb) {                                         // the two rulers' labels; ticks thin themselves when they collide
+      LRS.forEach(function (lr, j) { Lb.push({ p: [cx(j), RY - 0.9, -0.4], text: fmtLR(lr), cls: 'dim', group: 'lr', occlude: true }); });
+      BS.forEach(function (B, i) { Lb.push({ p: [RX - 0.8, cy(i), -0.4], text: String(B), cls: 'dim', align: 'r', group: 'b', occlude: true }); });
       Lb.push({ p: [cx(NX - 1) + 2.4, RY, -0.4], text: 'learning rate', short: 'lr', cls: 'tag', align: 'l' });
       Lb.push({ p: [RX - 0.9, cy(NY - 1) + 2.8, -0.4], text: 'batch (sequences)', short: 'batch', cls: 'tag', align: 'r' });
+      return Lb;
+    }
+    function labels(t) {
+      var Lb = [], act = actAt(t), m = morphAt(t), G = m < 0.5 ? G8 : G16;
+      rulers(Lb);
       if (act === 0 && t > 7.2) Lb.push({ p: [cx(J8), cy(B64), hOf(G8.L[B64][J8] - G8.min) + 1.2], text: 'best at batch 64', short: 'best', cls: 'me' });
       if (act === 3 && t > 34) Lb.push({ p: [cx(J8), cy(B64), heightAt(B64, J8, t) + 3.4], text: 'd8’s best rate', short: 'd8 best', cls: 'hot' });
       return Lb;
@@ -141,12 +150,43 @@
       return (X === 8 ? 'd8' : 'd16') + ' · batch 64 · best lr ' + fmtLR(LRS[G.rowBest[B64]]) + (X === 16 ? ' · lr ' + fmtLR(LRS[J8]) + ' costs +' + (G16.L[B64][J8] - G16.L[B64][G16.rowBest[B64]]).toFixed(3) : '');
     }
 
+    /* ---------- free play: any model size, and a rate held fixed across the grid ---------- */
+    function freeDraw(q) {
+      var G = gridAt(q.X), held = q.held;
+      for (var i = 0; i < NY; i++) for (var j = 0; j < NX; j++) {
+        var h = hOf(G.L[i][j] - G.min), c = cols[i][j], cp = caps[i][j];
+        c.show = cp.show = true; c.scale = [1, 1, h]; cp.pos = [cx(j), cy(i), h - 0.06];
+        var mat = 'steel', cap = 'paper', glow = 0;
+        if (G.rowBest[i] === j) { mat = 'subject'; cap = 'subject'; }
+        if (G.best[0] === i && G.best[1] === j) { mat = 'gold'; cap = 'gold'; glow = 0.35; }
+        if (j === held && G.rowBest[i] !== j) { mat = 'mem'; cap = 'memx'; glow = 0.15; }
+        c.mat = mat; cp.mat = cap; c.glow = cp.glow = glow;
+      }
+    }
+    function freeLabels(q) {
+      var Lb = rulers([]), G = gridAt(q.X);
+      if (q.held >= 0) Lb.push({ p: [cx(q.held), cy(0) - P / 2 - 0.2, hOf(G.L[0][q.held] - G.min) + 1.4], text: 'held at ' + fmtLR(LRS[q.held]), short: 'held', cls: 'hot' });
+      return Lb;
+    }
+    function freeReadout(q) {
+      var G = gridAt(q.X), own = G.L[B64][G.rowBest[B64]], s = 'd' + q.X + ' · batch 64: best lr ' + fmtLR(LRS[G.rowBest[B64]]);
+      if (q.held >= 0) s += ' · lr ' + fmtLR(LRS[q.held]) + (q.held === G.rowBest[B64] ? ' is the best' : ' costs +' + (G.L[B64][q.held] - own).toFixed(3));
+      return s;
+    }
+
     return XP.player(host, {
       id: opt.id || 'surface', fig: opt.fig || 'Fig. 1', title: 'A field of runs: learning rate × batch size', scene: S, tl: tl,
       labels: labels, readout: readout, stillAt: ACTS[1].t0 + 9, loop: true, gl: false,
+      free: {
+        controls: [{ id: 'X', label: 'model', values: [4, 6, 8, 12, 16], value: 8, fmt: function (X) { return 'd' + X; } },
+                   { id: 'held', label: 'rate held fixed', options: [[-1, 'none']].concat(LRS.map(function (lr, j) { return [j, fmtLR(lr)]; })), value: J8 }],
+        draw: freeDraw, labels: freeLabels, readout: freeReadout,
+        ask: { id: 'u1-fig1-d4', q: 'Shrink the model from d8 to d4. Which way does the valley move?', options: ['Toward larger rates', 'It stays where it is', 'Toward smaller rates'], answer: 0 }
+      },
+      onAsk: opt.onAsk,
       label: 'A grid of 48 columns on a base. Left to right, eight learning rates from 0.0004 to 0.048, each twice the previous; front to back, six batch sizes from 16 to 512. Each column is one training run, and its height is how far the run’s final loss sits above the best run. Four acts: one sweep at batch 64; the full grid, where the best rate for each batch lies on a diagonal valley; one rate borrowed for every batch; and the same grid for a model eight times larger, where the valley moves to smaller rates.',
       keys: [['steel', 'one finished run · height = loss above the best run'], ['subject', 'the best rate for that batch size'], ['gold', 'the best run in the grid'],
-             ['mem', 'a run at a borrowed rate: the extra loss is the rate’s, not the batch’s'], ['paper', 'the floor: one tile per run']],
+             ['mem', 'a run at a borrowed or held rate: the extra loss is the rate’s, not the batch’s or the model’s'], ['paper', 'the floor: one tile per run']],
       caption: opt.caption || ''
     });
   };
