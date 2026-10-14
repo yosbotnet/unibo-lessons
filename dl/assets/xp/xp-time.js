@@ -33,6 +33,19 @@
     // a story beat: a title and a line of narration, shown from now until the next beat
     tl.beat = function (title, say, extra) { var b = { t: tl.cursor, title: title, say: say || '' }; for (var k in extra) b[k] = extra[k]; tl.beats.push(b); return tl; };
     tl.at = function (t) { tl.cursor = t; return tl; };
+    /* A prediction: ask(id, question, options, { hold, reveal, answer, confidence }). The player stops here until the
+       viewer answers or skips, then plays on (from `reveal` when given). The question stays on screen for `hold` seconds
+       of film time after it (default 2.5, added to the timeline): with the viewer's answer, or as a still in exports and
+       under reduced motion. answer: the index of the true option, passed on with the viewer's answer; confidence: the
+       levels offered, in % (default [50, 70, 90]; false for none). */
+    tl.asks = [];
+    tl.ask = function (id, question, options, opt) {
+      opt = opt || {};
+      var a = { id: id, q: question, options: options || [], t: tl.cursor, hold: opt.hold != null ? opt.hold : 2.5, reveal: opt.reveal != null ? opt.reveal : null,
+        answer: opt.answer != null ? opt.answer : null, confidence: opt.confidence === false ? [] : (opt.confidence || [50, 70, 90]) };
+      tl.asks.push(a); tl.cursor += a.hold; tl.duration = Math.max(tl.duration, tl.cursor);
+      return tl;
+    };
 
     /* Voice. say(id, spoken, {show, gap}) puts a narration line at the cursor and advances by its
        length: the recorded clip's when a voice manifest has it (XP.VOICE[film], written by
@@ -86,7 +99,9 @@
        styleAt(t) → { a, b, mix }   (GL style schedule; optional),
        readout(t, S) → text,          stillAt (t for reduced motion), loop (bool), id (export key),
        posterAt (the frame behind the play button of a narrated film), autoplay (default: only silent films),
-       gl: true|false (try the shader renderer), styles: names offered in the style picker })
+       gl: true|false (try the shader renderer), styles: names offered in the style picker,
+       free: { controls, draw(params, S), ... } (after the tour, the scene follows controls: see free play below),
+       onAsk(answer) (each answer to a tl.ask; also an 'xp-ask' event on host) })
      Everything you operate lives inside the frame, as on a video: click the picture to play or pause,
      subtitles at the bottom, a control bar that fades while the film plays, the acts as segments of the
      scrubber, and a lower-third title as each act begins. Below the card: only the legend and the caption. */
@@ -199,28 +214,96 @@
         : 'SVG' + (glOff && glOff.software ? ' (software GPU: ' + glOff.gpu + ')' : '');
       Q.box.textContent = r + (Q.ema ? ' · ' + Q.ema.toFixed(1) + ' ms/frame · js ' + Q.js.toFixed(1) + ' ms' : '');
     }
-    /* labels: HTML text pinned to 3D points (o.labels(t, S) → [{ p:[x,y,z], text, short, wide, cls, align: 'r'|'l', o }]), the same in both renderers */
-    var labLayer = null, labEls = [];
-    if (o.labels) { labLayer = document.createElement('div'); labLayer.className = 'xp-labels'; labLayer.setAttribute('aria-hidden', 'true'); stage.appendChild(labLayer); }
-    function drawLabels() {
+    /* labels: HTML text pinned to 3D points, the same in every renderer. o.labels(t, S) → [{ p:[x,y,z], text, short, wide,
+       cls, align: 'r'|'l', o, group, occlude, flat, size }]:
+       - short: the text on phones ('' hides the label there); wide: shown on wide screens only;
+       - group: labels sharing a group are a row of ticks, in order; when neighbours collide on screen, every other one
+         is dropped (then every 4th kept, and so on) until they fit;
+       - occlude: fades the label when a part stands between it and the camera;
+       - flat: printed on a plane, foreshortened with it: true (the floor, reading along +x), [ux, uy] (the floor,
+         reading along that direction) or { u, v } (reading direction and text-up direction, world vectors). size: the
+         text height in world units (default 0.5). */
+    var labLayer = null, labEls = [], sized = {}, meter = null;
+    if (o.labels || (o.free && o.free.labels)) { labLayer = document.createElement('div'); labLayer.className = 'xp-labels'; labLayer.setAttribute('aria-hidden', 'true'); stage.appendChild(labLayer); }
+    if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', function () { sized = {}; });
+    function sizeOf(txt, cls) {                                   // a label's box in CSS px, measured once per text and class
+      var key = cls + '|' + txt, m = sized[key]; if (m) return m;
+      if (!meter) { meter = document.createElement('span'); meter.style.visibility = 'hidden'; labLayer.appendChild(meter); }
+      meter.className = 'xp-label' + (cls ? ' ' + cls : ''); meter.textContent = txt;
+      return (sized[key] = [meter.offsetWidth, meter.offsetHeight]);
+    }
+    function behind(p, Sc, d) {                                   // does a part stand between world point p and the camera?
+      for (var i = 0; i < Sc.parts.length; i++) {
+        var q = Sc.parts[i]; if (!q.show || q.mat === 'none') continue;
+        var sc = XP.scaleOf(q), m = q.mesh; if (!(Math.abs(sc[0]) > 1e-4 && Math.abs(sc[1]) > 1e-4 && Math.abs(sc[2]) > 1e-4)) continue;
+        var c = XP.partCenter(q), rr = 0.5 * Math.hypot((m.hi[0] - m.lo[0]) * sc[0], (m.hi[1] - m.lo[1]) * sc[1], (m.hi[2] - m.lo[2]) * sc[2]);
+        var w = [c[0] - p[0], c[1] - p[1], c[2] - p[2]], al = w[0] * d[0] + w[1] * d[1] + w[2] * d[2];
+        if (al < -rr || w[0] * w[0] + w[1] * w[1] + w[2] * w[2] - al * al > rr * rr) continue;   // its bounding sphere misses the ray
+        var Fs = XP.partFaces(q), s0 = -1e30, s1 = 1e30;           // the ray p + s·d inside every face's half-space (convex part)
+        for (var j = 0; j < Fs.length && s0 < s1; j++) {
+          var n = Fs[j].n, v = Fs[j].p[0], num = n[0] * (v[0] - p[0]) + n[1] * (v[1] - p[1]) + n[2] * (v[2] - p[2]), den = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+          if (Math.abs(den) < 1e-12) { if (num < 0) s1 = -1e30; } else if (den > 0) s1 = Math.min(s1, num / den); else s0 = Math.max(s0, num / den);
+        }
+        if (s0 < s1 && s0 > 1e-6 * (1 + rr)) return true;            // a point inside a part (its own) doesn't count
+      }
+      return false;
+    }
+    function overlap(a, b) {                                     // two convex outlines (4 corners each, screen px), 2 px apart
+      var polys = [a, b];
+      for (var k = 0; k < 2; k++) for (var i = 0; i < 4; i++) {
+        var P = polys[k], e = [P[(i + 1) % 4][0] - P[i][0], P[(i + 1) % 4][1] - P[i][1]], l = Math.hypot(e[0], e[1]) || 1, n = [-e[1] / l, e[0] / l];
+        var r = [a, b].map(function (Q) { var lo = 1e9, hi = -1e9; Q.forEach(function (q) { var d = q[0] * n[0] + q[1] * n[1]; lo = Math.min(lo, d); hi = Math.max(hi, d); }); return [lo, hi]; });
+        if (r[0][1] + 2 <= r[1][0] || r[1][1] + 2 <= r[0][0]) return false;   // a separating axis
+      }
+      return true;
+    }
+    function drawLabels(t, Sc) {
       if (!labLayer) return;
       var narrow = stage.clientWidth < 520;                    // phones: short forms, and drop labels marked wide-only
-      var items = (o.labels(T, S) || []).filter(function (it) { return !(narrow && it.wide); }), B = XP.basis(S.cam), k = stage.clientWidth / S.cam.W;
-      while (labEls.length < items.length) { var e = document.createElement('span'); labLayer.appendChild(e); labEls.push(e); }
+      var src = freeOn && F.labels ? F.labels(params, Sc) : o.labels ? o.labels(t, Sc) : null;
+      var items = (src || []).filter(function (it) { return !(narrow && (it.wide || it.short === '')); });
+      var B = XP.basis(Sc.cam), k = stage.clientWidth / Sc.cam.W, zk = Sc.cam.zoom * k, groups = {};
+      while (labEls.length < items.length) { var e = document.createElement('span'); labLayer.insertBefore(e, meter); labEls.push(e); }
+      var L = items.map(function (it) {
+        var txt = narrow && it.short != null ? it.short : it.text, cls = it.cls || '', q = XP.project(Sc.cam, it.p, B), x = q[0] * k, y = q[1] * k;
+        var ax = it.align === 'r' ? 1 : it.align === 'l' ? 0 : 0.5, r = { it: it, txt: txt, cls: cls, on: true, box: null }, sz;
+        if (it.flat) {
+          var f = it.flat, u = f.u || (Array.isArray(f) ? [f[0], f[1], 0] : [1, 0, 0]), v = f.v || [-u[1], u[0], 0];
+          if (XP.v.dot(B.r, u) < -1e-9) { u = [-u[0], -u[1], -u[2]]; v = [-v[0], -v[1], -v[2]]; ax = 1 - ax; }   // keep it upright: read left to right
+          sz = sizeOf(txt, cls); var s = (it.size || 0.5) / sz[1];   // world units per CSS px of text
+          var M = [XP.v.dot(B.r, u) * zk * s, XP.v.dot(B.dn, u) * zk * s, -XP.v.dot(B.r, v) * zk * s, -XP.v.dot(B.dn, v) * zk * s];
+          r.tf = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) matrix(' + M.map(function (z) { return z.toFixed(4); }).join(',') + ',0,0) translate(' + (-ax * 100) + '%,-50%)';
+          if (it.group != null) r.box = [[-ax, -0.5], [1 - ax, -0.5], [1 - ax, 0.5], [-ax, 0.5]].map(function (c) { var a = c[0] * sz[0], b = c[1] * sz[1]; return [x + M[0] * a + M[2] * b, y + M[1] * a + M[3] * b]; });
+        } else {
+          r.tf = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) translate(' + (-ax * 100) + '%,-50%)';
+          if (it.group != null) { sz = sizeOf(txt, cls); var x0 = x - ax * sz[0], y0 = y - sz[1] / 2; r.box = [[x0, y0], [x0 + sz[0], y0], [x0 + sz[0], y0 + sz[1]], [x0, y0 + sz[1]]]; }
+        }
+        if (it.group != null) (groups[it.group] = groups[it.group] || []).push(r);
+        r.op = (it.o == null ? 1 : it.o) * (it.occlude && behind(it.p, Sc, B.d) ? 0.12 : 1);
+        return r;
+      });
+      Object.keys(groups).forEach(function (g) {                 // thin a row of ticks until neighbours stop colliding
+        var row = groups[g], step = 1;
+        for (; step < row.length; step *= 2) {
+          var ok = true, prev = null;
+          for (var j = 0; j < row.length && ok; j += step) { if (prev && overlap(prev, row[j].box)) ok = false; prev = row[j].box; }
+          if (ok) break;
+        }
+        row.forEach(function (r, j) { r.on = j % step === 0; });
+      });
       labEls.forEach(function (e, i) {
-        var it = items[i];
-        if (!it) { e.style.display = 'none'; return; }
-        var q = XP.project(S.cam, it.p, B);
-        e.style.display = ''; e.className = 'xp-label' + (it.cls ? ' ' + it.cls : '');
-        var txt = narrow && it.short ? it.short : it.text;
-        if (e.textContent !== txt) e.textContent = txt;
-        e.style.transform = 'translate(' + (q[0] * k).toFixed(1) + 'px,' + (q[1] * k).toFixed(1) + 'px) translate(' + (it.align === 'r' ? '-100%' : it.align === 'l' ? '0' : '-50%') + ',-50%)';
-        e.style.opacity = it.o == null ? '' : String(it.o);
+        var r = L[i];
+        if (!r || !r.on) { e.style.display = 'none'; return; }
+        e.style.display = ''; e.className = 'xp-label' + (r.cls ? ' ' + r.cls : '') + (r.it.flat ? ' flat' : '');
+        if (e.textContent !== r.txt) e.textContent = r.txt;
+        e.style.transform = r.tf;
+        e.style.opacity = r.op === 1 ? '' : String(r.op);
       });
     }
     var mode = glWant ? 'gl' : 'svg';
     stage.setAttribute('data-renderer', mode);
     var hasVoice = !!(tl.lines && tl.lines.some(function (l) { return l.src; }));
+    var F = o.free || null, freeOn = false, params = {}, filmId = o.id || host.id || 'film';
     var styleNames = o.styles || (XP.STYLES ? Object.keys(XP.STYLES) : []);
     var beatsOf = tl.beats.length ? tl.beats : [{ t: 0, title: o.title || '' }];
 
@@ -248,6 +331,7 @@
         }).join('') + '</div><div class="thumb"></div><div class="tip"></div></div>' +
       '<span class="time">0:00 / ' + mmss(total) + '</span><span class="now"></span>' +
       (hasVoice ? '<button type="button" class="b-snd" title="Sound (M)" aria-label="Sound" aria-pressed="false">' + ICON.mute + '</button>' : '') +
+      (F ? '<button type="button" class="b-free" title="Try it yourself (T)" aria-pressed="false">' + esc(F.label || 'Try it') + '</button>' : '') +
       '<button type="button" class="b-cc" title="Subtitles (C)" aria-label="Subtitles" aria-pressed="true">' + ICON.cc + '</button>' +
       (glWant ? '<span class="xp-menu-w"><button type="button" class="b-style" title="Style" aria-label="Style" aria-haspopup="true" aria-expanded="false">' + ICON.style + '</button>' +
         '<div class="xp-menu" role="menu" hidden>' + [['', 'As directed']].concat(styleNames.map(function (n) { return [n, n]; }), [['svg', (flatWant ? 'flat' : 'svg') + ' (fallback)']]).map(function (m) {
@@ -257,7 +341,7 @@
     var playBtn = bar.querySelector('.b-play'), scrub = bar.querySelector('.xp-scrub'), segEls = [].slice.call(scrub.querySelectorAll('.segs i')),
       thumb = scrub.querySelector('.thumb'), tip = scrub.querySelector('.tip'), timeEl = bar.querySelector('.time'), nowEl = bar.querySelector('.now'),
       soundBtn = bar.querySelector('.b-snd'), ccBtn = bar.querySelector('.b-cc'), styleBtn = bar.querySelector('.b-style'), menu = bar.querySelector('.xp-menu'),
-      fsBtn = bar.querySelector('.b-fs');
+      fsBtn = bar.querySelector('.b-fs'), freeBtn = bar.querySelector('.b-free');
 
     /* below the card: only what belongs to the figure */
     if (o.keys) {
@@ -273,6 +357,114 @@
     var T = calm ? (o.stillAt != null ? o.stillAt : 0) : (hasVoice && o.posterAt != null ? o.posterAt : 0);
     if (calm || !hasVoice) started = true;
     try { if (localStorage.getItem('xp-cc') === '0') card.classList.add('nocc'); } catch (e) {}
+
+    /* predictions (tl.ask): playing stops at each unanswered one, and a panel over the picture takes an answer and a
+       confidence. Each answer goes to o.onAsk and to an 'xp-ask' event on host (bubbling), for a page's ledger. */
+    var asks = (tl.asks || []).slice().sort(function (a, b) { return a.t - b.t; }), answers = {}, asking = null, exporting = false, pick = null, conf = null, askKey = '';
+    var askEl = document.createElement('div'); askEl.className = 'xp-ask'; askEl.hidden = true; askEl.setAttribute('role', 'group'); askEl.setAttribute('aria-label', 'Your prediction');
+    stage.appendChild(askEl);
+    var askMarks = asks.map(function () { var m = document.createElement('span'); m.className = 'ask-mark'; scrub.appendChild(m); return m; });
+    var FA = F && F.ask ? { id: F.ask.id || 'free', q: F.ask.q, options: F.ask.options || [], answer: F.ask.answer != null ? F.ask.answer : null,
+      confidence: F.ask.confidence === false ? [] : (F.ask.confidence || [50, 70, 90]), free: true, t: null, hold: 0, reveal: null } : null;
+    function askWin(t) { for (var i = asks.length - 1; i >= 0; i--) if (t >= asks[i].t - 1e-6 && t < asks[i].t + Math.max(asks[i].hold, 0.05)) return asks[i]; return null; }
+    function crossed(t0, t1) { for (var i = 0; i < asks.length; i++) if (!answers[asks[i].id] && asks[i].t >= t0 - 1e-9 && asks[i].t < t1) return asks[i]; return null; }
+    function askPanel() {
+      var a = asking || (freeOn ? null : askWin(T)), on = !!a && !exporting && (a === asking || (calm && !answers[a.id] && !a.free));
+      askEl.hidden = !a; card.classList.toggle('asking', on);
+      if (freeEl) freeEl.querySelector('fieldset').disabled = !!(asking && asking.free);
+      if (!a) { askKey = ''; return; }
+      var ans = answers[a.id], key = a.id + '|' + on + '|' + (ans ? 1 : 0);
+      if (key !== askKey) {
+        askKey = key;
+        var b = function (attr, v, text) { return '<button type="button" ' + attr + '="' + v + '"' + (on ? '' : ' disabled') + '>' + esc(text) + '</button>'; };
+        askEl.innerHTML = '<div class="xp-ask-in"><p class="q"><small>' + (a.free ? 'Before you try it' : 'Predict') + '</small>' + esc(a.q) + '</p>' +
+          '<div class="opts">' + a.options.map(function (x, i) { return b('data-i', i, x); }).join('') + '</div>' +
+          (a.confidence.length ? '<div class="conf"><span>How sure?</span>' + a.confidence.map(function (c) { return b('data-c', c, c + '%'); }).join('') + '</div>' : '') +
+          (on ? '<div class="go"><button type="button" class="lock">Lock in</button><button type="button" class="skip">Skip</button></div>' : ans && ans.skipped ? '<div class="go"><span>Skipped</span></div>' : '') + '</div>';
+        if (on && a === asking) { var f0 = askEl.querySelector('.opts button'); if (f0 && card.contains(document.activeElement)) f0.focus({ preventScroll: true }); }
+      }
+      var sel = on ? pick : ans ? ans.choice : null, cs = on ? conf : ans ? ans.confidence : null;
+      [].forEach.call(askEl.querySelectorAll('[data-i]'), function (e) { e.setAttribute('aria-pressed', String(+e.dataset.i === sel)); });
+      [].forEach.call(askEl.querySelectorAll('[data-c]'), function (e) { e.setAttribute('aria-pressed', String(+e.dataset.c === cs)); });
+      var lock = askEl.querySelector('.lock'); if (lock) lock.disabled = sel == null;
+    }
+    function answer(a, choice, c, skipped) {
+      var rec = { film: filmId, id: a.id, question: a.q, options: a.options.slice(), choice: choice, answer: choice == null ? null : a.options[choice],
+        confidence: c, skipped: skipped, correct: a.answer == null || choice == null ? null : choice === a.answer, right: a.answer, free: !!a.free };
+      answers[a.id] = rec; pick = conf = null;
+      var was = asking === a; asking = null;
+      try { host.dispatchEvent(new CustomEvent('xp-ask', { bubbles: true, detail: rec })); } catch (e) {}
+      if (o.onAsk) o.onAsk(rec);
+      stage.focus({ preventScroll: true });
+      if (a.free) { draw(); var c0 = freeEl.querySelector('input, select'); if (c0) c0.focus({ preventScroll: true }); return; }
+      if (calm) { seek(a.reveal != null ? a.reveal : a.t + a.hold); return; }
+      if (a.reveal != null) seek(a.reveal);
+      if (was) setPlaying(true); else draw();
+    }
+    askEl.addEventListener('pointerup', function (e) { e.stopPropagation(); });   // not a click on the picture
+    askEl.addEventListener('click', function (e) {
+      var b = e.target.closest('button'), a = asking || askWin(T); if (!b || b.disabled || !a) return;
+      if (b.dataset.i != null) pick = +b.dataset.i;
+      else if (b.dataset.c != null) conf = +b.dataset.c;
+      else if (b.classList.contains('lock')) { answer(a, pick, conf, false); return; }
+      else if (b.classList.contains('skip')) { answer(a, null, null, true); return; }
+      askPanel();
+    });
+
+    /* free play (o.free): after the last act, or from the "Try it" button, the scene follows controls instead of T.
+       o.free = { controls: [{ id, label, min, max, step, value, log, values: [...], options: [[value, text]], fmt(v) }],
+       draw(params, S) (after the timeline is applied at `base`, default the end), labels(params, S), readout(params, S),
+       ask: { q, options, confidence, answer, id } (a prediction before the controls unlock), label (the button's text),
+       auto (enter at the end of the film; default true) }. Scrubbing, playing or "Back to the film" returns to the tour. */
+    var freeEl = null, ctlEls = {};
+    if (F) {
+      freeEl = document.createElement('div'); freeEl.className = 'xp-free'; freeEl.hidden = true;
+      freeEl.innerHTML = '<div class="xp-free-h"><span>' + esc(F.label || 'Try it') + '</span><button type="button" class="back">Back to the film</button></div>';
+      var fs = document.createElement('fieldset'); fs.innerHTML = '<legend class="xp-sr">Controls</legend>'; freeEl.appendChild(fs);
+      (F.controls || []).forEach(function (c) {
+        var lab = document.createElement('label'), id = c.id, inp;
+        if (c.options) {
+          inp = document.createElement('select');
+          c.options.forEach(function (op) { var e = document.createElement('option'); e.value = String(op[0]); e.textContent = op[1] != null ? op[1] : op[0]; inp.appendChild(e); });
+          params[id] = c.value != null ? c.value : c.options[0][0];
+          inp.value = String(params[id]);
+        } else {
+          inp = document.createElement('input'); inp.type = 'range';
+          params[id] = c.value != null ? c.value : c.values ? c.values[0] : c.min;
+        }
+        lab.innerHTML = '<span class="n">' + esc(c.label || id) + '</span>'; lab.appendChild(inp);
+        var out = document.createElement('output'); lab.appendChild(out); fs.appendChild(lab);
+        ctlEls[id] = { c: c, inp: inp, out: out };
+        inp.addEventListener('input', function () { params[id] = fromInput(c, inp); syncCtl(id); draw(); });
+        syncCtl(id, true);
+      });
+      freeEl.querySelector('.back').addEventListener('click', function () { setFree(false); stage.focus({ preventScroll: true }); });
+      card.insertBefore(freeEl, subBox);
+      freeBtn.addEventListener('click', function () { setFree(!freeOn); });
+    }
+    // a range input: discrete values by index, log scales by exponent, else the value itself
+    function fromInput(c, inp) {
+      if (c.options) { var v = inp.value; return c.options.some(function (op) { return typeof op[0] === 'number'; }) ? +v : v; }
+      var x = +inp.value;
+      if (c.values) return c.values[Math.round(x)];
+      return c.log ? Math.pow(10, x) : x;
+    }
+    function syncCtl(id, setInput) {
+      var E = ctlEls[id], c = E.c, v = params[id];
+      if (setInput && !c.options) {
+        if (c.values) { E.inp.min = 0; E.inp.max = c.values.length - 1; E.inp.step = 1; E.inp.value = Math.max(0, c.values.indexOf(v)); }
+        else if (c.log) { E.inp.min = Math.log10(c.min); E.inp.max = Math.log10(c.max); E.inp.step = c.step || 'any'; E.inp.value = Math.log10(v); }
+        else { E.inp.min = c.min; E.inp.max = c.max; E.inp.step = c.step || 'any'; E.inp.value = v; }
+      } else if (setInput) E.inp.value = String(v);
+      E.out.textContent = c.fmt ? c.fmt(v) : c.options ? '' : String(v);
+    }
+    function setFree(on) {
+      if (!F) return; on = !!on; if (on === freeOn) return;
+      freeOn = on; card.classList.toggle('free', on); freeEl.hidden = !on; freeBtn.setAttribute('aria-pressed', String(on));
+      if (on) { if (playing) setPlaying(false); started = true; asking = FA && !answers[FA.id] ? FA : null; pick = conf = null; }
+      else if (asking && asking.free) asking = null;
+      draw();
+    }
     ccBtn.setAttribute('aria-pressed', String(!card.classList.contains('nocc')));
 
     /* sound: Web Audio, and the sound is the clock. Voice clips are decoded once and scheduled on the
@@ -409,6 +601,7 @@
     /* subtitles: the spoken line, each word lit as it is said; a silent film shows its beat's text */
     var curLine = null, curSub = null, wordEls = [];
     function subtitle() {
+      if (freeOn) { if (curLine || curSub) { curLine = null; curSub = null; wordEls = []; sub.textContent = ''; } sub.parentNode.classList.remove('on'); return; }
       if (tl.lines && tl.lines.length) {
         var L = tl.lineAt(T);
         if (L && T > L.t0 + L.dur + 0.9) L = null;                // the line has been said: clear the screen until the next
@@ -502,10 +695,12 @@
     }
 
     function draw() {
-      var sh = shotAt(T), tr = cutAt(sh, T);
+      var tNow = freeOn ? (F.base != null ? F.base : total - 1e-3) : T;
+      var sh = shotAt(tNow), tr = freeOn ? null : cutAt(sh, T);
       var useSvg = forced === 'svg' || (!glR && !glWait), glOK = !useSvg && glR && glR.ready() && !(glR.kind === 'webgpu' && glR.failed());
       if (tr && (useSvg || glOK)) freeze(tr, sh.at, glOK);
-      S = sh.scene; applyShot(sh, T);
+      S = sh.scene; applyShot(sh, tNow);
+      if (freeOn) F.draw(params, S);
       var view = flatWant ? null : viewOf(S);
       if (view) views.forEach(function (v) { v.svg.style.visibility = v === view ? '' : 'hidden'; });
       stage.setAttribute('data-renderer', useSvg ? (flatWant ? 'flat' : 'svg') : 'gl');
@@ -513,18 +708,24 @@
       else if (useSvg) view.svgR.render();
       else if (glR && glR.kind === 'webgpu' && glR.failed()) toGL();
       else if (glR && glR.ready()) {
-        var st = styleNow(T);
+        var st = styleNow(tNow);
         glR.setScene(S); glR.setStyles(st.a, st.b, st.mix, st.wipe);
         var g0 = performance.now(); glR.render(T); glMs = performance.now() - g0;
       }
       paintCut(tr);
-      drawLabels();
-      if (o.readout) { var r = o.readout(T, S) || ''; if (readout.textContent !== r) readout.textContent = r; readout.classList.toggle('on', !!r); }
+      drawLabels(tNow, S);
+      askPanel();
+      var ro = freeOn && F.readout ? function () { return F.readout(params, S); } : o.readout ? function () { return o.readout(tNow, S); } : null;
+      if (ro) { var r = ro() || ''; if (readout.textContent !== r) readout.textContent = r; readout.classList.toggle('on', !!r); }
       card.classList.toggle('poster', !started);
       /* the scrubber: each act fills in turn */
       var si = segOf(T);
       segEls.forEach(function (e, i) { var f = i < si ? 1 : i > si ? 0 : XP.clamp((T - beatsOf[i].t) / Math.max(segEnd(i) - beatsOf[i].t, 1e-6), 0, 1); e.firstChild.style.width = (f * 100).toFixed(2) + '%'; e.classList.toggle('cur', i === si); });
       var se = segEls[si]; if (se) thumb.style.left = (se.offsetLeft + se.firstChild.offsetWidth) + 'px';
+      asks.forEach(function (a, i) {                               // the predictions, as marks on the scrubber
+        var j = segOf(a.t), e = segEls[j], f = (a.t - beatsOf[j].t) / Math.max(segEnd(j) - beatsOf[j].t, 1e-6);
+        askMarks[i].style.left = (e.offsetLeft + f * e.offsetWidth) + 'px'; askMarks[i].classList.toggle('done', !!answers[a.id]);
+      });
       scrub.setAttribute('aria-valuenow', String(Math.round(T)));
       scrub.setAttribute('aria-valuetext', mmss(T) + ' of ' + mmss(total) + (tl.beats.length ? ', ' + beatsOf[si].title : ''));
       timeEl.textContent = mmss(T) + ' / ' + mmss(total);
@@ -534,10 +735,11 @@
         actEl.firstChild.textContent = tl.beats.length > 1 ? 'Act ' + (ROMAN[si] || si + 1) : ''; actEl.lastChild.textContent = tl.beats.length > 1 ? beatsOf[si].title : '';
       }
       var since = T - beatsOf[si].t;
-      actEl.classList.toggle('on', tl.beats.length > 1 && started && !calm && since >= 0.15 && since < 3.2);
+      actEl.classList.toggle('on', tl.beats.length > 1 && started && !calm && !freeOn && since >= 0.15 && since < 3.2);
       subtitle();
     }
     function setPlaying(on) {
+      if (on && freeOn) setFree(false);
       playing = on && !calm;
       if (playing && !started) { started = true; T = 0; }          // leave the poster frame: films start at the start
       playBtn.innerHTML = playing ? ICON.pause : ICON.play; playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play'); playBtn.title = (playing ? 'Pause' : 'Play') + ' (Space)';
@@ -549,6 +751,7 @@
     function tick(now) {
       var raw = last ? now - last : null, dt = raw != null ? Math.min(raw / 1000, 1 / 20) : 1 / 60; last = now;
       if (playing) {
+        var t0 = T;
         if (AU && sound) {                                        // the audio clock: T is what the speakers are playing
           if (AU.ctx.state !== 'running') { T += dt; AU.dirty = true; }   // no audio device yet: the wall clock, and re-lay when it wakes
           else {
@@ -558,7 +761,12 @@
           }
           scoreTick();
         } else T += dt;
-        if (T >= total) { if (o.loop !== false && !hasVoice) T = 0; else { T = total; setPlaying(false); } }
+        var q = crossed(t0, T);
+        if (q) { T = q.t; asking = q; pick = conf = null; setPlaying(false); }
+        else if (T >= total) {
+          if (F && F.auto !== false) { T = total; setPlaying(false); setFree(true); }
+          else if (o.loop !== false && !hasVoice) T = 0; else { T = total; setPlaying(false); }
+        }
       }
       var d0 = performance.now(); glMs = 0;
       draw();
@@ -566,9 +774,17 @@
       frame = visible && playing ? requestAnimationFrame(tick) : 0;
     }
     function kick() { if (!frame && visible && playing) { last = 0; Q.n = 0; frame = requestAnimationFrame(tick); } }
-    function seek(t) { started = true; T = Math.max(0, Math.min(total, t)); if (AU) { if (dragging) { relay(true); AU.dirty = true; } else relay(); } draw(); }
-    function goBeat(i) { i = Math.max(0, Math.min(beatsOf.length - 1, i)); var b = beatsOf[i]; seek(calm && b.still != null ? b.still : b.t + 0.01); }
+    function seek(t) { if (freeOn) setFree(false); asking = null; started = true; T = Math.max(0, Math.min(total, t)); if (AU) { if (dragging) { relay(true); AU.dirty = true; } else relay(); } draw(); }
+    function goBeat(i) {
+      i = Math.max(0, Math.min(beatsOf.length - 1, i)); var b = beatsOf[i];
+      if (calm) {                                                 // reduced motion: an act's unanswered prediction comes before its still
+        var end = b.still != null ? b.still : segEnd(i);
+        for (var k = 0; k < asks.length; k++) if (!answers[asks[k].id] && asks[k].t >= b.t - 1e-6 && asks[k].t <= end + 1e-6) { seek(asks[k].t); return; }
+      }
+      seek(calm && b.still != null ? b.still : b.t + 0.01);
+    }
     function toggle(showFlash) {
+      if (asking && !asking.free) { answer(asking, null, null, true); return; }   // play while a question waits: skip it
       if (hasVoice && !playing && !host.dataset.heard) { host.dataset.heard = '1'; setSound(true); }   // the first play is the gesture that allows sound
       if (!playing && T >= total - 0.05) T = 0;
       if (sound) audio();                                         // resume the context inside the gesture
@@ -591,7 +807,7 @@
 
     /* the picture is the play button; on touch, the first tap only brings the bar back */
     stage.addEventListener('pointerup', function (e) {
-      if (e.button || e.target.closest('.xp-big')) return;
+      if (e.button || e.target.closest('.xp-big') || freeOn) return;
       stage.focus({ preventScroll: true });
       if (e.pointerType === 'touch' && card.classList.contains('idle')) { wake(); return; }
       if (calm) return;
@@ -654,7 +870,7 @@
 
     /* keys, while the film has focus: Space/K play · ← → acts · J L five seconds · M sound · C subtitles · F full screen */
     card.addEventListener('keydown', function (e) {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea')) return;
       var onBtn = e.target.closest('button, .xp-menu'), si = segOf(T), k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
       if ((k === ' ' || k === 'Enter') && onBtn) return;
       if (k === ' ' || k === 'k') toggle(e.target === stage);
@@ -666,6 +882,7 @@
       else if (k === 'm' && soundBtn) { host.dataset.heard = '1'; setSound(!sound); }
       else if (k === 'c') setCC(card.classList.contains('nocc'));
       else if (k === 'f' && fsBtn) fsBtn.click();
+      else if (k === 't' && F) setFree(!freeOn);
       else return;
       e.preventDefault(); wake();
     });
@@ -688,12 +905,21 @@
     setPlaying(false);
     draw(); perfText();
 
-    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? (glR.kind || 'gl') : flatWant ? 'canvas2d' : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
+    var api = { card: card, export: function (on) { exporting = on !== false; card.classList.toggle('export', exporting); draw(); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? (glR.kind || 'gl') : flatWant ? 'canvas2d' : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
       lines: function () { return (tl.lines || []).map(function (l) { return { id: l.id, text: l.text, t0: l.t0, dur: l.dur }; }); },
       audio: function () { return (tl.lines || []).filter(function (l) { return l.src; }).map(function (l) { return { src: new URL(l.src, location.href).href, t0: l.t0 }; });  },
-      score: scoreWav };
+      score: scoreWav,
+      asks: asks, answers: function () { var r = {}; for (var k in answers) r[k] = answers[k]; return r; },
+      answer: function (id, choice, confidence) {                 // a page that already holds the viewer's answer (a sealed prediction)
+        var a = asks.filter(function (x) { return x.id === id; })[0] || (FA && FA.id === id ? FA : null); if (!a) return;
+        answers[id] = { film: filmId, id: id, question: a.q, options: a.options.slice(), choice: choice, answer: choice == null ? null : a.options[choice],
+          confidence: confidence == null ? null : confidence, skipped: choice == null, correct: a.answer == null || choice == null ? null : choice === a.answer, source: 'page' };
+        if (asking === a) asking = null; draw();
+      },
+      free: function (on) { setFree(on !== false); }, params: function () { var r = {}; for (var k in params) r[k] = params[k]; return r; },
+      setParams: function (p) { for (var k in p) if (ctlEls[k]) { params[k] = p[k]; syncCtl(k, true); } draw(); } };
     XP.films = XP.films || {};
-    XP.films[o.id || host.id || 'film'] = api;
+    XP.films[filmId] = api;
     return api;
   };
 })();

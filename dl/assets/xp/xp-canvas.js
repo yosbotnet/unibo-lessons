@@ -57,19 +57,20 @@
       var w = canvas.clientWidth || S.cam.W, h = canvas.clientHeight || S.cam.H;
       canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio); fill = stroke = null; lw = -1;   // resizing resets the context
     }
-    // per part, until its scale (or mesh) changes: world normals and tones
+    // per part, until its scale, rotation (or mesh) changes: world normals and tones
     function shapeOf(p, T, s) {
-      var c = p._cv;
-      if (c && c.T === T && c.s0 === s[0] && c.s1 === s[1] && c.s2 === s[2]) return c;
-      var F = T.faces.length, n = new Float64Array(3 * F), tone = [];
+      var c = p._cv, rot = p.rot || 0;
+      if (c && c.T === T && c.s0 === s[0] && c.s1 === s[1] && c.s2 === s[2] && c.rot === rot) return c;
+      var F = T.faces.length, n = new Float64Array(3 * F), tone = [], cs = XP.rotOf(p);
       for (var i = 0; i < F; i++) {
         var m = T.faces[i].n, x = m[0] / (s[0] || 1e-6), y = m[1] / (s[1] || 1e-6), z = m[2] / (s[2] || 1e-6), l = Math.hypot(x, y, z) || 1;
-        n[3 * i] = x / l; n[3 * i + 1] = y / l; n[3 * i + 2] = z / l;
+        n[3 * i] = (cs[0] * x - cs[1] * y) / l; n[3 * i + 1] = (cs[1] * x + cs[0] * y) / l; n[3 * i + 2] = z / l;
         tone.push(XP.toneOf([n[3 * i], n[3 * i + 1], n[3 * i + 2]]));
       }
-      return (p._cv = { T: T, s0: s[0], s1: s[1], s2: s[2], n: n, tone: tone, lim: p.mesh.round ? 0.5 : 0.8, vis: new Uint8Array(F), hull: null, az: 0, el: 0 });
+      return (p._cv = { T: T, s0: s[0], s1: s[1], s2: s[2], rot: rot, cs: cs, n: n, tone: tone, lim: p.mesh.round ? 0.5 : 0.8, vis: new Uint8Array(F), hull: null, az: 0, el: 0 });
     }
-    // the outline: convex hull of all projected corners. Panning, zooming and moving keep the same corners; turning doesn't.
+    // the outline: convex hull of all projected corners. Panning, zooming and moving keep the same corners; turning the
+    // camera or the part doesn't (a new rot makes a new shapeOf, so a fresh hull).
     function hullOf(c, T, az, el) {
       if (c.hull && c.az === az && c.el === el) return c.hull;
       var ids = [], i;
@@ -106,8 +107,9 @@
       for (i = 0; i < parts.length; i++) {
         p = parts[i]; s = typeof p.scale === 'number' ? [p.scale, p.scale, p.scale] : p.scale;
         if (!(p.show && p.mat !== 'none' && s[0] > 1e-4 && s[1] > 1e-4 && s[2] > 1e-4)) continue;
-        var mc = p.mesh.c;
-        p._cvs = s; p._cvd = (p.layer || 0) * 1e6 + d[0] * (mc[0] * s[0] + p.pos[0]) + d[1] * (mc[1] * s[1] + p.pos[1]) + d[2] * (mc[2] * s[2] + p.pos[2]);
+        var mc = p.rot ? XP.partCenter(p) : null;
+        if (!mc) { mc = p.mesh.c; mc = [mc[0] * s[0] + p.pos[0], mc[1] * s[1] + p.pos[1], mc[2] * s[2] + p.pos[2]]; }
+        p._cvs = s; p._cvd = (p.layer || 0) * 1e6 + d[0] * mc[0] + d[1] * mc[1] + d[2] * mc[2];
         live.push(p);
       }
       live.sort(function (a, b) { return a._cvd - b._cvd; });
@@ -115,8 +117,10 @@
         p = live[i]; s = p._cvs;
         var T = topoOf(p.mesh), c = shapeOf(p, T, s), V = T.v, t = p.pos, glow = p.glow > 0.02;
         if (P.length < 2 * T.n) P = new Float64Array(4 * T.n);
+        var rc = c.cs[0], rs = c.cs[1];
         for (j = 0; j < T.n; j++) {
-          var x = V[3 * j] * s[0] + t[0] - cx, y = V[3 * j + 1] * s[1] + t[1] - cy, w = V[3 * j + 2] * s[2] + t[2] - cz;
+          var lx = V[3 * j] * s[0], ly = V[3 * j + 1] * s[1];
+          var x = rc * lx - rs * ly + t[0] - cx, y = rs * lx + rc * ly + t[1] - cy, w = V[3 * j + 2] * s[2] + t[2] - cz;
           P[2 * j] = W2 + (r[0] * x + r[1] * y + r[2] * w) * z;
           P[2 * j + 1] = H2 + (dn[0] * x + dn[1] * y + dn[2] * w) * z;
         }

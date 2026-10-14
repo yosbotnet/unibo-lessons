@@ -129,16 +129,17 @@
   /* ---------- shaders ---------- */
   var GEO_VS = '#version 300 es\n' +
     'layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNrm;\n' +
-    'layout(location=2) in vec3 iPos; layout(location=3) in vec3 iScale; layout(location=4) in vec2 iMG; layout(location=5) in float iId;\n' +
+    'layout(location=2) in vec3 iPos; layout(location=3) in vec3 iScale; layout(location=4) in vec2 iMG; layout(location=5) in float iId; layout(location=6) in vec2 iRot;\n' +
     'uniform vec3 uR, uDn, uD, uC; uniform float uZoom; uniform vec2 uVB; uniform vec3 uMap; uniform vec2 uCss; uniform float uDR;\n' +
     'out vec3 vN; flat out vec2 vMG; flat out float vId;\n' +
     'void main(){\n' +
-    '  vec3 w = aPos * iScale + iPos, q = w - uC;\n' +
+    '  vec3 a = aPos * iScale; a.xy = vec2(iRot.x * a.x - iRot.y * a.y, iRot.y * a.x + iRot.x * a.y);\n' +   // scale, turn about z, move
+    '  vec3 w = a + iPos, q = w - uC;\n' +
     // exactly XP.project: viewBox px, then "meet" into the canvas (CSS px), then clip space
     '  float sx = uVB.x * 0.5 + dot(uR, q) * uZoom, sy = uVB.y * 0.5 + dot(uDn, q) * uZoom;\n' +
     '  vec2 c = vec2(uMap.y + sx * uMap.x, uMap.z + sy * uMap.x);\n' +
     '  gl_Position = vec4(c.x / uCss.x * 2.0 - 1.0, 1.0 - c.y / uCss.y * 2.0, clamp(-dot(uD, q) / uDR, -1.0, 1.0), 1.0);\n' +
-    '  vN = normalize(aNrm / max(abs(iScale), vec3(1e-4)) * sign(iScale + 1e-9));\n' +
+    '  vN = normalize(aNrm / max(abs(iScale), vec3(1e-4)) * sign(iScale + 1e-9)); vN.xy = vec2(iRot.x * vN.x - iRot.y * vN.y, iRot.y * vN.x + iRot.x * vN.y);\n' +
     '  vMG = iMG; vId = iId;\n' +
     '}';
   var GEO_FS = '#version 300 es\nprecision highp float;\n' +
@@ -529,7 +530,7 @@
     function warm() { if (!comp && !failed && ready) { startComp(); if (!par) linkComp(); } }
 
     /* meshes → vertex buffers (fan-triangulated convex faces, flat normals), one VAO each */
-    var meshes = {}, STRIDE = 9;
+    var meshes = {}, STRIDE = 11, ONE = [1, 0];   // floats per instance: pos, scale, mat, glow, id, cos and sin of rot
     var inst = gl.createBuffer(), instData = new Float32Array(STRIDE * 256);
     function meshOf(m) {
       if (meshes[m.id]) return meshes[m.id];
@@ -542,7 +543,7 @@
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(a), gl.STATIC_DRAW);
       gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-      for (var k = 2; k <= 5; k++) { gl.enableVertexAttribArray(k); gl.vertexAttribDivisor(k, 1); }
+      for (var k = 2; k <= 6; k++) { gl.enableVertexAttribArray(k); gl.vertexAttribDivisor(k, 1); }
       gl.bindVertexArray(null);
       return (meshes[m.id] = { vao: vao, count: a.length / 6 });
     }
@@ -687,6 +688,11 @@
         h[j] = (m.hi[j] - m.lo[j]) * 0.5 * Math.abs(s[j]);
         err += Math.max(Math.abs(m.lo[j]), Math.abs(m.hi[j])) * Math.abs(s[j]) + Math.abs(p.pos[j]) + Math.abs(C.center[j]);
       }
+      if (p.rot) {                                                   // a turned part: the box around its turned box
+        var cs = XP.rotOf(p), ca = Math.abs(cs[0]), sa = Math.abs(cs[1]), cx = q[0] - p.pos[0] + C.center[0], cy = q[1] - p.pos[1] + C.center[1];
+        q[0] = cs[0] * cx - cs[1] * cy + p.pos[0] - C.center[0]; q[1] = cs[1] * cx + cs[0] * cy + p.pos[1] - C.center[1];
+        var hx = h[0]; h[0] = ca * hx + sa * h[1]; h[1] = sa * hx + ca * h[1];
+      }
       var z = Math.abs(C.zoom * k), pad = 2 + err * z * 0.00001;
       var x = ox + (C.W * 0.5 + XP.v.dot(B.r, q) * C.zoom) * k;
       var y = cssH - oy - (C.H * 0.5 + XP.v.dot(B.dn, q) * C.zoom) * k;
@@ -736,6 +742,7 @@
           instData[o++] = p.pos[0] + B.d[0] * lz; instData[o++] = p.pos[1] + B.d[1] * lz; instData[o++] = p.pos[2] + B.d[2] * lz;
           instData[o++] = s[0]; instData[o++] = s[1]; instData[o++] = s[2];
           instData[o++] = XP.matIndex(p.mat); instData[o++] = p.glow || 0; instData[o++] = e.i + 1;
+          var cs = p.rot ? XP.rotOf(p) : ONE; instData[o++] = cs[0]; instData[o++] = cs[1];
         });
       });
       gl.bindBuffer(gl.ARRAY_BUFFER, inst);
@@ -759,6 +766,7 @@
         gl.vertexAttribPointer(3, 3, gl.FLOAT, false, st, off + 12);
         gl.vertexAttribPointer(4, 2, gl.FLOAT, false, st, off + 24);
         gl.vertexAttribPointer(5, 1, gl.FLOAT, false, st, off + 32);
+        gl.vertexAttribPointer(6, 2, gl.FLOAT, false, st, off + 36);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, M.count, g.list.length);
       });
       gl.bindVertexArray(null);
