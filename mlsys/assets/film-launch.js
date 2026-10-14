@@ -537,9 +537,13 @@
       if (t >= C.tues && t < C.there - 0.7) for (q = 0; q < 4; q++) {
         var ready = []; for (var k2 = 0; k2 < 12; k2++) { var w2 = smW[q * 12 + k2]; if (w2.show && w2 !== mine) ready.push(w2); }
         if (!ready.length) continue;
-        var pick = ready[Math.floor(hash(issueK * 4 + q) * ready.length)]; pick.glow = 0.9; pick.mat = 'gold';
-        disp[q].glow = 0.5 * (1 - beat); icache[q][Math.floor(hash(issueK * 4 + q + 0.5) * 12)].glow = 0.6 * (1 - beat);   // fetched, dispatched
-        for (var a2 = 0; a2 < 32; a2++) alus[q * 32 + a2].glow = 0.45 * (1 - beat);
+        // the beat lives in the small parts (dispatch bar, an i-cache line, the picked warp), each scheduler a quarter
+        // beat after the last, rising and falling smoothly. The lanes just glow while busy: 128 of them jumping back to
+        // full glow together, 4 times a second, strobed in the shader styles.
+        var qt = t / 0.24 - q * 0.25, qk = Math.floor(qt), qb = qt - qk, pulse = Math.pow(Math.sin(Math.PI * qb), 2);
+        var pick = ready[Math.floor(hash(qk * 4 + q) * ready.length)]; pick.glow = 0.9; pick.mat = 'gold';
+        disp[q].glow = 0.5 * pulse; icache[q][Math.floor(hash(qk * 4 + q + 0.5) * 12)].glow = 0.6 * pulse;   // fetched, dispatched
+        for (var a2 = 0; a2 < 32; a2++) alus[q * 32 + a2].glow = 0.2;
       }
       // my warp as 32 threads on quadrant 0's lanes (the same story as the chip's old close-up)
       var from = slotC(0, 1), unf1 = sg(t, C.warp - 0.1, 1.0), unf2 = sg(t, C.there - 0.7, 0.7), laneGone = sg(t, C.exit, 0.8);

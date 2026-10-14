@@ -130,6 +130,16 @@
     var svgR = XP.svgRenderer(svg, S), glR = null, canvas = null, glOff = null;
     var snap = document.createElement('div'); snap.className = 'xp-snap'; snap.setAttribute('aria-hidden', 'true'); stage.appendChild(snap);
     var views = [{ scene: S, svg: svg, svgR: svgR }];               // one SVG renderer per scene, made when its shot first shows
+    /* the fallback picture: a 2D canvas (xp-canvas.js) when the page loads it, else SVG. The <svg> stays either way:
+       it sizes the stage and carries the figure's label. One canvas serves every scene. */
+    var flatWant = !!XP.canvasRenderer, flat = null, flatR = null;
+    function flatOf() {
+      if (!flatR) {
+        flat = document.createElement('canvas'); flat.className = 'xp-flat'; flat.setAttribute('aria-hidden', 'true'); stage.insertBefore(flat, snap);
+        flatR = XP.canvasRenderer(flat, S, { pixelRatio: Math.min(2, window.devicePixelRatio || 1) });
+      }
+      return flatR;
+    }
     function viewOf(sc) {
       for (var i = 0; i < views.length; i++) if (views[i].scene === sc) return views[i];
       var e = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); e.setAttribute('class', 'xp-shot'); e.setAttribute('aria-hidden', 'true');
@@ -157,8 +167,11 @@
       try { glR = XP.glRenderer(canvas, S, { async: !now && !navigator.webdriver }); } catch (e) { glR = null; }
       if (!glR || !glR.supported) { noGL(); draw(); return; }
       Q.max = glR.scale();
-      glR.onReady(function (ok) { if (!ok) noGL(); draw(); perfText(); });
+      glR.onReady(function (ok) { if (!ok) noGL(); draw(); perfText(); warmGL(); });
     }
+    // the renderer starts with a shader for one style; its general shader (wipes, other styles) compiles while the film is
+    // paused, since in Firefox a compile holds up drawing for a moment
+    function warmGL() { setTimeout(function () { if (!playing && glR && glR.warm) glR.warm(); }, 400); }
     function toGL() {                                             // no WebGPU device, or it was lost: WebGL on a fresh canvas
       glOff = glR; glR = null; if (canvas) canvas.remove(); canvas = null; gpuWant = false; glWait = true; startGL(); draw();
     }
@@ -237,7 +250,7 @@
       (hasVoice ? '<button type="button" class="b-snd" title="Sound (M)" aria-label="Sound" aria-pressed="false">' + ICON.mute + '</button>' : '') +
       '<button type="button" class="b-cc" title="Subtitles (C)" aria-label="Subtitles" aria-pressed="true">' + ICON.cc + '</button>' +
       (glWant ? '<span class="xp-menu-w"><button type="button" class="b-style" title="Style" aria-label="Style" aria-haspopup="true" aria-expanded="false">' + ICON.style + '</button>' +
-        '<div class="xp-menu" role="menu" hidden>' + [['', 'As directed']].concat(styleNames.map(function (n) { return [n, n]; }), [['svg', 'svg (fallback)']]).map(function (m) {
+        '<div class="xp-menu" role="menu" hidden>' + [['', 'As directed']].concat(styleNames.map(function (n) { return [n, n]; }), [['svg', (flatWant ? 'flat' : 'svg') + ' (fallback)']]).map(function (m) {
           return '<button type="button" role="menuitemradio" data-s="' + m[0] + '" aria-checked="' + (m[0] === '') + '">' + m[1] + '</button>'; }).join('') + '</div></span>' : '') +
       (canFs ? '<button type="button" class="b-fs" title="Full screen (F)" aria-label="Full screen">' + ICON.fs + '</button>' : '');
     card.appendChild(bar);
@@ -425,7 +438,7 @@
       var p = (t - sh.at) / c.dur; return p < 1 ? { prev: shots[sh.i - 1], c: c, p: XP.clamp(p, 0, 1) } : null;
     }
     function freeze(tr, at, gl) {
-      var prev = tr.prev, key = prev.i + '|' + (gl ? 'gl ' + canvas.width + 'x' + canvas.height : 'svg') + '|' + forced + '|' + stage.clientWidth;
+      var prev = tr.prev, key = prev.i + '|' + (gl ? 'gl ' + canvas.width + 'x' + canvas.height : flatWant ? 'flat' : 'svg') + '|' + forced + '|' + stage.clientWidth;
       if (key === snapKey && snapEl) return; snapKey = key;
       var t = at - 1e-3; applyShot(prev, t);
       if (snapEl) snapEl.remove();
@@ -433,6 +446,10 @@
         var st = styleNow(t); glR.setScene(prev.scene); glR.setStyles(st.a, st.b, st.mix, st.wipe); glR.render(t);
         snapEl = document.createElement('canvas'); snapEl.width = canvas.width; snapEl.height = canvas.height;
         snapEl.getContext('2d').drawImage(canvas, 0, 0);            // same task as the render, so the drawing buffer is still there
+      } else if (flatWant) {
+        var fr = flatOf(); fr.setScene(prev.scene); fr.render();
+        snapEl = document.createElement('canvas'); snapEl.width = flat.width; snapEl.height = flat.height;
+        snapEl.getContext('2d').drawImage(flat, 0, 0);
       } else {
         var v = viewOf(prev.scene); v.svgR.render(); snapEl = v.svg.cloneNode(true); snapEl.setAttribute('class', 'xp-svg'); snapEl.style.visibility = '';   // keeps the material styles, drops xp-shot
       }
@@ -489,10 +506,11 @@
       var useSvg = forced === 'svg' || (!glR && !glWait), glOK = !useSvg && glR && glR.ready() && !(glR.kind === 'webgpu' && glR.failed());
       if (tr && (useSvg || glOK)) freeze(tr, sh.at, glOK);
       S = sh.scene; applyShot(sh, T);
-      var view = viewOf(S);
-      views.forEach(function (v) { v.svg.style.visibility = v === view ? '' : 'hidden'; });
-      stage.setAttribute('data-renderer', useSvg ? 'svg' : 'gl');
-      if (useSvg) view.svgR.render();
+      var view = flatWant ? null : viewOf(S);
+      if (view) views.forEach(function (v) { v.svg.style.visibility = v === view ? '' : 'hidden'; });
+      stage.setAttribute('data-renderer', useSvg ? (flatWant ? 'flat' : 'svg') : 'gl');
+      if (useSvg && flatWant) { var fr = flatOf(); fr.setScene(S); fr.render(); }
+      else if (useSvg) view.svgR.render();
       else if (glR && glR.kind === 'webgpu' && glR.failed()) toGL();
       else if (glR && glR.ready()) {
         var st = styleNow(T);
@@ -525,6 +543,7 @@
       playBtn.innerHTML = playing ? ICON.pause : ICON.play; playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play'); playBtn.title = (playing ? 'Pause' : 'Play') + ' (Space)';
       card.classList.toggle('playing', playing);
       wake(); kick(); relay(); if (!frame) draw();
+      if (!playing) warmGL();
     }
     var glMs = 0;
     function tick(now) {
@@ -669,7 +688,7 @@
     setPlaying(false);
     draw(); perfText();
 
-    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? (glR.kind || 'gl') : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
+    var api = { card: card, export: function (on) { card.classList.toggle('export', on !== false); }, time: function () { return T; }, setTime: function (t, style) { startGL(true); forced = style || ''; started = true; T = t; setPlaying(false); draw(); }, total: total, beats: tl.beats, renderer: function () { return glR ? (glR.kind || 'gl') : flatWant ? 'canvas2d' : 'svg'; }, play: function () { setPlaying(true); }, draw: draw,
       lines: function () { return (tl.lines || []).map(function (l) { return { id: l.id, text: l.text, t0: l.t0, dur: l.dur }; }); },
       audio: function () { return (tl.lines || []).filter(function (l) { return l.src; }).map(function (l) { return { src: new URL(l.src, location.href).href, t0: l.t0 }; });  },
       score: scoreWav };
