@@ -16,6 +16,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <ucontext.h>
 #include <algorithm>
 #include <cmath>
@@ -216,6 +217,15 @@ inline float rsqrtf(float x) { return 1.0f / std::sqrt(x); }
 inline float __frsqrt_rn(float x) { return 1.0f / std::sqrt(x); }
 inline float __ldg(const float* p) { return *p; }
 inline float4 __ldg(const float4* p) { return *p; }
+// Cycle counter and bit tricks (lab 4b). The clock is fake: wall time at a pretend 2.5 GHz.
+inline long long clock64()
+{ return (long long)(std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now().time_since_epoch()).count() * 2.5); }
+inline int __popc(unsigned x) { return __builtin_popcount(x); }
+template <typename T> T __ldcg(const T* p) { return *p; }
+inline float __int2float_rn(int x) { return (float)x; }
+inline int __float2int_rn(float x) { return (int)std::nearbyint(x); }
+inline int __float_as_int(float f) { int i; std::memcpy(&i, &f, 4); return i; }
+inline float __int_as_float(int i) { float f; std::memcpy(&f, &i, 4); return f; }
 #include <math.h>   // fmaxf, expf, tanhf, ... as global functions, like CUDA's
 
 // ---------------------------------------------------------------------------

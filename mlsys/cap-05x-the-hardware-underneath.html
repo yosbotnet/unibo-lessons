@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interlude — The hardware underneath: pipes, DRAM and clocks · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/xp/xp.css?v=20261013s">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-05-profiling.html">&larr; Ch. 5 — Profiling with Nsight</a>
+    <a href="index.html">Index</a>
+    <a href="cap-06-neural-networks-as-a-workload.html">Part II begins: Ch. 6 — Neural networks as a workload &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part I — The GPU · Interlude (optional, before Part II)</div>
+    <h1>The hardware underneath: pipes, DRAM and clocks</h1>
+    <div class="lk-meta"><span>~50 min read</span><span>2 animated figures</span><span>1 plate</span><span>lab 4b · ~45 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The interlude in one paragraph</h2>
+    <p>Chapters 2&ndash;5 gave you a model of the GPU that is accurate enough to predict and profile real kernels, and they rounded three things off to get there. &ldquo;128 FP32 lanes per SM&rdquo; is one of several execution pipes, and the others run at very different speeds: an <code>exp</code> goes through a unit an eighth as wide, a <code>double</code> through one sixty-four times slower. &ldquo;672 GB/s of DRAM&rdquo; is 24 independent channels, each made of banks that must open a row before they can deliver a byte, which is why the access pattern matters below the 32-byte sector. And &ldquo;2.51 GHz&rdquo; is a rated number; the real clock moves with power and temperature, and moves compute-bound kernels with it. This interlude opens those three boxes. Nothing in Part II depends on it, but it explains several things Part II will simply state: why softmax is never limited by its <code>exp</code> on your card but attention almost is on a B200, why a stray <code>0.5</code> can make a kernel ten times slower, why the practical DRAM ceiling sits near 88%, and why random access is fine as long as the unit of randomness is large.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this interlude</h3>
+    <ol>
+      <li><a href="#s1">What chapters 2&ndash;5 rounded off</a></li>
+      <li><a href="#s2">Issue and execute: the pipes of a quadrant</a></li>
+      <li><a href="#s3">Latency: waiting on the compiler, waiting on a scoreboard</a></li>
+      <li><a href="#s4">The SFU, and the price of <code>exp</code></a></li>
+      <li><a href="#s5">FP64 and the accidental double</a></li>
+      <li><a href="#s6">The rest of the quadrant</a></li>
+      <li><a href="#s7">Below the L2</a></li>
+      <li><a href="#s8">Clocks and power</a></li>
+      <li><a href="#s9">The rest of the chip, and where to read more</a></li>
+      <li><a href="#s10">Lab 4b: measure the hardware</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. What chapters 2&ndash;5 rounded off</h2>
+
+    <p>Every model of a machine leaves things out; the useful question is whether what it leaves out ever changes a decision. Part I&rsquo;s model left out three things that occasionally do:</p>
+
+    <table>
+      <tr><th>Part I said</th><th>What is underneath</th><th>When it changes a decision</th></tr>
+      <tr><td>An SM has 128 FP32 lanes, 32 per scheduler</td><td>Each quadrant has several execution pipes of different widths: FP32/INT32, a special function unit (SFU) for <code>exp</code>, <code>sin</code>, <code>rsqrt</code>, a tiny FP64 unit, load/store, a tensor core, a scalar &ldquo;uniform&rdquo; datapath</td><td>Kernels heavy in transcendental functions, integer address math or (accidentally) <code>double</code></td></tr>
+      <tr><td>DRAM delivers 672 GB/s in 32-byte sectors</td><td>24 channels of 8 bits, each with banks; a bank opens a row (a few KB) before reading it, and closes it before opening another</td><td>Random access with small units: gathers, embedding lookups, paged caches</td></tr>
+      <tr><td>The clock is 2.51 GHz</td><td>The rated boost clock; the real one moves with power, temperature and load, and the memory clock moves separately</td><td>Comparing measurements, and kernels near the ridge point</td></tr>
+    </table>
+
+    <p>Each section below follows the same pattern as chapter 4: a number from NVIDIA&rsquo;s documentation, what it predicts, and an experiment in lab 4b that checks it on your card. Two animated figures show the two places where timing is the whole story: one quadrant&rsquo;s pipes, cycle by cycle, and one memory channel, nanosecond by nanosecond.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Issue and execute: the pipes of a quadrant</h2>
+
+    <p>Chapter 2&rsquo;s scheduler picks one ready warp per cycle and issues its next instruction. Here is the part it skipped: <em>where</em> the instruction goes. NVIDIA&rsquo;s diagram of the RTX Blackwell SM shows each of the four quadrants (Nsight calls them SMSPs) with its own L0 instruction cache, warp scheduler, dispatch unit and 64 KB register file, feeding these units:</p>
+
+    <ul>
+      <li><strong>32 FP32/INT32 units.</strong> On Blackwell each one can do either a float or an integer operation in a given cycle. Nsight Compute splits them into two pipes, <code>fmaheavy</code> and <code>fmalite</code>: both do FP32 add, multiply and FMA, but only the heavy half does integer multiply (<code>IMAD</code>). That is why <code>IMAD</code> runs at half the FP32 rate.</li>
+      <li><strong>One SFU</strong> (special function unit; Nsight&rsquo;s <code>xu</code> pipe) for <code>MUFU</code>, the multi-function instruction: reciprocal, reciprocal square root, base-2 log and exponential, sine, cosine. 16 per SM per cycle, so 4 lanes per quadrant.</li>
+      <li><strong>FP64</strong>: 2 per SM per cycle on GeForce Blackwell. Half a lane per quadrant.</li>
+      <li><strong>4 load/store units</strong> that send memory instructions, shuffles and barrier operations to the L1 (section 6).</li>
+      <li><strong>A tensor core</strong> (chapter 8), and a <strong>uniform datapath</strong> for values every thread shares (section 6).</li>
+    </ul>
+
+    <p>Two numbers describe a pipe. Its <strong>throughput</strong> is how often it can accept a new warp instruction: a 32-lane pipe takes one every cycle, a 16-lane pipe one every 2 cycles, the 4-lane SFU one every 8. Its <strong>latency</strong> is how long until the result can be used, about 4 cycles for an FMA. A pipe is like the conveyor of chapter 3&rsquo;s Little&rsquo;s law: it can hold several instructions at once, at different stages.</p>
+
+    <p>NVIDIA publishes the throughputs as results per clock per SM in the CUDA C++ Best Practices Guide (the column for compute capability 12.0, which is your card). Dividing by 4 quadrants and then into 32 threads gives the cycles one warp instruction occupies its pipe:</p>
+
+    <table>
+      <tr><th>Operation (SASS)</th><th>Results / clock / SM</th><th>Cycles per warp instruction</th><th>Relative to FFMA</th></tr>
+      <tr><td>FP32 add, multiply, FMA (<code>FADD</code>, <code>FMUL</code>, <code>FFMA</code>)</td><td>128</td><td>1</td><td>1&times;</td></tr>
+      <tr><td>Integer add, integer min/max, warp vote</td><td>128</td><td>1</td><td>1&times;</td></tr>
+      <tr><td>FP16&times;2 (<code>HFMA2</code>, two halves per lane)</td><td>64 (128 halves)</td><td>2</td><td>same FLOPs</td></tr>
+      <tr><td>Integer multiply-add (<code>IMAD</code>), 3-input add</td><td>64</td><td>2</td><td>1/2</td></tr>
+      <tr><td>Shifts, logic (<code>LOP3</code>), FP32 min/max</td><td>64</td><td>2</td><td>1/2</td></tr>
+      <tr><td>Conversions int&harr;float, FP16&harr;FP32</td><td>64</td><td>2</td><td>1/2</td></tr>
+      <tr><td>Warp shuffle (<code>SHFL</code>)</td><td>32</td><td>4</td><td>1/4</td></tr>
+      <tr><td><code>MUFU</code>: <code>exp2</code>, <code>lg2</code>, <code>rcp</code>, <code>rsqrt</code>, <code>sin</code>, <code>cos</code></td><td>16</td><td>8</td><td>1/8</td></tr>
+      <tr><td>Population count, count leading zeros</td><td>16</td><td>8</td><td>1/8</td></tr>
+      <tr><td>FP64 (<code>DADD</code>, <code>DMUL</code>, <code>DFMA</code>) and conversions to/from FP64</td><td>2</td><td>64</td><td>1/64</td></tr>
+    </table>
+
+    <p>The scheduler is a pipe too: <strong>one warp instruction per cycle per quadrant</strong>, whatever kind it is. That single fact has a consequence chapter 4 hinted at. FP32 peak needs an FFMA issued every cycle, so <em>every other instruction</em> in the loop, an address computation, a load, a loop counter, a comparison, takes an issue slot that an FFMA could have used. Peak FLOP/s is a statement about a loop made only of FMAs. Real loops get close only when the FMAs vastly outnumber everything else, which is what tiling buys in chapter 7: each loaded value is reused in many FMAs.</p>
+
+    <div class="callout note">
+      <span class="callout-label">The FP32 and INT32 units are the same units</span>
+      <p>Turing had separate INT32 units, so the integer adds and logic of index math ran beside the float math. Ampere and Ada made half of each quadrant&rsquo;s units switchable between the two. On RTX Blackwell all 32 are: in a given cycle a unit does float work or integer work, not both. Index math now competes with the FMAs for the units as well as for issue slots. That is one reason the compiler hoists index math out of loops, and one reason the uniform datapath (section 6) exists.</p>
+    </div>
+
+    <details class="ym">
+      <summary>Your move: an inner loop contains 6 <code>FFMA</code>, 2 <code>IMAD</code> for addresses, 1 load from shared memory and 1 branch. Ignore latency. What fraction of FP32 peak can it reach at best, and what is the limit?</summary>
+      <p>Issue. 10 instructions per iteration, one per cycle: at least 10 cycles. The two FMA pipes together accept one warp instruction per cycle, and they need only 8 (6 FFMAs and 2 IMADs, the IMADs on the heavy half), so they are not the limit. 6 useful FFMAs in 10 issue cycles: 60% of peak at best. Unrolling (fewer branches and address updates per FFMA) and register tiling (more FFMAs per load) are the two ways up.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Latency: waiting on the compiler, waiting on a scoreboard</h2>
+
+    <p>An instruction that needs the result of an earlier one must wait for it. How the hardware knows how long to wait depends on the pipe.</p>
+
+    <p><strong>Fixed latency.</strong> FP32, integer and logic instructions always take the same number of cycles; the Nsight Compute Profiling Guide states that &ldquo;FFMA-to-FFMA dependency latency is 4 cycles&rdquo;. Because it is fixed, the hardware does not track it at all. The <em>compiler</em> does: every SASS instruction carries a few control bits, set by the compiler, that tell the scheduler how many cycles to hold this warp before its next instruction. (NVIDIA doesn&rsquo;t document their format; Jia et al. reverse-engineered it, see section 9.) A warp held this way shows up in Nsight Compute as the stall reason <strong><code>wait</code></strong>: &ldquo;waiting on a fixed latency execution dependency&rdquo;.</p>
+
+    <p><strong>Variable latency.</strong> A shared-memory load might hit a bank conflict; a global load might hit L1, L2 or DRAM. The compiler cannot know, so the hardware keeps a small set of <em>scoreboards</em> per warp: the instruction that produces a value sets a scoreboard, the one that consumes it waits until the scoreboard clears. There are two kinds, and they are the two scoreboard stalls you met in chapter 5:</p>
+
+    <ul>
+      <li><strong><code>short_scoreboard</code></strong>: waiting on an <em>MIO</em> (memory input/output) operation that does not go to L1TEX: shared memory above all, but also <code>MUFU</code> and dynamic branches. Latency in the tens of cycles.</li>
+      <li><strong><code>long_scoreboard</code></strong>: waiting on L1TEX: global, local and texture memory. Hundreds of cycles if it goes to DRAM.</li>
+    </ul>
+
+    <p>Latency is hidden the way chapter 3 hid DRAM latency, by Little&rsquo;s law: <em>work in flight = latency &times; throughput</em>. For the FMA pipe that is 4 cycles &times; 1 warp instruction per cycle = <strong>4 independent FMAs in flight per quadrant</strong>. They can come from 4 warps that each have one chain (thread-level parallelism, TLP) or from one warp with 4 independent chains (instruction-level parallelism, ILP), or any mix. Chapter 4&rsquo;s compute benchmark used four chains per thread for exactly this reason.</p>
+
+    <div id="fig-pipes"></div>
+
+    <details>
+      <summary>What in Fig. 1 is real, and what is modelled?</summary>
+      <p><strong>Real</strong> (NVIDIA documentation): one issue per cycle per quadrant, 12 warp slots, a 64 KB register file, 32 FP32/INT32 lanes split into two pipes, a 4-lane SFU (16 per SM), FP64 at 2 per SM, 4-cycle FFMA latency, the meaning of each stall reason. <strong>Modelled</strong>: the SFU latency (18 cycles here) and the FP64 latency (72), a simple round-robin choice among ready warps, and every instruction going straight to its pipe. Real schedulers have more rules, and real code has loads, branches and register bank conflicts. Every frame comes from a small cycle-by-cycle model in <code>assets/fig-pipes.js</code>; the percentages in the readout are its output, not measurements. Lab 4b measures the real ones.</p>
+    </details>
+
+    <p>Reading Fig. 1 against chapter 5 gives a map from stall reason to hardware:</p>
+
+    <table>
+      <tr><th>Stall reason</th><th>The warp is waiting for&hellip;</th><th>Hardware behind it</th><th>Usual fix</th></tr>
+      <tr><td><code>wait</code></td><td>a fixed number of cycles set by the compiler</td><td>FMA/ALU latency (4+ cycles)</td><td>more independent instructions (ILP) or more warps</td></tr>
+      <tr><td><code>short_scoreboard</code></td><td>a shared-memory, <code>MUFU</code> or dynamic-branch result</td><td>MIO: shared memory, SFU</td><td>fewer bank conflicts, fewer/wider shared loads, fewer <code>MUFU</code></td></tr>
+      <tr><td><code>long_scoreboard</code></td><td>a global or local memory result</td><td>L1TEX, L2, DRAM</td><td>more bytes in flight (chapter 3), better locality</td></tr>
+      <tr><td><code>math_pipe_throttle</code></td><td>a pipe that is still busy</td><td>an oversubscribed pipe: SFU, FP64, or FMA at peak</td><td>change the instruction mix; or nothing, if it is the FMA pipe at peak</td></tr>
+      <tr><td><code>mio_throttle</code></td><td>room in the MIO queue</td><td>shared memory or SFU saturated</td><td>wider shared loads, fewer conflicts</td></tr>
+      <tr><td><code>lg_throttle</code></td><td>room in the local/global queue</td><td>too many small global accesses</td><td>vectorize loads (<code>float4</code>), avoid local memory spills</td></tr>
+      <tr><td><code>not_selected</code></td><td>its turn</td><td>another ready warp was picked</td><td>nothing: there is spare parallelism</td></tr>
+    </table>
+
+    <details class="ym">
+      <summary>Your move: a kernel&rsquo;s inner loop is one long dependent chain of FFMAs per thread. How many warps per scheduler does it need to keep the FMA pipe full? And if you rewrite it with two independent chains per thread?</summary>
+      <p>Four warps per scheduler with one chain each (4 cycles of latency, one issue per cycle): 16 warps per SM, a third of the 48-warp limit. With two chains per thread, two warps per scheduler suffice. Below that, Nsight Compute shows <code>wait</code> as the top stall and the issue slot idles, exactly like the first act of Fig. 1.</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. The SFU, and the price of <code>exp</code></h2>
+
+    <p>When you write <code>expf(x)</code> in a kernel, the compiler does not emit one instruction. The SFU only computes 2<sup>x</sup> (<code>MUFU.EX2</code>), approximately. To build an accurate <code>expf</code>, the compiler multiplies by log<sub>2</sub>&nbsp;e, splits the result into an integer and a fraction, fixes up the rounding with a few FMAs, calls the SFU, and handles overflow and underflow. CUDA offers two versions, and the Programming Guide lists their accuracy:</p>
+
+    <table>
+      <tr><th>Function</th><th>Roughly compiles to</th><th>Maximum error</th></tr>
+      <tr><td><code>expf(x)</code></td><td>a handful of FMAs and one <code>MUFU.EX2</code></td><td>2 ulp (units in the last place) over the whole range</td></tr>
+      <tr><td><code>__expf(x)</code> (an <em>intrinsic</em>)</td><td>one <code>FMUL</code> and one <code>MUFU.EX2</code></td><td>2 + floor(|1.173&middot;x|) ulp: grows with |x|</td></tr>
+    </table>
+
+    <p>The same split exists for <code>__sinf</code>, <code>__logf</code>, <code>__fdividef</code> and others. The compiler flag <code>-use_fast_math</code> replaces every call with its intrinsic in one go. It implies <code>--ftz=true</code> (denormals flushed to zero), <code>--prec-div=false</code> and <code>--prec-sqrt=false</code> (fast, approximate division and square root) and <code>--fmad=true</code>. That is a lot of semantics to change with one flag; in this course we write intrinsics by hand where we want them and leave the rest accurate.</p>
+
+    <p>How much does it matter? Two cases, one where it doesn&rsquo;t and one where it does.</p>
+
+    <p><strong>Softmax on your card: not at all.</strong> A softmax over FP32 values reads 4 bytes and writes 4 bytes per element and does one <code>exp</code>. At the practical 590 GB/s that is about 74 billion elements per second. The SFUs can do 16 &times; 48 SMs &times; 2.51 GHz &asymp; 1.9 <em>trillion</em> <code>MUFU</code> per second, 26&times; more. Softmax is memory-bound by a wide margin; whether its <code>exp</code> takes one <code>MUFU</code> or ten instructions doesn&rsquo;t show up in its time. Chapter 4&rsquo;s rule holds: on the roofline, removing work you don&rsquo;t wait for buys nothing.</p>
+
+    <p><strong>Attention: it depends on the card.</strong> In FlashAttention (Part III) the scores never touch DRAM. Each score costs about 4<em>d</em> FLOPs on the tensor cores (a dot product of length <em>d</em> to make it, and its share of the product with V) and one <code>exp</code> on the SFU, and both units work on the same tile at the same time. Compare their speeds:</p>
+
+    <table>
+      <tr><th></th><th>Tensor FLOPs / clock / SM (FP16 in, FP32 accumulate, dense)</th><th><code>MUFU</code> / clock / SM</th><th>Tensor FLOPs per <code>exp</code> at balance</th><th>FLOPs per score, head dim <em>d</em></th></tr>
+      <tr><td>RTX 5070</td><td>512</td><td>16</td><td>32</td><td>256 at <em>d</em> = 64: the SFU needs 1/8 of the tensor time</td></tr>
+      <tr><td>B200 (datacenter Blackwell)</td><td>8,192</td><td>16</td><td>512</td><td>512 at <em>d</em> = 128: the SFU needs as long as the tensor cores</td></tr>
+    </table>
+
+    <p>Tensor cores got 16&times; faster per SM between the two chips; the SFU did not. On a B200, attention with head dimension 128 spends as long on <code>exp</code> as on matrix multiplication, and the two can overlap at best. FlashAttention-4 (2026) responds by computing part of the exponentials <em>without</em> the SFU: a cubic polynomial evaluated with FMAs on the FP32 pipe, which has 8&times; the SFU&rsquo;s throughput and is otherwise idle. On your card that trick isn&rsquo;t needed. The lesson generalizes: <strong>a unit that didn&rsquo;t scale becomes the bottleneck when everything around it did</strong>, and the fix is often to move its work to a unit that did.</p>
+
+    <p>The fourth and fifth acts of Fig. 1 show the same thing at the scale of one quadrant: one <code>MUFU</code> per instruction group saturates the SFU at one warp instruction per 8 cycles, but up to seven other instructions can issue in its shadow for free.</p>
+
+    <details class="ym">
+      <summary>Your move: GELU with the <code>tanh</code> approximation, <code>0.5x(1 + tanh(&radic;(2/&pi;)(x + 0.044715x&sup3;)))</code>, runs as its own elementwise kernel over FP16 activations. Is it SFU-bound? What if it were fused into the epilogue of a matmul instead?</summary>
+      <p>As its own kernel: no. It reads 2 bytes and writes 2 bytes per element, about 150 billion elements per second at 590 GB/s, and even an accurate <code>tanhf</code> (a few <code>MUFU</code> and a dozen FMAs) stays far below the SFU and FMA limits. Fused into a matmul epilogue, the bytes disappear and the kernel is limited by the tensor cores; the GELU then costs a few instructions per output element against roughly 2&times;<em>K</em> tensor FLOPs per output (<em>K</em> in the thousands). Still negligible. GELU only matters when <em>K</em> is small.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. FP64 and the accidental double</h2>
+
+    <p>GeForce cards are built for graphics and AI, which don&rsquo;t need 64-bit floats, so NVIDIA gives them just enough FP64 to run code that uses it: 2 operations per clock per SM, 1/64 of FP32. (Datacenter chips like the B200 have far more.) That is fine until a kernel uses <code>double</code> without meaning to. The classic way:</p>
+
+<pre><code class="language-cpp">__global__ void scale(float* y, const float* x, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i &lt; n) y[i] = x[i] * 0.5;    // 0.5 is a double literal
+}</code></pre>
+
+    <p>C++ promotes <code>x[i]</code> to <code>double</code>, multiplies, and converts back. In SASS that is <code>F2F.F64.F32</code>, <code>DMUL</code>, <code>F2F.F32.F64</code>: three instructions at the FP64 rate, 64 cycles each per warp. The fix is one character, <code>0.5f</code>. Other ways in: <code>pow(x, 2.0)</code>, <code>sqrt(2.0)</code> used as a constant, a <code>double</code> constant in a header, an unsuffixed literal like <code>1e-6</code> in a comparison. The sixth act of Fig. 1 shows what it looks like: the issue slot idles 98% of the time while the FP64 unit chews through one warp instruction every 64 cycles.</p>
+
+    <p>Will this slow a <em>memory-bound</em> kernel like <code>scale</code>? Each element needs three FP64 operations, and the GPU does 2 &times; 48 &times; 2.51 GHz &asymp; 240 billion per second: 80 billion elements per second, about the same as the 74 billion that DRAM allows. So the accident turns a cleanly memory-bound kernel into one limited by both, and any kernel with more than one stray double per element becomes FP64-bound. Two ways to catch it, both cheap:</p>
+
+<pre><code class="language-bash">cuobjdump -sass ./prog | grep -E "DMUL|DADD|DFMA|F2F\.F64"      # any FP64 instruction in the binary
+nvcc -Xptxas --warn-on-double-precision-use ...                   # ptxas warns at compile time</code></pre>
+
+    <p>The second is worth adding to every Makefile in this course that has no business using <code>double</code>. In Nsight Compute, the Compute Workload Analysis section shows the <code>fp64</code> pipe&rsquo;s utilization; anything above zero in a float kernel is an accident.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. The rest of the quadrant</h2>
+
+    <p>A few more units appear in Nsight Compute&rsquo;s pipe list. You don&rsquo;t need to tune for them, but you will see their names:</p>
+
+    <ul>
+      <li><strong>Uniform datapath</strong> (<code>uniform</code>): a scalar unit for values that are the same in every thread of the warp: base pointers, loop counters, <code>blockIdx</code>-derived offsets. It has its own small register file (uniform registers, <code>UR</code> in SASS). Work on it doesn&rsquo;t take an FP32/INT32 lane, though each instruction still uses the issue slot.</li>
+      <li><strong>Load/store</strong> (<code>lsu</code>): 4 units per quadrant. Every global, local and shared memory instruction passes through here on its way to the L1, and so do shuffles, special-register reads (<code>S2R</code>, e.g. reading <code>threadIdx</code>) and block-level barrier operations. That is why shuffles show up as memory-like traffic in the profiler.</li>
+      <li><strong>Branch units</strong>: the convergence barrier unit (<code>cbu</code>) handles warp-level convergence and branches, the divergence of chapter 2; the address divergence unit (<code>adu</code>) handles indirect jumps and also serves constant loads.</li>
+      <li><strong>Texture units</strong> (<code>tex</code>): 4 per SM, for graphics texture sampling. CUDA uses them for some read-only loads.</li>
+      <li><strong>Tensor core</strong> (<code>tc</code>): chapter 8.</li>
+    </ul>
+
+    <p>In the Compute Workload Analysis section, Nsight Compute shows the utilization of every one of these pipes. When the FMA pipe is not the busiest, that chart tells you which one is.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Below the L2</h2>
+
+    <p>Chapter 3 stopped at the L2: on a miss, a 32-byte sector comes from &ldquo;DRAM&rdquo;. Here is the path it takes, from top to bottom:</p>
+
+    <ol>
+      <li><strong>L2 slices.</strong> The 48 MB L2 is not one cache but many slices; each physical address belongs to exactly one slice, picked by a hash of its bits. NVIDIA doesn&rsquo;t publish the slice count for your chip; Nsight Compute&rsquo;s <code>lts__</code> metrics (L2 &ldquo;tag stage&rdquo;) count per slice.</li>
+      <li><strong>A crossbar</strong> connects every SM to every slice, so any SM can reach any address at the same cost.</li>
+      <li><strong>Six memory controllers</strong>, each 32 bits wide, each attached to one 2 GB GDDR7 chip: 192 bits, 12 GB.</li>
+      <li><strong>Four channels per chip.</strong> A GDDR7 chip is split into four independent 8-bit channels, so the card has 24. Each pin runs at 28 Gbit/s, so each channel moves 28 GB/s, and 24 &times; 28 = 672 GB/s, the number from chapter 1. GDDR7 sends 1.5 bits per symbol by using three voltage levels (PAM3) instead of two; that is how it reaches 28 Gbit/s per pin.</li>
+      <li><strong>Bursts.</strong> One access moves 32 bits per pin over 8 pins: 32 bytes, exactly one L2 sector, in about 1.14 ns.</li>
+    </ol>
+
+    <p>The address hash matters more than it looks. Early GPUs picked the channel from a few plain address bits, so a strided access pattern, like walking down a matrix column, could land on one channel while the others sat idle (&ldquo;partition camping&rdquo;). Today&rsquo;s hash scatters any regular pattern over all channels and slices; you no longer need to think about it.</p>
+
+    <h3>Banks and rows</h3>
+
+    <p>Inside each channel the memory is divided into <em>banks</em>, and each bank into <em>rows</em> of a few KB. A bank can only read from one row at a time, through its <strong>row buffer</strong>:</p>
+
+    <ul>
+      <li><strong>ACTIVATE</strong> copies a whole row into the row buffer. That takes about 10&ndash;15 ns.</li>
+      <li><strong>READ</strong> or <strong>WRITE</strong> moves one 32-byte burst between the row buffer and the pins. As long as the row stays open, these can go back to back at the full 1.14 ns per burst.</li>
+      <li><strong>PRECHARGE</strong> writes the row back and closes it, another 10&ndash;15 ns, before the bank can open a different row.</li>
+    </ul>
+
+    <p>On top of that, DRAM limits how many rows may be activated in any short window, to bound the current the chip draws (DDR&rsquo;s rule is four; the model below uses the same). A stream of reads that keeps hitting open rows runs at full speed. A stream where every burst needs its own row pays an ACTIVATE and a PRECHARGE per 32 bytes and hits the activation limit. Fig. 2 runs one channel through five traffic patterns.</p>
+
+    <div id="fig-dram"></div>
+
+    <details>
+      <summary>What in Fig. 2 is real, and what is modelled?</summary>
+      <p><strong>Real</strong>: six 32-bit controllers and six GDDR7 chips, four 8-bit channels per chip, 28 Gbit/s per pin, one 32-byte burst per 1.14 ns per channel, 672 GB/s in total, and the ACTIVATE &rarr; READ &rarr; PRECHARGE protocol. <strong>Modelled</strong>, illustrative and <em>not measured</em>: 16 banks per channel (as in GDDR6; GDDR7&rsquo;s exact organisation is in the JEDEC standard, which we have not checked), 2 KB rows, the timings (about 11 ns to activate, 11 ns to precharge, at most 4 activates per 20 ns, a few ns to turn the bus around), the number of L2 slices drawn, and the controller&rsquo;s policy (oldest request first, reads before writes, writes sent in batches). Refresh is not modelled, so streaming reaches 100% in the figure and about 88&ndash;92% on the real card. Each frame comes from the model in <code>assets/fig-dram.js</code>; the readout&rsquo;s GB/s is the model&rsquo;s bus utilization times 672.</p>
+    </details>
+
+    <p>The model&rsquo;s numbers over the 110 ns window:</p>
+
+    <table>
+      <tr><th>Traffic</th><th>Bursts per ACTIVATE</th><th>Bus busy (model)</th><th>What limits it</th></tr>
+      <tr><td>Streaming read</td><td>64</td><td>~100%</td><td>nothing (refresh, on real hardware)</td></tr>
+      <tr><td>Random 32 B sectors</td><td>1</td><td>~21%</td><td>the activation limit: 4 rows per 20 ns</td></tr>
+      <tr><td>Random 128 B chunks</td><td>4</td><td>~60%</td><td>activations and bank timing</td></tr>
+      <tr><td>Random 2 KB chunks</td><td>64</td><td>~100%</td><td>nothing: as good as a stream</td></tr>
+      <tr><td>Copy (read + write)</td><td>64</td><td>~86%</td><td>turning the bus around between read and write batches</td></tr>
+    </table>
+
+    <p>This is where the practical ceiling of chapter 4 comes from. Even a perfect stream loses a few percent to <strong>refresh</strong> (every row must be rewritten every few tens of milliseconds, and the chip pauses for it) and to <strong>read/write turnaround</strong> (a kernel that both reads and writes makes the bus switch direction, and each switch costs idle nanoseconds). Hence chapter 4&rsquo;s 590 GB/s, 88% of 672.</p>
+
+    <p>And this is the hardware reason behind a rule you will meet again in Part III: <strong>random access is fine when the unit of randomness is large.</strong> Chapter 3 already showed that a warp should use all 32 bytes of each sector it touches. Below the L2 the rule extends: scattered 32-byte sectors waste most of DRAM&rsquo;s time on opening rows, while scattered chunks of a few KB stream almost as well as one contiguous array. An embedding table of 4 KB rows, or a KV cache stored in pages of several KB (Part III&rsquo;s paged attention), can be read in random order at nearly full bandwidth.</p>
+
+    <h3>One more rung: the TLB</h3>
+
+    <p>Every address a kernel uses is virtual. Translating it to a physical address goes through a page table, cached in small TLBs (translation lookaside buffers) at each level. GPU memory is mapped in large pages, typically 2 MB, so a TLB with a few thousand entries covers gigabytes. But not unlimited gigabytes: chapter 3&rsquo;s latency staircase can creep up past a few hundred MB, and accesses spread randomly over the whole 12 GB miss the TLB and pay a page-table walk on top of DRAM latency. NVIDIA doesn&rsquo;t publish the TLB sizes; Jia et al. measured them on earlier GPUs by pointer-chasing with one access per page, and experiment H in lab 4b does the same on yours.</p>
+
+    <details class="ym">
+      <summary>Your move: a recommendation model looks up rows of an embedding table at random: 64 values of FP16 per row. Using the model in Fig. 2, roughly what fraction of DRAM bandwidth do you expect? What changes at 1,024 values per row?</summary>
+      <p>64 &times; 2 bytes = 128 bytes, four sectors per row looked up: the third act, about 60% in the model (lower on the real card, which also has refresh and TLB misses over a large table). At 1,024 values a row is 2 KB, a whole DRAM row&rsquo;s worth: close to streaming. This is one reason embedding tables are often stored with wide rows, or with several lookups batched so that each request carries more bytes.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. Clocks and power</h2>
+
+    <p>Chapter 4 computed the peak as 6,144 lanes &times; 2 FLOPs &times; 2.51 GHz = 30.9 TFLOP/s. The 2.51 GHz is the <em>rated boost clock</em>: a promise that the card will reach it under typical load. The clock it actually runs at is chosen continuously by the card&rsquo;s firmware (GPU Boost) as the highest frequency allowed by three limits: the power budget (250 W total graphics power on the 5070), the temperature, and the voltage. A cool card running light work usually goes above the rated boost; a card running heavy tensor-core work at its power limit may go below. RTX Blackwell changes its clock far faster than earlier GPUs (NVIDIA says about 1000&times;), so the clock can now move within a single frame, and so within a long kernel.</p>
+
+    <p>The memory clock is separate and much steadier: GDDR7 runs at its rated 28 Gbit/s whatever the SM clock does. That splits kernels into two kinds:</p>
+
+    <figure class="lk-fig" role="img" aria-label="A chart of kernel time against SM clock, from 1.8 to 3.0 gigahertz, normalized to 1 at the rated boost of 2.51 gigahertz. The compute-bound line falls as one over the clock, from 1.4 at 1.8 gigahertz to 0.84 at 3.0. The memory-bound line stays flat at 1. A band above 2.51 gigahertz marks where a cool card often runs.">
+      <div class="figure-diagram">
+        <svg viewBox="0 0 540 320" xmlns="http://www.w3.org/2000/svg" font-family="var(--lk-font)" font-size="15">
+          <rect x="308" y="30" width="128" height="220" fill="var(--lk-cobalt)" opacity="0.08"/>
+          <text x="372" y="22" text-anchor="middle" font-size="13" fill="var(--lk-cobalt-dark)">often, on a cool card</text>
+          <g stroke="var(--lk-rule)" stroke-width="1">
+            <line x1="70" y1="250" x2="470" y2="250"/><line x1="70" y1="30" x2="70" y2="250"/>
+            <line x1="70" y1="155" x2="470" y2="155" opacity="0.6"/>
+            <line x1="307" y1="30" x2="307" y2="250"/>
+          </g>
+          <g font-size="13" fill="var(--lk-ink-soft)" text-anchor="middle">
+            <text x="70" y="270">1.8</text><text x="137" y="270">2.0</text><text x="203" y="270">2.2</text><text x="307" y="270">2.51</text><text x="403" y="270">2.8</text><text x="470" y="270">3.0</text>
+            <text x="270" y="300">SM clock (GHz)</text>
+          </g>
+          <g font-size="13" fill="var(--lk-ink-soft)" text-anchor="end">
+            <text x="62" y="160">1.0</text><text x="62" y="60">1.4</text><text x="62" y="210">0.8</text>
+          </g>
+          <text x="16" y="140" font-size="13" fill="var(--lk-ink-soft)" transform="rotate(-90 16 140)" text-anchor="middle">time (rated boost = 1)</text>
+          <polyline fill="none" stroke="var(--lk-forest)" stroke-width="3.5" points="70,56 103,74.5 137,91 170,106 203,119.5 237,132 270,143.3 307,155 337,163.5 370,172.4 403,181 437,188.4 470,196"/>
+          <polyline fill="none" stroke="var(--lk-vermilion)" stroke-width="2" points="70,155 470,155"/>
+          <g fill="var(--lk-vermilion)"><circle cx="70" cy="155" r="4"/><circle cx="170" cy="155" r="4"/><circle cx="270" cy="155" r="4"/><circle cx="370" cy="155" r="4"/><circle cx="470" cy="155" r="4"/></g>
+          <text x="476" y="200" font-size="14" fill="var(--lk-forest)">compute-</text><text x="476" y="216" font-size="14" fill="var(--lk-forest)">bound</text>
+          <text x="476" y="146" font-size="14" fill="var(--lk-vermilion)">memory-</text><text x="476" y="162" font-size="14" fill="var(--lk-vermilion)">bound</text>
+        </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; Kernel time against SM clock, relative to the time at the rated 2.51 GHz (computed, not measured). A compute-bound kernel (thick forest line) takes time proportional to 1/clock: 12% faster at 2.8 GHz, 40% slower at 1.8. A memory-bound kernel (thin vermilion line with dots) doesn&rsquo;t move, because the memory clock is fixed. The shaded band marks the range where a lightly loaded, cool card often runs; yours will differ, and lab 4b prints it.</figcaption>
+    </figure>
+
+    <p>Three practical consequences:</p>
+
+    <ul>
+      <li><strong>The ridge point moves with the clock.</strong> At 590 GB/s it is 30.9 TFLOP/s / 590 GB/s &asymp; 52 FLOPs per byte at 2.51 GHz, about 42 at 2.0 GHz and 59 at 2.85 GHz. A kernel near the ridge can switch between compute- and memory-bound as the card heats up.</li>
+      <li><strong>Report the clock with every compute-bound measurement.</strong> A 10% speedup that coincides with a 10% higher clock is not a speedup. Warm the card up before timing, and log the clock while you measure:
+<pre><code class="language-bash">nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw,temperature.gpu --format=csv -lms 200
+nvidia-smi -q -d PERFORMANCE      # why the clock is what it is: power cap, thermal, idle...</code></pre></li>
+      <li><strong>Nsight Compute fixes the clock</strong> (chapter 5) so that its results are comparable between runs. That is why its durations can differ from your benchmark: they are measured at a different clock.</li>
+    </ul>
+
+    <p>Lab 4b measures the clock directly: a kernel reads the SM&rsquo;s cycle counter (<code>clock64()</code>) at its start and end, and dividing cycles by nanoseconds gives the real frequency during that kernel.</p>
+
+    <details class="ym">
+      <summary>Your move: you benchmark two kernels in the morning, then again after an hour of training on the same card. The compute-bound one is 9% slower; the memory-bound one is unchanged. What happened, and how would you confirm it?</summary>
+      <p>The card got hot and the firmware lowered the SM clock, by about 9%. The memory clock didn&rsquo;t change, so the memory-bound kernel didn&rsquo;t notice. To confirm, log <code>clocks.sm</code> and <code>temperature.gpu</code> during both runs, and check the &ldquo;clocks event reasons&rdquo; in <code>nvidia-smi -q -d PERFORMANCE</code>, which should report a thermal or power limit.</p>
+    </details>
+  </section>
+
+  <section id="s9">
+    <h2>9. The rest of the chip, and where to read more</h2>
+
+    <p>Outside the SMs and the memory system, a few more units take part in every CUDA program:</p>
+
+    <ul>
+      <li><strong>The GigaThread engine</strong> is the block scheduler of chapter 2: it hands blocks to SMs as space frees up.</li>
+      <li><strong>Copy engines</strong> are DMA units that move data between CPU memory and GPU memory over PCIe without using any SM. They are what lets <code>cudaMemcpyAsync</code> overlap with running kernels (PMPP ch. 23).</li>
+      <li><strong>NVENC and NVDEC</strong> encode and decode video, and the display engine drives the monitor; none of them matters for CUDA, except that the desktop shares your GPU (chapter 5).</li>
+      <li><strong>The PCIe 5.0 &times;16 interface</strong> connects all of it to the CPU (chapter 2&rsquo;s film).</li>
+    </ul>
+
+    <p>Where to go deeper, once Part II is done:</p>
+
+    <table>
+      <tr><th>Topic</th><th>Read</th></tr>
+      <tr><td>DRAM internals, bursts, banks and channels</td><td>PMPP, 5th ed., ch. 6</td></tr>
+      <tr><td>How atomics are executed in the L2</td><td>PMPP, 5th ed., section 9.3</td></tr>
+      <tr><td>Virtual memory and TLBs on GPUs</td><td>PMPP, 5th ed., appendix C</td></tr>
+      <tr><td>Streams, copy engines, overlap</td><td>PMPP, 5th ed., ch. 23</td></tr>
+      <tr><td>Microbenchmarking the pipes, caches and TLBs</td><td>Jia et al., <em>Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking</em> (2018) and the Turing follow-up (2019)</td></tr>
+      <tr><td>The per-instruction throughput table</td><td>CUDA C++ Best Practices Guide, &ldquo;Arithmetic Instructions&rdquo;</td></tr>
+      <tr><td>The pipes and stall reasons as the profiler sees them</td><td>Nsight Compute Profiling Guide, &ldquo;Pipelines&rdquo; and &ldquo;Warp Scheduler States&rdquo;</td></tr>
+    </table>
+  </section>
+
+  <section id="s10">
+    <h2>10. Lab 4b: measure the hardware</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 4b</span><span class="lab-title">Pipes, latencies, DRAM patterns and the real clock</span><span class="idx-meta">~45 min · <code>mlsys/labs/lab04b-pipes-and-dram/</code></span></div>
+      <div class="lab-body">
+        <p>Two microbenchmark programs. <code>pipes</code> measures latency and throughput of single instructions; <code>dram</code> measures bandwidth for the access patterns of section 7. Close other GPU programs first and let the card warm up for a minute: section 8 explains why.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab04b-pipes-and-dram
+make test          # quick correctness checks (every kernel computes what it claims)
+make sass          # count the instructions in each loop: is it the one it claims to be?
+make bench-pipes   # A: latencies, B: throughput per instruction, C: warps x ILP, D: MUFU + k FFMA
+make bench-dram    # E: read/write/copy, F: working-set sweep, G: random chunks, H: TLB reach</code></pre>
+        <table>
+          <tr><th>Experiment</th><th>What it measures</th><th>Prediction to write down first</th></tr>
+          <tr><td>A</td><td>cycles per step of one dependent chain: FFMA, IMAD, MUFU.EX2, MUFU.RSQ, DFMA, SHFL</td><td>FFMA = 4 (section 3); guess the others</td></tr>
+          <tr><td>B</td><td>results per clock per SM, every pipe</td><td>the table in section 2</td></tr>
+          <tr><td>C</td><td>FFMA throughput for 1&ndash;12 warps per scheduler &times; 1, 2, 4 chains</td><td>full speed once warps &times; chains &ge; 4 (Fig. 1)</td></tr>
+          <tr><td>D</td><td>cycles per group of 1 MUFU + <em>k</em> FFMA</td><td>max(8, 1 + <em>k</em>) per warp (Fig. 1, acts 4&ndash;5)</td></tr>
+          <tr><td>E</td><td>read, write, copy GB/s at 1 GB</td><td>read near 88% of 672; copy a little lower</td></tr>
+          <tr><td>F</td><td>GB/s for working sets of 1 MB to 1 GB</td><td>a step where the data stops fitting in the 48 MB L2</td></tr>
+          <tr><td>G</td><td>GB/s for random chunks of 32 B to 8 KB</td><td>the shape of section 7&rsquo;s table (not its numbers)</td></tr>
+          <tr><td>H</td><td>ns per access, one access per 2 MB page, spans 16 MB to 4 GB</td><td>flat, then a step where the pages stop fitting in the TLB</td></tr>
+        </table>
+        <p>Every experiment also prints the clock it ran at, measured as cycles per nanosecond. Paste back the <code>PASTE:</code> lines: we will compare your latencies and the TLB step with the numbers in this interlude.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Run experiment B under <code>ncu --section ComputeWorkloadAnalysis</code> and find each loop&rsquo;s pipe in the utilization chart: the MUFU loop should drive <code>xu</code> to the top, the DFMA loop <code>fp64</code>. Then add an op whose step is a plain <code>expf(-x)</code> (copy <code>OpEX2</code>), and measure its latency and throughput with and without <code>-use_fast_math</code>. <code>make sass</code> shows the instructions behind each: the price of accuracy from section 4, in cycles.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why can a loop that is pure FP32 math still not reach FP32 peak?</summary>
+        <p>The scheduler issues one warp instruction per cycle per quadrant, and peak needs an FFMA in every one of those slots. Any other instruction in the loop (address math, loads, loop control, comparisons) takes a slot from an FFMA. Also, with fewer than 4 independent FFMAs in flight per quadrant, the 4-cycle latency leaves slots empty.</p>
+      </details>
+      <details>
+        <summary>A kernel&rsquo;s top stall is <code>wait</code>. What is the warp waiting for, and what do you try?</summary>
+        <p>A fixed-latency result, typically an FMA or integer operation, whose wait the compiler encoded in the instruction. There is not enough independent work per scheduler: add instruction-level parallelism (independent accumulators, unrolling) or more warps.</p>
+      </details>
+      <details>
+        <summary>How many independent FFMAs must be in flight per quadrant to keep the FMA pipe full, and where does the number come from?</summary>
+        <p>About 4: Little&rsquo;s law with a 4-cycle latency and one warp instruction accepted per cycle. They can come from 4 warps, from 4 independent chains in one warp, or any combination.</p>
+      </details>
+      <details>
+        <summary>Why is softmax not limited by its <code>exp</code> on an RTX 5070?</summary>
+        <p>It is memory-bound: 8 bytes per element at 590 GB/s is about 74 billion elements per second, while the SFUs do about 1.9 trillion <code>MUFU</code> per second. The <code>exp</code> is hidden behind the memory traffic.</p>
+      </details>
+      <details>
+        <summary>Why did <code>exp</code> become a bottleneck for attention on the B200, and what did FlashAttention-4 do about it?</summary>
+        <p>The tensor cores got 16&times; faster per SM than on the 5070 while the SFU stayed at 16 per clock per SM, so at head dimension 128 the exponentials take as long as the matrix multiplications. FlashAttention-4 computes part of the exponentials with a polynomial on the FMA pipe, which has 8&times; the SFU&rsquo;s throughput.</p>
+      </details>
+      <details>
+        <summary>What does <code>y[i] = x[i] * 0.5;</code> compile to when <code>x</code> is <code>float*</code>, and how do you catch it?</summary>
+        <p>A conversion to double, a <code>DMUL</code> and a conversion back, each running at 1/64 of FP32 speed on a GeForce card. Catch it with <code>cuobjdump -sass | grep DMUL</code>, with <code>-Xptxas --warn-on-double-precision-use</code>, or with a non-zero <code>fp64</code> pipe in Nsight Compute. Fix it with <code>0.5f</code>.</p>
+      </details>
+      <details>
+        <summary>Why is reading random 32-byte sectors from DRAM so much slower than reading random 2 KB chunks, even though both read whole sectors?</summary>
+        <p>Each random sector needs its bank to ACTIVATE a new row (and PRECHARGE the old one), and the chip may only activate a few rows per short window. A 2 KB chunk pays one activation for 64 bursts, so the bus stays busy as in a stream.</p>
+      </details>
+      <details>
+        <summary>Why is the practical DRAM ceiling around 88% of 672 GB/s and not 100%?</summary>
+        <p>Refresh periodically pauses each chip, the bus loses time switching between reads and writes, and row openings are never entirely hidden. Together they cost roughly 8&ndash;12%.</p>
+      </details>
+      <details>
+        <summary>A compute-bound kernel is 7% faster today than yesterday, with no code change. What do you check first?</summary>
+        <p>The SM clock: temperature and power limits change it, and compute-bound time scales with 1/clock. Log <code>clocks.sm</code> during both runs (or time with <code>ncu</code>, which fixes the clock).</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>NVIDIA, <em>NVIDIA RTX Blackwell GPU Architecture</em> (whitepaper, 2025): the SM diagram (per quadrant: L0 instruction cache, warp scheduler, dispatch at 32 threads per clock, 16,384 &times; 32-bit registers, 32 FP32/INT32 cores, 4 load/store units, an SFU, a tensor core; per SM: 128 KB L1/shared, 4 texture units, 2 FP64 cores), the GB205 specifications (48 SMs, 2,512 MHz boost, 48 MB L2, 192-bit GDDR7 at 28 Gbps, 672 GB/s, 250 W), and accelerated frequency switching.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html">CUDA C++ Best Practices Guide</a>, &ldquo;Arithmetic Instructions&rdquo;: results per clock cycle per multiprocessor by compute capability (the table in section 2 uses the 12.0 column).</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html">CUDA C++ Programming Guide</a>, &ldquo;Mathematical Functions&rdquo; and &ldquo;Intrinsic Functions&rdquo;: maximum ulp errors of <code>expf</code> and <code>__expf</code>; the effect of <code>-use_fast_math</code>. NVCC documentation for <code>--warn-on-double-precision-use</code>.</li>
+      <li>NVIDIA, <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html">Nsight Compute Profiling Guide</a>: pipeline descriptions (<code>fmaheavy</code>, <code>fmalite</code>, <code>xu</code>, <code>lsu</code>, <code>uniform</code>, <code>cbu</code>, <code>adu</code>, <code>fp64</code>), the 4-cycle FFMA dependency latency, and the warp stall reasons quoted in section 3.</li>
+      <li>JEDEC, JESD239 GDDR7 SGRAM standard, and vendor summaries of it: four independent channels per device, PAM3 signalling. Bank counts, row sizes and timings in Fig. 2 are illustrative, not taken from the standard.</li>
+      <li>Zhe Jia, Marco Maggioni, Benjamin Staiger, Daniele P. Scarpazza, <em>Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking</em> (2018), and Jia, Maggioni, Smith, Scarpazza, <em>Dissecting the NVIDIA Turing T4 GPU via Microbenchmarking</em> (2019): latencies, throughputs, TLB measurements, and the methods lab 4b borrows.</li>
+      <li><em>FlashAttention-4</em> (2026), arXiv:2603.05451: the exponential as a bottleneck on Blackwell datacenter GPUs and its polynomial emulation on the FMA units.</li>
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 5th ed.: ch. 6 (DRAM), section 9.3 (atomics), appendix C (virtual memory), ch. 23 (streams).</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-05-profiling.html">&larr; Ch. 5 — Profiling with Nsight</a>
+      <a href="index.html">Index</a>
+      <a href="cap-06-neural-networks-as-a-workload.html">Part II begins: Ch. 6 — Neural networks as a workload &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part I · Interlude · throughputs from the CUDA Best Practices Guide (compute capability 12.0), hardware from the RTX Blackwell whitepaper, October 2026; the figures&rsquo; timings are modelled, lab 4b measures the real ones</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/xp/xp-core.js?v=20261013s"></script>
+  <script src="assets/xp/xp-svg.js?v=20261013s"></script>
+  <script src="assets/xp/xp-gl.js?v=20261013s"></script>
+  <script src="assets/xp/xp-time.js?v=20261013s"></script>
+  <script src="assets/fig-pipes.js?v=20261014a"></script>
+  <script src="assets/fig-dram.js?v=20261014a"></script>
+  <script>
+    MLFilms.pipes(document.getElementById('fig-pipes'), {
+      fig: 'Fig. 1',
+      caption: '<b>Fig. 1</b> — One quadrant of an RTX 5070 SM, cycle by cycle, under six instruction mixes. Back to front: the L0 instruction cache, 12 warp slots (a peg per warp: tall when it issues, pale when it is ready but not picked, low when it waits), the dispatch bar, the register file, then the pipes. The tape in front records 48 cycles, one row each (top to bottom): issue, FP32 half a, FP32 half b, SFU, FP64. Timings partly modelled; see below.'
+    });
+    MLFilms.dram(document.getElementById('fig-dram'), {
+      fig: 'Fig. 2',
+      caption: '<b>Fig. 2</b> — Below the L2: L2 slices, a crossbar, six 32-bit memory controllers and six GDDR7 chips at the back; one chip opened into its four 8-bit channels of 16 banks (rows, and a row buffer in front of each); in front, channel A&rsquo;s tape over 110 ns, one row each (top to bottom): activates, precharges, the data bus. Five traffic patterns; the DRAM timings are an illustrative model, not measurements.'
+    });
+  </script>
+</body>
+</html>

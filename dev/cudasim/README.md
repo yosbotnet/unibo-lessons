@@ -21,6 +21,6 @@ races ahead of its whole block, so a missing `__syncthreads()` gives wrong
 results reliably. A barrier reached by only part of a block, or threads waiting
 at different barriers, stops the program with a message.
 
-Not modelled: time (event timings are fake, so `bench` output is meaningless),
+Not modelled: time (event timings and `clock64()` are fake, so `bench` output is meaningless),
 occupancy, caches, concurrency between blocks, streams, inline PTX. About
 1 microsecond per CUDA thread: keep test sizes to a few million threads.
