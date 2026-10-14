@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unit 1 — Basics: hyperparameters, noise and debugging · DL Alchemy</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/alchemy.css?v=20261014a">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="assets/xp/xp.css?v=20261014a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<style>
+  .w-plot .nz-wrong{fill:var(--lk-vermilion);opacity:.28}
+  .w-plot .nz-pass{fill:var(--lk-forest);opacity:.2}
+  .w-legend i.box{width:.9rem;height:.6rem;border:0;vertical-align:0}
+  .w-legend i.box.b{background:var(--lk-vermilion);opacity:.4}
+  .w-legend i.box.g{background:var(--lk-forest);opacity:.35}
+  .w-legend i.sq{width:.6rem;height:.6rem;border:0;vertical-align:0;background:var(--lk-forest)}
+  .pred-why .w-plot{max-width:520px;margin:.6rem 0}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="u0-method.html">&larr; Unit 0 — The method</a>
+    <a href="index.html">Index</a>
+    <a href="u2a-optimizers.html">Unit 2a — Optimizers &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Unit 1 · Basics (CS 312 lecture 2, assignment 1, quiz 1)</div>
+    <h1>Basics: hyperparameters, noise and debugging</h1>
+    <div class="lk-meta"><span>~60 min read</span><span>1 figure · 2 widgets · 2 charts</span><span>11 predictions</span><span>3 audit drills</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The unit in one paragraph</h2>
+    <p>When a training experiment fails, the only thing you know for sure is that at least one setting was bad. This unit is about telling which. It starts with the most consequential setting, the learning rate: final loss is roughly a parabola in its logarithm, and the bottom of the parabola moves when you change the batch size, the model size or the optimizer, so any comparison that holds the rate fixed is partly a comparison of how well that rate suits each arm. Then noise: two runs that differ only in their random seed end about 0.003 apart in validation loss on the course&rsquo;s reference model, and a single changed token in the training data moves the result about half that much, so a difference between two single runs means little until you know the spread. Then schedules, where mid-run loss is mostly a picture of the schedule, and debugging, where what matters is knowing what normal looks like. Eleven predictions use CS 312&rsquo;s measured quiz-1 answers; three fictional research logs ask you to find what their authors missed.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this unit</h3>
+    <ol>
+      <li><a href="#s1">A failed experiment says one thing</a></li>
+      <li><a href="#s2">The learning-rate valley, and why it moves</a></li>
+      <li><a href="#s3">Ladders and scaling laws</a></li>
+      <li><a href="#s4">Noise: seeds, jitter and chaos</a></li>
+      <li><a href="#s5">How many runs?</a></li>
+      <li><a href="#s6">Schedules and warmup</a></li>
+      <li><a href="#s7">Debugging: know what normal looks like</a></li>
+      <li><a href="#drills">Audit drills</a></li>
+      <li><a href="#debrief">Quiz 1, question by question</a></li>
+      <li><a href="#lab">Run it yourself</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. A failed experiment says one thing</h2>
+    <p>A <em>hyperparameter</em> is anything chosen by hand rather than learned: the learning rate and its schedule, the batch size, the optimizer&rsquo;s &beta;s and &epsilon;, weight decay, initialization scales, warmup length, gradient clipping, dropout. CS 312&rsquo;s first assignment lists about twenty for d8 alone. They matter because the conclusion of an experiment is conditional on all of them. &ldquo;Method X does not help&rdquo; really means &ldquo;method X, at these twenty settings, did not help&rdquo;, and if one of the twenty was poor for X, the experiment measured the setting.</p>
+    <p>Three cases from the lecture show the size of the effect:</p>
+    <ul>
+      <li><strong>Private language models.</strong> Training with differential privacy (DP-SGD) was widely believed not to work for fine-tuning large language models. Li et al. (2021) found that the standard hyperparameters were simply wrong for the noisy, clipped gradients of DP training; the usual choices were off by roughly a factor of 100. Tuned, DP fine-tuning of large models worked well.</li>
+      <li><strong>Repeating data.</strong> If you are short of data, does training for more epochs help? With default regularization, gains stop early and bigger models even get worse. With regularization tuned for the repeated-data regime (much stronger weight decay than usual), Kim et al. (2025) found clean, predictable trends that kept improving. Same question, opposite conclusions.</li>
+      <li><strong>New optimizers.</strong> Many optimizers have been reported to beat AdamW. Compared against an AdamW whose learning rate, weight decay and warmup were tuned as carefully as theirs, most of the reported gains shrink a lot (Wen et al., 2025). Different optimizers need different hyperparameters, so a new optimizer at AdamW&rsquo;s settings, or AdamW at default settings against a tuned challenger, is not a fair test.</li>
+    </ul>
+    <details class="ym">
+      <summary>Your move: a 20-dimensional grid with 4 values per hyperparameter is 4<sup>20</sup> &asymp; 10<sup>12</sup> runs. Why is tuning feasible at all?</summary>
+      <p>Because the loss is not an arbitrary function of the twenty. Most hyperparameters barely matter near a sensible default; a few (learning rate first, then batch size, weight decay, warmup) matter a lot; and the important ones interact in structured ways (the best rate moves smoothly with the batch and the model size). So in practice you sweep one or two at a time around a known-good point, and use rules for how the optimum moves (unit 2) instead of re-searching everything at every scale.</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. The learning-rate valley, and why it moves</h2>
+    <p>Run the same model at several learning rates, each a factor of 2 apart, and plot the final loss against the logarithm of the rate. Almost always you get a rounded valley: too small a rate and the model does not get far in its budget; too large and the updates overshoot, the loss is noisy, and past some point training diverges. Near the bottom the curve is roughly a parabola, which gives a useful rule of thumb: <strong>missing the best rate by a factor of 2 costs about 0.01 in final loss</strong> at d8&rsquo;s scale, and a factor of 4 about four times as much.</p>
+    <p>StepFun&rsquo;s large study of this surface (Li et al., 2025, &ldquo;Step Law&rdquo;) trained thousands of models across learning rates and batch sizes at many sizes. Three findings matter for us: the surface is smooth and roughly quadratic in log learning rate and log batch size; the best learning rate moves with batch size; and both optimal values move with model size and data size.</p>
+
+    <div class="pred" data-id="u1-shift">
+      <div class="pred-q"><p>You tuned the learning rate for d8 at batch 64. Now you train d16 (8&times; the parameters, same data and batch). Where is d16&rsquo;s best learning rate?</p></div>
+      <ol class="pred-opts">
+        <li>Higher: bigger models are more stable</li>
+        <li>About the same: Adam normalizes the update size</li>
+        <li data-ok>Lower</li>
+        <li>It depends only on the batch size, not the model</li>
+      </ol>
+      <div class="pred-why">
+        <p>Lower. With standard initialization, a weight matrix with more inputs sums more update contributions in the same direction, so the same per-entry step moves its outputs further; the stable step shrinks as the width grows. Unit 2b derives this and shows how &micro;P removes it. Published fits find the optimum falling roughly like N<sup>&minus;0.7</sup> in parameters (Step Law), and CS 312&rsquo;s assignment 2 measures it falling roughly as 1/width when only the width changes. How fast it moves depends on the architecture and the optimizer; that it moves does not. A rate that is right for d8 runs hot at d16.</p>
+        <p class="pred-src">Mechanism: unit 2b. Direction: Step Law and CS 312 lecture 2.</p>
+      </div>
+    </div>
+
+    <div id="fig-surface"></div>
+    <details>
+      <summary>What in Fig. 1 is real, and what is a model?</summary>
+      <p><strong>The shape</strong> (a valley in log learning rate that runs diagonally across batch sizes and moves left as the model grows) is what Step Law and CS 312 report. <strong>The numbers are an illustrative model</strong>, written in <code>assets/fig-surface.js</code>: loss = best(model) + 0.01 &times; (octaves from the best rate)<sup>2</sup> + 0.003 &times; (octaves from batch 64)<sup>2</sup>, with the best rate growing as the square root of the batch. Its anchors are measured: the default recipe gives 2.926 at d8, d9 is 0.41 better than d4, and a rate of 0.03 costs +0.023 at d4, +0.056 at d6 and +0.122 at d16 over 0.003 (CS 312 quiz 1, Q7); given the 0.01 rule, those three gaps put d8&rsquo;s best rate near 0.0045 and d16&rsquo;s near 0.0027. Real valleys are steeper on the high side than the low side (instability), and warmup shifts them; the model ignores both.</p>
+    </details>
+
+    <p>Act 3 of the figure is the trap to remember. Comparing batch sizes at a single rate reads the side of the valley wall: at the borrowed rate, batch 512 looks clearly worse than batch 64; with each batch at its own best rate the gap is smaller. The same is true of any comparison at a fixed rate: optimizers, architectures, model sizes. Which brings us to ladders.</p>
+  </section>
+
+  <section id="s3">
+    <h2>3. Ladders and scaling laws</h2>
+    <p>Big runs are expensive, so we study small ones and extrapolate. A <em>ladder</em> is a series of models of increasing size (d4, d6, d8, &hellip;) trained the same way; a <em>scaling law</em> is a curve fitted through it, usually a power law in parameters, data or compute. Scaling laws are the cheap proxy that makes large-model research possible: Kaplan et al. (2020) and Hoffmann et al. (2022, &ldquo;Chinchilla&rdquo;) predicted the loss of models 100&times; larger than any they fitted on.</p>
+    <p>They are also easy to bend. Kaplan and Chinchilla disagreed by a large factor on how to split compute between parameters and data; later work traced much of the gap to how the ladders were run (learning-rate schedules not matched to each run&rsquo;s length, hyperparameters not retuned per size, and how parameters and FLOPs were counted). The Marin project&rsquo;s public notes describe a ladder that looked healthy until the large run behaved differently from the small ones. A ladder is an experiment like any other: its conclusion inherits every hyperparameter held fixed along it.</p>
+
+    <div class="w" id="w-ladder">
+      <h4>The ladder at one learning rate</h4>
+      <p class="w-sub">Train d4 to d16 at the same rate, as a quick ladder would, and compare with each rung at its own best rate. Illustrative model from Fig. 1, anchored to CS 312&rsquo;s measured gaps <span class="tag-i">illustrative</span></p>
+      <div class="w-controls">
+        <label>Learning rate for every rung: <output id="lad-lr-o">0.020</output><input type="range" id="lad-lr" min="0" max="100" value="80"></label>
+        <label class="chk"><input type="checkbox" id="lad-tune" checked> Show each rung at its own best rate</label>
+      </div>
+      <div id="lad-plot"></div>
+      <div class="w-legend"><span><i class="a"></i>every rung at the chosen rate</span><span><i class="g dash"></i>each rung at its best rate</span></div>
+      <div class="w-out">
+        <div class="w-stat"><span class="k">d8 &rarr; d16, this rate</span><span class="v" id="lad-gfix">–</span></div>
+        <div class="w-stat"><span class="k">d8 &rarr; d16, tuned</span><span class="v" id="lad-gtrue">–</span></div>
+        <div class="w-stat"><span class="k">gain you see</span><span class="v" id="lad-ratio">–</span></div>
+        <div class="w-stat"><span class="k">best rate d4 &rarr; d16</span><span class="v" id="lad-best">–</span></div>
+      </div>
+      <div class="w-verdict" id="lad-verdict"></div>
+    </div>
+
+    <p>Try the extremes. A rate tuned on the smallest rung (about 0.007) makes the big rungs run hot, and the ladder flattens: &ldquo;width stops paying&rdquo;. A rate too low for everyone does the opposite and flatters scale. Only per-rung tuning, or a parametrization that keeps the optimum in place (&micro;P, unit 2b), measures what size buys.</p>
+    <p>CS 312&rsquo;s assignment 1 ran four recipes on the d4&ndash;d9 ladder (the default; a constant rate with no decay; dropout 0.2; a rate of 0.03) and then asked what happens at d16. At the two smallest rungs, measured as the gap to the default recipe at the same size:</p>
+    <div class="tw">
+    <table>
+      <tr><th>Recipe</th><th>d4</th><th>d6</th><th>d16</th></tr>
+      <tr><td>constant rate</td><td class="r">+0.125</td><td class="r">+0.187</td><td class="r">?</td></tr>
+      <tr><td>dropout 0.2</td><td class="r">+0.156</td><td class="r">+0.161</td><td class="r">?</td></tr>
+      <tr><td>rate 0.03</td><td class="r">+0.023</td><td class="r">+0.056</td><td class="r">?</td></tr>
+    </table>
+    </div>
+
+    <div class="pred" data-id="u1-q7-lr">
+      <div class="pred-q"><p>At d16 (16 layers, width 1,024, the same 614.4M tokens), how much worse than the default recipe is the run at rate 0.03?</p></div>
+      <ol class="pred-opts">
+        <li>Less than +0.08: the gap stays about where it is</li>
+        <li data-ok>+0.08 to +0.18</li>
+        <li>+0.18 to +0.40</li>
+        <li>It diverges</li>
+      </ol>
+      <div class="pred-why">
+        <p>+0.122 <span class="tag-m">measured</span>. The gap grows with size (0.023, 0.056, 0.122) because the best rate falls as the model grows, so 0.03 is further above it at each rung. It did not diverge: QK-norm and gradient clipping keep d8&rsquo;s architecture stable well above its optimum.</p>
+        <p class="pred-src">CS 312 quiz 1, Q7(a).</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u1-q7-drop">
+      <div class="pred-q"><p>And dropout 0.2, which costs about +0.16 at both d4 and d6: what is its gap at d16?</p></div>
+      <ol class="pred-opts">
+        <li data-ok>Under +0.08: it shrinks</li>
+        <li>+0.08 to +0.18: about the same</li>
+        <li>+0.18 to +0.40: it grows</li>
+      </ol>
+      <div class="pred-why">
+        <p>+0.058 <span class="tag-m">measured</span>. Dropout is a regularizer, and every run here sees each token once, so there is no overfitting for it to prevent; it costs capacity instead. A bigger model has capacity to spare, so the cost shrinks with size. The constant-rate recipe went the other way, growing to +0.244 at d16: without a decay at the end, the bigger model is left further from the bottom of its valley.</p>
+        <p class="pred-src">CS 312 quiz 1, Q7(a). The lesson for ladders: two recipes that look equally bad at small scale can move in opposite directions.</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u1-q7-qk">
+      <div class="pred-q"><p>With the default recipe, d9 ends 0.41 below d4. Now remove QK-norm and use a rate of 0.006 (2&times; the default). What is d9 minus d4?</p></div>
+      <ol class="pred-opts">
+        <li>Still about &minus;0.4: QK-norm is a minor detail</li>
+        <li>Between &minus;0.25 and 0: smaller gains</li>
+        <li>Between 0 and +0.5: d9 is worse than d4</li>
+        <li data-ok>Above +0.5: d9 is much worse than d4</li>
+      </ol>
+      <div class="pred-why">
+        <p>+0.608 <span class="tag-m">measured</span>: the ladder inverts. Without QK-norm the attention logits grow during training, and the bigger model, at a rate already too high for its size, becomes unstable while d4 is fine. A ladder run this way would conclude that bigger models are worse. The other intervention in the same question, repeating 75,000 sequences for 8 epochs, shrank d9&rsquo;s advantage from &minus;0.41 to &minus;0.226: with repeated data the bigger model starts to memorize.</p>
+        <p class="pred-src">CS 312 quiz 1, Q7(b).</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Noise: seeds, jitter and chaos</h2>
+    <p>Training is random in several ways: the initial weights, the order of the data, and (unless you force determinism) the order of floating-point additions on the GPU. Rerun the same recipe with a different seed and the final loss changes. How much it changes sets the resolution of every experiment you run.</p>
+
+    <div class="pred" data-id="u1-q1-seed">
+      <div class="pred-q"><p>The default d8 recipe is trained ten times with seeds 4 to 13 (each seed sets both the initialization and the data order), on the same type of GPU. The standard deviation of the ten final validation losses is closest to:</p></div>
+      <ol class="pred-opts">
+        <li>0.0003</li>
+        <li data-ok>0.003</li>
+        <li>0.03</li>
+        <li>0.1</li>
+      </ol>
+      <div class="pred-why">
+        <p>0.0029 <span class="tag-m">measured</span>. This is the number to carry around: on d8, differences below about 0.005 between single runs are within noise, and 0.01 (the cost of a factor-of-2 learning-rate error) is about three standard deviations. Note how small it is compared with the step-to-step noise of the training loss curve, about 0.04 at batch 64 (the next question): the curve jitters ten times more than the endpoint varies.</p>
+        <p class="pred-src">CS 312 quiz 1, Q1(a). The mean step-to-step jitter over the last 2,000 steps was 0.0399, Q1(b).</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u1-q2-jitter">
+      <div class="pred-q"><p>Define a run&rsquo;s <em>jitter</em> as the standard deviation of the training loss around its own running mean, late in training. At batch 64 it is about 0.04. Train the same 600,000 sequences at batch 256 (so a quarter of the steps). The jitter is about:</p></div>
+      <ol class="pred-opts">
+        <li>&times;1/4 of batch 64&rsquo;s</li>
+        <li data-ok>&times;1/2</li>
+        <li>about the same</li>
+        <li>&times;2</li>
+      </ol>
+      <div class="pred-why">
+        <p>&times;1/2 <span class="tag-m">measured</span>: 0.0769, 0.0404 and 0.0198 at batches 16, 64 and 256. Each step&rsquo;s loss is an average over the batch, and the standard deviation of an average of B independent samples falls as 1/&radic;B: four times the batch, half the jitter.</p>
+        <div id="c-jitter"></div>
+        <p>The jitter of the curve is mostly measurement noise of a single batch, not a property of the model. Two runs can look very different step by step and end within 0.003.</p>
+        <p class="pred-src">CS 312 quiz 1, Q2. The dashed line is 1/&radic;B through the batch-64 point.</p>
+      </div>
+    </div>
+
+    <p>Where does the seed-to-seed spread come from? Two mental models compete. In one, SGD is like Brownian motion: small perturbations keep you close, so changing a seed moves the result a little. In the other, training is chaotic: an infinitesimal perturbation grows until the two runs are as different as two random seeds. Even full-batch gradient descent, with no sampling at all, shows sudden spikes in its loss, a sign of chaotic dynamics rather than of noise.</p>
+
+    <div class="pred" data-id="u1-q8-token">
+      <div class="pred-q"><p>With full determinism enabled, train d8 twice with the same seed, except that one token (of 614.4M) in the first training batch is changed. Let &sigma; be the seed-to-seed standard deviation from above (0.0029). Averaged over five such pairs, the final validation losses differ by:</p></div>
+      <ol class="pred-opts">
+        <li>Less than 0.2&sigma;: one token cannot matter</li>
+        <li data-ok>Between 0.2&sigma; and 5&sigma;: about as much as a different seed</li>
+        <li>More than 5&sigma;: chaos amplifies it beyond seed noise</li>
+      </ol>
+      <div class="pred-why">
+        <p>0.57&sigma; on average <span class="tag-m">measured</span>. One token is enough to send the run on a different path that ends about as far away as half a seed change. In the course&rsquo;s higher-rate variant (0.009), the per-step training loss of the two runs differed by up to 0.095 at its peak.</p>
+        <p>Two consequences. First, &ldquo;same seed&rdquo; does not mean &ldquo;same run&rdquo; once anything changes, so pairing two arms by seed removes only part of the noise. For two independent runs of spread &sigma;, the expected gap is about 1.13&sigma;; a gap of 0.57&sigma; corresponds to a correlation of about 0.75 between the paired runs <span class="tag-d">derived</span>, assuming normal noise. A real method change perturbs far more than one token, so expect less. Second, any change you make, however tiny, buys you a fresh draw of the noise, which is why one run per arm is never enough.</p>
+        <p class="pred-src">CS 312 quiz 1, Q8.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s5">
+    <h2>5. How many runs?</h2>
+    <p>With the spread known, the arithmetic is standard. If each arm has n runs with standard deviation &sigma;, the difference of the two means has a standard error of &sigma;&radic;(2/n), reduced by a factor &radic;(1&minus;&rho;) if the arms are paired with correlation &rho;. Two less obvious facts are worth seeing in numbers: how often a design picks the wrong winner, and how little a handful of runs tells you about &sigma; itself.</p>
+
+    <div class="w" id="w-noise">
+      <h4>Seeds and noise: what can this design tell you?</h4>
+      <p class="w-sub">Arm B is truly better than arm A by &Delta;. Seed noise is d8&rsquo;s &sigma; = 0.0029 <span class="tag-m">measured</span>; the rest is exact Gaussian arithmetic <span class="tag-d">derived</span></p>
+      <div class="w-controls">
+        <label>True difference &Delta;: <output id="nz-d-o">0.0040</output><input type="range" id="nz-d" min="0" max="150" value="40"></label>
+        <label>Runs per arm: <output id="nz-n-o">1</output><input type="range" id="nz-n" min="1" max="12" value="1"></label>
+        <label>Pairing correlation &rho;: <output id="nz-r-o">0</output><input type="range" id="nz-r" min="0" max="95" step="5" value="0"></label>
+      </div>
+      <div id="nz-plot"></div>
+      <div class="w-legend"><span><i class="a"></i>spread of the difference you would measure</span><span><i class="g dash"></i>the true difference</span><span><i class="box b"></i>wrong winner</span><span><i class="box g"></i>passes a 2-standard-error test</span></div>
+      <div class="w-out">
+        <div class="w-stat"><span class="k">standard error</span><span class="v" id="nz-se">–</span></div>
+        <div class="w-stat"><span class="k">wrong winner</span><span class="v" id="nz-wrong">–</span></div>
+        <div class="w-stat"><span class="k">passes 2 SE</span><span class="v" id="nz-pass">–</span></div>
+        <div class="w-stat"><span class="k">runs per arm for 80%</span><span class="v" id="nz-need">–</span></div>
+        <div class="w-stat"><span class="k">true <span class="nt">&sigma;</span> vs. what n runs show (95%)</span><span class="v" id="nz-sig">–</span></div>
+      </div>
+      <div class="w-verdict" id="nz-verdict"></div>
+    </div>
+
+    <p>Read the last box with two runs per arm: the true spread could be anywhere from 0.45&times; to 32&times; what the two runs show. A &ldquo;noise floor&rdquo; measured from two seeds is almost no information, and a decision rule built on it (&ldquo;anything above 2&sigma; is real&rdquo;) inherits that uncertainty. Ten runs narrow it to 0.69&times;&ndash;1.83&times;. On d8 the course has done this for you; on a new model or a new pipeline, measuring &sigma; with 4&ndash;10 seeds is one of the cheapest and most valuable experiments you can run.</p>
+    <div class="callout note">
+      <span class="callout-label">Paired tests</span>
+      <p>Pairing matters even more for evaluation than for seeds. Two models evaluated on the same validation sequences share most of their per-sequence variation, because most of it is about how hard each sequence is, not about the model. A paired comparison (per-sequence differences, then their mean and standard error) is often far more sensitive than comparing two independent averages whose error bars overlap. The lecture&rsquo;s point: overlapping error bars do not mean an insignificant difference when the samples are paired.</p>
+    </div>
+  </section>
+
+  <section id="s6">
+    <h2>6. Schedules and warmup</h2>
+    <p>d8&rsquo;s default schedule warms the rate up linearly over the first 1% of steps, then decays it linearly to zero. Both ends do work. Warmup protects the first steps, when Adam&rsquo;s second-moment estimates are poor and the network is far from any stable region; the decay at the end removes the noise of the last steps, letting the parameters settle into the bottom of the valley they have been bouncing around in.</p>
+
+    <div class="pred" data-id="u1-q3-warm">
+      <div class="pred-q"><p>Remove the warmup from the default recipe (start at the peak rate 0.003 on step one) and change nothing else. Final validation loss changes by:</p></div>
+      <ol class="pred-opts">
+        <li>Less than +0.01: it is within noise</li>
+        <li>+0.01 to +0.04</li>
+        <li data-ok>+0.04 to +0.15</li>
+        <li>More than +0.15, or divergence</li>
+      </ol>
+      <div class="pred-why">
+        <p>About +0.1 <span class="tag-m">measured</span> (+0.097, +0.111, +0.094 over three seed pairs), more than 30&sigma;, from 94 steps of warmup (1% of training). The damage happens in the first few hundred steps and is never repaired.</p>
+        <p class="pred-src">CS 312 quiz 1, Q3.</p>
+      </div>
+    </div>
+
+    <p>A popular alternative to decaying all the way is <em>warmup&ndash;stable&ndash;decay</em> (WSD): hold the peak rate for most of training and decay only at the end. Its appeal is that the stable phase can be extended or branched, so one long run gives checkpoints for many training lengths.</p>
+
+    <div class="pred" data-id="u1-q4-wsd">
+      <div class="pred-q"><p>WSD with the default warmup, then decaying linearly to zero over only the last fraction X of steps. What is the smallest X that ends within 0.02 of the default linear schedule?</p></div>
+      <ol class="pred-opts">
+        <li>2%</li>
+        <li>5%</li>
+        <li>10%</li>
+        <li data-ok>20%</li>
+        <li>40%</li>
+      </ol>
+      <div class="pred-why">
+        <p>20% <span class="tag-m">measured</span>. The gaps to linear decay were 0.085, 0.051, 0.030 and 0.009 for decay fractions of 2%, 5%, 10% and 20%.</p>
+        <div id="c-wsd"></div>
+        <p>A short decay is not enough to settle from the peak rate. And note what this means for comparisons: two runs compared during their stable phase are compared before most of their loss improvement has happened, and the improvement each gets from its decay need not be equal. Compare after decay, or decay both from the same point.</p>
+        <p class="pred-src">CS 312 quiz 1, Q4.</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u1-q5-lrw">
+      <div class="pred-q"><p>Triple the peak rate to 0.009 and lengthen the warmup to 5%. The final validation loss (default: 2.926) is:</p></div>
+      <ol class="pred-opts">
+        <li data-ok>Below 2.94</li>
+        <li>2.94 to 3.05</li>
+        <li>Above 3.05</li>
+      </ol>
+      <div class="pred-why">
+        <p>2.9165 <span class="tag-m">measured</span>, better than the default. The default 0.003 is not quite d8&rsquo;s best rate, and a longer warmup lets a higher one work. At 0.027 the same 5% warmup gave 2.9745, and 20% warmup brought it back to 2.9563: the higher the peak, the longer the warmup it needs. Warmup and the learning rate interact, so tuning one at the other&rsquo;s default can give the wrong answer for both.</p>
+        <p class="pred-src">CS 312 quiz 1, Q5.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s7">
+    <h2>7. Debugging: know what normal looks like</h2>
+    <p>When a run is worse than expected, the loss curve tells you less than you would like. The lecture&rsquo;s debugging kit:</p>
+    <ul>
+      <li><strong>Loss curves.</strong> Schedules leave signatures (the drop during decay, the plateau of a constant rate), and some failures have a typical shape: early spikes from too high a rate, a slow drift up from instability, a curve that is too smooth for its batch size because something is averaging it.</li>
+      <li><strong>Internal statistics.</strong> Activation RMS per layer, gradient norms per layer and in total, parameter norms, attention logit sizes, update-to-weight ratios. QK-norm became standard this way: tracking attention logits in a very large vision transformer showed them growing until training broke.</li>
+      <li><strong>Knowing which statistics are allowed to drift.</strong> With RMSNorm after a weight matrix, the scale of that matrix does not change the output, so its norm can grow a lot without harming anything. A growing norm is only a symptom when it matters to the function (unit 2a).</li>
+      <li><strong>Known-good controls.</strong> Smaller runs or ladders that you know are healthy, overlaid on the run you are debugging. The Marin project caught a problem this way: a large run&rsquo;s curves diverged in shape from its ladder; the parameter norms of its gated-attention layers had grown very large, and the early layers were contributing almost nothing to the residual stream. A light weight decay brought the norms back.</li>
+      <li><strong>Change one thing at a time,</strong> and move from a known-good configuration towards the broken one, so the step that breaks it is the culprit.</li>
+    </ul>
+
+    <div class="pred" data-id="u1-q6-norm">
+      <div class="pred-q"><p>Four d8 runs cross the schedule (linear decay or constant rate) with weight decay (0.1 or 0). Each logs the total parameter norm every step. In which runs does the parameter norm end <em>below</em> its peak, rather than at it?</p></div>
+      <ol class="pred-opts">
+        <li>All four: the norm always peaks mid-training</li>
+        <li>Both runs with weight decay</li>
+        <li data-ok>Only the run with linear decay and weight decay 0.1</li>
+        <li>None: the parameter norm only grows</li>
+      </ol>
+      <div class="pred-why">
+        <p>Only linear decay with weight decay 0.1, which ends 3&ndash;15% below its peak <span class="tag-m">measured</span>; the other three end at their maximum. Without weight decay, nothing pulls the norm down. With weight decay, the norm heads for an equilibrium where the growth from the updates balances the decay&rsquo;s pull, and that equilibrium scales like the square root of the learning rate over the weight decay (unit 2a derives it). At a constant rate the equilibrium stays put and the norm approaches it from below, so it ends at its maximum. With a decaying rate the equilibrium itself sinks during training, and the norm follows it down. And in none of the four did the gradient norm double over training, so a slowly rising gradient norm is not by itself a sign of trouble at this scale.</p>
+        <p class="pred-src">CS 312 quiz 1, Q6. Unit 2a explains the equilibrium.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="drills">
+    <h2>8. Audit drills</h2>
+    <p>Each log below is fictional, written for this course, with a conclusion in it. Tick every objection you would raise before accepting the conclusion, then check. Some options are real problems; some sound reasonable but are not what is wrong here.</p>
+
+    <div class="drill" data-id="u1-d1" data-title="Width stops paying">
+      <div class="drill-log"><span class="who">[agent]</span> Width ladder for the music-token model. All rungs at lr 0.02 (best lr from the w256 sweep), 1B tokens each, seed 0.
+w256: 2.311   w384: 2.254   w512: 2.226   w768: 2.205   w1024: 2.199
+<span class="who">[agent]</span> Gains per rung: -0.057, -0.028, -0.021, <b>-0.006</b>. Returns collapse beyond w768.
+<span class="who">[agent]</span> Recommendation: freeze width at 768 and spend the remaining budget on data cleaning.</div>
+      <p class="drill-q">What would you challenge before accepting the recommendation?</p>
+      <ul class="drill-opts">
+        <li data-ok><span>Every rung runs at the rate tuned for the smallest one.</span><div class="why">the best rate falls as width grows, so the big rungs run hot and lose more to it than the small ones. That alone flattens the top of the ladder, exactly as in the widget above.</div></li>
+        <li data-ok><span>Every rung sees the same 1B tokens, so the bigger rungs get fewer tokens per parameter.</span><div class="why">the ladder measures what width buys at a fixed data budget. At that budget the big models are under-trained, and the curve flattens for that reason too. &ldquo;Width stops paying&rdquo; might be &ldquo;data stops keeping up&rdquo;.</div></li>
+        <li data-ok><span>One seed per rung, and the last gain (0.006) is about two seed standard deviations at this scale.</span><div class="why">if &sigma; is near d8&rsquo;s 0.003, the difference of two single runs has a standard error of about 0.004. The &ldquo;collapse&rdquo; rests on the rung most affected by noise.</div></li>
+        <li><span>A real ladder must scale depth and width together; a width-only ladder is invalid.</span><div class="why">Not the problem: width-only ladders are a legitimate design. Its conclusion is narrower (about width at this depth), but the flaws above would remain with any shape.</div></li>
+        <li><span>Validation loss is the wrong metric for music; it needs listening tests.</span><div class="why">Not the problem here: maybe true in the end, but the inference from these losses is already unsound for the reasons above. Fix the experiment before arguing about the metric.</div></li>
+      </ul>
+      <div class="drill-why"><p>Three independent mechanisms each bend a ladder&rsquo;s top in the same direction, so the observed flattening is what you would expect even if width kept paying. The repair: tune the rate at two or three rungs (or use &micro;P), scale tokens with parameters or state the data budget explicitly in the conclusion, and put two or three seeds on the top rungs.</p></div>
+    </div>
+
+    <div class="drill" data-id="u1-d2" data-title="A noise floor from two runs">
+      <div class="drill-log"><span class="who">[agent]</span> Chess-move model. Noise floor: baseline with seeds 1 and 2 -> 1.884, 1.885. sigma ~ 0.001.
+<span class="who">[agent]</span> z-loss 1e-4 (seed 3): <b>1.880</b>. Delta = -0.004 = 4 sigma. Significant; adopting.
+<span class="who">[agent]</span> label smoothing 0.05 (seed 4): 1.889. Delta = +0.005. Rejected.
+<span class="who">[agent]</span> Wrote noise_floor = 0.001 into the experiment config for future decisions.</div>
+      <p class="drill-q">What would you challenge?</p>
+      <ul class="drill-opts">
+        <li data-ok><span>A standard deviation from two runs is barely an estimate.</span><div class="why">with two runs, the true &sigma; could be 0.45&times; to 32&times; what they show (95%). &ldquo;4 sigma&rdquo; could easily be less than 1.</div></li>
+        <li data-ok><span>Each candidate is a single run on a new seed, compared with the baseline&rsquo;s runs.</span><div class="why">the candidate&rsquo;s own seed noise enters the difference in full. With one run per arm and no pairing, even a known &sigma; gives the difference a standard error of about &sigma;&radic;1.5 here.</div></li>
+        <li data-ok><span>The noise floor is written into the config, so every later decision inherits it.</span><div class="why">a bad estimate used once is one wrong decision; stored as a threshold, it silently decides every future comparison. Measure it with 4&ndash;10 seeds before it becomes infrastructure.</div></li>
+        <li><span>The validation set may be too small; evaluate on more data.</span><div class="why">Not the problem: every run is scored on the same validation sequences, so their sampling error largely cancels in a difference. The variation that matters here is between training runs.</div></li>
+        <li><span>z-loss is known to matter only at large scale, so this result must be noise.</span><div class="why">Not an audit: a prior is not evidence about this experiment. The design is what is wrong, whichever way the truth turns out.</div></li>
+      </ul>
+      <div class="drill-why"><p>Here nothing in the log says the result is wrong; it says the design cannot tell. The cheapest fix also has the most value: six more baseline seeds give a usable &sigma; for every later decision, and pairing seeds across arms removes part of the noise of each comparison.</p></div>
+    </div>
+
+    <div class="drill" data-id="u1-d3" data-title="Warmup judged on a smoke run">
+      <div class="drill-log"><span class="who">[agent]</span> Question: does a longer warmup help the code model? Smoke runs of 2,000 steps (5% of the full schedule), lr 0.004, no decay.
+<span class="who">[agent]</span> train loss at step 2,000:  warmup 1% -> 3.412   warmup 10% -> <b>3.447</b>
+<span class="who">[agent]</span> Longer warmup is worse by 0.035, far beyond our seed noise (0.003). Keeping 1%.
+<span class="who">[agent]</span> Also raising peak lr to 0.008 for the full run, since warmup is clearly not needed.</div>
+      <p class="drill-q">What would you challenge?</p>
+      <ul class="drill-opts">
+        <li data-ok><span>The comparison is made mid-run, before any decay.</span><div class="why">the longer-warmup run has simply spent fewer steps at full rate, so it is behind at step 2,000. Mid-run loss mostly shows the schedule, not where each run would end.</div></li>
+        <li data-ok><span>One step&rsquo;s training loss is compared against a noise figure for final validation loss.</span><div class="why">the per-step training loss jitters by about 0.04 at d8&rsquo;s batch, more than ten times the 0.003 seed spread of the final loss. A 0.035 gap at one step is inside that jitter.</div></li>
+        <li data-ok><span>The decision is then applied at twice the rate it was tested at.</span><div class="why">warmup matters most at high rates. CS 312 measured that at a higher peak, longer warmup helps (5% to 20% recovered 0.018 at lr 0.027). The test removed exactly the condition it was meant to inform.</div></li>
+        <li><span>Warmup does not matter with AdamW, so the experiment is pointless.</span><div class="why">Wrong: removing d8&rsquo;s 1% warmup costs about 0.1 in final loss. The question is reasonable; the test is not.</div></li>
+        <li><span>The full schedule should have used cosine decay.</span><div class="why">Not the problem: the decay shape is a separate choice and does not affect what this comparison can show.</div></li>
+      </ul>
+      <div class="drill-why"><p>A smoke run is a harness check, not an experiment: it answers &ldquo;does it run&rdquo;, not &ldquo;which is better&rdquo;. To test warmup, run the full schedule (or a shorter one that still decays to zero) for both arms, at the peak rate you intend to use, and compare final validation loss.</p></div>
+    </div>
+  </section>
+
+  <section id="debrief">
+    <h2>9. Quiz 1, question by question</h2>
+    <p>CS 312&rsquo;s first quiz is <a href="https://deep-learning-alchemy.github.io/quiz-basics.html">online as an interactive page</a> that grades itself in your browser; the answer slides are on the <a href="https://deep-learning-alchemy.github.io/">course page</a>. Take it cold before or after this unit. Every question is covered above:</p>
+    <div class="tw">
+    <table>
+      <tr><th>Q</th><th>About</th><th>Measured answer</th><th>Here</th></tr>
+      <tr><td>1</td><td>Seed spread; step-to-step jitter</td><td class="r">0.0029; 0.040</td><td><a href="#s4">&sect;4</a></td></tr>
+      <tr><td>2</td><td>Jitter at batch 16 and 256</td><td class="r">&times;2; &times;&frac12;</td><td><a href="#s4">&sect;4</a></td></tr>
+      <tr><td>3</td><td>No warmup</td><td class="r">+0.1</td><td><a href="#s6">&sect;6</a></td></tr>
+      <tr><td>4</td><td>WSD decay fraction</td><td class="r">20%</td><td><a href="#s6">&sect;6</a></td></tr>
+      <tr><td>5</td><td>Rate and warmup together</td><td class="r">2.917 / 2.975 / 2.956</td><td><a href="#s6">&sect;6</a></td></tr>
+      <tr><td>6</td><td>Parameter and gradient norms</td><td class="r">only linear + WD falls</td><td><a href="#s7">&sect;7</a></td></tr>
+      <tr><td>7</td><td>Recipes at d16; ladder benders</td><td class="r">+0.12 / +0.06 / +0.24; +0.61</td><td><a href="#s3">&sect;3</a></td></tr>
+      <tr><td>8</td><td>One changed token</td><td class="r">0.57&sigma;</td><td><a href="#s4">&sect;4</a></td></tr>
+    </table>
+    </div>
+  </section>
+
+  <section id="lab">
+    <h2>10. Run it yourself</h2>
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 1</span><span class="lab-title">Assignment 1 on your own Modal account</span></div>
+      <div class="lab-body">
+        <p>Set up as in <a href="u0-method.html#modal">unit 0</a> on the <code>a1_release</code> branch. The assignment&rsquo;s seven problems each have a launcher in <code>experiments/a1_basics/</code>, run with module syntax, for example <code>uv run python -m experiments.a1_basics.p3_measuring_variation</code>. The README&rsquo;s first exercise is a learning-rate sweep: <code>uv run python -m experiments.lr_tuning.launch_lr_tuning</code>, then <code>uv run python -m experiments.lr_tuning.plot_lr_tuning</code>.</p>
+        <p>If you run only one thing, make it problem 3 (measuring variation, about 25 d8 runs, around $12 at the course&rsquo;s estimate): it gives you your own &sigma; on your own hardware, which every later comparison needs. None of this has been run for this page.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why does a comparison at one fixed learning rate say little about the methods being compared?</summary>
+        <p>Each method has its own best rate, and the loss rises roughly quadratically in log rate away from it. At one shared rate you measure how far each method is from its own optimum as much as how good it is.</p>
+      </details>
+      <details>
+        <summary>A ladder run at a single learning rate shows diminishing returns at the top. Name three reasons that could produce this even if size keeps paying.</summary>
+        <p>The rate is too high for the bigger rungs (the optimum falls with size); a fixed token budget gives bigger rungs fewer tokens per parameter; and the top rungs&rsquo; differences are small enough for seed noise to matter.</p>
+      </details>
+      <details>
+        <summary>Why is the step-to-step jitter of the training loss a poor guide to how much two runs&rsquo; final losses differ?</summary>
+        <p>Jitter is mostly the sampling noise of one batch (it falls as 1/&radic;B), about 0.04 on d8 at batch 64; the seed-to-seed spread of final validation loss is about 0.003. They measure different things.</p>
+      </details>
+      <details>
+        <summary>You have two baseline runs that differ by 0.001. What can you say about &sigma;?</summary>
+        <p>Very little: with two runs the 95% interval for the true &sigma; runs from about 0.45&times; to 32&times; the sample value. Measure with 4&ndash;10 seeds.</p>
+      </details>
+      <details>
+        <summary>Why does pairing seeds across arms reduce noise only partly?</summary>
+        <p>Training is chaotic: even one changed token sends the run on a different path, ending about 0.57&sigma; from its twin on d8. Pairing keeps some correlation (about 0.75 for a one-token change, by that measurement), less for a larger change.</p>
+      </details>
+      <details>
+        <summary>Why can WSD runs not be compared in their stable phase?</summary>
+        <p>Most of the improvement arrives during the decay, and how much each run gains from it need not be the same. Compare after decay, or decay both from the same point.</p>
+      </details>
+      <details>
+        <summary>Which internal statistic&rsquo;s growth is usually harmless in a transformer with RMSNorm, and why?</summary>
+        <p>The norm of a weight matrix whose output is normalized: scaling it does not change the function, so its growth only changes the effective learning rate, not the model&rsquo;s outputs.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources</h2>
+    <ul class="srcs">
+      <li>CS 312, <a href="https://deep-learning-alchemy.github.io/">course page</a>: lecture 2 (basics), assignment 1, quiz 1 and its answer slides. All numbers tagged <span class="tag-m">measured</span> on this page come from the answer slides.</li>
+      <li>Li, Tram&egrave;r, Liang, Hashimoto, <a href="https://arxiv.org/abs/2110.05679">Large Language Models Can Be Strong Differentially Private Learners</a>, 2021.</li>
+      <li>Kim, Kotha, Liang, Hashimoto, <a href="https://arxiv.org/abs/2509.14786">Pre-training under infinite compute</a>, 2025.</li>
+      <li>Wen, Hall, Ma, Liang, <a href="https://arxiv.org/abs/2509.02046">Fantastic Pretraining Optimizers and Where to Find Them</a>, 2025.</li>
+      <li>Li et al. (StepFun), <a href="https://arxiv.org/abs/2503.04715">Predictable Scale: Part I, Step Law Predictable Scale: Part I &mdash; Optimal Hyperparameter Scaling Law in Large Language Model Pretraining</a> (&ldquo;Step Law&rdquo;)mdash; Optimal Hyperparameter Scaling Law in Large Language Model Pretraining</a>, 2025.</li>
+      <li>Kaplan et al., <a href="https://arxiv.org/abs/2001.08361">Scaling Laws for Neural Language Models</a>, 2020; Hoffmann et al., <a href="https://arxiv.org/abs/2203.15556">Training Compute-Optimal Large Language Models</a>, 2022.</li>
+      <li>Porian et al., <a href="https://arxiv.org/abs/2406.19146">Resolving Discrepancies in Compute-Optimal Scaling of Language Models</a>, 2024; Pearce and Song, <a href="https://arxiv.org/abs/2406.12907">Reconciling Kaplan and Chinchilla Scaling Laws</a>, 2024.</li>
+      <li>Marin project, <a href="https://openathena.ai/blog/delphi/">Delphi</a> notes on scaling, cited in lecture 2.</li>
+      <li>Dehghani et al., <a href="https://arxiv.org/abs/2302.05442">Scaling Vision Transformers to 22 Billion Parameters</a>, 2023: attention-logit growth and QK-norm.</li>
+      <li>H&auml;gele et al., <a href="https://arxiv.org/abs/2405.18392">Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations</a>, 2024: WSD schedules.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="u0-method.html">&larr; Unit 0 — The method</a>
+      <a href="index.html">Index</a>
+      <a href="u2a-optimizers.html">Unit 2a — Optimizers &rarr;</a>
+    </nav>
+    <p>Follows CS 312 lecture 2, assignment 1 and quiz 1, in its own words; measured numbers from the course&rsquo;s answer slides; Fig. 1 and the ladder are illustrative models; the drills are fictional.</p>
+  </footer>
+<script src="assets/lesson-kit.js"></script>
+<script src="assets/ledger.js?v=20261014a"></script>
+<script src="assets/xp/xp-core.js?v=20261014a"></script>
+<script src="assets/xp/xp-svg.js?v=20261014a"></script>
+<script src="assets/xp/xp-gl.js?v=20261014a"></script>
+<script src="assets/xp/xp-time.js?v=20261014a"></script>
+<script src="assets/fig-surface.js?v=20261014a"></script>
+<script src="assets/u1.js?v=20261014a"></script>
+<script>
+  Alchemy.figSurface(document.getElementById('fig-surface'), {
+    fig: 'Fig. 1',
+    caption: '<b>Fig. 1</b> — A field of 48 training runs. Left to right: eight learning rates, each twice the last; front to back: batch sizes 16 to 512. Each column&rsquo;s height is how far that run&rsquo;s final loss sits above the best run in the grid. Four acts: one sweep at batch 64; the full grid, where the best rate moves with the batch; one rate borrowed for every batch; and the grid for d16 instead of d8. Illustrative model anchored to CS 312&rsquo;s measured numbers; see below.'
+  });
+</script>
+</body>
+</html>

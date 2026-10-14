@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unit 2a — Optimizers: noise, curvature and norms · DL Alchemy</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/alchemy.css?v=20261014a">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<style>
+  /* unit 2a widgets: two plot panels side by side, stacked on phones */
+  .u2a-panels{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin:.2rem 0 .3rem}
+  .u2a-norm{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:.6rem;align-items:start;margin:.2rem 0 .3rem}
+  .u2a-stack{display:grid;gap:.6rem}
+  .u2a-sw{vertical-align:middle;margin-right:.35rem}
+  .w-legend span{display:inline-flex;align-items:center}
+  .u2a-cap{font-size:.86rem;color:var(--lk-ink-soft);margin:.5rem 0 0}
+  .w.ready .u2a-nojs{display:none}
+  .w-controls label.chk input{accent-color:var(--lk-cobalt)}
+  .w-controls label[hidden]{display:none}
+  #w-nqm .w-stat .k,#w-norm .w-stat .k{text-transform:none;letter-spacing:.02em;font-size:.76rem}
+  @media(max-width:640px){.u2a-panels,.u2a-norm{grid-template-columns:1fr}}
+</style>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="u1-basics.html">&larr; Unit 1 — Basics</a>
+    <a href="index.html">Index</a>
+    <a href="u2b-parametrization.html">Unit 2b — Parametrization: µP and Muon &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Unit 2 · Optimization 1 · part a (CS 312 lecture 3, assignment 2)</div>
+    <h1>Optimizers: noise, curvature and norms</h1>
+    <div class="lk-meta"><span>~60 min read</span><span>2 interactive widgets</span><span>12 sealed predictions</span><span>3 audit drills</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The unit in one paragraph</h2>
+    <p>An optimizer is four dials: a learning rate, a batch size, a preconditioner and momentum. Two simple models predict most of how they interact. The <strong>noisy quadratic</strong> treats the loss as a bowl with steep and flat directions and the gradient as a noisy measurement of its slope. It explains why the best learning rate grows with batch size and then stops growing, why larger batches eventually stop paying, and why momentum and preconditioning help mostly at large batch. The <strong>rotational picture of the weights</strong> starts from the fact that most weights in a normalized transformer only matter through their direction. Gradient steps then make their norms grow, weight decay pulls them back, and the two settle into an equilibrium where the learning rate and the weight decay act only through their product. That product explains measured results from CS 312 that look strange otherwise, such as why the right response to an eight times larger batch is eight times more weight decay. Hyperball fixes the norm by construction, so that the learning rate directly sets how far each weight turns. Twelve sealed predictions, most checked against CS 312&rsquo;s measured d8 runs, and three audit drills.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this unit</h3>
+    <ol>
+      <li><a href="#s1">What an optimizer is made of</a></li>
+      <li><a href="#s2">The noisy quadratic</a></li>
+      <li><a href="#s3">Batch size and the critical batch</a></li>
+      <li><a href="#s4">Momentum and preconditioning pay at large batch</a></li>
+      <li><a href="#s5">Where the quadratic stops</a></li>
+      <li><a href="#s6">Why weights grow</a></li>
+      <li><a href="#s7">One knob: the product &eta;&lambda;</a></li>
+      <li><a href="#s8">Hyperball: fix the norm, keep the angle</a></li>
+      <li><a href="#s9">Audit drills</a></li>
+      <li><a href="#s10">Run it yourself</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. What an optimizer is made of</h2>
+
+    <p>Plain stochastic gradient descent takes one step downhill on a minibatch: &theta; &larr; &theta; &minus; &eta; &nabla;&ell;(&theta;). Every optimizer in use is that update with four things changed:</p>
+    <ul>
+      <li><strong>The learning rate</strong> &eta;, and how it changes over training (the schedule).</li>
+      <li><strong>The batch</strong>: how many examples are averaged into each gradient. More examples mean less noise but fewer steps for the same data.</li>
+      <li><strong>A preconditioner</strong> <var>A</var>: &theta; &larr; &theta; &minus; &eta; <var>A</var> <var>g</var>. Think of it as a change of coordinates that gives each direction its own step size. It must be positive definite, with eigenvalues kept away from zero and infinity, or it stops being a descent method.</li>
+      <li><strong>Momentum</strong>: a running sum of past gradients, so that directions where gradients keep agreeing get faster steps.</li>
+    </ul>
+
+    <p>AdamW, the d8 default, uses all four. Elementwise, for a weight matrix <var>W</var> with gradient <var>g</var> at step <var>t</var>:</p>
+    <div class="eq">m &larr; &beta;<sub>1</sub> m + (1 &minus; &beta;<sub>1</sub>) g &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; v &larr; &beta;<sub>2</sub> v + (1 &minus; &beta;<sub>2</sub>) g<sup>2</sup> &nbsp;&nbsp;&nbsp;&nbsp;<span class="c">momentum, and a running second moment</span><br>
+U = [m / (1 &minus; &beta;<sub>1</sub><sup>t</sup>)] / ( &radic;[v / (1 &minus; &beta;<sub>2</sub><sup>t</sup>)] + &epsilon; ) &nbsp;&nbsp;&nbsp;&nbsp;<span class="c">bias-corrected; dividing by &radic;v is a diagonal preconditioner</span><br>
+W &larr; W &minus; &eta; U &minus; &eta; &lambda; W &nbsp;&nbsp;&nbsp;&nbsp;<span class="c">the step, then decay applied to the weights directly</span></div>
+
+    <p>The &ldquo;W&rdquo; stands for <em>decoupled</em> weight decay (Loshchilov and Hutter). Adding &lambda;&#8239;|W|&sup2;/2 to the loss instead would send the decay through the preconditioner, dividing it by &radic;v and shrinking each coordinate by a different amount. AdamW shrinks every weight by the same factor 1 &minus; &eta;&lambda; per step. Hold on to that factor: it is the subject of sections 6 to 8. The d8 recipe uses &beta; = (0.9, 0.95), &epsilon; = 10<sup>&minus;8</sup>, peak &eta; = 0.003, &lambda; = 0.1, and exempts embeddings, normalization gains and biases from decay.</p>
+
+    <h3>Why deep-learning optimizers are judged differently</h3>
+    <p>Classical optimization theory asks how fast a method reaches a precise stationary point, on every function in some class. Training a language model asks for neither. Nobody runs a model to convergence; the goal is a good loose solution within a fixed budget, on one narrow family of functions. Adam is the standard example. Its original convergence proof contained an error, and Reddi and colleagues later built simple problems on which it does not converge. Practice did not change, because the guarantee was never what anyone relied on. CS 312&rsquo;s stance follows from this. Convex intuition is a source of hypotheses, not a verdict. Build top-down models of the large-scale behaviour (how a recipe responds to learning rate, batch, scale), then reconcile them with bottom-up mechanisms. The rest of this unit does exactly that, twice.</p>
+
+    <details class="ym">
+      <summary>Your move: multiply the loss by 10. What happens to an SGD step, and to an Adam step?</summary>
+      <p>SGD&rsquo;s gradient, and therefore its step, gets 10 times larger: the same &eta; is now a 10 times larger learning rate, enough to diverge. Adam divides by the running &radic;v, which also grows 10 times, so its step barely changes. The only exception is &epsilon;, which becomes relatively smaller. Adam is nearly invariant to the scale of the gradient; its step size per coordinate is set by &eta;. Keep this in mind for section 6: a step whose size ignores the gradient&rsquo;s scale is what makes weight norms matter.</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. The noisy quadratic</h2>
+
+    <p>Zhang and colleagues (2019) asked how far one can get by pretending the loss is a quadratic bowl and the gradient is its slope plus Gaussian noise. Further than you would expect: their noisy quadratic model (NQM) predicted how the best learning rate, the effect of momentum and the benefit of preconditioning change with batch size in real networks. Its appeal is that everything about it can be solved exactly.</p>
+
+    <p>Rotate coordinates so that the curvature matrix <var>H</var> is diagonal, with eigenvalues <var>h<sub>i</sub></var>. Then the loss is &frac12; &Sigma; <var>h<sub>i</sub></var> &theta;<sub>i</sub><sup>2</sup> and the minibatch gradient is <var>H</var>&theta; + &epsilon;, with noise &epsilon; ~ N(0, <var>C</var>/<var>B</var>): averaging <var>B</var> independent examples divides the variance by <var>B</var>. If <var>C</var> is diagonal in the same coordinates, every coordinate evolves on its own. With SGD at step size &alpha;:</p>
+    <div class="eq">&theta;<sub>i</sub> &larr; (1 &minus; &alpha;h<sub>i</sub>) &theta;<sub>i</sub> &minus; &alpha; &epsilon;<sub>i</sub>, &nbsp;&nbsp; &epsilon;<sub>i</sub> ~ N(0, c<sub>i</sub>/B)<br>
+E[&ell;<sub>i</sub>(t)] = (1 &minus; &alpha;h<sub>i</sub>)<sup>2t</sup> E[&ell;<sub>i</sub>(0)] &nbsp;+&nbsp; [1 &minus; (1 &minus; &alpha;h<sub>i</sub>)<sup>2t</sup>] &middot; &alpha;c<sub>i</sub> / (2B(2 &minus; &alpha;h<sub>i</sub>))</div>
+
+    <p>The expected loss has two parts <span class="tag-d">derived</span>. The first is what is <strong>left of the start</strong>, shrinking by a factor (1 &minus; &alpha;h)&sup2; per step. The second is a <strong>noise floor</strong> the run settles on, proportional to &alpha;/<var>B</var>. Three consequences follow, and between them they hold most of this unit:</p>
+    <ol>
+      <li><strong>The steepest direction sets the speed limit.</strong> The factor |1 &minus; &alpha;h| must stay below 1 in every direction, so &alpha; &lt; 2/<var>h</var><sub>max</sub>. Past that the steep direction overshoots by more each step and the run diverges.</li>
+      <li><strong>The flattest direction sets the duration.</strong> It shrinks at a rate of about &alpha;<var>h</var><sub>min</sub> per step, so it needs on the order of 1/(&alpha;<var>h</var><sub>min</sub>) steps, and &alpha; cannot be raised to hurry it past the limit set by the steep direction.</li>
+      <li><strong>The noise floor costs &alpha;/B.</strong> A larger learning rate finishes the flat direction sooner and parks the run higher. A larger batch lowers the floor, but at a fixed data budget it also means fewer steps.</li>
+    </ol>
+
+    <details class="ym">
+      <summary>Your move: derive the noise floor from the update rule.</summary>
+      <p>Square the update and take expectations; the noise is independent of &theta;, so the cross term vanishes: <var>v</var>&prime; = (1 &minus; &alpha;h)&sup2; <var>v</var> + &alpha;&sup2;c/B, where <var>v</var> = E[&theta;&sup2;]. At the fixed point <var>v</var> = &alpha;&sup2;c / (B(1 &minus; (1 &minus; &alpha;h)&sup2;)) = &alpha;c / (B h (2 &minus; &alpha;h)). The loss is &frac12;h<var>v</var> = &alpha;c / (2B(2 &minus; &alpha;h)). It depends on &alpha; and B only through &alpha;/B as long as &alpha;h is small, which is the seed of the linear scaling rule in section 3.</p>
+    </details>
+
+    <p>CS 312&rsquo;s assignment 2 uses the smallest interesting case: two coordinates with <var>H</var> = diag(1, 10), noise covariance <var>I</var> (the same noise in both directions), a fixed budget of <var>N</var> = 8,192 examples (so <var>N</var>/<var>B</var> steps), and a random start, w<sub>1</sub> ~ N(0, 1) and w<sub>2</sub> ~ N(0, 0.1). The widget below is that toy. For SGD, momentum and the preconditioned variant the expected loss is computed exactly, by carrying the second moments through every step. Adam has no closed form, so it is simulated. Every view also shows the average of 64 seeded simulated runs, so you can see the exact curve and the simulation agree.</p>
+
+    <div class="w" id="w-nqm">
+      <h4>The noisy quadratic, live</h4>
+      <p class="w-sub">H = diag(1, 10), gradient noise N(0, I/B), 8,192 examples, constant step size. Exact where a closed form exists; 64 seeded runs otherwise.</p>
+      <p class="w-sub u2a-nojs">This widget needs JavaScript.</p>
+      <div class="w-controls">
+        <label>Optimizer
+          <select data-k="opt">
+            <option value="sgd" selected>SGD</option>
+            <option value="mom">SGD + momentum</option>
+            <option value="pre">preconditioned SGD (H^-1/2)</option>
+            <option value="adam">Adam (0.9, 0.95), simulated</option>
+          </select></label>
+        <label>Batch size B = <output data-o="b">16</output><input type="range" data-k="b" min="0" max="9" step="1" value="4" aria-label="batch size, as a power of two"></label>
+        <label>Step size &eta; = <output data-o="lr">0.01</output><input type="range" data-k="lr" min="-4" max="0" step="0.05" value="-2" aria-label="log10 of the step size"></label>
+        <label data-box="mu" hidden>Momentum &mu; = <output data-o="mu">0.90</output><input type="range" data-k="mu" min="0" max="0.98" step="0.02" value="0.9" aria-label="momentum coefficient"></label>
+        <label>View
+          <select data-k="view">
+            <option value="run" selected>one setting</option>
+            <option value="sweep">tune &eta; at every batch size</option>
+          </select></label>
+      </div>
+      <div class="u2a-panels">
+        <svg class="w-plot" data-k="a" role="img" aria-label="Left panel of the noisy quadratic widget"></svg>
+        <svg class="w-plot" data-k="b" role="img" aria-label="Right panel of the noisy quadratic widget"></svg>
+      </div>
+      <div class="w-legend"></div>
+      <p class="u2a-cap" data-k="cap"></p>
+      <div class="w-out"></div>
+      <div class="w-verdict"></div>
+    </div>
+
+    <p>Things to try, in this order:</p>
+    <ul>
+      <li>SGD at B = 16. Start at &eta; = 0.0001 and slide right. First the run is <em>too slow</em>: the flat direction has not arrived. Then it is <em>noise-bound</em>: it gets there and rattles. At &eta; = 0.2 the steep direction diverges. The best &eta; sits where the two losses balance.</li>
+      <li>Momentum with &mu; = 0.9. Watch the path swing across the steep direction before it settles. At the same &eta; the step is effectively ten times larger, because the sum of past gradients builds up to about 1/(1 &minus; &mu;) of one gradient.</li>
+      <li>Adam at B = 16 and at B = 256. It never settles the way SGD does; its step per coordinate stays about &eta; in size whatever the gradient.</li>
+    </ul>
+  </section>
+
+  <section id="s3">
+    <h2>3. Batch size and the critical batch</h2>
+
+    <p>Hold the data budget fixed at 8,192 examples and ask how the best SGD step size changes with the batch. Predict before switching the widget to its sweep view.</p>
+
+    <div class="pred" data-id="u2a-nqm-double">
+      <div class="pred-q"><p>In the toy above, with plain SGD and the step size tuned separately at each batch size, the batch goes from 16 to 32 (so from 512 steps to 256). By what factor does the best step size change?</p></div>
+      <ol class="pred-opts">
+        <li>It stays about the same: the curvature has not changed</li>
+        <li>About &times;&radic;2</li>
+        <li data-ok>About &times;2</li>
+        <li>About &times;4</li>
+      </ol>
+      <div class="pred-why">
+        <p>About &times;2 (exactly 0.00944 &rarr; 0.0186, a factor of 1.97) <span class="tag-d">derived</span>. While &alpha;h is small, (1 &minus; &alpha;h)<sup>2T</sup> &asymp; e<sup>&minus;2&alpha;hT</sup> with T = N/B, so the leftover depends on &alpha;/B, and so does the noise floor &alpha;c/(4B). Double B and double &alpha; and the expected loss after the same number of examples is unchanged. This is the <strong>linear scaling rule</strong>, which Goyal and colleagues used to train ImageNet in an hour.</p>
+        <p class="pred-src">Computed exactly from the closed form in this page; you can check it in the sweep view.</p>
+      </div>
+    </div>
+
+    <p>The argument has an expiry date. It needs &alpha;h<sub>max</sub> to be small, and the limit &alpha; &lt; 2/h<sub>max</sub> does not move with the batch. Once the best step size gets near that limit, a larger batch still lowers the noise but can no longer buy a proportionally larger step, and the flat direction gets fewer steps to finish. Past that point a larger batch just wastes data. McCandlish and colleagues called the turning point the <strong>critical batch size</strong>; Zhang and colleagues showed the NQM reproduces it, and that it depends on the optimizer.</p>
+
+    <div class="pred" data-id="u2a-nqm-extrap">
+      <div class="pred-q"><p>Fit the linear rule &eta;* = <var>c</var>&middot;B to the toy&rsquo;s tuned SGD step sizes at B = 1 to 64. They fit it almost perfectly. Now use the rule at B = 512 (16 steps). What happens at the extrapolated step size?</p></div>
+      <ol class="pred-opts">
+        <li>Within 10% of the best loss at B = 512</li>
+        <li>About twice the best loss</li>
+        <li data-ok>The run diverges</li>
+        <li>Better than the tuned step: the rule extrapolates past what a grid finds</li>
+      </ol>
+      <div class="pred-why">
+        <p>It diverges <span class="tag-d">derived</span>. The rule gives &eta; &asymp; 0.000589 &times; 512 &asymp; 0.30, above the stability limit 2/h<sub>max</sub> = 0.2. The tuned step at B = 512 is 0.174, and even then the best loss is 5.7 times the B = 1 value. A rule fitted where its assumption holds says nothing about where the assumption breaks, and nothing in the fit warns you. Problem 3.1 of the assignment makes you find this range yourself.</p>
+        <p class="pred-src">Computed exactly from the closed form in this page.</p>
+      </div>
+    </div>
+
+    <p>Switch the widget to <em>tune &eta; at every batch size</em>. The left panel shows the best step size against B on log axes: slope 1 for SGD until it bends toward the stability limit. The right panel shows the best loss after tuning: flat while the linear rule holds, then rising. SGD&rsquo;s best loss is up 9% at B = 64, 22% at B = 128 and 5.7 times at B = 512 <span class="tag-d">derived</span>. In this toy the critical batch is around 64 to 128 examples.</p>
+
+    <div class="callout note">
+      <span class="callout-label">Adam scales differently</span>
+      <p>For adaptive methods the analogous small-step argument suggests &eta;* &prop; &radic;B instead of &prop; B (the square-root rule of Malladi and colleagues). Real language models follow neither rule cleanly, and published scaling rules for the optimal learning rate disagree with each other; the assignment opens with a figure collecting them, from the Step Law paper. Assignment 2 has you measure the exponent for Adam in the toy, then in d8 at batch sizes 8 to 256. Section 7 shows that for AdamW the cleanest thing to scale with batch is not the learning rate alone.</p>
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2>4. Momentum and preconditioning pay at large batch</h2>
+
+    <p><strong>Momentum.</strong> With s &larr; &mu;s + g and &theta; &larr; &theta; &minus; &eta;s, a run that takes small steps behaves like SGD with step size &eta;/(1 &minus; &mu;): the sum of agreeing gradients is just a larger step. Once the step size is tuned, that buys nothing. The difference shows up when the stability limit binds. Heavy-ball momentum stays stable up to &eta;h &lt; 2(1 + &mu;), so its effective step &eta;/(1 &minus; &mu;) can reach 2(1 + &mu;)/((1 &minus; &mu;)h<sub>max</sub>): 38/h<sub>max</sub> at &mu; = 0.9, against SGD&rsquo;s 2/h<sub>max</sub> <span class="tag-d">derived</span>. The flat direction gets large steps while the steep one oscillates but does not blow up. Small batches need small steps anyway, because the noise floor is high, so the extra headroom is useless there. Large batches have a low floor and can use it.</p>
+
+    <p><strong>Preconditioning.</strong> Zhang and colleagues model it as stepping with <var>H</var><sup>&minus;p</sup>: each direction gets step &eta;h<sup>&minus;p</sup>. At p = &frac12; the toy&rsquo;s curvature spread shrinks from 10 to &radic;10, so the steep direction stops holding the flat one back. Adam&rsquo;s division by &radic;v is a rough, noisy version of this, and in their experiments Adam and K-FAC raised the critical batch well above SGD&rsquo;s.</p>
+
+    <p>The sweep view puts numbers on both <span class="tag-d">derived</span>. Tuned momentum (&mu; and &eta; both tuned) beats tuned SGD by 1.02&times; at B = 1, 1.7&times; at B = 16 and 7.3&times; at B = 512. Preconditioning beats it by 1.46&times; at B = 1 and 7.7&times; at B = 512. In the toy preconditioning helps even at batch 1, which differs from the paper. The reason is that the assignment&rsquo;s noise is the same in both directions, so the preconditioner also cuts the noise injected along the steep one; Zhang and colleagues assumed the noise covariance equals the curvature, and under that assumption the small-batch gain disappears. One more trap: with &mu; fixed at 0.9 instead of tuned, momentum is <em>worse</em> than SGD at B &ge; 128 in the toy. Sixteen to sixty-four steps are too few for a memory that spans about ten of them. &ldquo;Momentum helps at large batch&rdquo; assumes enough steps for it to act.</p>
+
+    <p>CS 312 ran the d8 version (quiz 2, building on assignment problem 3.2). At 614.4M tokens and two batch sizes, each at its own tuned learning rate and weight decay, only &beta;<sub>1</sub> of AdamW changed: 0, 0.9 or 0.98, with &beta;<sub>2</sub> = 0.95. At B = 8 (&eta; = 0.00075, &lambda; = 0.1) the default &beta;<sub>1</sub> = 0.9 reached 2.9366; at B = 256 (&eta; = 0.0015, &lambda; = 1.944) it reached 2.9682 <span class="tag-m">measured</span>.</p>
+
+    <div class="pred" data-id="u2a-mom-b8">
+      <div class="pred-q"><p>At B = 8, rank the three runs (&beta;<sub>1</sub> = 0, 0.9, 0.98) by final validation loss, best first.</p></div>
+      <ol class="pred-opts">
+        <li data-ok>0.98, then 0.9, then 0</li>
+        <li>0, then 0.9, then 0.98</li>
+        <li>0, then 0.98, then 0.9</li>
+        <li>0.9, then 0.98, then 0</li>
+      </ol>
+      <div class="pred-why">
+        <p>0.98 &lt; 0.9 &lt; 0 <span class="tag-m">measured</span>. At B = 8 the momentum curve is nearly flat, so the order between 0.9 and 0.98 is the hard part; removing momentum entirely still costs a little. The NQM says the small-batch effect of momentum should be small, not that more momentum should be worse.</p>
+        <p class="pred-src">CS 312 quiz 2, question 4, answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u2a-mom-b256">
+      <div class="pred-q"><p>At B = 256, the same ranking.</p></div>
+      <ol class="pred-opts">
+        <li>0.98, then 0.9, then 0</li>
+        <li>0, then 0.9, then 0.98</li>
+        <li>0, then 0.98, then 0.9</li>
+        <li data-ok>0.9, then 0.98, then 0</li>
+      </ol>
+      <div class="pred-why">
+        <p>0.9 &lt; 0.98 &lt; 0 <span class="tag-m">measured</span>. At large batch the curve over &beta;<sub>1</sub> is sharp: no momentum is much worse, and too much is also worse. Fewer steps leave less room for a long memory, as in the toy.</p>
+        <p class="pred-src">CS 312 quiz 2, question 4, answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u2a-mom-cost">
+      <div class="pred-q"><p>How much does removing momentum (&beta;<sub>1</sub> = 0 instead of 0.9) cost in final validation loss, at each batch size?</p></div>
+      <ol class="pred-opts">
+        <li>Under 0.01 at both</li>
+        <li data-ok>About 0.03 at B = 8, about 0.25 at B = 256</li>
+        <li>About 0.25 at B = 8, about 0.03 at B = 256</li>
+        <li>About 0.1 at both</li>
+      </ol>
+      <div class="pred-why">
+        <p>0.0276 at B = 8 and 0.2503 at B = 256 <span class="tag-m">measured</span>: about nine times larger at the larger batch, the direction the NQM predicts. Note the design: each batch kept its own tuned &eta; and &lambda; while &beta;<sub>1</sub> changed, so the &beta;<sub>1</sub> = 0 runs were not retuned. Removing momentum changes the effective step size, so part of the 0.25 may be a learning-rate mismatch rather than the absence of momentum as such. The assignment asks you to compare this with the toy, where &eta; was retuned for every &mu;.</p>
+        <p class="pred-src">CS 312 quiz 2, question 4 (b); differences computed from the course&rsquo;s measured losses.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s5">
+    <h2>5. Where the quadratic stops</h2>
+    <p>The NQM is the workhorse of this unit because it is exactly solvable and often points the right way. It is also wrong about several things that matter, and knowing where is part of using it:</p>
+    <ul>
+      <li><strong>Curvature is not fixed.</strong> In full-batch training the sharpness rises until it hovers around 2/&eta;, the very limit the quadratic says must not be crossed, and the loss keeps falling anyway while oscillating (the &ldquo;edge of stability&rdquo;, Cohen and colleagues). A quadratic would have diverged.</li>
+      <li><strong>Noise is not a fixed Gaussian.</strong> Real gradient noise depends on where the weights are, is heavy-tailed, and is correlated with the curvature in ways that change during training.</li>
+      <li><strong>Adam is not a fixed preconditioner.</strong> Its &radic;v follows the noise as much as the curvature, and at small batch it mostly measures noise.</li>
+      <li><strong>The landscape has structure a bowl cannot hold.</strong> Loss that drops sharply during a learning-rate decay, curves that cross after the decay, valleys with a slowly descending floor: unit 3 covers these with the &ldquo;river valley&rdquo; picture.</li>
+      <li><strong>Weight norms change the effective step.</strong> In a normalized network the same &eta; means different things at different weight norms. The quadratic has no notion of this, and it is the subject of the rest of this unit.</li>
+    </ul>
+    <p>The working rule: trust the NQM for the <em>direction</em> of an effect and for which regime you are in, and measure the size.</p>
+  </section>
+
+  <section id="s6">
+    <h2>6. Why weights grow</h2>
+
+    <p>CS 312&rsquo;s first quiz contained a question that looks like bookkeeping. Four d8 runs cross the learning-rate schedule (linear decay or constant) with weight decay (0.1 or 0). Every step, each run logs the L2 norm of all its parameters and the L2 norm of its gradient before clipping. Predict before reading on.</p>
+
+    <div class="pred" data-id="u2a-norm-peak">
+      <div class="pred-q"><p>At the end of training, which runs have a parameter norm noticeably (3&ndash;15%) <em>below</em> the highest value it reached during the run? The others end within 3% of their peak.</p></div>
+      <ol class="pred-opts">
+        <li>All four: norms always come down as training settles</li>
+        <li>Both runs with weight decay 0.1</li>
+        <li data-ok>Only linear decay with weight decay 0.1</li>
+        <li>None: every run ends at its peak</li>
+      </ol>
+      <div class="pred-why">
+        <p>Only linear decay with weight decay 0.1 <span class="tag-m">measured</span>; the other three end within 3% of their peak. Without weight decay nothing pulls the norm down, so it ends at its maximum. With weight decay and a constant learning rate it reaches an equilibrium and stays there. Only when the learning rate falls does the equilibrium itself move down, and the norm follows it. The rest of this section and the next explain why.</p>
+        <p class="pred-src">CS 312 quiz 1, question 6 (a), answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u2a-gradnorm">
+      <div class="pred-q"><p>In which runs does the gradient norm before clipping at least double over training (median of the last 10% of steps against the first 10%)?</p></div>
+      <ol class="pred-opts">
+        <li>The two runs without weight decay</li>
+        <li>The two linear-decay runs: the gradient norm climbs as the learning rate falls</li>
+        <li data-ok>None of the four</li>
+        <li>All four</li>
+      </ol>
+      <div class="pred-why">
+        <p>None of them <span class="tag-m">measured</span>. Defazio (2025) reported gradient norms that rise sharply near the end of training with weight decay and a decaying learning rate, and proposed a fix (AdamC). The d8 runs did not show it at this scale and length. The answer slides note that the gradient norm seemed driven more by weight decay than by the schedule.</p>
+        <p class="pred-src">CS 312 quiz 1, question 6 (b), answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <h3>Scale invariance</h3>
+    <p>Most weight matrices in a transformer with RMSNorm feed, directly or a few operations later, into a normalization that divides out their scale. QK-norm normalizes queries and keys; the pre-norm before each block normalizes the residual stream. For such a weight, multiplying it by any c &gt; 0 leaves the network&rsquo;s output unchanged, or nearly: <var>L</var>(c<var>w</var>) = <var>L</var>(<var>w</var>). Two facts follow by differentiating that identity <span class="tag-d">derived</span>:</p>
+    <ul>
+      <li>With respect to c at c = 1: <var>w</var> &middot; &nabla;<var>L</var>(<var>w</var>) = 0. <strong>The gradient is orthogonal to the weight.</strong> Changing the weight&rsquo;s length does nothing, so the gradient has no component along it.</li>
+      <li>With respect to <var>w</var>: &nabla;<var>L</var>(c<var>w</var>) = &nabla;<var>L</var>(<var>w</var>)/c. <strong>The gradient shrinks as the weight grows.</strong></li>
+    </ul>
+    <p>Now take a step <var>u</var> orthogonal to <var>w</var>. By Pythagoras, |<var>w</var> + <var>u</var>|&sup2; = |<var>w</var>|&sup2; + |<var>u</var>|&sup2;: <strong>every step makes the norm grow</strong>, whichever way it points. A larger norm means the same step turns the weight by a smaller angle, and the angle is all the loss cares about. For SGD the effect compounds, because the gradient itself shrinks like 1/|<var>w</var>|: the effective learning rate is &eta;/|<var>w</var>|&sup2; (van Laarhoven, 2017). Without weight decay the effective learning rate decays on its own, on a schedule nobody chose and nobody logs. Weight decay multiplies the norm by 1 &minus; &eta;&lambda; every step, pulling it back. The question is where the two balance.</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. One knob: the product &eta;&lambda;</h2>
+
+    <p>Four more predictions first, because the next derivation gives them away. All four are from CS 312&rsquo;s second quiz, on d8.</p>
+
+    <p>The first two use a 3 &times; 3 grid of peak learning rates {0.0015, 0.003, 0.006} and weight decays {0.1, 0.2, 0.4}, at 1.2288B tokens with a cosine schedule. The best cell was &eta; = 0.003, &lambda; = 0.2, with loss 2.8354 <span class="tag-m">measured</span>.</p>
+
+    <div class="pred" data-id="u2a-lrwd-rank">
+      <div class="pred-q"><p>Three other cells of that grid: A (&eta; = 0.006, &lambda; = 0.1), C (&eta; = 0.006, &lambda; = 0.4) and D (&eta; = 0.0015, &lambda; = 0.1). Rank them by loss, best first.</p></div>
+      <ol class="pred-opts">
+        <li>D, A, C: the lowest learning rate is the safest</li>
+        <li data-ok>A, D, C</li>
+        <li>A, C, D</li>
+        <li>C, A, D: the most regularization wins at this budget</li>
+      </ol>
+      <div class="pred-why">
+        <p>A, then D, then C <span class="tag-m">measured</span> (the full measured order of the six off-optimum cells was A &lt; B &lt; F &lt; E &lt; D &lt; C). Look at the products &eta;&lambda;: A has 6&times;10<sup>&minus;4</sup>, the same as the best cell, and is the closest to it, although its learning rate and weight decay are each off by a factor of two. D&rsquo;s product is four times too small and C&rsquo;s four times too large. Both are off by the same factor, and C is worse; with the learning rate also doubled, C is the one pushing toward instability.</p>
+        <p class="pred-src">CS 312 quiz 2, question 2 (a), answer slides (Fall 2026); our three-cell version of the question.</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u2a-lrwd-excess">
+      <div class="pred-q"><p>How far above the best cell (2.8354) is C?</p></div>
+      <ol class="pred-opts">
+        <li>Less than 0.005</li>
+        <li>0.005 to 0.015</li>
+        <li>0.015 to 0.025</li>
+        <li data-ok>0.025 or more</li>
+      </ol>
+      <div class="pred-why">
+        <p>About 0.032 <span class="tag-m">measured</span>. CS 312&rsquo;s rule of thumb from the assignment&rsquo;s fits is a quadratic penalty in how far the product is off: about 0.007 &times; (log<sub>2</sub> of the factor)&sup2;. Off by 4 = 2&sup2;, that is 0.007 &times; 4 &asymp; 0.028 <span class="tag-d">derived</span>.</p>
+        <p class="pred-src">CS 312 quiz 2, question 2 (b), answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <p>The next two start from the default d8 at 614.4M tokens, where the best pair at B = 64 is &eta; = 0.003, &lambda; = 0.2 (loss 2.9178) <span class="tag-m">measured</span>. The batch becomes 512: the same tokens in eight times fewer steps. Five recipes: A keeps both; B multiplies &eta; by &radic;8; C multiplies &eta; by 8; D multiplies &lambda; by 8; E multiplies both by &radic;8.</p>
+
+    <div class="pred" data-id="u2a-b512-best">
+      <div class="pred-q"><p>At B = 512, which recipe gives the lowest loss?</p></div>
+      <ol class="pred-opts">
+        <li>A: keep both; Adam is batch-invariant enough</li>
+        <li>B: &eta; &times; &radic;8, the square-root rule</li>
+        <li>C: &eta; &times; 8, the linear rule</li>
+        <li data-ok>D: &lambda; &times; 8</li>
+        <li>E: both &times; &radic;8</li>
+      </ol>
+      <div class="pred-why">
+        <p>D, eight times the weight decay <span class="tag-m">measured</span>. C, D and E all multiply the product &eta;&lambda; by 8; D does it without touching the learning rate, which the noisy quadratic says cannot grow without limit. The answer slides summarize the assignment&rsquo;s batch experiments this way: scaling weight decay with batch is predictable, scaling the learning rate tapers off.</p>
+        <p class="pred-src">CS 312 quiz 2, question 7 (a), answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <div class="pred" data-id="u2a-b512-cost">
+      <div class="pred-q"><p>How much worse is recipe A (keeping the batch-64 pair) than the best recipe?</p></div>
+      <ol class="pred-opts">
+        <li>Less than 0.02</li>
+        <li>0.02 to 0.05</li>
+        <li data-ok>0.05 to 0.15</li>
+        <li>0.15 or more</li>
+      </ol>
+      <div class="pred-why">
+        <p>About 0.106 <span class="tag-m">measured</span>. The answer slides&rsquo; estimate: each doubling the product is off costs about 0.01 &times; (doublings)&sup2;, and 8 is three doublings, so 0.01 &times; 9 &asymp; 0.09 <span class="tag-d">derived</span>.</p>
+        <p class="pred-src">CS 312 quiz 2, question 7 (b), answer slides (Fall 2026).</p>
+      </div>
+    </div>
+
+    <h3>The equilibrium</h3>
+    <p>Here is why the product is the knob. Take a scale-invariant weight <var>w</var> with <var>d</var> entries, trained with AdamW. Assume:</p>
+    <ol>
+      <li>each step <var>u</var> is orthogonal to <var>w</var> (scale invariance);</li>
+      <li>its size is roughly constant, |<var>u</var>| &asymp; &eta;&rho;&radic;<var>d</var>, where &rho; is the per-coordinate RMS of Adam&rsquo;s update (Adam normalizes, so &rho; does not track the gradient&rsquo;s scale);</li>
+      <li>successive steps point in roughly unrelated directions, so they add like a random walk, not coherently;</li>
+      <li>&eta;&lambda; &#8810; 1, and the run is long compared with 1/(2&eta;&lambda;) steps.</li>
+    </ol>
+    <p>Each step shrinks <var>w</var> by 1 &minus; &eta;&lambda; and adds an orthogonal |<var>u</var>|:</p>
+    <div class="eq">|w&prime;|&sup2; = (1 &minus; &eta;&lambda;)&sup2; |w|&sup2; + &eta;&sup2;&rho;&sup2;d<br>
+equilibrium: &nbsp;|w|&sup2; = &eta;&sup2;&rho;&sup2;d / (1 &minus; (1 &minus; &eta;&lambda;)&sup2;) &asymp; &eta;&rho;&sup2;d / (2&lambda;)<br>
+angle turned per step: &nbsp;|u| / |w| &asymp; &eta;&rho;&radic;d / &radic;(&eta;&rho;&sup2;d / 2&lambda;) = &radic;(2&eta;&lambda;)</div>
+    <p>At equilibrium <strong>the angle each weight turns per step is about &radic;(2&eta;&lambda;)</strong> <span class="tag-d">derived</span>. It depends on &eta; and &lambda; only through their product, and not on &rho; or <var>d</var>. Since the loss only sees the direction, the product is the effective learning rate; &eta; alone sets only the equilibrium norm. Kosson and colleagues (2024) call this rotational equilibrium; the same algebra with SGD (gradient &prop; 1/|<var>w</var>|) gives the same &radic;(2&eta;&lambda;). The approach to equilibrium takes about 1/(2&eta;&lambda;) steps. For d8&rsquo;s defaults, 2&eta;&lambda; = 6&times;10<sup>&minus;4</sup>, so that is about 1,700 of its 9,375 steps, and the equilibrium angle is about 0.024 radians, 1.4&deg; per step <span class="tag-d">derived</span>. Real updates are only approximately orthogonal and uncorrelated, so read these as orders of magnitude.</p>
+
+    <div class="w" id="w-norm">
+      <h4>Rotational equilibrium in the plane</h4>
+      <p class="w-sub">A weight w in two dimensions whose loss depends only on its angle. Each step has fixed size &eta;, is at right angles to w, and points toward the best direction when a noisy sign says so (an Adam-like normalized step). Exact simulation, 3,000 steps, seeded.</p>
+      <p class="w-sub u2a-nojs">This widget needs JavaScript.</p>
+      <div class="w-controls">
+        <label>Norm control
+          <select data-k="mode">
+            <option value="wd" selected>decoupled weight decay (AdamW-like)</option>
+            <option value="ball">Hyperball: fixed norm, no decay</option>
+          </select></label>
+        <label>Learning rate &eta; = <output data-o="eta">0.01</output><input type="range" data-k="eta" min="0" max="6" step="1" value="3" aria-label="learning rate"></label>
+        <label data-box="lam">Weight decay &lambda; = <output data-o="lam">0.1</output><input type="range" data-k="lam" min="0" max="8" step="1" value="4" aria-label="weight decay"></label>
+        <label>Schedule
+          <select data-k="sched">
+            <option value="const" selected>constant</option>
+            <option value="linear">linear decay to zero</option>
+          </select></label>
+        <label class="chk" data-box="twin"><input type="checkbox" data-k="twin"> add a twin with &eta; &times; 4, &lambda; &divide; 4</label>
+      </div>
+      <div class="u2a-norm">
+        <svg class="w-plot" data-k="plane" role="img" aria-label="The weight's path in its plane, spiralling out from a small start and settling on a circle when weight decay is on"></svg>
+        <div class="u2a-stack">
+          <svg class="w-plot" data-k="r" role="img" aria-label="The weight's norm against step"></svg>
+          <svg class="w-plot" data-k="ang" role="img" aria-label="Angle turned per step against step, log scale"></svg>
+        </div>
+      </div>
+      <div class="w-legend"></div>
+      <div class="w-out"></div>
+      <div class="w-verdict"></div>
+    </div>
+
+    <p>In the toy the step size is exactly constant, so the equilibrium is exact: |<var>w</var>|&sup2; = &eta;/(&lambda;(2 &minus; &eta;&lambda;)), and the angle per step is a function of &eta;&lambda; alone <span class="tag-d">derived</span>. Things to try:</p>
+    <ul>
+      <li>Set &lambda; = 0. The path spirals outward forever and the angle per step falls like 1/&radic;t. This is the run that ends at its norm peak in the quiz question, and why its effective learning rate is out of anyone&rsquo;s control.</li>
+      <li>&eta; = 0.01, &lambda; = 0.1, then tick the twin (&eta; = 0.04, &lambda; = 0.025). The twin settles on a circle four times wider and turns by exactly the same angle per step. Their final losses match.</li>
+      <li>Switch the schedule to linear decay. With &lambda; &gt; 0 the norm peaks and then follows the shrinking equilibrium down, ending below its peak (17% at the defaults; d8 measured 3&ndash;15%). With &lambda; = 0, or with a constant schedule, it ends at its peak. That is the first quiz answer above.</li>
+      <li>Try &eta; = 0.001, &lambda; = 0.01: the relaxation time is 50,000 steps, so the run never reaches equilibrium and the start still sets the effective step at the end.</li>
+    </ul>
+
+    <h3>Reading the measured results</h3>
+    <p><strong>The grid.</strong> If only &eta;&lambda; mattered, the loss surface over (log &eta;, log &lambda;) would be a valley along lines of constant product. The measured grid is close to that: the cells that keep the best product (A and B) are the best of the rest, and penalties grow with how far the product is off. Not exactly, because &eta; also matters on its own: it sets the step size of the parameters that are not scale-invariant (embeddings, gains, the readout), and the stability limit from section 2 still applies. That is why C, with &eta; doubled as well, is worse than D.</p>
+    <p><strong>The batch.</strong> At a fixed token budget, B = 512 means eight times fewer steps. If the right amount of rotation over the whole run is what matters, each step must rotate more, and the timescale 1/(&eta;&lambda;) must shrink eight times when measured in steps. Wang and Aitchison read AdamW as an exponential moving average of updates with that timescale. Bergsma and colleagues (Power Lines) found that the best timescale, expressed as a fraction of the training data, B/(&eta;&lambda;D), stays roughly constant, which makes the right &eta;&lambda; proportional to B. Recipes C, D and E all satisfy that. D wins because it gets the whole factor from &lambda;, which has no stability limit, while C puts it all into &eta;, which does. Quiz 2&rsquo;s B = 256 setting in section 4 (&eta; = 0.0015, &lambda; = 1.944) is this rule applied.</p>
+
+    <details class="ym">
+      <summary>Your move: the batch doubles in the middle of a run. Which single change keeps the rotation per token the same, and why not just raise &eta;?</summary>
+      <p>Double &lambda;. After the switch there are half as many steps per token, so each step must rotate &radic;2 times more: &radic;(2&eta;&lambda;) &times; &radic;2 means &eta;&lambda; &times; 2. Doubling &eta; also doubles the product, but it doubles the step size of the parameters that are not scale-invariant too, and moves you toward the stability limit. Doubling &lambda; changes only the equilibrium. Assignment 2 has a worked example question on exactly this switch, with five policies to rank; try it before reading their answer.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. Hyperball: fix the norm, keep the angle</h2>
+
+    <p>If the learning rate and weight decay matter mostly through the norm equilibrium they produce, why not set the norm directly? Hyperball (Wen and colleagues, 2026), used in assignment 2, does this for every linear-layer weight matrix. Take Adam&rsquo;s update direction <var>U</var>, scale it relative to the weight, step, then project back to the weight&rsquo;s initial Frobenius norm <var>R</var> = |<var>W</var><sub>0</sub>|<sub>F</sub>:</p>
+    <div class="eq">W&#771; = W &minus; &eta; |W|<sub>F</sub> U / |U|<sub>F</sub> &nbsp;&nbsp;&nbsp;&nbsp; W &larr; R &middot; W&#771; / |W&#771;|<sub>F</sub></div>
+    <p>No weight decay is needed, because the norm cannot drift. The relative step is &eta; on every step, so the angle turned per step is about arctan &eta;, whatever happened earlier in the run. The learning rate becomes a number with a meaning: the fraction of the weight&rsquo;s norm to move per step. Switch the widget above to Hyperball to see it: the radius never changes and the angle per step stays fixed at arctan &eta;.</p>
+    <p>Two subtleties the lecture flags. Not every weight should be norm-constrained: the readout&rsquo;s scale encodes the model&rsquo;s confidence, and embeddings may use their norms, so the course applies Hyperball to the internal matrices and the readout, while embeddings and normalization gains use Adam at 0.1041&eta;. And the idea has relatives: weight normalization, steps on the sphere or on the Stiefel manifold, column-wise norms, ball projection. Wen and colleagues report lower loss and norm control by construction; the open question in the assignment is whether it also makes the best learning rate scale more predictably.</p>
+
+    <div class="pred" data-id="u2a-hyperball-lr">
+      <div class="pred-q"><p>CS 312 fitted Hyperball&rsquo;s optimal peak learning rate on d8 (weight decay off) at four token budgets. Read off their plot, the fitted optima are roughly 0.014, 0.013, 0.012 and 0.010 at 0.15B, 0.31B, 0.61B and 1.23B tokens <span class="tag-m">measured</span> (approximate, read from a figure). Which interval contains the fitted optimum at 2.46B tokens?</p></div>
+      <ol class="pred-opts">
+        <li data-ok>0.0075 or more</li>
+        <li>0.0055 to 0.0075</li>
+        <li>0.004 to 0.0055</li>
+        <li>Less than 0.004</li>
+      </ol>
+      <div class="pred-why">
+        <p>About 0.008 <span class="tag-m">measured</span>. The trend continued. A straight line in log&ndash;log through the four points gives about 0.009 <span class="tag-d">derived</span>; the last two alone give about 0.008. The answer slides call it an easy question for that reason: follow the line. Whether AdamW&rsquo;s ladder in assignment problem 1 is as regular is exactly what the assignment asks you to find out.</p>
+        <p class="pred-src">CS 312 quiz 2, question 3, answer slides (Fall 2026).</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s9">
+    <h2>9. Audit drills</h2>
+    <p>Three fictional research logs, each written like an AI research agent&rsquo;s notes. Each one breaks a rule from this unit while sounding reasonable. Tick every objection you would raise, then check. The <a href="u0-method.html#s6">director&rsquo;s checklist</a> from unit 0 applies throughout.</p>
+
+    <div class="drill" data-id="u2a-d1" data-title="Bigger batches hurt this model">
+      <div class="drill-log"><span class="who">[agent]</span> Project: chess-move model, 60M params. Baseline B=128, AdamW lr 2e-3, wd 0.1, cosine schedule (config: total_steps=37,500, warmup=750), 4.9B tokens, val 1.874.
+<span class="who">[agent]</span> Throughput: B=256 is 1.7x faster per token on our GPUs. Switched batch to 256, everything else from the same config. 4.9B tokens = 18,750 steps.
+<span class="who">[agent]</span> Result: <b>val 1.906</b> (+0.032). Seed spread on this model is ~0.004 (3 seeds), so the gap is real.
+<span class="who">[agent]</span> Conclusion: larger batches hurt this model, consistent with the generalization gap of large-batch training. Reverting to B=128 and dropping the batch-size line of work.</div>
+      <p class="drill-q">Which objections would you raise?</p>
+      <ul class="drill-opts">
+        <li data-ok><span>The schedule still targets 37,500 steps, but the run stopped at 18,750: it ended halfway through the cosine, with the learning rate still near its middle value.</span><div class="why">A config that counts in steps silently changed meaning when the batch doubled. The run was compared before its decay, and on most recipes the decay alone is worth more than 0.03.</div></li>
+        <li data-ok><span>Learning rate and weight decay were kept from B=128 although the run takes half as many steps; at least &lambda; (or the product &eta;&lambda;) needed to scale with the batch.</span><div class="why">With half the steps and the same &eta;&lambda;, each step rotates the weights too little over the run. CS 312&rsquo;s batch-512 result says keeping the old pair is a large loss and scaling &lambda; is the cheap fix.</div></li>
+        <li data-ok><span>&ldquo;Larger batches hurt&rdquo; is a claim about every setting; the run tested one setting at B=256.</span><div class="why">The honest conclusion is &ldquo;B=256 with B=128&rsquo;s settings is worse&rdquo;. Dropping the line of work on that basis throws away a 1.7&times; throughput gain on an untuned comparison.</div></li>
+        <li><span>A gap of 0.032 could be seed noise.</span><div class="why">Not the problem here: three seeds give a rough spread, but 0.032 is eight times 0.004. The gap is real; what caused it is the question.</div></li>
+        <li><span>The large-batch generalization gap explains the result.</span><div class="why">Not the problem, but a wrong explanation to accept: that story is about overfitting a fixed training set. In one-pass pretraining, train and validation loss move together; what large batches cost here is steps.</div></li>
+        <li><span>The agent should have used gradient accumulation instead of a real batch of 256.</span><div class="why">Not the problem: accumulation gives the same gradient as a larger batch (up to numerics). It changes memory, not the optimization.</div></li>
+      </ul>
+      <div class="drill-why"><p>Two of the checklist&rsquo;s questions fail here: was each arm tuned (no), and were the runs compared after the decay (no, and nobody noticed because the config hid it). The repair: express the schedule in tokens, rerun B=256 at &lambda; &times; 2 and at &eta; &times; &radic;2 (two runs), and compare after the decay. The self-review checked whether the gap was larger than the noise, which it was, and stopped there.</p></div>
+    </div>
+
+    <div class="drill" data-id="u2a-d2" data-title="Lion loses on code">
+      <div class="drill-log"><span class="who">[agent]</span> Project: small code model, 120M params, AdamW baseline tuned over lr {5e-4, 1e-3, 2e-3} x wd {0.05, 0.1, 0.2}: best lr 1e-3, wd 0.1, val 1.412.
+<span class="who">[agent]</span> Trying Lion (sign of an interpolated momentum, betas 0.9/0.99). Same lr 1e-3, wd 0.1, schedule, data order. 1 seed.
+<span class="who">[agent]</span> Lion: loss spikes at step 1,800 and 4,100, recovers; final <b>val 1.561</b>.
+<span class="who">[agent]</span> Lion is 0.149 worse. Seed spread ~0.005, so ~30 sigma.
+<span class="who">[agent]</span> Conclusion: Lion is not suited to code data. Closing the ticket.</div>
+      <p class="drill-q">Which objections would you raise?</p>
+      <ul class="drill-opts">
+        <li data-ok><span>Lion ran at AdamW&rsquo;s tuned learning rate. Its sign update has magnitude 1 in every coordinate, far larger than Adam&rsquo;s typical step, so the same &eta; is a much larger effective learning rate.</span><div class="why">The loss spikes are the symptom. Lion&rsquo;s authors recommend a learning rate 3&ndash;10 times smaller than AdamW&rsquo;s. Comparing at one borrowed rate compares how well 1e-3 suits each optimizer.</div></li>
+        <li data-ok><span>Weight decay was also borrowed. With decoupled decay the product &eta;&lambda; sets the equilibrium; lowering &eta; for Lion without raising &lambda; would change it again.</span><div class="why">The Lion authors scale weight decay up by the same factor they scale the learning rate down, which keeps &eta;&lambda; fixed. A fair Lion arm needs a small grid, as AdamW got.</div></li>
+        <li data-ok><span>&ldquo;Not suited to code data&rdquo; names a cause the experiment did not vary: no other data, and no tuned Lion run.</span><div class="why">The only thing shown is that Lion at AdamW&rsquo;s settings is worse on this data. A conclusion about the data needs the same comparison on other data, after tuning.</div></li>
+        <li><span>One seed is not enough to call a 0.149 gap.</span><div class="why">Not the problem here: with a seed spread around 0.005 the gap is not noise. More seeds will not fix an untuned comparison; they will confirm it.</div></li>
+        <li><span>Lion uses less optimizer memory, so it should have been compared at a larger batch.</span><div class="why">Not the problem: memory savings are a separate argument. Changing the batch for one arm adds a confound instead of removing one.</div></li>
+      </ul>
+      <div class="drill-why"><p>Checklist question 1 (was each arm tuned) fails in the most common way: the baseline got a 3 &times; 3 grid and the challenger got the baseline&rsquo;s winner. Question 5 would have caught it too: one Lion run at lr 3e-4 would likely have changed the picture. The repair is a Lion grid around lr 1e-4 to 3e-4 with wd 0.3 to 1.0, the same size as AdamW&rsquo;s.</p></div>
+    </div>
+
+    <div class="drill" data-id="u2a-d3" data-title="The bridge run">
+      <div class="drill-log"><span class="who">[agent]</span> Project: symbolic-music model (MIDI tokens), 45M params, AdamW lr 3e-3, wd 0.1 applied to ALL params including RMSNorm gains. Baseline val 1.208 (3 seeds: 1.205 / 1.208 / 1.211).
+<span class="who">[agent]</span> Cleanup "bridge" run toward the new recipe: (1) exclude norm gains and biases from weight decay, (2) warmup 1% -> 3%. Seed 0.
+<span class="who">[agent]</span> Result: <b>val 1.248</b>. Delta +0.040, within the noise of a single seed. Adopting as the new baseline so later changes compare against it.</div>
+      <p class="drill-q">Which objections would you raise?</p>
+      <ul class="drill-opts">
+        <li data-ok><span>0.040 is not within the noise: the three baseline seeds span 0.006, so it is about 13 standard deviations.</span><div class="why">The agent called it noise without using the noise estimate sitting in its own log. Something in the bridge made the model worse.</div></li>
+        <li data-ok><span>Two changes in one run: if something is worse, there is no way to tell whether it came from the decay mask or the warmup.</span><div class="why">&ldquo;What else changed&rdquo; has two answers here. Each costs one run to separate.</div></li>
+        <li data-ok><span>Adopting a worse run as the baseline moves the reference point: every later change will be measured against a model that is 0.04 worse for an unknown reason.</span><div class="why">Later &ldquo;wins&rdquo; may just recover the 0.04. That is how a research log ends up proud of fixing its own regression.</div></li>
+        <li><span>Norm gains should never be excluded from weight decay.</span><div class="why">Not the problem as a rule: excluding gains and biases is the standard practice and the d8 default. But the change is not free; it may interact with the learning rate, which is one more reason to test it alone.</div></li>
+        <li><span>Warmup never matters by the end of training, so change (2) can be ignored.</span><div class="why">Not the problem, and false as stated: removing warmup entirely cost d8 about 0.10 in unit 1. Going from 1% to 3% is probably small, but &ldquo;probably small&rdquo; is what the separate run is for.</div></li>
+      </ul>
+      <div class="drill-why"><p>The worst move in this log is not the bundling. It is declaring the result noise without looking at the noise, then making the regression the new reference point. The repair: rerun the baseline from the same commit; run the two changes separately at seeds 0 and 1; adopt only a version that is no worse than the old baseline within its seed spread.</p></div>
+    </div>
+  </section>
+
+  <section id="s10">
+    <h2>10. Run it yourself</h2>
+    <div class="callout warn">
+      <span class="callout-label">Not run by us</span>
+      <p>Nothing on this page was run on a GPU for this companion. The measured numbers are CS 312&rsquo;s; the toy numbers are computed by this page&rsquo;s widgets. The commands below are the ones the assignment handout gives, on the <code>a2_release</code> branch, with the Modal setup from <a href="u0-method.html#modal">unit 0</a>.</p>
+    </div>
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 2a</span><span class="lab-title">Assignment 2, problems 1&ndash;3</span></div>
+      <div class="lab-body">
+        <ol>
+          <li><strong>Problems 1 and 2 need no new runs to start.</strong> The course published its sweeps (learning rate against token budget, Hyperball, the learning-rate &times; weight-decay grid). List them with links, or read the measurements offline without <code>--links</code>:
+<pre><code>uv run python -m experiments.a2.provided_sweeps --part P1a --links</code></pre>
+          Replace <code>P1a</code> with <code>P1b</code>, <code>P1d</code>, <code>P1e</code> or <code>P2a</code>. Fit the quadratic in log learning rate yourself, and make the extrapolation in 1 (b) before you look at the larger budgets.</li>
+          <li><strong>Problem 3.1 runs on a CPU.</strong> Write your own noisy-quadratic simulation (at least 512 samples per point, as the handout asks), then check it against this page&rsquo;s exact curves. The widget&rsquo;s math core is <a href="assets/u2a.js"><code>assets/u2a.js</code></a> and loads in node: <code>require('./u2a.js').sgdFinal(eta, B, 0, 8192 / B)</code>. Adam and RMSProp are where your simulation does the work.</li>
+          <li><strong>Problem 3.2 is the expensive one.</strong> About 48 d8 runs at 614.4M tokens across batch sizes 8 to 256, launched with the starter&rsquo;s <code>launch_training_jobs</code>. At roughly 15 minutes per run on an H100 for B = 64, that is at least 12 GPU-hours, more because small batches run slower. Budget it before launching, and run the unit 0 harness check first.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>In the noisy quadratic, what limits the step size and what limits how fast the run finishes?</summary>
+        <p>The steepest direction limits the step size: &alpha; &lt; 2/h<sub>max</sub>, or it diverges. The flattest direction limits the duration: it needs about 1/(&alpha;h<sub>min</sub>) steps. The gap between the two is why preconditioning, which narrows the curvature spread, helps.</p>
+      </details>
+      <details>
+        <summary>Why does the best SGD learning rate grow linearly with batch size, and why does that stop?</summary>
+        <p>For small steps, both the leftover from the start and the noise floor depend on &alpha;/B at a fixed number of examples, so doubling both leaves the outcome unchanged. It stops when &alpha; approaches 2/h<sub>max</sub>: the steep direction caps the step, and beyond that larger batches only reduce the number of steps. That turning point is the critical batch.</p>
+      </details>
+      <details>
+        <summary>Why does momentum help at large batch but not at small batch, according to the NQM?</summary>
+        <p>At small steps momentum is SGD with step &eta;/(1 &minus; &mu;), which tuning matches. Small batches need small steps because of the noise floor. Large batches can use large steps, and momentum stays stable up to &eta;h &lt; 2(1 + &mu;), so its effective step can exceed SGD&rsquo;s 2/h<sub>max</sub>. Measured on d8: removing momentum cost about 0.03 at B = 8 and 0.25 at B = 256.</p>
+      </details>
+      <details>
+        <summary>Why do scale-invariant weights grow under gradient descent?</summary>
+        <p>Scale invariance makes the gradient orthogonal to the weight, so every step adds its squared length to the squared norm (Pythagoras). Nothing removes it unless weight decay does.</p>
+      </details>
+      <details>
+        <summary>At equilibrium under AdamW, what sets the angle a scale-invariant weight turns per step, and what does &eta; alone set?</summary>
+        <p>The angle is about &radic;(2&eta;&lambda;): the product. &eta; alone sets the equilibrium norm, |w|&sup2; &asymp; &eta;&rho;&sup2;d/(2&lambda;), and the step size of the parameters that are not scale-invariant.</p>
+      </details>
+      <details>
+        <summary>A batch goes from 64 to 512 at a fixed token budget. Which change did CS 312 measure as best, and what does keeping the old settings cost?</summary>
+        <p>Multiplying weight decay by 8, which multiplies &eta;&lambda; by 8 (the Power Lines rule &eta;&lambda; &prop; B) without pushing the learning rate toward instability. Keeping the batch-64 pair cost about 0.106.</p>
+      </details>
+      <details>
+        <summary>What does Hyperball change, and what does its learning rate mean?</summary>
+        <p>It scales each matrix&rsquo;s Adam step relative to the weight&rsquo;s norm and projects back to the initial norm, with no weight decay. The norm cannot drift, so &eta; is the relative step per update, about the angle turned per step.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources</h2>
+    <ul class="srcs">
+      <li>CS 312 Deep Learning Alchemy (Stanford, Fall 2026), Hashimoto and Kotha: lecture 3, &ldquo;Optimizers 1: invariances (and hyperparameters)&rdquo;; assignment 2, &ldquo;Hyperparameter scaling&rdquo;; quiz 1 and quiz 2 with their answer slides. <a href="https://deep-learning-alchemy.github.io/">deep-learning-alchemy.github.io</a>. All <span class="tag-m">measured</span> numbers on this page come from these.</li>
+      <li>G. Zhang, L. Li, Z. Nado et al., <a href="https://arxiv.org/abs/1907.04164">Which algorithmic choices matter at which batch sizes? Insights from a noisy quadratic model</a>, NeurIPS 2019.</li>
+      <li>S. McCandlish, J. Kaplan, D. Amodei et al., <a href="https://arxiv.org/abs/1812.06162">An empirical model of large-batch training</a>, 2018.</li>
+      <li>P. Goyal, P. Doll&aacute;r, R. Girshick et al., <a href="https://arxiv.org/abs/1706.02677">Accurate, large minibatch SGD: training ImageNet in 1 hour</a>, 2017.</li>
+      <li>S. Malladi, K. Lyu, A. Panigrahi, S. Arora, <a href="https://arxiv.org/abs/2205.10287">On the SDEs and scaling rules for adaptive gradient algorithms</a>, NeurIPS 2022.</li>
+      <li>I. Loshchilov, F. Hutter, <a href="https://arxiv.org/abs/1711.05101">Decoupled weight decay regularization</a>, ICLR 2019.</li>
+      <li>S. J. Reddi, S. Kale, S. Kumar, <a href="https://arxiv.org/abs/1904.09237">On the convergence of Adam and beyond</a>, ICLR 2018.</li>
+      <li>J. Cohen, S. Kaur, Y. Li, J. Z. Kolter, A. Talwalkar, <a href="https://arxiv.org/abs/2103.00065">Gradient descent on neural networks typically occurs at the edge of stability</a>, ICLR 2021.</li>
+      <li>T. van Laarhoven, <a href="https://arxiv.org/abs/1706.05350">L2 regularization versus batch and weight normalization</a>, 2017.</li>
+      <li>G. Zhang, C. Wang, B. Xu, R. Grosse, <a href="https://openreview.net/forum?id=B1lz-3Rct7">Three mechanisms of weight decay regularization</a>, ICLR 2019.</li>
+      <li>A. Kosson, B. Messmer, M. Jaggi, <a href="https://arxiv.org/abs/2305.17212">Rotational equilibrium: how weight decay balances learning across neural networks</a>, ICML 2024.</li>
+      <li>A. Defazio, <a href="https://arxiv.org/abs/2506.02285">Why gradients rapidly increase near the end of training</a>, 2025.</li>
+      <li>X. Wang, L. Aitchison, <a href="https://arxiv.org/abs/2405.13698">How to set AdamW&rsquo;s weight decay as you scale model and dataset size</a>, 2024.</li>
+      <li>S. Bergsma, N. Dey, G. Gosal et al., <a href="https://arxiv.org/abs/2505.13738">Power Lines: scaling laws for weight decay and batch size in LLM pre-training</a>, 2025.</li>
+      <li>H. Li et al., <a href="https://arxiv.org/abs/2503.04715">Predictable scale: part I, optimal hyperparameter scaling law in large language model pretraining</a> (&ldquo;Step Law&rdquo;), 2025.</li>
+      <li>K. Wen et al., Hyperball, 2026 (arXiv:2606.16899, as cited by CS 312), and the weight-decay blog series: <a href="https://whenwen.github.io/wd_blog/public/weight-decay-part-2.html">weight decay, part 2</a>.</li>
+      <li>X. Chen, C. Liang, D. Huang et al., <a href="https://arxiv.org/abs/2302.06675">Symbolic discovery of optimization algorithms</a> (Lion), 2023. Used in drill 2.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="u1-basics.html">&larr; Unit 1 — Basics</a>
+      <a href="index.html">Index</a>
+      <a href="u2b-parametrization.html">Unit 2b — Parametrization: µP and Muon &rarr;</a>
+    </nav>
+    <p>Deep Learning Alchemy companion · Unit 2a · measured numbers from CS 312&rsquo;s quiz answer keys (Fall 2026); toy numbers computed exactly by this page&rsquo;s widgets; drill logs are fictional</p>
+  </footer>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ledger.js?v=20261014a"></script>
+  <script src="assets/u2a.js?v=20261014a"></script>
+</body>
+</html>
