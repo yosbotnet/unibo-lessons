@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 12 — Triton: kernels at the block level · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch12.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-11-gpt2-forward-pass.html">&larr; Ch. 11 — Lab: a GPT-2 forward pass</a>
+    <a href="index.html">Index</a>
+    <a href="cap-13-inference-arithmetic.html">Ch. 13 — Inference arithmetic &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Attention · Chapter 12</div>
+    <h1>Triton: kernels at the block level</h1>
+    <div class="lk-meta"><span>~60 min read</span><span>2 interactive widgets</span><span>3 plates</span><span>lab 11 · ~60 min on your GPU (Python)</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Lab 7&rsquo;s v7 is about two hundred lines, and five ideas: a block tile, a warp tile, a thread tile, 16-byte loads, a double buffer. The ideas took a paragraph each; the lines are index arithmetic that maps elements to threads. <strong>Triton</strong> is a language in which you write the ideas and a compiler writes the arithmetic. In CUDA you write <em>one thread</em> and the block and warp structure is your problem. In Triton you write <em>one program instance</em> that works on <strong>tiles</strong> (small tensors of fixed shape), and the compiler decides which thread holds which element, stages tiles through shared memory, places tensor-core fragments and pipelines the loads. You still choose everything that matters for performance: the tile sizes, the grid and its order, the loop over <var>K</var>, and what to fuse into what. This chapter rebuilds the course&rsquo;s kernels in that model (vector add, softmax, layernorm, a tensor-core matmul with a fused epilogue), then opens the compiler to show what it did to them, says how to benchmark the result honestly against cuBLAS and your own CUDA, and ends with the limits: what Triton will not let you say, and what the state of its support for your sm_120 card is.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Why a block-level language</a></li>
+      <li><a href="#s2">The model: programs, tiles, pointers, masks</a></li>
+      <li><a href="#s3">Softmax: one program per row</a></li>
+      <li><a href="#s4">Layernorm: two reductions, one read</a></li>
+      <li><a href="#s5">Matmul: <code>tl.dot</code>, the <var>K</var> loop, grouped order, autotuning</a></li>
+      <li><a href="#s6">Fusion: the epilogue is just more Python</a></li>
+      <li><a href="#s7">What the compiler does, and how to watch it</a></li>
+      <li><a href="#s8">Benchmarking fairly</a></li>
+      <li><a href="#s9">Limits: what Triton will not let you say</a></li>
+      <li><a href="#s10">Triton on sm_120: what is known and what is not</a></li>
+      <li><a href="#s11">Lab 11: the course&rsquo;s kernels in Triton</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. Why a block-level language</h2>
+
+    <p>Look back at what you decided in chapters 7 and 8, and at what the lines of v7 are actually about. The decisions were few: a 128&times;128 block tile with <var>BK</var> = 16, four warps each owning a 64&times;64 square, 8&times;16 outputs per thread, <code>float4</code> loads, a transposed A tile, two buffers. The code was mostly something else: <code>warpRow = warp / 2</code>, <code>tRowInWarp = lane / 4</code>, <code>As[k][warpRow*64 + tRowInWarp*8 + i]</code>, the guards at ragged edges, the two <code>__syncthreads</code>. That is the <strong>mapping</strong>: the rule that says which thread touches which element at which step, and it exists because CUDA&rsquo;s unit of programming is one thread. The mapping is where the bugs live (chapter 3&rsquo;s write-after-read race, chapter 8&rsquo;s bank conflicts), it is different for every tile shape, and it is what you rewrite when you move from FP32 to tensor cores, where it becomes the fragment layout of chapter 8&rsquo;s figure 3.</p>
+
+    <p>The observation behind Triton (Tillet, Kung and Cox, 2019; now the kernel language behind <code>torch.compile</code>, Part V) is that the mapping can be derived by a compiler from the decisions, if the program is written one level up: not &ldquo;what does thread 17 do&rdquo; but &ldquo;what does this <strong>block</strong> do to this <strong>tile</strong>&rdquo;. A tile is a small tensor of compile-time shape (a row of 1,024 floats, a 128&times;64 slab of A), and a program instance loads tiles, computes on them with whole-tile operations (add, max over an axis, a small matrix product) and stores tiles. Given that, the compiler can choose a layout of tile elements over threads that makes every load coalesced (chapter 3), stage tiles through shared memory with a swizzle instead of your padding, lower a tile product to <code>mma.sync</code> with the right fragment layout, and pipeline the loads over several stages. Those were the hard parts of lab 7. What it cannot choose, because they depend on the problem and the machine together, is left to you: the tile sizes, how many warps serve a program, how many pipeline stages, the launch order of the grid, the loop structure, and what to fuse.</p>
+
+    <table>
+      <tr><th>Decision</th><th>CUDA (labs 5&ndash;9)</th><th>Triton</th></tr>
+      <tr><td>Tile sizes, pipeline depth, warps per block</td><td>you</td><td>you (<code>BLOCK_*</code>, <code>num_stages</code>, <code>num_warps</code>), often by autotuning</td></tr>
+      <tr><td>Grid size and launch order</td><td>you</td><td>you (the grid, and the <code>program_id</code> &rarr; tile mapping)</td></tr>
+      <tr><td>The loop over <var>K</var>, the rows, the tiles</td><td>you</td><td>you</td></tr>
+      <tr><td>What is fused with what</td><td>you</td><td>you</td></tr>
+      <tr><td>Which thread holds which element</td><td>you</td><td>the compiler (a <em>layout</em>, section 7)</td></tr>
+      <tr><td>Coalescing and vector width of loads</td><td>you</td><td>the compiler</td></tr>
+      <tr><td>Shared-memory staging, padding or swizzle, barriers</td><td>you</td><td>the compiler</td></tr>
+      <tr><td>Tensor-core fragments, <code>ldmatrix</code>, <code>mma.sync</code></td><td>you (WMMA or PTX)</td><td>the compiler (<code>tl.dot</code>)</td></tr>
+      <tr><td>Asynchronous copies and the double buffer</td><td>you</td><td>the compiler (<code>num_stages</code>)</td></tr>
+      <tr><td>Warp-level control: shuffles, lane-dependent code</td><td>you</td><td>not expressible (section 9)</td></tr>
+    </table>
+
+    <p>The price of the trade is the last row, and the chapter comes back to it. The gain is that each kernel of Part II becomes a page of Python that runs on the tensor cores, and that the decisions become parameters you can search over instead of structures you rebuild.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. The model: programs, tiles, pointers, masks</h2>
+
+    <p>Four ideas make up the whole language; chapter 1&rsquo;s vector add shows all four. A kernel is a Python function with <code>@triton.jit</code>; it is compiled the first time it is called with a given set of argument types and constants:</p>
+<pre><code class="language-python">import torch, triton, triton.language as tl
+
+@triton.jit
+def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(axis=0)                 # which program instance am I
+    offs = pid * BLOCK + tl.arange(0, BLOCK)    # a tile of BLOCK indices
+    mask = offs &lt; n                             # the ragged edge
+    x = tl.load(x_ptr + offs, mask=mask)        # a tile of BLOCK floats
+    y = tl.load(y_ptr + offs, mask=mask)
+    tl.store(out_ptr + offs, x + y, mask=mask)
+
+def add(x, y):
+    out = torch.empty_like(x)
+    n = out.numel()
+    grid = lambda meta: (triton.cdiv(n, meta['BLOCK']),)   # one program per tile
+    add_kernel[grid](x, y, out, n, BLOCK=1024)
+    return out</code></pre>
+
+    <ul>
+      <li><strong>A program instance</strong> is the unit of execution: one invocation of the function, identified by <code>tl.program_id</code>, in a <strong>grid</strong> of instances launched together. It is CUDA&rsquo;s thread block seen from outside: it runs on one SM, with <code>num_warps</code> warps (4 by default, 128 threads), and no thread is visible inside it.</li>
+      <li><strong>A tile</strong> is a tensor whose shape is a compile-time constant: <code>tl.arange(0, BLOCK)</code> is a tile of <var>BLOCK</var> integers, and everything derived from it (<code>offs</code>, <code>mask</code>, <code>x</code>) has the same shape. Tile dimensions must be powers of two. A <code>tl.constexpr</code> argument is a value baked into the compiled code, like a template parameter: change <code>BLOCK</code> and you get a different kernel.</li>
+      <li><strong>Pointer arithmetic on tiles.</strong> <code>x_ptr + offs</code> is a tile of <var>BLOCK</var> pointers; <code>tl.load</code> of it is a tile of values. There is no <code>x[i]</code>: every access is &ldquo;load this tile of addresses&rdquo;, and the shape of the address tile is what the compiler uses to decide how the threads should split the work.</li>
+      <li><strong>A mask</strong> is a boolean tile that turns elements off. The last program of the grid covers indices past <var>n</var>; the mask stops their loads and stores, and <code>other=</code> gives masked loads a value (0 for a sum, &minus;&infin; for a max). It is the <code>if (i &lt; n)</code> of chapter 2, applied to a whole tile.</li>
+    </ul>
+
+    <p>The grid is given as a function of the kernel&rsquo;s constants so that the same launch line works when <code>BLOCK</code> is autotuned later. Play with the mapping below: move the tile over the end of the array and watch which lanes are masked, then change <code>BLOCK</code> and <code>num_warps</code> and see how many elements each thread ends up holding.</p>
+
+    <div id="w-tile" class="w"></div>
+
+    <p>What the compiler makes of this kernel is predictable, and it is worth predicting once. With <code>BLOCK</code> = 1,024 and 4 warps, 128 threads hold a 1,024-element tile: 8 elements per thread. It will give each thread two groups of 4 consecutive elements, so that each group is one 16-byte load (chapter 8&rsquo;s <code>float4</code>) and the 32 lanes of a warp cover 512 contiguous bytes per instruction, fully coalesced. The guard becomes a predicate on the load instruction, not a branch. You will check this in section 7 by reading the PTX. One thing it must know first: that <code>x_ptr</code> is 16-byte aligned and that <var>n</var> does not break the contiguity. Triton <strong>specializes</strong> on that: integer arguments divisible by 16 and pointers aligned to 16 bytes get their own compiled variant, so passing an array that starts at an odd offset silently gives you a slower kernel. (<code>do_not_specialize</code> turns it off per argument; <code>tl.multiple_of</code> and <code>tl.max_contiguous</code> assert it when the compiler cannot see it.)</p>
+
+    <details class="ym">
+      <summary>Your move: the grid has <code>cdiv(n, BLOCK)</code> programs, and the last one is mostly masked. Why not launch exactly <code>n / BLOCK</code> programs and handle the tail on the CPU, or make <code>BLOCK</code> divide <var>n</var>?</summary>
+      <p>For the same reason chapter 2&rsquo;s kernels used a guard rather than a perfectly sized grid: a masked tail costs one program that does less work, a few microseconds at most, while any scheme that changes the launch shape with <var>n</var> means another compiled variant or another kernel. The mask is cheap because it is not a branch: lanes with the mask off issue the load with a predicate and the hardware skips it. The expensive case is the opposite one, a <code>BLOCK</code> much larger than <var>n</var>: then every program is mostly masked and you are paying for lanes that do nothing. Section 3&rsquo;s softmax, with <code>BLOCK</code> equal to the next power of two above the row length, lives on that edge: a 1,025-wide row costs a 2,048-wide tile.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Softmax: one program per row</h2>
+
+    <p>Chapter 9 ended with softmax v4: one warp or block per row, the row loaded once into registers, max and sum by shuffle reductions, one write. Here is the same kernel. Each program instance takes a whole row as a tile, so the three passes become three tile expressions and the compiler emits chapter 5&rsquo;s reduction for <code>tl.max</code> and <code>tl.sum</code>:</p>
+<pre><code class="language-python">@triton.jit
+def softmax_kernel(out_ptr, x_ptr, stride_row, n_cols, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)                      # BLOCK = next power of two &gt;= n_cols
+    mask = cols &lt; n_cols
+    x = tl.load(x_ptr + row * stride_row + cols, mask=mask, other=-float('inf'))
+    x = x - tl.max(x, axis=0)                       # pass 1: the row max (a reduction)
+    e = tl.exp(x)                                   # masked lanes: exp(-inf) = 0
+    y = e / tl.sum(e, axis=0)                       # pass 2: the sum; pass 3: normalize
+    tl.store(out_ptr + row * stride_row + cols, y, mask=mask)
+
+def softmax(x):                                     # x: [rows, n_cols], row-major
+    rows, n_cols = x.shape
+    BLOCK = triton.next_power_of_2(n_cols)
+    num_warps = min(max(BLOCK // 256, 1), 16)       # more warps for longer rows
+    y = torch.empty_like(x)
+    softmax_kernel[(rows,)](y, x, x.stride(0), n_cols, BLOCK=BLOCK, num_warps=num_warps)
+    return y</code></pre>
+
+    <p>Three things are decided here, and only one by the compiler. <strong>The row is the tile</strong>, so it is read from DRAM exactly once; the max, the exponentials and the sum are computed on the copy in registers. <strong><code>num_warps</code></strong> is yours: it is the number of threads that share the row, chapter 9&rsquo;s &ldquo;thread, warp or block per row by row length&rdquo; turned into one integer, and the heuristic above gives a 1,024-wide row 4 warps (8 floats per thread) and an 8,192-wide one 16 warps (16 per thread). <strong>The reductions</strong> are the compiler&rsquo;s: <code>tl.max(x, axis=0)</code> over a tile spread across 4 warps becomes per-thread maxima, a shuffle tree inside each warp, a round through shared memory between warps and a broadcast back, which is exactly lab 8&rsquo;s code, generated. <code>tl.exp</code> is the fast exponential (interlude 5b&rsquo;s <code>__expf</code>: a multiply and <code>MUFU.EX2</code>); the masked lanes hold &minus;&infin; and contribute e<sup>&minus;&infin;</sup> = 0 to the sum, which is the guard chapter 9 wrote by hand.</p>
+
+    <p>The official tutorial adds one more decision, and it is worth understanding because it reappears in every production Triton kernel: <strong>persistent programs</strong>. Instead of one program per row (65,536 programs for a [64&times;1,024, 1,024] attention-score matrix), it launches as many programs as the GPU can hold at once (SMs &times; programs per SM, computed from the compiled kernel&rsquo;s register and shared-memory use) and each one loops over rows with stride <code>tl.num_programs(0)</code>. The loop is <code>tl.range(..., num_stages=k)</code>, which asks the compiler to pipeline it: issue the loads of row <var>r</var>+1 before computing on row <var>r</var>, chapter 8&rsquo;s double buffering, applied to rows instead of <var>K</var> tiles. Both versions are in lab 11; the chapter&rsquo;s prediction is that for rows of 1,024 they are within a few percent of each other and of the DRAM ceiling, and that the persistent one pulls ahead on short rows, where launching a program per row costs more than the row&rsquo;s bytes.</p>
+
+    <details class="ym">
+      <summary>Your move: a score matrix with rows of 100,000 (a long-context attention row). <code>BLOCK</code> becomes 131,072. With 16 warps, how many registers per thread does the row alone need, and what happens?</summary>
+      <p>131,072 floats over 512 threads is 256 registers per thread for the tile, above the 255 limit before a single index or temporary, so the kernel spills (chapter 8&rsquo;s warning) and the one-read advantage drowns in local-memory traffic. The tile-is-the-row design has a ceiling, and it is set by the register file, not by the language. Past it you write what chapter 9 did for the same problem: loop over the row in chunks with a running max and sum (online softmax), two tiles of a chunk at a time. Triton gives you the loop and the merge (<code>m_new = tl.maximum(m, tl.max(chunk))</code>, rescale, add) but does not invent it for you: the algorithm is still yours.</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. Layernorm: two reductions, one read</h2>
+
+    <p>Layernorm has softmax&rsquo;s shape, two row statistics (mean and variance instead of max and sum) followed by an elementwise formula, plus a per-channel scale and shift, and GPT-2&rsquo;s rows are 768 wide (chapter 6). The tile-is-the-row design works unchanged, with one numerical choice. Chapter 9 showed that the one-pass formula E[<var>x</var><sup>2</sup>] &minus; E[<var>x</var>]<sup>2</sup> cancels catastrophically on rows with a large mean, and that Welford&rsquo;s update avoids it. With the row in registers there is a simpler fix: compute the mean first, then the variance of the <em>centred</em> values, two reductions on the same tile. Nothing is re-read; the &ldquo;second pass&rdquo; is over registers:</p>
+<pre><code class="language-python">@triton.jit
+def layernorm_kernel(out_ptr, x_ptr, w_ptr, b_ptr, stride_row, n_cols, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols &lt; n_cols
+    x = tl.load(x_ptr + row * stride_row + cols, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=0) / n_cols
+    xc = tl.where(mask, x - mean, 0.0)             # masked lanes must not enter the variance
+    var = tl.sum(xc * xc, axis=0) / n_cols
+    rstd = 1.0 / tl.sqrt(var + eps)
+    w = tl.load(w_ptr + cols, mask=mask)
+    b = tl.load(b_ptr + cols, mask=mask)
+    y = xc * rstd * w + b
+    tl.store(out_ptr + row * stride_row + cols, y.to(x_ptr.dtype.element_ty), mask=mask)</code></pre>
+
+    <p>Two details carry chapter 9&rsquo;s lessons. The <code>tl.where</code> is not optional: the masked lanes loaded 0, which is fine for the mean (they add nothing) but would contribute (0 &minus; mean)<sup>2</sup> to the variance. And the <code>.to(tl.float32)</code> is chapter 6&rsquo;s rule: FP16 in, FP32 statistics, FP16 out. The official tutorial&rsquo;s kernel instead loops over the row in <code>BLOCK</code>-sized chunks three times (mean, variance, normalize); that handles rows of any length, and it relies on the second and third reads hitting L1 or L2 for short rows, as chapter 6&rsquo;s lab 5 stretch suggested they would. Lab 11 has both, and the fused residual-plus-layernorm of chapter 9 is one more pointer and one add.</p>
+  </section>
+
+  <section id="s5">
+    <h2>5. Matmul: <code>tl.dot</code>, the <var>K</var> loop, grouped order, autotuning</h2>
+
+    <p>Now the kernel the chapter exists for. In chapter 8&rsquo;s terms, a Triton matmul program computes one <strong>block tile</strong> of C: it loops over <var>K</var> in steps of <code>BLOCK_K</code>, loads a <code>BLOCK_M</code>&times;<code>BLOCK_K</code> tile of A and a <code>BLOCK_K</code>&times;<code>BLOCK_N</code> tile of B, and multiplies them into an FP32 accumulator tile with <code>tl.dot</code>. That one call is the tensor cores: the compiler stages both tiles through shared memory, loads fragments with <code>ldmatrix</code>, issues <code>mma.sync</code> per warp and keeps the accumulator in registers in the fragment layout: the work of lab 7&rsquo;s <code>hgemm</code> t2, one level below the WMMA calls that kernel used. The warp tile is implied: <code>BLOCK_M</code>&times;<code>BLOCK_N</code> divided among <code>num_warps</code> warps, so 128&times;128 with 4 warps is v7&rsquo;s four 64&times;64 squares. Here is the kernel, close to the official tutorial&rsquo;s, with the grouped ordering explained after it:</p>
+<pre><code class="language-python">@triton.jit
+def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
+                  stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                  GROUP_M: tl.constexpr):
+    # --- which tile of C: grouped ordering, so that programs running at the
+    #     same time share rows of A and columns of B in L2 (fig. 1)
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_in_group = GROUP_M * num_pid_n
+    group = pid // num_in_group
+    first_m = group * GROUP_M
+    group_m = min(num_pid_m - first_m, GROUP_M)          # the last group may be short
+    pid_m = first_m + (pid % num_in_group) % group_m      # walk down the group's rows...
+    pid_n = (pid % num_in_group) // group_m               # ...then move one column right
+    # --- pointer tiles for the first K step
+    offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M   # wrap instead of mask (see text)
+    offs_n = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak   # [BLOCK_M, BLOCK_K]
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn   # [BLOCK_K, BLOCK_N]
+    # --- the K loop: chapter 7's phases
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        a = tl.load(a_ptrs, mask=offs_k[None, :] &lt; K - k * BLOCK_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] &lt; K - k * BLOCK_K, other=0.0)
+        acc = tl.dot(a, b, acc)                 # tensor cores: acc += a @ b, FP32 accumulate
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+    # --- epilogue (section 6 adds bias + GELU here) and masked store
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    c_ptrs = c_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+    tl.store(c_ptrs, acc.to(tl.float16), mask=(offs_cm[:, None] &lt; M) &amp; (offs_cn[None, :] &lt; N))</code></pre>
+
+    <p>Three things to notice in the body before the ordering. <strong>Two-dimensional pointer tiles</strong>: <code>offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak</code> is NumPy broadcasting, and it produces a [<code>BLOCK_M</code>, <code>BLOCK_K</code>] tile of addresses from a column of row offsets and a row of column offsets; the strides make the same kernel serve row-major, column-major and transposed operands, chapter 6&rsquo;s &ldquo;which way round is the weight&rdquo; as two integers. <strong>The <code>% M</code> wrap</strong> instead of a mask on the <var>M</var> and <var>N</var> edges: rows past the end of A are loaded from the top of A again, garbage that is computed and then discarded by the masked store, which costs nothing and spares the loads a second mask (only <var>K</var>&rsquo;s edge needs one, because a masked-in garbage column would corrupt the sum). <strong><code>tl.dot(a, b, acc)</code></strong> takes tiles of at least 16 in every dimension, and FP16 or BF16 inputs with an FP32 accumulator are what lands on the tensor cores; an FP32 <code>tl.dot</code> defaults to TF32 inputs (chapter 6&rsquo;s format, 10 mantissa bits), which on your card buys nothing over the CUDA cores and loses precision, so the FP32 path of the engine stays in CUDA.</p>
+
+    <h3>Grouped launch order</h3>
+    <p>Chapter 8 listed block rasterization among the things cuBLAS does. The grid of a 4,096&sup3; matmul with 128&times;128 tiles has 32&times;32 = 1,024 programs, and your card runs about 48 to 96 of them at a time (one or two per SM at these register counts). Which 48 run together decides what the L2 sees. In plain row-major order, programs 0&ndash;47 cover one and a half rows of tiles: they share 2 row-strips of A (2 &times; 128 &times; 4,096 &times; 2 B = 2 MB) but need all 32 column-strips of B (32 MB) at once; the next wave needs the same 32 MB of B again, and by then much of it has been pushed out of the 48 MB L2 by A and C traffic. In <strong>grouped</strong> order with <code>GROUP_M</code> = 8, the first 48 programs are an 8-tall, 6-wide rectangle of tiles: 8 strips of A plus 6 strips of B, <strong>14 MB</strong> of distinct input instead of 34, and the next wave moves one rectangle right, reusing all 8 A strips. The nine lines of integer arithmetic at the top of the kernel are only this: number the tiles so that consecutive program ids walk down a group of <code>GROUP_M</code> rows before moving one column right.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Two 32 by 32 grids of output tiles of a 4096 cubed FP16 matmul, with the first 48 programs marked. Row-major order: rows 0 and half of row 1, touching 2 row strips of A and all 32 column strips of B, 34 MB. Grouped order with GROUP_M 8: an 8 tall, 6 wide rectangle, touching 8 strips of A and 6 of B, 14 MB; the next wave is the rectangle to its right and reuses the same 8 A strips.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 344" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Launch order decides what the L2 holds</title>
+        <text x="160" y="18" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">row-major order</text>
+        <rect x="64" y="52" width="192" height="192" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="64" y="52" width="192" height="6" fill="var(--lk-cobalt)" opacity=".85"/>
+        <rect x="64" y="58" width="96" height="6" fill="var(--lk-cobalt)" opacity=".85"/>
+        <path d="M70 52V244M76 52V244M82 52V244M88 52V244M94 52V244M100 52V244M106 52V244M112 52V244M118 52V244M124 52V244M130 52V244M136 52V244M142 52V244M148 52V244M154 52V244M160 52V244M166 52V244M172 52V244M178 52V244M184 52V244M190 52V244M196 52V244M202 52V244M208 52V244M214 52V244M220 52V244M226 52V244M232 52V244M238 52V244M244 52V244M250 52V244M64 58H256M64 64H256M64 70H256M64 76H256M64 82H256M64 88H256M64 94H256M64 100H256M64 106H256M64 112H256M64 118H256M64 124H256M64 130H256M64 136H256M64 142H256M64 148H256M64 154H256M64 160H256M64 166H256M64 172H256M64 178H256M64 184H256M64 190H256M64 196H256M64 202H256M64 208H256M64 214H256M64 220H256M64 226H256M64 232H256M64 238H256" stroke="var(--lk-rule-soft)" stroke-width=".5" fill="none"/>
+        <path d="M160 59L255 59L255 69L65 69L65 64L160 64Z" fill="none" stroke="var(--lk-gold)" stroke-width="2"/>
+        <rect x="64" y="52" width="192" height="192" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="52" y="52.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="64.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="58.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="70.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="64.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="76.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="70.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="82.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="76.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="88.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="82.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="94.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="88.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="100.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="94.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="106.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="100.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="112.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="106.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="118.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="112.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="124.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="118.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="130.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="124.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="136.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="130.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="142.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="136.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="148.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="142.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="154.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="148.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="160.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="154.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="166.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="160.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="172.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="166.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="178.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="172.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="184.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="178.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="190.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="184.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="196.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="190.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="202.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="196.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="208.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="202.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="214.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="208.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="220.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="214.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="226.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="220.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="232.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="226.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="238.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="232.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="244.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="52" y="238.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="250.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <text x="42" y="152" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle" font-weight="700">A</text>
+        <text x="261" y="45" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start" font-weight="700">B</text>
+        <text x="160" y="266" font-size="11" fill="var(--lk-ink)" text-anchor="middle" >A: 2 strips (2 MB)  B: 32 strips (32 MB)</text>
+        <text x="160" y="281" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">= 34 MB of distinct input per wave</text>
+        <text x="160" y="296" font-size="10.5" fill="var(--lk-gold-dark)" text-anchor="middle" >next wave: all 32 B strips again</text>
+        <text x="500" y="18" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">grouped order, GROUP_M = 8</text>
+        <rect x="404" y="52" width="192" height="192" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="404" y="52" width="36" height="48" fill="var(--lk-cobalt)" opacity=".85"/>
+        <path d="M410 52V244M416 52V244M422 52V244M428 52V244M434 52V244M440 52V244M446 52V244M452 52V244M458 52V244M464 52V244M470 52V244M476 52V244M482 52V244M488 52V244M494 52V244M500 52V244M506 52V244M512 52V244M518 52V244M524 52V244M530 52V244M536 52V244M542 52V244M548 52V244M554 52V244M560 52V244M566 52V244M572 52V244M578 52V244M584 52V244M590 52V244M404 58H596M404 64H596M404 70H596M404 76H596M404 82H596M404 88H596M404 94H596M404 100H596M404 106H596M404 112H596M404 118H596M404 124H596M404 130H596M404 136H596M404 142H596M404 148H596M404 154H596M404 160H596M404 166H596M404 172H596M404 178H596M404 184H596M404 190H596M404 196H596M404 202H596M404 208H596M404 214H596M404 220H596M404 226H596M404 232H596M404 238H596" stroke="var(--lk-rule-soft)" stroke-width=".5" fill="none"/>
+        <rect x="441" y="53" width="34" height="46" fill="none" stroke="var(--lk-gold)" stroke-width="2"/>
+        <rect x="404" y="52" width="192" height="192" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="392" y="52.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="404.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="392" y="58.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="410.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="392" y="64.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="416.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="392" y="70.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="422.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="392" y="76.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="428.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="392" y="82.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="434.5" y="40" width="5" height="6" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="392" y="88.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="440.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="94.5" width="6" height="5" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".5"/>
+        <rect x="446.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="100.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="452.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="106.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="458.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="112.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="464.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="118.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="470.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="124.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="476.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="130.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="482.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="136.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="488.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="142.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="494.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="148.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="500.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="154.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="506.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="160.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="512.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="166.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="518.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="172.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="524.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="178.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="530.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="184.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="536.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="190.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="542.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="196.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="548.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="202.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="554.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="208.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="560.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="214.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="566.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="220.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="572.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="226.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="578.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="232.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="584.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="392" y="238.5" width="6" height="5" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <rect x="590.5" y="40" width="5" height="6" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width=".5"/>
+        <text x="382" y="152" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle" font-weight="700">A</text>
+        <text x="601" y="45" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start" font-weight="700">B</text>
+        <text x="500" y="266" font-size="11" fill="var(--lk-ink)" text-anchor="middle" >A: 8 strips (8 MB)  B: 6 strips (6 MB)</text>
+        <text x="500" y="281" font-size="11" fill="var(--lk-forest)" text-anchor="middle" font-weight="700">= 14 MB of distinct input per wave</text>
+        <text x="500" y="296" font-size="10.5" fill="var(--lk-gold-dark)" text-anchor="middle" >next wave: the same 8 A strips</text>
+        <rect x="40" y="309" width="10" height="10" fill="var(--lk-cobalt)" opacity=".85"/>
+        <text x="55" y="318" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >one wave: programs 0&ndash;47</text>
+        <rect x="232" y="309" width="10" height="10" fill="none" stroke="var(--lk-gold)" stroke-width="2"/>
+        <text x="247" y="318" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >the next wave, 48&ndash;95</text>
+        <rect x="412" y="309" width="6" height="10" fill="var(--lk-vermilion)" />
+        <text x="423" y="318" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >strip fetched from DRAM</text>
+        <text x="330" y="335" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle" >grid: 32 &times; 32 tiles of 128 &times; 128; one strip of A or B = 128 &times; 4,096 &times; 2 B = 1 MB (FP16)</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; Launch order decides what the L2 holds. The same 1,024 output tiles of a 4,096&sup3; FP16 matmul, with the first 48 programs (one wave on your card) marked. Row-major order (left) touches 2 strips of A and all 32 strips of B, 34 MB of distinct input, most of which the next wave fetches again. Grouped order with <code>GROUP_M</code> = 8 (right) touches 8 strips of A and 6 of B, 14 MB, and the next wave reuses the 8 A strips. Both orders compute every tile exactly once; only DRAM traffic differs. Modelled from the tile counts; the L2 hit rate itself is what <code>ncu</code> measures.</figcaption>
+    </figure>
+
+    <h3><code>num_warps</code>, <code>num_stages</code>, and autotuning</h3>
+    <p>Two launch parameters complete chapter 8&rsquo;s hierarchy. <code>num_warps</code> sets the warps per program, hence the warp tile; <code>num_stages</code> is the depth of the asynchronous-copy pipeline the compiler builds around the <var>K</var> loop: 2 is lab 7&rsquo;s t3, 3 or 4 is what cuBLAS uses, each stage costing one more tile of shared memory. Which combination wins depends on the shape and the card, which is why the tutorial&rsquo;s kernel is wrapped in <code>@triton.autotune</code>: a list of <code>triton.Config</code> objects (tile sizes plus <code>num_warps</code> and <code>num_stages</code>), a <strong>key</strong> of arguments (<code>['M', 'N', 'K']</code>), and the first call for each new key value benchmarks every config and remembers the winner for the rest of the process. The cost is real: a dozen configs compiled and timed on the first call, seconds, which is why production code caches tuning results on disk, prunes configs that cannot fit (shared memory, registers) before timing, and why benchmarks must run the autotuner <em>before</em> the clock starts (section 8). The configs are the search space you learned to reason about in chapter 8: the hierarchy widget&rsquo;s validity rules are what <code>prune_configs_by</code> encodes.</p>
+
+    <p>The widget below puts the two versions of the same matmul side by side: lab 7&rsquo;s <code>hgemm</code> t3 on the left, the kernel above on the right. Toggle each decision and see which lines of the CUDA it corresponds to, and whether, in Triton, those lines are yours or the compiler&rsquo;s.</p>
+
+    <div id="w-who" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: at <var>M</var> = 64 (a decode batch of 64 tokens through the GPT-2 MLP, 64&times;768 times 768&times;3,072) the autotuner picks a config with <code>BLOCK_M</code> = 64 and small <code>BLOCK_N</code>. Why does the 128&times;256 config that wins at 4,096&sup3; lose here, before any measurement?</summary>
+      <p>Count the programs. With 128&times;256 tiles the grid is 1 &times; 12 = 12 programs for 48 SMs: a quarter of the card, and each program loads a 128-row A tile of which half is padding. With 64&times;64 tiles it is 1 &times; 48 programs, one per SM. At this shape the matmul is memory-bound anyway (chapter 6: intensity about <var>M</var>/2 in FP32, so about <var>M</var> = 64 FLOP/B in FP16, left of the FP16 ridge of 92), so the goal is not reuse but enough programs to keep bytes in flight across the whole chip, chapter 3&rsquo;s Little&rsquo;s law. The autotuner finds this by timing; you can find it by counting. For <var>M</var> = 1 even that is not enough, and chapter 15&rsquo;s split-K is the next step.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Fusion: the epilogue is just more Python</h2>
+
+    <p>Chapter 9 made the case for epilogue fusion: bias, GELU and residual add are memory-bound kernels whose entire cost is a round trip of the activation through DRAM, and inside the GEMM&rsquo;s epilogue the same arithmetic happens on values already in registers. In lab 8 that fusion was a template parameter: a small functor applied to each accumulator of the FP32 v7 kernel, with its row and column, on its way to memory. In Triton it is the lines between the loop and the store, operating on the accumulator tile:</p>
+<pre><code class="language-python">    # after the K loop: acc is [BLOCK_M, BLOCK_N] in FP32 registers
+    if HAS_BIAS:                                   # tl.constexpr flags: dead code is removed
+        bias = tl.load(bias_ptr + offs_cn, mask=offs_cn &lt; N, other=0.0)
+        acc = acc + bias[None, :]                  # one value per output column
+    if ACT == "gelu":                              # GPT-2's tanh GELU, written with a sigmoid:
+        u = 0.7978845608 * (acc + 0.044715 * acc * acc * acc)   # 0.5 (1 + tanh u) = sigmoid(2u)
+        acc = acc * tl.sigmoid(2.0 * u)
+    if HAS_RESIDUAL:
+        r = tl.load(res_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn, mask=c_mask, other=0.0)
+        acc = acc + r.to(tl.float32)
+    tl.store(c_ptrs, acc.to(tl.float16), mask=c_mask)</code></pre>
+
+    <p>The flags are <code>tl.constexpr</code>, so each combination is its own compiled kernel with the unused branches removed, not a runtime test per element. The bias is loaded once per program as a <code>BLOCK_N</code>-wide tile and broadcast down the rows; the residual is a full tile read, the one input that cannot be avoided. What this buys at GPT-2&rsquo;s MLP shape with <var>M</var> = 4,096 (a prefill of four 1,024-token sequences) in FP16: the output tile is 4,096 &times; 3,072 &times; 2 B = 25 MB, so a separate bias kernel costs a 50 MB round trip and GELU another, about 85 &micro;s each at the practical bandwidth, against a matmul that takes roughly 520 &micro;s at 60% of the FP16 roof. Fused, both disappear into a few FMAs and one <code>MUFU</code> per element on tiles that are in registers anyway. The limit is chapter 9&rsquo;s: a 128&times;128 program sees 128 columns of a 3,072-wide row, so the layernorm that follows the residual add needs the whole row and cannot go here; it stays a kernel of its own (section 4), reading the fused output once.</p>
+
+    <details class="ym">
+      <summary>Your move: GELU is an elementwise function. Could you also fuse it into the <em>next</em> matmul&rsquo;s prologue, applying it to the A tile as it is loaded, instead of into this one&rsquo;s epilogue?</summary>
+      <p>You could, and it would be computed <var>N</var>/<code>BLOCK_N</code> times instead of once: every program that needs a given A tile (all the programs in that row of the output grid, 24 of them for <var>N</var> = 3,072 with 128-wide tiles) would load and transform it again. Epilogue fusion is the right place because each output element exists in exactly one program&rsquo;s registers once. Prologue fusion makes sense only for things that must happen on the input side anyway, such as dequantizing INT4 weights to FP16 as they are loaded (Part IV), where the alternative is a separate dequantized copy of the weights in DRAM.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. What the compiler does, and how to watch it</h2>
+
+    <p>A kernel goes through five languages between your <code>def</code> and the GPU, and the one in the middle is the one worth knowing, because it is where every decision from section 1&rsquo;s &ldquo;compiler&rdquo; column is actually made:</p>
+    <ol>
+      <li><strong>Python AST &rarr; Triton IR (TTIR).</strong> The function is traced into MLIR: tile operations on tensors with shapes and element types, loads and stores of pointer tiles, <code>tt.dot</code>, reductions. There are no threads yet; a tensor is just a shape.</li>
+      <li><strong>TTIR &rarr; TritonGPU IR (TTGIR).</strong> Every tensor gets a <strong>layout</strong>: a rule saying which thread holds which of its elements. A <em>blocked</em> layout is the rule of figure 3 (so many consecutive elements per thread, so many threads per warp along each axis, so many warps); a <em>shared</em> layout places a tile in shared memory, with a swizzle pattern (chapter 8&rsquo;s XOR trick) chosen so that the later <code>ldmatrix</code> is conflict-free; an <em>mma</em> layout is chapter 8&rsquo;s fragment layout (the <code>w-frag</code> widget), the only layout a <code>tl.dot</code> result can have; <em>dot-operand</em> layouts are the A and B fragment layouts. The passes here are the chapter 8 playbook, in order: <em>coalesce</em> (choose blocked layouts so that each warp&rsquo;s loads cover contiguous bytes), <em>accelerate-matmul</em> (turn <code>tt.dot</code> into <code>mma.sync</code> with the operand layouts it needs), <em>pipeline</em> (wrap the <var>K</var> loop in a <code>num_stages</code>-deep ring of asynchronous copies into shared memory), and a pass that inserts a <em>layout conversion</em> wherever a value is needed in a layout different from the one it has. A conversion is a round trip through shared memory, the price of a layout the compiler could not avoid, and finding unexpected <code>convert_layout</code> ops in the TTGIR is how you learn a kernel was written against the grain.</li>
+      <li><strong>TTGIR &rarr; LLVM IR.</strong> Now there are threads: every tile op becomes per-thread scalar or vector code, reductions become shuffles and shared-memory exchanges, barriers are inserted where a layout conversion or a pipeline stage needs one.</li>
+      <li><strong>LLVM IR &rarr; PTX</strong> through NVPTX. This is the first text you can grep for <code>mma.sync</code>, <code>ldmatrix</code>, <code>cp.async</code>, <code>ld.global.v4</code>.</li>
+      <li><strong>PTX &rarr; cubin</strong> with <code>ptxas</code>, which Triton ships inside its wheel (section 10), targeting the card it finds. <code>cuobjdump -sass</code> on it shows <code>HMMA</code>, <code>LDSM</code> and <code>LDGSTS</code>, the instructions lab 7&rsquo;s <code>make sass</code> counted.</li>
+    </ol>
+
+    <figure class="lk-fig" role="img" aria-label="The same 32 by 32 FP16 tile drawn five times. Python: a plain square. Triton IR: a shape with no threads. TritonGPU IR blocked layout: four bands of 8 rows, one per warp, each row split into 4 threads of 8 halves, one 16-byte load each. Shared layout: 32 rows of 4 chunks whose order is permuted per row by chunk XOR row mod 4. Mma operand layout: four 16 by 16 blocks, one coloured by the lane that holds each element. Below: LLVM IR, then PTX with cp.async, ldmatrix and mma.sync, then SASS with LDGSTS, LDSM and HMMA.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 312" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One tile through the compiler</title>
+        <text x="66" y="18" font-size="11.5" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">Python</text>
+        <text x="198" y="18" font-size="11.5" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">Triton IR</text>
+        <text x="198" y="33" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle" >(TTIR)</text>
+        <text x="330" y="18" font-size="11.5" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">TritonGPU IR</text>
+        <text x="330" y="33" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle" >blocked layout</text>
+        <text x="462" y="18" font-size="11.5" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">TritonGPU IR</text>
+        <text x="462" y="33" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle" >shared, swizzled</text>
+        <text x="594" y="18" font-size="11.5" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">TritonGPU IR</text>
+        <text x="594" y="33" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle" >mma operand</text>
+        <path d="M119 100H141" stroke="var(--lk-ink-soft)" stroke-width="1.5"/>
+        <path d="M140 96L147 100L140 104Z" fill="var(--lk-ink-soft)"/>
+        <path d="M251 100H273" stroke="var(--lk-ink-soft)" stroke-width="1.5"/>
+        <path d="M272 96L279 100L272 104Z" fill="var(--lk-ink-soft)"/>
+        <path d="M383 100H405" stroke="var(--lk-ink-soft)" stroke-width="1.5"/>
+        <path d="M404 96L411 100L404 104Z" fill="var(--lk-ink-soft)"/>
+        <path d="M515 100H537" stroke="var(--lk-ink-soft)" stroke-width="1.5"/>
+        <path d="M536 96L543 100L536 104Z" fill="var(--lk-ink-soft)"/>
+        <rect x="18" y="52" width="96" height="96" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <rect x="150" y="52" width="96" height="96" fill="var(--lk-paper-light)" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <path d="M174 52V148M150 76H246M198 52V148M150 100H246M222 52V148M150 124H246" stroke="var(--lk-rule-soft)" stroke-width=".6" fill="none"/>
+        <rect x="282" y="52" width="96" height="24" fill="var(--lk-cobalt)" opacity=".9"/>
+        <rect x="282" y="76" width="96" height="24" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="282" y="100" width="96" height="24" fill="var(--lk-cobalt)" opacity=".48"/>
+        <rect x="282" y="124" width="96" height="24" fill="var(--lk-cobalt)" opacity=".3"/>
+        <path d="M306 52V148M330 52V148M354 52V148M282 55H378M282 58H378M282 61H378M282 64H378M282 67H378M282 70H378M282 73H378M282 79H378M282 82H378M282 85H378M282 88H378M282 91H378M282 94H378M282 97H378M282 103H378M282 106H378M282 109H378M282 112H378M282 115H378M282 118H378M282 121H378M282 127H378M282 130H378M282 133H378M282 136H378M282 139H378M282 142H378M282 145H378" stroke="var(--lk-paper-light)" stroke-width=".6" fill="none"/>
+        <path d="M282 76H378M282 100H378M282 124H378" stroke="var(--lk-paper-light)" stroke-width="1.6" fill="none"/>
+        <rect x="282.75" y="52.75" width="22.5" height="3" fill="none" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <rect x="282" y="52" width="96" height="96" fill="none" stroke="var(--lk-cobalt-dark)" stroke-width="1"/>
+        <rect x="414" y="52" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="52" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="52" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="52" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="55" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="55" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="55" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="55" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="58" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="58" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="58" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="58" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="61" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="61" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="61" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="61" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="64" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="64" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="64" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="64" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="67" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="67" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="67" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="67" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="70" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="70" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="70" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="70" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="73" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="73" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="73" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="73" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="76" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="76" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="76" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="76" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="79" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="79" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="79" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="79" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="82" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="82" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="82" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="82" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="85" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="85" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="85" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="85" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="88" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="88" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="88" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="88" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="91" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="91" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="91" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="91" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="94" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="94" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="94" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="94" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="97" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="97" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="97" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="97" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="100" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="100" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="100" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="100" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="103" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="103" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="103" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="103" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="106" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="106" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="106" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="106" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="109" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="109" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="109" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="109" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="112" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="112" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="112" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="112" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="115" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="115" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="115" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="115" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="118" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="118" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="118" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="118" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="121" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="121" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="121" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="121" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="124" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="124" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="124" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="124" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="127" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="127" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="127" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="127" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="130" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="130" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="130" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="130" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="133" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="133" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="133" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="133" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="414" y="136" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="438" y="136" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="462" y="136" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="486" y="136" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="438" y="139" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="414" y="139" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="486" y="139" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="462" y="139" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="462" y="142" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="486" y="142" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="414" y="142" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="438" y="142" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <rect x="486" y="145" width="24" height="3" fill="var(--lk-paper)" />
+        <rect x="462" y="145" width="24" height="3" fill="var(--lk-rule-soft)" />
+        <rect x="438" y="145" width="24" height="3" fill="var(--lk-rule)" />
+        <rect x="414" y="145" width="24" height="3" fill="var(--lk-ink-soft)" />
+        <path d="M438 52V148M462 52V148M486 52V148" stroke="var(--lk-paper-light)" stroke-width=".8" fill="none"/>
+        <rect x="414" y="52" width="96" height="96" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="546" y="52" width="96" height="96" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="546" y="52" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="546" y="76" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="52" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="76" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="552" y="52" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="552" y="76" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="52" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="76" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="558" y="52" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="558" y="76" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="52" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="76" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="564" y="52" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="564" y="76" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="52" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="76" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="546" y="55" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="546" y="79" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="55" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="79" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="552" y="55" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="552" y="79" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="55" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="79" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="558" y="55" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="558" y="79" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="55" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="79" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="564" y="55" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="564" y="79" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="55" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="79" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="546" y="58" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="546" y="82" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="58" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="82" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="552" y="58" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="552" y="82" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="58" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="82" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="558" y="58" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="558" y="82" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="58" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="82" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="564" y="58" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="564" y="82" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="58" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="82" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="546" y="61" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="546" y="85" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="61" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="85" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="552" y="61" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="552" y="85" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="61" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="85" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="558" y="61" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="558" y="85" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="61" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="85" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="564" y="61" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="564" y="85" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="61" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="85" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="546" y="64" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="546" y="88" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="64" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="88" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="552" y="64" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="552" y="88" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="64" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="88" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="558" y="64" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="558" y="88" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="64" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="88" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="564" y="64" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="564" y="88" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="64" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="88" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="546" y="67" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="546" y="91" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="67" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="91" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="552" y="67" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="552" y="91" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="67" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="91" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="558" y="67" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="558" y="91" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="67" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="91" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="564" y="67" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="564" y="91" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="67" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="91" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="546" y="70" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="546" y="94" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="70" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="570" y="94" width="6" height="3" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="552" y="70" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="552" y="94" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="70" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="576" y="94" width="6" height="3" fill="var(--lk-cobalt)" opacity=".62"/>
+        <rect x="558" y="70" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="558" y="94" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="70" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="582" y="94" width="6" height="3" fill="var(--lk-cobalt)" opacity=".38"/>
+        <rect x="564" y="70" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="564" y="94" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="70" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="588" y="94" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".85"/>
+        <rect x="546" y="73" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="546" y="97" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="73" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="570" y="97" width="6" height="3" fill="var(--lk-cobalt)" opacity=".8"/>
+        <rect x="552" y="73" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="552" y="97" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="73" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="576" y="97" width="6" height="3" fill="var(--lk-cobalt)" opacity=".5"/>
+        <rect x="558" y="73" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="558" y="97" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="73" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="582" y="97" width="6" height="3" fill="var(--lk-cobalt-dark)" opacity=".6"/>
+        <rect x="564" y="73" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="564" y="97" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="73" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="588" y="97" width="6" height="3" fill="var(--lk-cobalt)" opacity=".25"/>
+        <rect x="546" y="52" width="6" height="3" fill="none" stroke="var(--lk-gold)" stroke-width="1.2"/>
+        <rect x="546" y="76" width="6" height="3" fill="none" stroke="var(--lk-gold)" stroke-width="1.2"/>
+        <rect x="570" y="52" width="6" height="3" fill="none" stroke="var(--lk-gold)" stroke-width="1.2"/>
+        <rect x="570" y="76" width="6" height="3" fill="none" stroke="var(--lk-gold)" stroke-width="1.2"/>
+        <path d="M594 52V148M546 100H642" stroke="var(--lk-rule)" stroke-width="1"/>
+        <text x="66" y="165" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >tl.load(a_ptrs)</text>
+        <text x="66" y="179" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >a 32 &times; 32 tile</text>
+        <text x="66" y="193" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >of halves</text>
+        <text x="198" y="165" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >tensor&lt;32x32xf16&gt;</text>
+        <text x="198" y="179" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >a shape,</text>
+        <text x="198" y="193" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >no threads yet</text>
+        <text x="330" y="165" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >thread: 8 halves</text>
+        <text x="330" y="179" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >= one 16 B load;</text>
+        <text x="330" y="193" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >warp = 8 rows</text>
+        <text x="462" y="165" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >chunk c of row r</text>
+        <text x="462" y="179" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >at slot c^(r%4):</text>
+        <text x="462" y="193" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >no bank conflicts</text>
+        <text x="594" y="165" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >lane l: 8 halves</text>
+        <text x="594" y="179" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >scattered over</text>
+        <text x="594" y="193" font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle" >ch. 8&rsquo;s fragment</text>
+        <text x="18" y="225" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >then, per thread, what lab 11 counts:</text>
+        <rect x="18" y="232" width="150" height="24" fill="var(--lk-gold-soft)" rx="3" stroke="var(--lk-gold)" stroke-width="1.5"/>
+        <text x="93" y="248" font-size="10" fill="var(--lk-ink)" text-anchor="middle" ><tspan font-weight="700" fill="var(--lk-gold-dark)">LLVM IR</tspan> per-thread code</text>
+        <path d="M171 244H179" stroke="var(--lk-ink-soft)" stroke-width="1.5"/>
+        <path d="M178 240L185 244L178 248Z" fill="var(--lk-ink-soft)"/>
+        <rect x="188" y="232" width="216" height="24" fill="var(--lk-gold-soft)" rx="3" stroke="var(--lk-gold)" stroke-width="1.5"/>
+        <text x="296" y="248" font-size="10" fill="var(--lk-ink)" text-anchor="middle" ><tspan font-weight="700" fill="var(--lk-gold-dark)">PTX</tspan> cp.async / ldmatrix / mma.sync</text>
+        <path d="M407 244H415" stroke="var(--lk-ink-soft)" stroke-width="1.5"/>
+        <path d="M414 240L421 244L414 248Z" fill="var(--lk-ink-soft)"/>
+        <rect x="424" y="232" width="210" height="24" fill="var(--lk-gold-soft)" rx="3" stroke="var(--lk-gold)" stroke-width="1.5"/>
+        <text x="529" y="248" font-size="10" fill="var(--lk-ink)" text-anchor="middle" ><tspan font-weight="700" fill="var(--lk-gold-dark)">cubin (SASS)</tspan> LDGSTS / LDSM / HMMA</text>
+        <rect x="18" y="277" width="30" height="10" fill="var(--lk-cobalt)" opacity=".6"/>
+        <text x="53" y="286" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >cobalt tints: who holds it</text>
+        <rect x="300" y="277" width="30" height="10" fill="var(--lk-rule)" />
+        <text x="335" y="286" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >greys: which chunk (0&ndash;3) of a row</text>
+        <rect x="18" y="293" width="10" height="10" fill="none" stroke="var(--lk-ink)" stroke-width="1.5"/>
+        <text x="33" y="302" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >thread 0&rsquo;s 16 bytes</text>
+        <rect x="300" y="293" width="10" height="10" fill="none" stroke="var(--lk-gold)" stroke-width="1.5"/>
+        <text x="315" y="302" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >lane 0&rsquo;s 8 halves (rows 0, 8; cols 0&ndash;1, 8&ndash;9)</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; One 32&times;32 FP16 tile of A on its way through the compiler. In Triton IR it is a shape. In TritonGPU IR it gets a blocked layout for the coalesced load (each thread 8 consecutive halves, a warp covering 8 rows), a shared layout with a swizzle for the staging buffer, and the <code>mma</code> operand layout chapter 8 drew by hand. From there on it is per-thread code: <code>cp.async</code> into shared memory, <code>ldmatrix</code> into fragments, <code>mma.sync</code>. Layouts are real (the names are Triton&rsquo;s); the exact parameters the compiler picks for a given kernel are what you read in its <code>.ttgir</code>.</figcaption>
+    </figure>
+
+    <figure class="lk-fig" role="img" aria-label="A strip of 256 elements split among 64 threads of 2 warps, each thread holding 4 consecutive elements, so each warp covers 512 contiguous bytes. An enlarged view shows threads 0 to 3 holding elements 0 to 3, 4 to 7, 8 to 11 and 12 to 15. Below, a strip of 1024 elements with the same layout repeating four times.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 300" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>A blocked layout</title>
+        <text x="20" y="16" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start" >threads 0&ndash;3, enlarged: thread t holds elements 4t &hellip; 4t + 3</text>
+        <rect x="20" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".95"/>
+        <text x="27.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >0</text>
+        <rect x="36" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".95"/>
+        <text x="43.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >1</text>
+        <rect x="52" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".95"/>
+        <text x="59.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >2</text>
+        <rect x="68" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".95"/>
+        <text x="75.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >3</text>
+        <rect x="87" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".68"/>
+        <text x="94.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >4</text>
+        <rect x="103" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".68"/>
+        <text x="110.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >5</text>
+        <rect x="119" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".68"/>
+        <text x="126.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >6</text>
+        <rect x="135" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".68"/>
+        <text x="142.5" y="43" font-size="10" fill="var(--lk-paper-light)" text-anchor="middle" >7</text>
+        <rect x="154" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".46"/>
+        <text x="161.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >8</text>
+        <rect x="170" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".46"/>
+        <text x="177.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >9</text>
+        <rect x="186" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".46"/>
+        <text x="193.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >10</text>
+        <rect x="202" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".46"/>
+        <text x="209.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >11</text>
+        <rect x="221" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".28"/>
+        <text x="228.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >12</text>
+        <rect x="237" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".28"/>
+        <text x="244.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >13</text>
+        <rect x="253" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".28"/>
+        <text x="260.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >14</text>
+        <rect x="269" y="28" width="15" height="22" fill="var(--lk-cobalt)" opacity=".28"/>
+        <text x="276.5" y="43" font-size="10" fill="var(--lk-ink)" text-anchor="middle" >15</text>
+        <path d="M21.5 55V59H80.5V55" stroke="var(--lk-ink-soft)" fill="none"/>
+        <text x="51.5" y="72" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle" >t0: 16 B</text>
+        <path d="M88.5 55V59H147.5V55" stroke="var(--lk-ink-soft)" fill="none"/>
+        <text x="118.5" y="72" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle" >t1: 16 B</text>
+        <path d="M155.5 55V59H214.5V55" stroke="var(--lk-ink-soft)" fill="none"/>
+        <text x="185.5" y="72" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle" >t2: 16 B</text>
+        <path d="M222.5 55V59H281.5V55" stroke="var(--lk-ink-soft)" fill="none"/>
+        <text x="252.5" y="72" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle" >t3: 16 B</text>
+        <path d="M20 78L20.0 115M285 78L58.4 115" stroke="var(--lk-cobalt)" stroke-width="1" opacity=".55" fill="none"/>
+        <rect x="20.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="29.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="39.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="49" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="58.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="68.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="77.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="87.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="97" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="106.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="116.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="125.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="135.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="145" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="154.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="164.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="173.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="183.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="193" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="202.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="212.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="221.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="231.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="241" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="250.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="260.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="269.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="279.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="289" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="298.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="308.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="317.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="333.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="343" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="352.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="362.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="371.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="381.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="391" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="400.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="410.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="419.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="429.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="439" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="448.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="458.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="467.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="477.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="487" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="496.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="506.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="515.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="525.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="535" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="544.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="554.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="563.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="573.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="583" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="592.6" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <rect x="602.2" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".95"/>
+        <rect x="611.8" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".68"/>
+        <rect x="621.4" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".46"/>
+        <rect x="631" y="118" width="9" height="20" fill="var(--lk-cobalt)" opacity=".28"/>
+        <path d="M20 143V148H327.2V143" stroke="var(--lk-ink)" fill="none"/>
+        <text x="173.6" y="162" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle" >warp 0: 32 &times; 16 B = 512 contiguous B</text>
+        <path d="M333.2 143V148H640.4V143" stroke="var(--lk-ink)" fill="none"/>
+        <text x="486.8" y="162" font-size="10.5" fill="var(--lk-ink)" text-anchor="middle" >warp 1: 32 &times; 16 B = 512 contiguous B</text>
+        <text x="640.4" y="110" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="end" >256 elements (FP32) over 2 warps, 64 threads</text>
+        <text x="20" y="206" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >1,024 elements, the same layout: it wraps, 4 groups per thread</text>
+        <defs><pattern id="c12-wrap0" x="20" y="214" width="9.6" height="16" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".95"/><rect x="2.4" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".68"/><rect x="4.8" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".46"/><rect x="7.2" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".28"/></pattern><pattern id="c12-wrap1" x="175.6" y="214" width="9.6" height="16" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".95"/><rect x="2.4" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".68"/><rect x="4.8" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".46"/><rect x="7.2" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".28"/></pattern><pattern id="c12-wrap2" x="331.2" y="214" width="9.6" height="16" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".95"/><rect x="2.4" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".68"/><rect x="4.8" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".46"/><rect x="7.2" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".28"/></pattern><pattern id="c12-wrap3" x="486.8" y="214" width="9.6" height="16" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".95"/><rect x="2.4" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".68"/><rect x="4.8" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".46"/><rect x="7.2" y="0" width="2.4" height="16" fill="var(--lk-cobalt)" opacity=".28"/></pattern></defs>
+        <rect x="20" y="214" width="153.6" height="16" fill="url(#c12-wrap0)" />
+        <rect x="175.6" y="214" width="153.6" height="16" fill="url(#c12-wrap1)" />
+        <rect x="331.2" y="214" width="153.6" height="16" fill="url(#c12-wrap2)" />
+        <rect x="486.8" y="214" width="153.6" height="16" fill="url(#c12-wrap3)" />
+        <rect x="18.5" y="212.5" width="156.6" height="19" fill="none" stroke="var(--lk-gold)" stroke-width="2"/>
+        <text x="20" y="246" font-size="10.5" fill="var(--lk-gold-dark)" text-anchor="start" >elements 0&ndash;255: the layout once</text>
+        <text x="640.4" y="246" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="end" >and thread t also holds 256j + 4t &hellip; 256j + 4t + 3</text>
+        <text x="20" y="272" font-size="10.5" fill="var(--lk-cobalt-dark)" text-anchor="start" >#blocked&lt;{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [2], order = [0]}&gt;</text>
+        <text x="20" y="288" font-size="10.5" fill="var(--lk-ink)" text-anchor="start" >one thread = one 16-byte load (ld.global.v4)  &middot;  one warp instruction = 512 contiguous bytes</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; A blocked layout, the compiler&rsquo;s answer to &ldquo;which thread holds which element&rdquo;. A 256-element tile over 2 warps with 4 elements per thread: thread <var>t</var> holds elements 4<var>t</var> to 4<var>t</var>+3, so each thread&rsquo;s load is one 16-byte instruction and a warp&rsquo;s 32 loads are 512 contiguous bytes. A 1,024-element tile with the same layout wraps: each thread holds four such groups. This is chapter 3&rsquo;s coalescing and chapter 8&rsquo;s <code>float4</code>, chosen by a pass instead of by you.</figcaption>
+    </figure>
+
+    <h3>Looking at each stage</h3>
+    <p>Every launch returns a handle to the compiled kernel, and the handle carries every intermediate text:</p>
+<pre><code class="language-python">h = matmul_kernel[grid](a, b, c, M, N, K, *strides, BLOCK_M=128, BLOCK_N=128, BLOCK_K=32, GROUP_M=8)
+print(h.asm.keys())                 # 3.8: dict_keys(['source', 'ttir', 'ttgir', 'llir', 'ptx', 'cubin'])
+print(h.n_regs, h.n_spills, h.metadata.shared)      # registers, spills, shared bytes: lab 7's -Xptxas -v
+ptx = h.asm['ptx']
+for s in ('mma.sync', 'ldmatrix', 'cp.async', 'ld.global.v4', 'wgmma', 'tcgen05'):
+    print(s, ptx.count(s))          # on sm_120 the first three should be nonzero, the last two zero
+                                    # (ld.global.v4 is for the vector add: pipelined matmul loads become cp.async)</code></pre>
+    <p>The same texts are written to <code>~/.triton/cache/&lt;hash&gt;/</code> as <code>.ttir</code>, <code>.ttgir</code>, <code>.llir</code>, <code>.ptx</code> and <code>.cubin</code> next to a <code>.json</code> of the launch metadata; <code>MLIR_ENABLE_DUMP=1</code> prints the IR after every pass, and <code>TRITON_PRINT_AUTOTUNING=1</code> prints each config as the autotuner tries it, then the winner and the total tuning time. Lab 11&rsquo;s <code>inspect_asm.py</code> does the counting above for every kernel of the lab and prints the blocked layout the compiler chose for the vector add, so that figure 3 can be checked against the real thing.</p>
+
+    <details class="ym">
+      <summary>Your move: the TTGIR of a kernel that computes <code>softmax(x) @ v</code> in one program shows a <code>convert_layout</code> between the softmax and the <code>tl.dot</code>. What happened, and what did it cost?</summary>
+      <p>The softmax result lives in the layout the reduction produced (a blocked layout, one row of the tile spread over a warp so that the max and sum were cheap). <code>tl.dot</code> needs its A operand in the dot-operand fragment layout, in which a lane holds specific scattered elements of a 16&times;16 block. The compiler bridged the two by writing the tile to shared memory in one layout and reading it back in the other: one tile-sized store and load through shared memory per iteration, plus a barrier. That is exactly the cost chapter 14&rsquo;s hand-written FlashAttention avoids by keeping the score tile in the <code>mma</code> accumulator layout and reusing it directly as the next operand, a trick Triton&rsquo;s compiler now also knows for this specific pattern, but which you cannot ask for in general: section 9.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. Benchmarking fairly</h2>
+
+    <p>The chapter&rsquo;s kernels will be compared with three things: PyTorch&rsquo;s own kernels (cuBLAS behind <code>torch.matmul</code>, hand-written CUDA behind <code>softmax</code> and <code>layer_norm</code>), and your lab 7 and lab 8 numbers. The comparison is only meaningful if the <em>harness</em> is the same, and the two harnesses in play are not. Triton&rsquo;s <code>triton.testing.do_bench(fn, warmup=25, rep=100, quantiles=[0.5, 0.2, 0.8])</code> runs <code>fn</code> for 25 ms untimed, then as many times as fit in 100 ms, timing each run with CUDA events; and <strong>before every timed run it writes a 256 MB buffer to push everything out of the L2</strong>, so its numbers are DRAM-cold. Lab 7&rsquo;s <code>bench.h</code> runs 3 warm-ups and 20 timed repetitions with no flush, so inputs that fit in the 48 MB L2 (every shape below about 2,048&sup3; in FP16) are partly warm. Chapter 1&rsquo;s vecadd lesson again: the same kernel measures faster on the harness that lets the cache help.</p>
+
+    <table>
+      <tr><th>Rule</th><th>Why</th></tr>
+      <tr><td>Same shape, same dtype, same layout for every contender</td><td>a transposed operand is a different kernel (chapter 6); FP16 against FP32 compares bytes, not kernels</td></tr>
+      <tr><td>Same cache policy: flush for all or for none</td><td><code>do_bench</code> flushes; <code>bench.h</code> does not; lab 11 reports both for the matmul so that the lab 7 comparison is like for like</td></tr>
+      <tr><td>Run the autotuner and the JIT before timing</td><td>the first call compiles (seconds) and tunes; <code>do_bench</code>&rsquo;s warm-up covers the JIT, but call the kernel once explicitly first, so a failure is a traceback and not a timing</td></tr>
+      <tr><td>Report the median and a spread</td><td><code>quantiles=[0.5, 0.2, 0.8]</code>; a wide spread means clocks moved (interlude 5b: lock them with <code>nvidia-smi -lgc</code> if you can) or something else ran</td></tr>
+      <tr><td>Count FLOPs and bytes yourself</td><td>TFLOP/s = 2<var>MNK</var> / time; GB/s = bytes actually required / time; never trust a library&rsquo;s own &ldquo;achieved&rdquo; number across libraries</td></tr>
+      <tr><td>Check correctness at the benchmark shape, with the tolerance of the dtype</td><td>an FP16 matmul that agrees with cuBLAS to 10<sup>&minus;2</sup> relative is correct (chapter 8&rsquo;s tensor-core rounding); one that agrees to 10<sup>&minus;6</sup> is probably not using the tensor cores</td></tr>
+    </table>
+
+    <p>The predictions, as ranges, since no Triton kernel has run on your card yet (section 10): the vector add, softmax and layernorm at the DRAM ceiling you measured in lab 0, within a few percent of PyTorch&rsquo;s; the FP16 matmul at 4,096&sup3; between 70 and 95% of <code>torch.matmul</code> after autotuning, and in the same band as lab 7&rsquo;s t3 or above it (the official tutorial reports parity with cuBLAS on the cards it was tuned for; your card is not among them); the fused matmul + bias + GELU within a few percent of the plain matmul, against a saving of two elementwise round trips. At small <var>M</var> (64, 1) expect the Triton matmul to fall behind cuBLAS, which has split-K and GEMV kernels for those shapes (chapter 8, section 8).</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Limits: what Triton will not let you say</h2>
+
+    <p>Everything the compiler decides is something you cannot decide, and for a few kernels in this course that is the whole game. The list, with where each limit bites:</p>
+    <ul>
+      <li><strong>No threads, no warps, no lanes.</strong> There is no <code>threadIdx</code>, no shuffle, no ballot, no lane-dependent code path. A reduction is <code>tl.sum</code> over a whole axis; you cannot write chapter 5&rsquo;s shuffle tree yourself or reduce over only the four lanes that share a row of an <code>mma</code> fragment (chapter 14&rsquo;s quad shuffles). Chapter 15&rsquo;s last-block-done pattern needs an atomic, a fence and a thread-dependent branch; Triton has <code>tl.atomic_add</code> and <code>tl.atomic_cas</code> and a <code>tl.debug_barrier</code>, so split-K with a separate combine kernel is natural and an atomic accumulation into C is easy, but the in-kernel combine is awkward at best.</li>
+      <li><strong>No explicit shared memory or registers.</strong> You cannot name a buffer, choose its padding or decide that a value stays in a fragment. The score-tile reuse of chapter 14 is a layout decision the compiler makes or does not make; the official FlashAttention tutorial reaches good speed because the compiler recognizes the pattern, not because the code asks for it.</li>
+      <li><strong>Tile shapes are powers of two and whole-axis.</strong> A 1,025-wide row costs 2,048 lanes of work; a reduction over half an axis is a mask and a full reduction.</li>
+      <li><strong>Every distinct constant and specialization is a compile.</strong> Shapes change, <code>constexpr</code> flags change, an argument stops being divisible by 16: a new kernel, seconds of compile time, which an engine must hide behind a cache and warm-up.</li>
+      <li><strong>The compiler&rsquo;s choices are opaque until you read the IR.</strong> A <code>convert_layout</code> you did not expect, a load that did not vectorize because alignment could not be proven, a pipeline that did not form because the loop had a data-dependent exit: all silent, all findable in section 7&rsquo;s dumps, none fixable except by rewriting the Python until the passes do what you want.</li>
+      <li><strong>Hardware features arrive late and unevenly.</strong> New instructions are supported first on data-center parts, in the kernels the maintainers care about; see section 10.</li>
+    </ul>
+    <p>So the course&rsquo;s division of labour from here: matmuls with fused epilogues, row kernels, and anything built from tile loads, reductions and <code>tl.dot</code> are Triton&rsquo;s territory, and in a real engine that is most of the kernel count. Attention at long context (chapter 14) and at decode (chapter 15) are written in CUDA, because their speed comes from exactly the warp-level control Triton hides: fragment reuse, lane-level reductions, the last-block combine. The honest summary is the one the chapter opened with: twenty lines against two hundred, at a cost in control that you pay only for the two or three kernels where control is the point.</p>
+  </section>
+
+  <section id="s10">
+    <h2>10. Triton on sm_120: what is known and what is not</h2>
+
+    <div class="callout note">
+      <span class="callout-label">Checked 2026-10-22, not run on your card</span>
+      <p><strong>Known.</strong> Blackwell targets, including consumer sm_120, entered Triton with release 3.3 (April 2025), which is the version PyTorch 2.7 shipped with its CUDA 12.8 wheels; the current release is 3.8.0 (August 2026). You need: a Linux Triton (WSL2 is Linux: fine), a PyTorch built for CUDA 12.8 or newer (the <code>cu128</code> or <code>cu130</code> wheels; a <code>cu126</code> wheel cannot target your card), and a Windows driver new enough for that toolkit (chapter 1). Triton bundles its own <code>ptxas</code>, so your system <code>nvcc</code> version does not matter to it; the two classic failures, <code>ptxas fatal: Value 'sm_120' is not defined</code> and <code>LLVM ERROR: ptx87 is required for target sm_120</code>, both mean a Triton or PTX toolchain older than that (an old wheel, or <code>TRITON_PTXAS_PATH</code> pointing at an old toolkit; since 3.6 Blackwell cards use a separate bundled <code>ptxas-blackwell</code>, overridden by <code>TRITON_PTXAS_BLACKWELL_PATH</code>).</p>
+      <p><strong>Expected but unverified here.</strong> Your card has no <code>wgmma</code> and no <code>tcgen05</code> (chapter 8), so Triton&rsquo;s Hopper and data-center-Blackwell paths (TMA descriptors with warp-group MMA, tensor memory) do not apply, and <code>tl.dot</code> should lower to the <code>mma.sync</code> path that Ampere and Ada use: section 7&rsquo;s PTX counts are the test, and lab 11 prints them first. The tutorials written for those paths (persistent TMA matmul, the Blackwell attention kernels) are not for this card. FP8 <code>tl.dot</code> on sm_120 is the part the ecosystem was slowest to cover (serving engines added FP8 kernels for sm_120 well after the data-center parts); treat it as unverified until you have run it, and the lab stays in FP16.</p>
+      <p><strong>How the lab settles it.</strong> <code>make env</code> prints <code>triton.__version__</code>, <code>torch.__version__</code>, <code>torch.version.cuda</code>, <code>torch.cuda.get_device_capability()</code> (expected <code>(12, 0)</code>), then compiles the vector add and the matmul and prints the instruction counts of section 7. Paste that block back before anything else: it replaces this callout.</p>
+    </div>
+  </section>
+
+  <section id="s11">
+    <h2>11. Lab 11: the course&rsquo;s kernels in Triton</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 11</span><span class="lab-title">Vector add, softmax, layernorm, FP16 matmul, fused epilogue: checked against PyTorch, timed against PyTorch and your CUDA</span><span class="idx-meta">~60 min · <code>mlsys/labs/lab11-triton/</code></span></div>
+      <div class="lab-body">
+        <p>Python only: <code>torch</code> and <code>triton</code> on your WSL2 (<code>pip install torch --index-url https://download.pytorch.org/whl/cu128</code> brings a matching Triton). Five kernel files, each with a <code>test</code> (against the PyTorch op, with a dtype-appropriate tolerance) and a <code>bench</code> (<code>do_bench</code> with quantiles, FLOP/s and GB/s computed from the shapes), a <code>common.py</code> with the harness and the environment check, and <code>inspect_asm.py</code> for section 7&rsquo;s instruction counts and layouts.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab11-triton
+make env          # versions, capability, and the PTX instruction counts of section 7
+make test         # every kernel vs its PyTorch op: all PASS
+make bench        # the tables: GB/s for the row kernels, TFLOP/s for the matmuls, vs PyTorch
+make bench-warm   # the matmul again without the L2 flush, for the lab 7 comparison
+make asm          # inspect_asm.py: layouts and instruction counts per kernel, PTX in ./asm/</code></pre>
+        <table>
+          <tr><th>Step</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>env</code>: <code>mma.sync</code>, <code>ldmatrix</code>, <code>cp.async</code> counts in the matmul PTX</td><td>all nonzero; <code>wgmma</code> and <code>tcgen05</code> zero</td></tr>
+          <tr><td><code>bench</code>: vector add at 64M floats</td><td>within 5% of lab 0&rsquo;s ceiling and of <code>torch.add</code></td></tr>
+          <tr><td><code>bench</code>: softmax, rows of 1,024 and 8,192</td><td>near the ceiling; the persistent version a little ahead on 1,024-wide rows; both near <code>torch.softmax</code></td></tr>
+          <tr><td><code>bench</code>: layernorm, rows of 768, <var>M</var> = 4,096</td><td>near the ceiling, within a few percent of <code>F.layer_norm</code>; the three-loop version close behind (L1 hits)</td></tr>
+          <tr><td><code>bench</code>: FP16 matmul at 4,096&sup3; after autotuning</td><td>70&ndash;95% of <code>torch.matmul</code>; winning config has <code>num_stages</code> &ge; 3</td></tr>
+          <tr><td><code>bench-warm</code> vs lab 7&rsquo;s t3 and cuBLAS HGEMM</td><td>Triton between t3 and cuBLAS, or above t3 by a clear margin</td></tr>
+          <tr><td><code>bench</code>: matmul + bias + GELU vs matmul alone, <var>M</var> = 4,096, 768 &rarr; 3,072</td><td>within a few percent of each other; against matmul + two PyTorch elementwise kernels, about 100&ndash;170 &micro;s saved</td></tr>
+          <tr><td><code>bench</code>: FP16 matmul at <var>M</var> = 64 and <var>M</var> = 1</td><td>behind cuBLAS, more so at <var>M</var> = 1</td></tr>
+        </table>
+        <p>Paste back the <code>make env</code> block, the <code>PASTE:</code> lines of <code>make test</code> and <code>make bench</code>, and the winning autotune config for each shape (<code>TRITON_PRINT_AUTOTUNING=1</code> is set by the Makefile). This lab has not been run on any GPU: the kernels follow the official tutorials&rsquo; stable API and were checked by reading, not by running.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Two options. <strong>The GPT-2 MLP in two launches</strong>: layernorm, then matmul + bias + GELU, then matmul + bias + residual, for <var>M</var> = 1,024 in FP16, timed against the equivalent PyTorch sequence and against lab 5&rsquo;s seven FP32 kernels; count the bytes saved and check that the time saved agrees. <strong>Online softmax in Triton</strong>: rewrite the softmax kernel with a chunk loop and a running (<var>m</var>, <var>d</var>) for rows of 65,536, and compare with the one-tile version at 8,192 and with <code>torch.softmax</code> at both lengths. It is the warm-up for chapter 14.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>In one sentence each: what is the unit of programming in CUDA, and what is it in Triton? What does each leave to you?</summary>
+        <p>CUDA: one thread, with the block and warp structure, the element-to-thread mapping, shared-memory staging and fragment layouts all written by you. Triton: one program instance acting on tiles, where the compiler derives the mapping, the staging, the layouts and the pipelining, and you keep the tile sizes, warps, stages, grid order, loops and fusion.</p>
+      </details>
+      <details>
+        <summary>Why must tile shapes be compile-time constants, and why powers of two?</summary>
+        <p>The compiler assigns tile elements to threads with a fixed rule (a layout) and emits per-thread code with a known number of elements per thread, vector widths and shuffle trees; all of that is decided at compile time from the shape. Powers of two make the layouts regular (elements per thread, threads per warp, warps per program all divide evenly) and the reductions tree-shaped.</p>
+      </details>
+      <details>
+        <summary>A load has <code>mask=offs &lt; n</code>. Is the mask a branch, and what does <code>other=</code> do?</summary>
+        <p>Not a branch: it becomes a predicate on the load instruction, so masked lanes skip the memory access while the warp stays converged. <code>other</code> is the value those lanes receive instead, chosen so that downstream reductions are unaffected: 0 for a sum, minus infinity for a max.</p>
+      </details>
+      <details>
+        <summary>What does <code>tl.dot</code> turn into on your card, and what does the compiler have to arrange for it?</summary>
+        <p><code>mma.sync</code> tensor-core instructions per warp (sm_120 has no <code>wgmma</code> or <code>tcgen05</code>). The compiler stages the A and B tiles through shared memory with a swizzled layout, loads fragments with <code>ldmatrix</code> in the dot-operand layouts, keeps the accumulator in the <code>mma</code> layout in registers, and pipelines the tile loads over <code>num_stages</code> stages with asynchronous copies.</p>
+      </details>
+      <details>
+        <summary>What does the grouped launch order change, and what does it not change?</summary>
+        <p>It changes which output tiles run at the same time, so that a wave of programs shares a few row strips of A and column strips of B and the L2 serves most of the loads; DRAM traffic falls. It does not change the arithmetic, the number of tiles, or any single program&rsquo;s work: every tile is still computed exactly once.</p>
+      </details>
+      <details>
+        <summary>A Triton kernel&rsquo;s TTGIR contains a <code>convert_layout</code> you did not expect. What is it, what does it cost, and how can it arise?</summary>
+        <p>A change of which thread holds which element, done by writing the tile to shared memory in one layout and reading it back in another, with a barrier: a tile-sized round trip through shared memory. It arises when a value produced in one layout (a reduction result, a loaded tile) is consumed by an operation that requires another (the operand layout of <code>tl.dot</code>, a store the compiler wants coalesced along a different axis).</p>
+      </details>
+      <details>
+        <summary>Your Triton matmul measures 15% slower than lab 7&rsquo;s t3 at 2,048&sup3;. Name two harness differences that could explain all of it before any kernel difference.</summary>
+        <p><code>do_bench</code> flushes the L2 before every run while <code>bench.h</code> does not, and at 2,048&sup3; in FP16 the 24 MB of inputs fit in the 48 MB L2, so t3 is measured partly warm. And the Triton number may include autotuning or JIT compilation if the kernel was not called once before timing. Fix both (lab 11&rsquo;s <code>bench-warm</code>, an explicit first call) before comparing kernels.</p>
+      </details>
+      <details>
+        <summary>Which of these can you not express in Triton, and which chapter needs it: a sum over a tile&rsquo;s axis; a reduction over the four lanes sharing a row of an <code>mma</code> fragment; an atomic add into C; a value kept in a specific register fragment between two matrix products?</summary>
+        <p>The first and third are expressible (<code>tl.sum</code>, <code>tl.atomic_add</code>). The second and fourth are not: they are lane-level and fragment-level control, which Triton hides. Chapter 14&rsquo;s FlashAttention needs both (quad shuffles for the row max and sum, the score fragment reused as the next operand), which is why it is written in CUDA.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>P. Tillet, H. T. Kung, D. Cox, <em>Triton: an intermediate language and compiler for tiled neural network computations</em> (MAPL 2019): the block-level model, tiles as the unit, and the compiler&rsquo;s job as described in sections 1 and 7.</li>
+      <li>Triton documentation, <a href="https://triton-lang.org/main/getting-started/tutorials/index.html"><em>Tutorials</em></a>: vector addition, fused softmax, matrix multiplication (the grouped ordering and autotune configs), layer normalization, fused attention. Lab 11&rsquo;s kernels follow their stable API; the softmax, layernorm and epilogue variants in this chapter are simplifications of them.</li>
+      <li>Triton documentation, <em>Python API</em>: <code>triton.testing.do_bench</code> (warm-up, repetitions, quantiles, the L2 flush), <code>triton.autotune</code>, <code>triton.Config</code>, <code>tl.dot</code>, <code>tl.constexpr</code>, <code>tl.multiple_of</code> / <code>tl.max_contiguous</code>.</li>
+      <li>Triton source, <code>include/triton/Dialect/TritonGPU/IR/TritonGPUAttrDefs.td</code>: the blocked, shared, mma and dot-operand layouts of section 7, with worked examples of each in the comments.</li>
+      <li>OpenAI, <a href="https://openai.com/index/triton/"><em>Introducing Triton: open-source GPU programming for neural networks</em></a> (2021): the &ldquo;who decides what&rdquo; division between programmer and compiler, as its authors state it.</li>
+      <li>PyTorch 2.7 release notes (April 2025): Blackwell support, CUDA 12.8 wheels and Triton 3.3; Triton releases 3.4&ndash;3.8 (July 2025 to August 2026) for the Hopper and data-center-Blackwell features that do not apply to sm_120; the triton-lang issue tracker for the sm_120 toolchain errors quoted in section 10.</li>
+      <li>S. Boehm, <em>How to Optimize a CUDA Matmul Kernel</em> (2022) and NVIDIA CUTLASS, <em>Efficient GEMM in CUDA</em>: the tile hierarchy, pipelining and rasterization that <code>BLOCK_*</code>, <code>num_stages</code> and <code>GROUP_M</code> parameterize (chapter 8&rsquo;s sources, revisited).</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-11-gpt2-forward-pass.html">&larr; Ch. 11 — Lab: a GPT-2 forward pass</a>
+      <a href="index.html">Index</a>
+      <a href="cap-13-inference-arithmetic.html">Ch. 13 — Inference arithmetic &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part III · Chapter 12 · kernels written against the official Triton tutorials&rsquo; API and checked by reading, not by running; sm_120 support status checked against Triton and PyTorch release notes on 2026-10-22; performance ranges are predictions until lab 11 replaces them, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch12.js"></script>
+</body>
+</html>

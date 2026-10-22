@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 10 — The transformer from the GPU&rsquo;s point of view · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch10.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-09-softmax-layernorm-fusion.html">&larr; Ch. 9 — Softmax, layernorm, fusion</a>
+    <a href="index.html">Index</a>
+    <a href="cap-11-gpt2-forward-pass.html">Ch. 11 — Lab: a GPT-2 forward pass &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Kernels that matter · Chapter 10</div>
+    <h1>The transformer from the GPU&rsquo;s point of view</h1>
+    <div class="lk-meta"><span>~65 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 9 · ~50 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Chapter 6 drew the transformer block as a list of operations and left one box closed: <strong>attention</strong>. This chapter opens it, from the side the GPU sees. A block is two sublayers, each &ldquo;normalize, mix, add back&rdquo;; the MLP mixes the channels <em>within</em> a token, and attention mixes <em>across</em> tokens, the only operation in the model that does. Attention is a content-based lookup: every token asks a question (its <strong>query</strong>), every token advertises what it holds (its <strong>key</strong>) and what it would hand over (its <strong>value</strong>), and each token&rsquo;s output is the average of the values, weighted by how well its query matches each key. To the GPU that is two matrix multiplies whose operands are <em>both activations</em>, around a softmax (chapter 9) over a matrix of scores that has <var>T</var><sup>2</sup> entries per head: at 1,024 tokens, 50 MB per layer, larger than every weight matrix in the block, and growing with the square of the context while everything else grows linearly. The chapter counts what that costs, shows that the causal mask wastes half of it, and then takes the step that makes generation affordable: because a token can only look backwards, the keys and values of earlier tokens never change, so they can be computed once and kept. That is the <strong>KV cache</strong>, and it splits inference into <strong>prefill</strong> and <strong>decode</strong>, the two regimes the rest of the course is organized around.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">The block in five lines, and the two mixing directions</a></li>
+      <li><a href="#s2">Attention as a lookup</a></li>
+      <li><a href="#s3">Heads, the fused QKV GEMM, and the layout the kernels want</a></li>
+      <li><a href="#s4">Naive attention as kernels</a></li>
+      <li><a href="#s5">The score matrix: <var>T</var><sup>2</sup> and the passes over it</a></li>
+      <li><a href="#s6">The masked half</a></li>
+      <li><a href="#s7">Generation: the KV cache, prefill and decode</a></li>
+      <li><a href="#s8">The whole model as a kernel list</a></li>
+      <li><a href="#s9">What changed since GPT-2, from the GPU&rsquo;s side</a></li>
+      <li><a href="#s10">Predictions</a></li>
+      <li><a href="#s11">Lab 9: naive attention</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. The block in five lines, and the two mixing directions</h2>
+
+    <p>Chapter 6&rsquo;s Fig. 4 is the whole model; here is one block of it as five lines, for a stream <var>x</var> of shape [<var>B</var>&middot;<var>T</var>, <var>C</var>], one row per token:</p>
+<pre><code class="language-python">h = x + attention(layernorm_1(x))      # sublayer 1: normalize, mix across tokens, add back
+y = h + mlp(layernorm_2(h))            # sublayer 2: normalize, mix across channels, add back
+# mlp(u) = gelu(u @ W_fc + b_fc) @ W_proj + b_proj</code></pre>
+    <p>The two sublayers have the same skeleton: <strong>normalize</strong> the row (chapter 9), <strong>mix</strong>, <strong>add the result back</strong> to the stream (the residual, so that each sublayer contributes a correction instead of replacing the signal). What differs is the direction of the mixing. The MLP takes one token&rsquo;s 768 channels and produces that token&rsquo;s new 768 channels; it never looks at another row. If the model were only MLPs, each token would be processed in complete isolation and the output for &ldquo;bank&rdquo; could not depend on whether &ldquo;river&rdquo; came before it. Attention is the one operation that mixes <em>rows</em>: a token&rsquo;s output is built from other tokens&rsquo; values. Everything the model knows about context passes through it.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Two copies of an 8-token by 12-channel matrix. Left, the MLP: row 3 is read and the same row 3 is written; no row looks at another, so B and T merge into M rows. Right, attention: row 5 is the output, built from rows 0 to 5, outlined; rows 6 and 7 are masked. Attention mixes only within one sequence. Weights never mix tokens; only attention does.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 680 330" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>The two mixing directions on one sequence&rsquo;s [T, C] activations</title>
+        <defs><pattern id="c10-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-paper)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-rule-soft)" stroke-width="2"/></pattern><marker id="c10-a-fo" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" fill="var(--lk-forest)"/></marker><marker id="c10-a-co" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" fill="var(--lk-cobalt)"/></marker></defs>
+        <text x="134" y="30" font-size="13" fill="var(--lk-forest)" text-anchor="middle" font-weight="700">MLP: within a token</text>
+        <text x="134" y="50" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">one row = one token</text>
+        <text x="134" y="68" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">&larr; 12 cells stand for 768 &rarr;</text>
+        <rect x="50" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="78" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="91" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t0</text>
+        <rect x="50" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="96" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="109" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t1</text>
+        <rect x="50" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="114" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="127" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t2</text>
+        <rect x="50" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="132" width="14" height="18" fill="var(--lk-forest)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="145" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t3</text>
+        <rect x="50" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="150" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="163" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t4</text>
+        <rect x="50" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="168" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="181" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t5</text>
+        <rect x="50" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="186" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="199" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t6</text>
+        <rect x="50" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="64" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="78" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="92" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="106" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="120" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="134" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="162" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="176" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="190" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="204" y="204" width="14" height="18" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="44" y="217" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t7</text>
+        <rect x="50" y="78" width="168" height="144" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <path d="M218 137.0 C 252 111.0, 252 171.0, 219 145.0" fill="none" stroke="var(--lk-forest)" stroke-width="1.6" marker-end="url(#c10-a-fo)"/>
+        <text x="224" y="177" font-size="11" fill="var(--lk-forest)" text-anchor="start">reads row 3,</text>
+        <text x="224" y="191" font-size="11" fill="var(--lk-forest)" text-anchor="start">writes row 3</text>
+        <text x="134" y="244" font-size="11" fill="var(--lk-ink)" text-anchor="middle">no row looks at another row,</text>
+        <text x="134" y="259" font-size="11" fill="var(--lk-ink)" text-anchor="middle">so B and T merge: M = B &times; T rows</text>
+        <text x="479" y="30" font-size="13" fill="var(--lk-cobalt)" text-anchor="middle" font-weight="700">attention: across tokens</text>
+        <text x="479" y="50" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">row 5 is built from rows 0..5</text>
+        <text x="479" y="68" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">&larr; C = 768 channels &rarr;</text>
+        <rect x="395" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="78" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="91" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t0</text>
+        <rect x="395" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="96" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="109" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t1</text>
+        <rect x="395" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="114" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="127" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t2</text>
+        <rect x="395" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="132" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="145" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t3</text>
+        <rect x="395" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="150" width="14" height="18" fill="var(--lk-hl)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="163" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t4</text>
+        <rect x="395" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="168" width="14" height="18" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="181" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t5</text>
+        <rect x="395" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="186" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="199" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t6</text>
+        <rect x="395" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="409" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="423" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="437" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="451" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="465" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="479" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="493" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="507" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="521" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="535" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="549" y="204" width="14" height="18" fill="url(#c10-hatch)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="389" y="217" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">t7</text>
+        <rect x="395" y="78" width="168" height="144" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="394" y="77" width="170" height="110" fill="none" stroke="var(--lk-cobalt)" stroke-width="2"/>
+        <rect x="413" y="190" width="132" height="28" fill="var(--lk-paper)" stroke="none" stroke-width="1"/>
+        <text x="479" y="201" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">masked: t6, t7 come</text>
+        <text x="479" y="215" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">later, not read</text>
+        <path d="M563 87.0 C 605 87.0, 605 171.0, 565 171.0" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.2" marker-end="url(#c10-a-co)"/>
+        <circle cx="563" cy="87.0" r="1.8" fill="var(--lk-cobalt)"/>
+        <path d="M563 105.0 C 599 105.0, 599 174.0, 565 174.0" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.2" marker-end="url(#c10-a-co)"/>
+        <circle cx="563" cy="105.0" r="1.8" fill="var(--lk-cobalt)"/>
+        <path d="M563 123.0 C 593 123.0, 593 177.0, 565 177.0" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.2" marker-end="url(#c10-a-co)"/>
+        <circle cx="563" cy="123.0" r="1.8" fill="var(--lk-cobalt)"/>
+        <path d="M563 141.0 C 587 141.0, 587 180.0, 565 180.0" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.2" marker-end="url(#c10-a-co)"/>
+        <circle cx="563" cy="141.0" r="1.8" fill="var(--lk-cobalt)"/>
+        <path d="M563 159.0 C 581 159.0, 581 183.0, 565 183.0" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.2" marker-end="url(#c10-a-co)"/>
+        <circle cx="563" cy="159.0" r="1.8" fill="var(--lk-cobalt)"/>
+        <path d="M608 78 H613 V222 H608" fill="none" stroke="var(--lk-forest)" stroke-width="1.4"/>
+        <text x="619" y="128" font-size="11" fill="var(--lk-forest)" text-anchor="start">one</text>
+        <text x="619" y="142" font-size="11" fill="var(--lk-forest)" text-anchor="start">sequence</text>
+        <text x="619" y="156" font-size="11" fill="var(--lk-forest)" text-anchor="start">only</text>
+        <text x="479" y="244" font-size="11" fill="var(--lk-ink)" text-anchor="middle">row i reads rows 0..i,</text>
+        <text x="479" y="259" font-size="11" fill="var(--lk-ink)" text-anchor="middle">never a later token</text>
+        <line x1="348" y1="24" x2="348" y2="262" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <line x1="40" y1="288" x2="640" y2="288" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="340" y="312" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">weights never mix tokens; only this op does</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The two mixing directions on the [<var>T</var>, <var>C</var>] activation matrix of one sequence. The MLP (forest) reads one row and writes the same row: every token independently, which is why chapter 6 could merge <var>B</var> and <var>T</var> into one matrix dimension. Attention (cobalt) writes row <var>i</var> from rows 0 to <var>i</var>: it reads down the column of tokens, within one sequence only, and never past the current token (the causal mask of section 2). The weights of the block never mix anything across tokens; only this one operation does.</figcaption>
+    </figure>
+
+    <p>From the GPU&rsquo;s side, the block is therefore: four GEMMs against weights (QKV projection, output projection, MLP up, MLP down; chapters 7 and 8), two GEMMs whose operands are <em>both activations</em> (the two inside attention; new in this chapter), one softmax whose rows are as long as the sequence (chapter 9), and the small operations fused into the rest. The next sections open the attention box.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. Attention as a lookup</h2>
+
+    <p>In goes a sequence of <var>T</var> vectors (one per token, <var>C</var> = 768 channels each, already layer-normalized); out comes a sequence of <var>T</var> vectors of the same shape, where each output vector is a mixture of information from the tokens before it. The mechanism, defined term by term:</p>
+    <ul>
+      <li>Three linear projections turn each token&rsquo;s vector <var>x<sub>i</sub></var> into a <strong>query</strong> <var>q<sub>i</sub></var> = <var>x<sub>i</sub></var><var>W<sub>q</sub></var>, a <strong>key</strong> <var>k<sub>i</sub></var> = <var>x<sub>i</sub></var><var>W<sub>k</sub></var> and a <strong>value</strong> <var>v<sub>i</sub></var> = <var>x<sub>i</sub></var><var>W<sub>v</sub></var>, each a vector of <var>D</var> numbers. The names are a database metaphor that happens to be exact: the query is what token <var>i</var> is looking for, the key is what token <var>j</var> offers to be matched against, the value is what token <var>j</var> hands over if matched.</li>
+      <li>The <strong>score</strong> <var>s<sub>ij</sub></var> = <var>q<sub>i</sub></var> &middot; <var>k<sub>j</sub></var> / &radic;<var>D</var> says how well token <var>i</var>&rsquo;s question matches token <var>j</var>&rsquo;s key. A dot product of <var>D</var> numbers of unit variance has variance <var>D</var>, so without the 1/&radic;<var>D</var> the scores would grow with the head size and the softmax below would saturate into a one-hot pick; the scale keeps them of order one whatever <var>D</var> is.</li>
+      <li>The <strong>causal mask</strong>: in a model that generates left to right, token <var>i</var> may only look at tokens 0 to <var>i</var>. Scores <var>s<sub>ij</sub></var> with <var>j</var> &gt; <var>i</var> are set to &minus;&infin; (chapter 9&rsquo;s convention) so that they vanish in the softmax. This is a training-time rule (the model must not see the answer), but it is also what makes section 7 possible.</li>
+      <li>A <strong>softmax over each row</strong> of scores turns them into weights <var>p<sub>ij</sub></var> &ge; 0 that sum to 1 over <var>j</var>: how much of its attention token <var>i</var> pays to each earlier token.</li>
+      <li>The <strong>output</strong> <var>o<sub>i</sub></var> = &sum;<sub><var>j</var></sub> <var>p<sub>ij</sub></var> <var>v<sub>j</sub></var>: the weighted average of the values of the tokens it attended to. A vector of <var>D</var> numbers per token.</li>
+    </ul>
+    <p>For all tokens at once, with <var>Q</var>, <var>K</var>, <var>V</var> the [<var>T</var>, <var>D</var>] matrices whose rows are the <var>q<sub>i</sub></var>, <var>k<sub>i</sub></var>, <var>v<sub>i</sub></var>:</p>
+    <p class="c10-eq"><var>S</var> = <var>Q</var><var>K</var><sup>T</sup> / &radic;<var>D</var> &nbsp;[<var>T</var>, <var>T</var>]; &nbsp; <var>P</var> = softmax<sub>rows</sub>(mask(<var>S</var>)); &nbsp; <var>O</var> = <var>P</var><var>V</var> &nbsp;[<var>T</var>, <var>D</var>]</p>
+    <p>Two matrix multiplies and a row softmax. Play with it at toy size, <var>T</var> = 8 tokens and <var>D</var> = 4: click a query row and follow what it reads.</p>
+
+    <div id="w-attn-explorer" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: with the causal mask on, what is the output of token 0, before you look at any number?</summary>
+      <p>Its own value, <var>v</var><sub>0</sub>, exactly. Row 0 of the masked scores has one finite entry, <var>s</var><sub>00</sub>, and &minus;&infin; everywhere else, so the softmax gives <var>p</var><sub>00</sub> = 1 and zero for the rest. Token 0 has nobody to look at. Token 1 mixes two values, and the last token mixes all <var>T</var>: the amount of work per row grows down the matrix, which is section 6&rsquo;s point.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Heads, the fused QKV GEMM, and the layout the kernels want</h2>
+
+    <p>One lookup per token is one <em>kind</em> of relation (say, &ldquo;the noun this adjective modifies&rdquo;). The model wants several at once, so it runs <var>H</var> independent lookups, called <strong>heads</strong>, each with its own <var>W<sub>q</sub></var>, <var>W<sub>k</sub></var>, <var>W<sub>v</sub></var> and its own score matrix. To keep the cost fixed, the heads split the channels: GPT-2 small has <var>H</var> = 12 heads of <var>D</var> = 64, so 12 &times; 64 = 768 = <var>C</var>. The outputs of the heads are concatenated back into one [<var>T</var>, <var>C</var>] matrix and passed through the output projection <var>W<sub>o</sub></var> [<var>C</var>, <var>C</var>], which mixes the heads&rsquo; findings.</p>
+
+    <h3>One GEMM, not thirty-six</h3>
+    <p>Thirty-six small projections (3 per head, 12 heads) would be thirty-six launches of [<var>T</var>, 768] &times; [768, 64] GEMMs with <var>N</var> = 64, too narrow to tile well (chapter 7). So the weights are stored side by side as one matrix <var>W<sub>qkv</sub></var> of shape [768, 2,304] = [<var>C</var>, 3<var>C</var>], and one GEMM produces everything: <code>qkv = x @ W_qkv + b_qkv</code>, shape [<var>B</var>&middot;<var>T</var>, 3<var>C</var>]. The column order is the one Hugging Face&rsquo;s GPT-2 checkpoint uses and the one the engine contract fixes: columns [0, <var>C</var>) are the queries, [<var>C</var>, 2<var>C</var>) the keys, [2<var>C</var>, 3<var>C</var>) the values, and within each third, head <var>h</var> owns the 64 columns <var>h</var>&middot;<var>D</var> to <var>h</var>&middot;<var>D</var> + 63.</p>
+
+    <figure class="lk-fig" role="img" aria-label="One row of the qkv buffer: 2,304 floats split into thirds q, k and v of 768 floats, each third split into 12 heads of 64. Head 3 of the k third is highlighted: 64 contiguous floats, 256 bytes, at qkv[(b*T + t)*3C + C + h*D + d]. The same head in the next token starts 2,304 floats later: the row stride. Head 3 keys of one sequence form a matrix of T rows with leading dimension 3C. Below, a row of att with 12 heads of 64; head 3 written at att[(b*T + i)*C + h*D + d].">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 680 330" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One row of the qkv buffer and where head 3 lives in it</title>
+        <defs><marker id="c10-a-ve" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" fill="var(--lk-vermilion)"/></marker></defs>
+        <text x="180" y="22" font-size="11" fill="var(--lk-ink)" text-anchor="middle">q: columns 0 .. 767</text>
+        <path d="M85 34 V30 H275 V34" fill="none" stroke="var(--lk-rule)"/>
+        <text x="372" y="22" font-size="11" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">k: columns 768 .. 1,535</text>
+        <path d="M277 34 V30 H467 V34" fill="none" stroke="var(--lk-rule)"/>
+        <text x="564" y="22" font-size="11" fill="var(--lk-ink)" text-anchor="middle">v: columns 1,536 .. 2,303</text>
+        <path d="M469 34 V30 H659 V34" fill="none" stroke="var(--lk-rule)"/>
+        <text x="76" y="60" font-size="11" fill="var(--lk-ink)" text-anchor="end">token t</text>
+        <g>
+        <rect x="84" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="100" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="116" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="132" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="164" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="180" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="196" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="212" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="228" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="244" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="260" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="84" y="44" width="192" height="24" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="276" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="292" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="308" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="324" y="44" width="16" height="24" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="340" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="356" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="372" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="388" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="404" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="420" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="436" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="452" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="276" y="44" width="192" height="24" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="468" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="484" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="500" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="516" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="532" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="548" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="564" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="580" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="596" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="612" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="628" y="44" width="16" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="644" y="44" width="16" height="24" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="468" y="44" width="192" height="24" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="284" y="60" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">h0</text>
+        <text x="332" y="60" font-size="11" fill="var(--lk-paper-light)" text-anchor="middle" font-weight="700">h3</text>
+        <text x="92" y="60" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">h0</text>
+        <text x="476" y="60" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">h0</text>
+        <path d="M324 71 V76 H340 V71" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="348" y="80" font-size="11" fill="var(--lk-cobalt-dark)" text-anchor="start" font-weight="700">head 3&rsquo;s key: 64 floats = 256 B, contiguous</text>
+        <text x="348" y="96" font-size="11" fill="var(--lk-ink)" text-anchor="start">qkv[(b*T + t)*3C + C + h*D + d], d = 0..63</text>
+        <line x1="324" y1="68" x2="324" y2="142" stroke="var(--lk-vermilion)" stroke-width="1.2"/>
+        <line x1="324" y1="138" x2="660" y2="138" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <line x1="660" y1="138" x2="666" y2="138" stroke="var(--lk-vermilion)" stroke-width="1.4"/>
+        <path d="M666 138 C 676 138, 676 146, 666 146" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="2 2"/>
+        <path d="M78 146 C 68 146, 68 154, 78 154" fill="none" stroke="var(--lk-vermilion)" stroke-width="1.2" stroke-dasharray="2 2"/>
+        <line x1="78" y1="154" x2="324" y2="154" stroke="var(--lk-vermilion)" stroke-width="1.4" marker-end="url(#c10-a-ve)"/>
+        <line x1="324" y1="150" x2="324" y2="162" stroke="var(--lk-vermilion)" stroke-width="1.2"/>
+        <rect x="410" y="123" width="250" height="13" fill="var(--lk-paper)" stroke="none" stroke-width="1"/>
+        <text x="660" y="133" font-size="11" fill="var(--lk-vermilion)" text-anchor="end" font-weight="700">row stride 3C = 2,304 floats to the next token</text>
+        <text x="76" y="176" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">token t+1</text>
+        <g opacity="0.45">
+        <rect x="84" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="100" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="116" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="132" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="164" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="180" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="196" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="212" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="228" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="244" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="260" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="84" y="162" width="192" height="20" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="276" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="292" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="308" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="324" y="162" width="16" height="20" fill="var(--lk-cobalt)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="340" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="356" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="372" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="388" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="404" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="420" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="436" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="452" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="276" y="162" width="192" height="20" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <rect x="468" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="484" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="500" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="516" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="532" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="548" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="564" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="580" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="596" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="612" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="628" y="162" width="16" height="20" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="644" y="162" width="16" height="20" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="468" y="162" width="192" height="20" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="460" y="220" font-size="11" fill="var(--lk-cobalt-dark)" text-anchor="end" font-weight="700">K of head 3, sequence b:</text>
+        <text x="460" y="235" font-size="11" fill="var(--lk-ink)" text-anchor="end">T rows of 64 floats,</text>
+        <text x="460" y="250" font-size="11" fill="var(--lk-ink)" text-anchor="end">leading dimension 3C</text>
+        <rect x="470" y="210" width="96" height="10" fill="var(--lk-cobalt)" stroke="none" stroke-width="1" opacity="0.85"/>
+        <text x="572" y="219" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">t</text>
+        <rect x="470" y="224" width="96" height="10" fill="var(--lk-cobalt)" stroke="none" stroke-width="1" opacity="0.55"/>
+        <text x="572" y="233" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">t+1</text>
+        <rect x="470" y="238" width="96" height="10" fill="var(--lk-cobalt)" stroke="none" stroke-width="1" opacity="0.55"/>
+        <text x="572" y="247" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">t+2</text>
+        <text x="518" y="264" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">&#8942;</text>
+        <path d="M610 210 H616 V234 H610" fill="none" stroke="var(--lk-vermilion)"/>
+        <text x="620" y="226" font-size="11" fill="var(--lk-vermilion)" text-anchor="start">3C apart</text>
+        <text x="84" y="276" font-size="11" fill="var(--lk-ink)" text-anchor="start">att, row of token t: C = 768 floats, 12 heads of 64</text>
+        <text x="76" y="301" font-size="11" fill="var(--lk-ink)" text-anchor="end">att</text>
+        <rect x="84" y="286" width="16" height="22" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="100" y="286" width="16" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="116" y="286" width="16" height="22" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="132" y="286" width="16" height="22" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="148" y="286" width="16" height="22" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="164" y="286" width="16" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="180" y="286" width="16" height="22" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="196" y="286" width="16" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="212" y="286" width="16" height="22" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="228" y="286" width="16" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="244" y="286" width="16" height="22" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="260" y="286" width="16" height="22" fill="var(--lk-paper)" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <rect x="84" y="286" width="192" height="22" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        <text x="140" y="301" font-size="11" fill="var(--lk-paper-light)" text-anchor="middle" font-weight="700">h3</text>
+        <text x="290" y="295" font-size="11" fill="var(--c10-gold-ink)" text-anchor="start" font-weight="700">att[(b*T + i)*C + h*D + d]:</text>
+        <text x="290" y="310" font-size="11" fill="var(--lk-ink)" text-anchor="start">the merge of heads is the same trick</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; One row of the <code>qkv</code> buffer: token <var>t</var> of sequence <var>b</var>, 2,304 floats. The three thirds are <var>q</var>, <var>k</var>, <var>v</var>; inside each, twelve runs of 64 are the heads. Head <var>h</var>&rsquo;s key for this token is the 64 floats at <code>qkv[(b*T + t)*3C + C + h*D]</code>: a contiguous 256-byte piece, which is why a warp can load it in two coalesced instructions. The &ldquo;head split&rdquo; [<var>B</var>, <var>T</var>, <var>H</var>, <var>D</var>] &rarr; [<var>B</var>, <var>H</var>, <var>T</var>, <var>D</var>] of chapter 6&rsquo;s callout is this index formula, not a copy.</figcaption>
+    </figure>
+
+    <h3>The head split is indexing, not copying</h3>
+    <p>Chapter 6 warned that [<var>B</var>, <var>T</var>, <var>H</var>, <var>D</var>] &rarr; [<var>B</var>, <var>H</var>, <var>T</var>, <var>D</var>] is a transpose, and a copy if you materialize it. Nobody materializes it. Head <var>h</var>&rsquo;s <var>Q</var> for sequence <var>b</var> is a [<var>T</var>, <var>D</var>] matrix whose rows are 64 consecutive floats, spaced 3<var>C</var> = 2,304 floats apart: a matrix with a <strong>leading dimension</strong> (the stride between rows) of 3<var>C</var> instead of <var>D</var>. Every GEMM routine takes a leading dimension, so the kernel reads the heads in place:</p>
+<pre><code class="language-cpp">// where head h of sequence b lives inside qkv[B*T, 3C]; row stride (leading dimension) is 3C everywhere
+const float* Q = qkv + (size_t)b * T * 3 * C + 0 * C + h * D;   // Q[i][d] = Q[i * 3C + d]
+const float* K = qkv + (size_t)b * T * 3 * C + 1 * C + h * D;
+const float* V = qkv + (size_t)b * T * 3 * C + 2 * C + h * D;
+float*       O = att + (size_t)b * T * C + h * D;              // O[i][d] = O[i * C + d]: heads merged by the same trick</code></pre>
+    <p>The output buffer <code>att[B*T, C]</code> receives head <var>h</var>&rsquo;s [<var>T</var>, 64] result at columns <var>h</var>&middot;<var>D</var>, with leading dimension <var>C</var>, so &ldquo;concatenate the heads&rdquo; is also just where each head writes. The output projection then reads <code>att</code> as an ordinary [<var>B</var>&middot;<var>T</var>, <var>C</var>] matrix.</p>
+
+    <h3>Batched GEMM</h3>
+    <p>Attention&rsquo;s matmuls are small (<var>T</var> &times; <var>T</var> &times; 64 per head) and there are <var>B</var>&middot;<var>H</var> of them, all the same shape, at regular distances in memory. That is a <strong>batched GEMM</strong>: one launch, grid dimension <var>z</var> = the batch index, and each block adds <code>z * stride</code> to its pointers. cuBLAS calls it <code>cublasSgemmStridedBatched</code>; the stride between heads is <var>D</var> floats and between sequences <var>T</var>&middot;3<var>C</var>. Lab 9 writes both a hand-made batched kernel and the cuBLAS call.</p>
+
+    <details class="ym">
+      <summary>Your move: why is the head size a round <var>D</var> = 64 (or 128) in nearly every model from GPT-2 to Llama 3, rather than 32 or 256?</summary>
+      <p>A guess from this course&rsquo;s material: the per-head matmuls have inner dimension <var>D</var> for <var>Q</var><var>K</var><sup>T</sup> and output width <var>D</var> for <var>P</var><var>V</var>, so <var>D</var> sets the arithmetic intensity of attention&rsquo;s matmuls and the width of the fragments a warp holds; 64 FP16 values is 128 bytes, one full memory transaction and a round number of <code>m16n8k16</code> fragments, and a 64-wide tile of <var>K</var> or <var>V</var> fits shared memory comfortably. Smaller heads make the matmuls thin and memory-bound; bigger heads cost registers in the fused kernels of chapter 14 and give the model fewer relations to learn. Nobody proved 64 optimal; it is where the hardware&rsquo;s round numbers and the model&rsquo;s preferences met, and it has stuck (Llama 3 uses 128, which is the same argument one size up).</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. Naive attention as kernels</h2>
+
+    <p>The straightforward implementation, which is lab 9 and the engine&rsquo;s first attention, runs the formula as four launches per layer:</p>
+    <ol>
+      <li><strong>Scores</strong>, batched over <var>B</var>&middot;<var>H</var>: <var>S</var> = <var>Q</var><var>K</var><sup>T</sup> &middot; 1/&radic;<var>D</var>, each [<var>T</var>, <var>T</var>]. An ordinary GEMM with <var>M</var> = <var>N</var> = <var>T</var>, <var>K</var> = 64, except that the B operand is transposed (chapter 6&rsquo;s NT case) and that the output goes to a scratch buffer of <var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> floats. The mask can be applied here (write &minus;&infin; where <var>j</var> &gt; <var>i</var>) or in the softmax.</li>
+      <li><strong>Masked row softmax</strong>: chapter 9&rsquo;s warp-per-row kernel over the <var>B</var>&middot;<var>H</var>&middot;<var>T</var> rows of <var>S</var>, in place. Rows are never fully masked under a causal mask (the diagonal is always allowed), but the guard stays.</li>
+      <li><strong>Weighted sum</strong>, batched: <var>O</var> = <var>P</var><var>V</var>, [<var>T</var>, <var>T</var>] &times; [<var>T</var>, 64], written into <code>att</code> with the head&rsquo;s column offset.</li>
+      <li><strong>Output projection</strong>: <code>att @ W_o + b_o</code>, one GEMM of [<var>B</var>&middot;<var>T</var>, 768] &times; [768, 768], then the residual add (chapter 9&rsquo;s epilogue).</li>
+    </ol>
+    <p>The simplest scores kernel is chapter 7&rsquo;s naive matmul with the batch index on <code>blockIdx.z</code> and the mask folded in:</p>
+<pre><code class="language-cpp">// lab 9, attn_scores_naive: one thread per score. grid = (ceil(T/16), ceil(T/16), B*H), block = (16, 16)
+__global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restrict__ S,
+                                  int B, int T, int H, int D, float scale)
+{
+    int bh = blockIdx.z, b = bh / H, h = bh % H;
+    int i = blockIdx.y * 16 + threadIdx.y;            // query row
+    int j = blockIdx.x * 16 + threadIdx.x;            // key column
+    if (i &gt;= T || j &gt;= T) return;
+    int C3 = 3 * H * D;
+    float* Srow = S + ((size_t)bh * T + i) * T;
+    if (j &gt; i) { Srow[j] = -INFINITY; return; }      // the causal mask
+    const float* q = qkv + ((size_t)b * T + i) * C3 + h * D;
+    const float* k = qkv + ((size_t)b * T + j) * C3 + H * D + h * D;
+    float s = 0.0f;
+    for (int d = 0; d &lt; D; ++d) s += q[d] * k[d];
+    Srow[j] = s * scale;
+}</code></pre>
+    <p>It is lab 5&rsquo;s matmul in a new costume, with the same flaw: every thread walks its own 64-long dot product from global memory and nothing is reused on chip. Lab 9&rsquo;s second version tiles it with chapter 7&rsquo;s shared-memory tiles, and the third hands both matmuls to cuBLAS. The cuBLAS call needs the row-major trick of lab 6&rsquo;s harness (compute <var>S</var><sup>T</sup> = <var>K</var><var>Q</var><sup>T</sup> in column-major terms) with the head stride as the batch stride; the lab&rsquo;s README spells it out, because getting a transpose flag wrong is the classic attention bug and the CPU reference catches it.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Naive attention for one head at T = 1,024 to scale. Q, K and V are thin 1,024 by 64 strips of 256 KB; S and P are 1,024 by 1,024 squares of 4 MB with the masked upper triangle hatched. Kernel 1 computes S from Q and K, kernel 2 the softmax in place, kernel 3 multiplies P by V into O. Four vermilion passes over S: write, read, write, read: 4 times 4 MB per head, times 12 heads, 201 MB per layer.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 680 350" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Naive attention for one head at T = 1,024, drawn to scale</title>
+        <defs><marker id="c10-a-ink" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" fill="var(--lk-ink)"/></marker><marker id="c10-a-ve3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" fill="var(--lk-vermilion)"/></marker><pattern id="c10-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-paper)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-rule-soft)" stroke-width="2"/></pattern></defs>
+        <rect x="22" y="64" width="10" height="160" fill="var(--lk-cobalt)" stroke="none" stroke-width="1"/>
+        <text x="27" y="56" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">Q</text>
+        <rect x="42" y="64" width="10" height="160" fill="var(--lk-cobalt)" stroke="none" stroke-width="1"/>
+        <text x="47" y="56" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">K</text>
+        <text x="22" y="238" font-size="11" fill="var(--lk-ink)" text-anchor="start">1,024 &times; 64</text>
+        <text x="22" y="252" font-size="11" fill="var(--lk-ink)" text-anchor="start">256 KB each</text>
+        <rect x="120" y="64" width="160" height="160" fill="url(#c10-hatch)" stroke="none" stroke-width="1"/>
+        <path d="M120 64 L280 224 H120 Z" fill="var(--lk-hl)"/>
+        <path d="M120 64 L280 224" stroke="var(--lk-cobalt)" stroke-width="1"/>
+        <rect x="120" y="64" width="160" height="160" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="200" y="56" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">S = QK&#7488; / 8</text>
+        <text x="128" y="200" font-size="11" fill="var(--lk-ink)" text-anchor="start">1,024 &times; 1,024</text>
+        <text x="128" y="214" font-size="11" fill="var(--lk-ink)" text-anchor="start">4 MB</text>
+        <text x="274" y="80" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">masked:</text>
+        <text x="274" y="94" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">computed</text>
+        <text x="274" y="108" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">anyway</text>
+        <text x="274" y="122" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">(section 6)</text>
+        <rect x="356" y="64" width="160" height="160" fill="url(#c10-hatch)" stroke="none" stroke-width="1"/>
+        <path d="M356 64 L516 224 H356 Z" fill="var(--lk-hl)"/>
+        <path d="M356 64 L516 224" stroke="var(--lk-cobalt)" stroke-width="1"/>
+        <rect x="356" y="64" width="160" height="160" fill="none" stroke="var(--lk-cobalt)" stroke-width="1.4"/>
+        <text x="436" y="56" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">P = softmax(S)</text>
+        <text x="364" y="200" font-size="11" fill="var(--lk-ink)" text-anchor="start">the same buffer,</text>
+        <text x="364" y="214" font-size="11" fill="var(--lk-ink)" text-anchor="start">in place</text>
+        <text x="510" y="80" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">zeros:</text>
+        <text x="510" y="94" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">still</text>
+        <text x="510" y="108" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">stored</text>
+        <text x="510" y="122" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">and read</text>
+        <rect x="544" y="64" width="10" height="160" fill="var(--lk-cobalt)" stroke="none" stroke-width="1"/>
+        <text x="549" y="56" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">V</text>
+        <text x="549" y="238" font-size="11" fill="var(--lk-ink)" text-anchor="middle">256 KB</text>
+        <text x="530" y="148" font-size="13" fill="var(--lk-ink)" text-anchor="middle">&times;</text>
+        <rect x="646" y="64" width="10" height="160" fill="var(--lk-forest)" stroke="none" stroke-width="1"/>
+        <text x="651" y="56" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">O</text>
+        <text x="651" y="238" font-size="11" fill="var(--lk-ink)" text-anchor="middle">256 KB</text>
+        <line x1="54" y1="144" x2="117" y2="144" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#c10-a-ink)"/>
+        <text x="85.5" y="126" font-size="11" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">kernel 1</text>
+        <text x="85.5" y="138" font-size="11" fill="var(--lk-ink)" text-anchor="middle">scores</text>
+        <line x1="283" y1="144" x2="353" y2="144" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#c10-a-ink)"/>
+        <text x="318" y="126" font-size="11" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">kernel 2</text>
+        <text x="318" y="138" font-size="11" fill="var(--lk-ink)" text-anchor="middle">softmax</text>
+        <line x1="556" y1="144" x2="643" y2="144" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#c10-a-ink)"/>
+        <text x="599.5" y="126" font-size="11" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">kernel 3</text>
+        <text x="599.5" y="138" font-size="11" fill="var(--lk-ink)" text-anchor="middle">P&middot;V</text>
+        <line x1="160" y1="276" x2="160" y2="227" stroke="var(--lk-vermilion)" stroke-width="2" marker-end="url(#c10-a-ve3)"/>
+        <circle cx="160" cy="278" r="2" fill="var(--lk-vermilion)"/>
+        <text x="160" y="292" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">1 write</text>
+        <line x1="240" y1="225" x2="240" y2="274" stroke="var(--lk-vermilion)" stroke-width="2" marker-end="url(#c10-a-ve3)"/>
+        
+        <text x="240" y="292" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">2 read</text>
+        <line x1="396" y1="276" x2="396" y2="227" stroke="var(--lk-vermilion)" stroke-width="2" marker-end="url(#c10-a-ve3)"/>
+        <circle cx="396" cy="278" r="2" fill="var(--lk-vermilion)"/>
+        <text x="396" y="292" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">3 write</text>
+        <line x1="476" y1="225" x2="476" y2="274" stroke="var(--lk-vermilion)" stroke-width="2" marker-end="url(#c10-a-ve3)"/>
+        
+        <text x="476" y="292" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">4 read</text>
+        <text x="160" y="306" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">kernel 1</text>
+        <text x="240" y="306" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">kernel 2</text>
+        <text x="396" y="306" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">kernel 2</text>
+        <text x="476" y="306" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">kernel 3</text>
+        <text x="340" y="342" font-size="12" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">4 passes &times; 4 MB per head, &times; 12 heads = 201 MB per layer</text>
+        <text x="340" y="18" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">one head, T = 1,024, areas to scale: S is 16 times the size of Q</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; Naive attention for one head at <var>T</var> = 1,024, drawn to scale. <var>Q</var>, <var>K</var>, <var>V</var> are 1,024 &times; 64 (256 KB each); <var>S</var> and <var>P</var> are 1,024 &times; 1,024 (4 MB): sixteen times larger than the operands that produced them, and the only thing the softmax kernel touches. The vermilion arrows are the four passes over <var>S</var>: written by the scores kernel, read and written by the softmax, read by the weighted sum. At <var>T</var> = 8,192 the ratio is 128.</figcaption>
+    </figure>
+  </section>
+
+  <section id="s5">
+    <h2>5. The score matrix: <var>T</var><sup>2</sup> and the passes over it</h2>
+
+    <p>Everything in the block except attention has a cost that grows linearly with the number of tokens: twice the tokens, twice the GEMM FLOPs, twice the layernorm bytes. Attention&rsquo;s score matrix has <var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> entries. For one sequence of GPT-2 small, in FP32:</p>
+    <table>
+      <tr><th><var>T</var></th><th><var>S</var> per layer (12 heads)</th><th>Four passes over it per layer</th><th>Time for those passes at 590 GB/s</th><th>The block&rsquo;s four weight GEMMs (at FP32 peak)</th></tr>
+      <tr><td>1,024</td><td>50 MB</td><td>201 MB</td><td>0.34 ms</td><td>0.47 ms</td></tr>
+      <tr><td>4,096</td><td>805 MB</td><td>3.2 GB</td><td>5.5 ms</td><td>1.9 ms</td></tr>
+      <tr><td>8,192</td><td>3.2 GB</td><td>12.9 GB</td><td>22 ms</td><td>3.8 ms</td></tr>
+    </table>
+    <p>At 1,024 tokens the trips of <var>S</var> through DRAM already cost most of what the block&rsquo;s real arithmetic costs; at 4,096 they cost three times more, and at 8,192 a batch of four sequences would need 13 GB for <var>S</var> alone, more than the card has. The table is a prediction from byte counts; the lab measures the 1,024 to 4,096 rows.</p>
+
+    <p>Per step, at <var>T</var> = 1,024 and <var>B</var> = 1, with the roofline of chapter 4 (bytes at 590 GB/s, FLOPs at 30.9 TFLOPS, the larger wins):</p>
+    <table>
+      <tr><th>Step</th><th>FLOPs</th><th>Bytes (ideal)</th><th>FLOP/B</th><th>Bound</th><th>Roofline time</th></tr>
+      <tr><td><var>S</var> = <var>Q</var><var>K</var><sup>T</sup> (12 heads)</td><td>1.61 G</td><td>56.6 MB</td><td>28</td><td>memory (ridge is 46)</td><td>0.096 ms</td></tr>
+      <tr><td>softmax over <var>S</var></td><td>0.06 G</td><td>100.7 MB</td><td>0.6</td><td>memory</td><td>0.17 ms</td></tr>
+      <tr><td><var>O</var> = <var>P</var><var>V</var></td><td>1.61 G</td><td>56.6 MB</td><td>28</td><td>memory</td><td>0.096 ms</td></tr>
+      <tr><td>output projection</td><td>1.21 G</td><td>8.6 MB</td><td>140</td><td>compute</td><td>0.039 ms</td></tr>
+      <tr><td><em>for scale:</em> the two MLP GEMMs</td><td>9.66 G</td><td>50 MB</td><td>190</td><td>compute</td><td>0.31 ms</td></tr>
+    </table>
+    <p>Read the first row twice. A matrix multiply, <strong>memory-bound</strong>: with an inner dimension of only 64, <var>Q</var><var>K</var><sup>T</sup> does 128 FLOPs per output element and then writes 4 bytes of it, and the writes of <var>S</var> dominate. Chapter 7&rsquo;s tiling cannot fix it, because the problem is not reuse of the inputs but the size of the output. The attention matmuls hold 18% of the block&rsquo;s FLOPs and, in this naive form, about 40% of its roofline time, all of it spent moving <var>S</var>. Slide <var>T</var> and <var>B</var> and watch the shares:</p>
+
+    <div id="w-block-cost" class="w"></div>
+
+    <p>This is the problem chapter 14 solves. Chapter 9&rsquo;s fusion limit said a row reduction cannot ride in a GEMM epilogue unless the block sees the whole row; for attention, the &ldquo;row&rdquo; is one query against all keys, and a block <em>can</em> own a few queries and stream through all the keys, carrying (<var>m</var>, <var>d</var>) and a running output. Then <var>S</var> is never written at all: the four vermilion passes disappear and attention&rsquo;s cost drops to its FLOPs plus the reads of <var>Q</var>, <var>K</var>, <var>V</var>. That is FlashAttention, and the reason this chapter makes you measure the naive version first is so that the number it removes is your own.</p>
+
+    <details class="ym">
+      <summary>Your move: the engine of chapter 11 allocates <var>S</var> once as scratch, sized for its largest <var>B</var> and <var>T</var>. In FP32 with <var>H</var> = 12, what is the largest <var>T</var> at <var>B</var> = 8 for which <var>S</var> fits in 4 GB of scratch, and what does that say about naive attention as the engine&rsquo;s long-term design?</summary>
+      <p><var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> &times; 4 B &le; 4 GB gives <var>T</var><sup>2</sup> &le; 4&times;10<sup>9</sup> / (8 &times; 12 &times; 4) &asymp; 10.4&times;10<sup>6</sup>, so <var>T</var> &asymp; 3,200: not even GPT-2&rsquo;s full context at a batch of 8, and the scratch is bigger than the model. Scratch that scales with <var>B</var>&middot;<var>T</var><sup>2</sup> is the clearest sign that the naive design is temporary: the engine&rsquo;s contract keeps the scratch behind a function (<code>attn_prefill_*_scratch_bytes</code>) precisely so that chapter 14&rsquo;s kernel can report a size that scales with <var>B</var>&middot;<var>T</var> instead.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. The masked half</h2>
+
+    <p>Under the causal mask, row <var>i</var> of <var>S</var> has <var>i</var> + 1 live entries and <var>T</var> &minus; <var>i</var> &minus; 1 that will be &minus;&infin; whatever the data. Over the whole matrix that is <var>T</var>(<var>T</var> &minus; 1)/2 entries, just under half, whose values are known before the kernel runs. The naive scores kernel computes the dot product for every one of them (or at least visits the thread and writes the &minus;&infin;), the softmax exponentiates them to zero, and the weighted sum multiplies the zeros by <var>V</var>. <strong>Half of naive attention&rsquo;s FLOPs and half of its bytes are spent on entries that are known to be zero.</strong></p>
+    <p>The waste is easy to see and awkward to remove in the naive design: a GEMM kernel computes rectangular tiles, and the diagonal cuts through them. Skipping whole tiles that lie entirely above the diagonal recovers most of it (a 16&times;16 tile at <var>i</var><sub>0</sub>, <var>j</var><sub>0</sub> is dead if <var>j</var><sub>0</sub> &gt; <var>i</var><sub>0</sub> + 15); the tiles on the diagonal still do their masked half. Lab 9&rsquo;s <code>waste</code> mode measures three things: the full kernels, the tile-skipping versions, and the softmax over rows truncated at the diagonal, and reports what fraction of the time the mask was worth. (The engine&rsquo;s own <code>attn_prefill_naive</code> in <code>attention.cuh</code> already ships with the tile skip and with softmax rows that stop at the diagonal: when you read its <code>if (j0 &gt; i0 + AT - 1) return;</code>, this is where it comes from.) For FlashAttention the same skip is the difference between a kernel that costs <var>T</var><sup>2</sup> and one that costs <var>T</var><sup>2</sup>/2, which at long contexts is the single largest optimization it has.</p>
+
+    <details class="ym">
+      <summary>Your move: the tile-skipping scores kernel launches the same grid as the full one and returns immediately from dead tiles. Is the saving in time the same as the saving in FLOPs?</summary>
+      <p>Nearly, but not quite: a dead block still costs its launch slot on the SM (chapter 2&rsquo;s block scheduling) and the softmax rows were full length. For the scores and <var>P</var><var>V</var> kernels, the bytes of <var>S</var> that are never written or read are the real saving (the kernels were memory-bound), and dead blocks cost microseconds in total. Expect a saving a little under the 50% of the entries: the diagonal tiles are full-cost, so at <var>T</var> = 1,024 with 16&times;16 tiles, 64 of the 2,080 live tiles are diagonal and the dead ones are 2,016 of 4,096: a 49% saving in tiles, a little less in time.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. Generation: the KV cache, prefill and decode</h2>
+
+    <p>A language model generates by running the forward pass, taking the logits of the last position, picking a token, appending it, and running the forward pass again. Done naively, generating the 101st token means a forward pass over 101 tokens, the 102nd over 102, and generating <var>N</var> tokens costs <var>N</var><sup>2</sup>/2 token-forwards. The fix comes from the causal mask, and it is worth stating precisely.</p>
+
+    <p>Look at what the model computes for token <var>j</var> at layer &ell;: its key <var>k<sub>j</sub></var> and value <var>v<sub>j</sub></var> are projections of <var>x<sub>j</sub></var>, the stream at position <var>j</var>, and <var>x<sub>j</sub></var> depends, through the attention of layers below, only on tokens 0 to <var>j</var>. Tokens appended later cannot change it. So when token <var>T</var> arrives, every <var>k<sub>j</sub></var> and <var>v<sub>j</sub></var> for <var>j</var> &lt; <var>T</var>, at every layer, is <strong>exactly what it was last step</strong>. Recomputing them is recomputing a known answer. Keep them instead: that is the <strong>KV cache</strong>, one buffer of keys and one of values per layer, with room for <var>T</var><sub>max</sub> positions per sequence per head. Generating the next token then means:</p>
+    <ol>
+      <li>run the new token alone through the block (<var>M</var> = <var>B</var>, one row per sequence): layernorm, the QKV GEMM with <var>M</var> = <var>B</var>, giving one <var>q</var>, <var>k</var>, <var>v</var> per head;</li>
+      <li><strong>append</strong> <var>k</var> and <var>v</var> at position <var>T</var> of the cache;</li>
+      <li>attention for one query row: scores against the <var>T</var> + 1 cached keys, a softmax over one row, the weighted sum of <var>T</var> + 1 cached values;</li>
+      <li>the rest of the block as before, at <var>M</var> = <var>B</var>.</li>
+    </ol>
+    <p>The queries of earlier tokens are not needed at all: nobody asks their question again. Only keys and values are cached, hence the name.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The k cache of one layer: for each of two sequences, 12 head slabs of T_max positions by 64 floats; positions 0 to p-1 are filled, position p receives the new token key, at ((b*H + h)*T_max + p)*D. Right: a decode step for one head: q of shape 1 by 64 times K transposed of 64 by p+1 gives a score row of p+1, softmax, then times V of p+1 by 64 gives the 1 by 64 output written into att.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 680 390" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>The KV cache of one layer and one decode step</title>
+        <defs><marker id="c10-a-ink4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" fill="var(--lk-ink)"/></marker></defs>
+        <text x="20" y="22" font-size="12" fill="var(--lk-ink)" text-anchor="start" font-weight="700">k_cache of one layer: [B][H][T_max][D], head-major</text>
+        <text x="20" y="38" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">one slab = one head&rsquo;s keys: T_max positions &times; 64 floats, contiguous</text>
+        <text x="44" y="72" font-size="12" fill="var(--lk-ink-soft)" text-anchor="end" font-weight="700">b = 0</text>
+        <g opacity="0.5">
+        <path d="M52 82 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 82 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="82" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="82" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="82" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="82" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="82" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="82" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="82" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="82" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="82" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="93" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h0</text>
+        <g opacity="0.5">
+        <path d="M52 106 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 106 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="106" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="106" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="106" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="106" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="106" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="106" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="106" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="106" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="106" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="117" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h1</text>
+        <g opacity="0.5">
+        <path d="M52 130 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 130 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="130" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="130" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="130" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="130" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="130" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="130" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="130" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="130" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="130" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="141" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h2</text>
+        <text x="132" y="156" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">&#8942;  12 heads in all</text>
+        <g opacity="0.5">
+        <path d="M52 168 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 168 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="168" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="168" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="168" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="168" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="168" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="168" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="168" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="168" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="168" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="179" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h11</text>
+        <text x="44" y="198" font-size="12" fill="var(--lk-ink)" text-anchor="end" font-weight="700">b = 1</text>
+        <g>
+        <path d="M52 208 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 208 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="208" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="208" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="208" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="208" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="208" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="208" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="208" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="208" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="208" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="219" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h0</text>
+        <g>
+        <path d="M52 232 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 232 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="232" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="232" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="232" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="232" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="232" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="232" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="232" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="232" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="232" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="243" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h1</text>
+        <g>
+        <path d="M52 256 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 256 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="256" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="256" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="256" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="256" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="256" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="256" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="256" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="256" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="256" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="267" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h2</text>
+        <text x="132" y="282" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">&#8942;  12 heads in all</text>
+        <g>
+        <path d="M52 294 l5 -5 h160 l-5 5 z" fill="var(--lk-rule-soft)"/>
+        <path d="M212 294 l5 -5 v14 l-5 5 z" fill="var(--lk-rule)" opacity="0.6"/>
+        <rect x="52" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="62" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="72" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="82" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="92" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="102" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="112" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="122" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="132" y="294" width="10" height="14" fill="var(--lk-cobalt)" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <rect x="142" y="294" width="10" height="14" fill="var(--c10-gold)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="152" y="294" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="162" y="294" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="172" y="294" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="182" y="294" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="192" y="294" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="202" y="294" width="10" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)" stroke-width="0.6"/>
+        <rect x="52" y="294" width="160" height="14" fill="none" stroke="var(--lk-rule)" stroke-width="1"/>
+        </g>
+        <text x="44" y="305" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">h11</text>
+        <text x="57" y="334" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">0</text>
+        <text x="147" y="334" font-size="11" fill="var(--c10-gold-ink)" text-anchor="middle" font-weight="700">p</text>
+        <text x="212" y="334" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">T_max</text>
+        <text x="52" y="350" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">position in the sequence &rarr;</text>
+        <text x="52" y="370" font-size="11" fill="var(--lk-ink)" text-anchor="start" font-weight="700">k_cache[((b*H + h)*T_max + p)*D + d]</text>
+        <text x="228" y="198" font-size="11" fill="var(--c10-gold-ink)" text-anchor="start" font-weight="700">append: k_p</text>
+        <text x="228" y="212" font-size="11" fill="var(--lk-ink)" text-anchor="start">of the new token,</text>
+        <text x="228" y="226" font-size="11" fill="var(--lk-ink)" text-anchor="start">in every head&rsquo;s</text>
+        <text x="228" y="240" font-size="11" fill="var(--lk-ink)" text-anchor="start">slab (v_p goes</text>
+        <text x="228" y="254" font-size="11" fill="var(--lk-ink)" text-anchor="start">to v_cache, same</text>
+        <text x="228" y="268" font-size="11" fill="var(--lk-ink)" text-anchor="start">layout)</text>
+        <path d="M224 194 H147.0 V202" fill="none" stroke="var(--c10-gold-ink)" stroke-width="1.2"/>
+        <text x="228" y="72" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">b = 0 appends</text>
+        <text x="228" y="86" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">its own token in</text>
+        <text x="228" y="100" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">the same step</text>
+        <line x1="366" y1="56" x2="366" y2="374" stroke="var(--lk-rule-soft)" stroke-width="1"/>
+        <text x="382" y="66" font-size="12" fill="var(--lk-ink)" text-anchor="start" font-weight="700">decode: one head of sequence b</text>
+        <rect x="382" y="105" width="48" height="10" fill="var(--lk-cobalt)" stroke="none" stroke-width="1"/>
+        <text x="406" y="86" font-size="11" fill="var(--lk-cobalt-dark)" text-anchor="middle" font-weight="700">q</text>
+        <text x="406" y="99" font-size="11" fill="var(--lk-cobalt-dark)" text-anchor="middle">[1, 64]</text>
+        <text x="439" y="114" font-size="13" fill="var(--lk-ink)" text-anchor="middle">&times;</text>
+        <rect x="448" y="86" width="80" height="48" fill="var(--lk-cobalt)" stroke="none" stroke-width="1" opacity="0.75"/>
+        <line x1="456" y1="86" x2="456" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="464" y1="86" x2="464" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="472" y1="86" x2="472" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="480" y1="86" x2="480" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="488" y1="86" x2="488" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="496" y1="86" x2="496" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="504" y1="86" x2="504" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="512" y1="86" x2="512" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="520" y1="86" x2="520" y2="134" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <text x="488" y="152" font-size="11" fill="var(--lk-cobalt-dark)" text-anchor="middle" font-weight="700">K&#7488; [64, p+1]</text>
+        <text x="488" y="166" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">the filled slab</text>
+        <text x="537" y="114" font-size="13" fill="var(--lk-ink)" text-anchor="middle">=</text>
+        <rect x="546" y="105" width="80" height="10" fill="var(--lk-vermilion)" stroke="none" stroke-width="1"/>
+        <text x="586" y="152" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle" font-weight="700">scores</text>
+        <text x="586" y="166" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle">[1, p+1]</text>
+        <line x1="586" y1="174" x2="586" y2="206" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#c10-a-ink4)"/>
+        <text x="594" y="194" font-size="11" fill="var(--lk-ink)" text-anchor="start">softmax</text>
+        <rect x="546" y="210" width="80" height="10" fill="var(--lk-vermilion)" stroke="none" stroke-width="1" opacity="0.55"/>
+        <text x="586" y="236" font-size="11" fill="var(--lk-vermilion)" text-anchor="middle">weights [1, p+1]</text>
+        <path d="M544 215 H436.0 V241" fill="none" stroke="var(--lk-ink)" stroke-width="1.2" marker-end="url(#c10-a-ink4)"/>
+        <text x="491" y="208" font-size="11" fill="var(--lk-ink)" text-anchor="middle">&times; V</text>
+        <rect x="412" y="244" width="48" height="80" fill="var(--lk-cobalt)" stroke="none" stroke-width="1" opacity="0.75"/>
+        <line x1="412" y1="252" x2="460" y2="252" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="260" x2="460" y2="260" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="268" x2="460" y2="268" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="276" x2="460" y2="276" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="284" x2="460" y2="284" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="292" x2="460" y2="292" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="300" x2="460" y2="300" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="308" x2="460" y2="308" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <line x1="412" y1="316" x2="460" y2="316" stroke="var(--lk-paper)" stroke-width="0.6"/>
+        <text x="470" y="278" font-size="11" fill="var(--lk-cobalt-dark)" text-anchor="start" font-weight="700">V [p+1, 64]</text>
+        <text x="470" y="292" font-size="11" fill="var(--lk-ink-soft)" text-anchor="start">the v slab</text>
+        <line x1="436" y1="326" x2="436" y2="346" stroke="var(--lk-ink)" stroke-width="1.4" marker-end="url(#c10-a-ink4)"/>
+        <rect x="412" y="350" width="48" height="10" fill="var(--c10-gold)" stroke="none" stroke-width="1"/>
+        <text x="470" y="359" font-size="11" fill="var(--c10-gold-ink)" text-anchor="start" font-weight="700">o [1, 64] &rarr; att, head h</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; The KV cache of one layer in the engine&rsquo;s layout, [<var>B</var>][<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>]: one head&rsquo;s keys are a contiguous <var>T</var><sub>max</sub> &times; 64 slab, filled up to the current length. Decode step for sequence <var>b</var>: the new token&rsquo;s <var>k</var> and <var>v</var> are written at position <var>p</var> (gold), and its single query row is scored against the <var>p</var> + 1 keys of each head and averaged over the <var>p</var> + 1 values: a [1, 64] &times; [64, <var>p</var>+1] product and a [1, <var>p</var>+1] &times; [<var>p</var>+1, 64] one per head, with the softmax in between. Prefill fills the slab in one go from the <var>k</var> and <var>v</var> thirds of <code>qkv</code>.</figcaption>
+    </figure>
+
+    <p>Two regimes come out of this, and the course names them now because the next five chapters are about them:</p>
+    <ul>
+      <li><strong>Prefill</strong>: the prompt&rsquo;s <var>T</var> tokens go through the model together, <var>M</var> = <var>B</var>&middot;<var>T</var> rows per GEMM, attention as in section 4, and the cache is filled from the <var>k</var> and <var>v</var> thirds of <code>qkv</code>. Compute-bound at useful lengths (chapter 6&rsquo;s intensity table at <var>M</var> = 512).</li>
+      <li><strong>Decode</strong>: one new token per sequence per step, <var>M</var> = <var>B</var> rows per GEMM, attention of one query against the cache. Every weight is read once per step for <var>B</var> tokens of output, and every sequence&rsquo;s cache is read once for one token: memory-bound, as chapter 4&rsquo;s &ldquo;attention does not batch&rdquo; said.</li>
+    </ul>
+    <p>What the cache costs: per token, per layer, one key and one value of <var>C</var> floats each, so 2 &middot; <var>L</var> &middot; <var>C</var> &middot; 4 bytes = 2 &times; 12 &times; 768 &times; 4 = 73.7 KB per token in FP32 for GPT-2 small; a full 1,024-token context is 75 MB per sequence, a batch of 16 is 1.2 GB. Chapter 13 does this arithmetic for real models and shows where the cache overtakes the weights; chapter 15 writes the decode attention kernel, which is nothing like section 4&rsquo;s: a single query row against a long slab of keys is a matrix-vector product, memory-bound, and the game is reading the cache at full bandwidth. Chapter 11&rsquo;s engine starts without a cache (generation by recomputation, so that correctness is simple) and the cache arrives with the measurements in chapter 13.</p>
+
+    <details class="ym">
+      <summary>Your move: a decode step for one sequence with a 1,024-token context. Roughly how many bytes of weights and how many bytes of cache does it read, and which dominates for GPT-2 small?</summary>
+      <p>Weights: all of them, 498 MB (chapter 6). Cache: 73.7 KB per token &times; 1,024 = 75 MB. The weights dominate by nearly 7&times; at <var>B</var> = 1, so the step is bounded by the weight stream, about 0.85 ms at 590 GB/s, and the cache adds 15%. With a batch of 8, the weights are still read once (498 MB) while the caches are read once each (600 MB): the cache now dominates. That crossover, and its dependence on context length and head count, is chapter 13&rsquo;s central table.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. The whole model as a kernel list</h2>
+
+    <p>Here is GPT-2 small as the engine of chapter 11 runs it, in the two regimes, with FLOPs and ideal bytes per launch. Prefill at <var>B</var> = 1, <var>T</var> = 1,024; decode at <var>B</var> = 1 with a 1,024-token cache. Bias adds and residual adds are in the GEMM epilogues (chapter 9); FP32 throughout. The time column is the roofline time (bytes at 590 GB/s or FLOPs at 30.9 TFLOPS, whichever is larger), a prediction and a floor.</p>
+    <table>
+      <tr><th>Kernel (per layer unless noted)</th><th>Shape</th><th>Prefill FLOPs / bytes / time</th><th>Decode FLOPs / bytes / time</th></tr>
+      <tr><td>embedding gather (once)</td><td>rows of <code>wte</code> + <code>wpe</code></td><td>0 / 9.4 MB / 16 &micro;s</td><td>0 / 9 KB / launch floor</td></tr>
+      <tr><td>layernorm (two)</td><td>[<var>M</var>, 768] &rarr; same</td><td>&asymp;0 / 6.3 MB / 11 &micro;s each</td><td>&asymp;0 / 6 KB / floor</td></tr>
+      <tr><td>QKV GEMM + bias</td><td>[<var>M</var>, 768] &times; [768, 2,304]</td><td>3.6 G / 19.7 MB / 117 &micro;s</td><td>3.5 M / 7.1 MB / 12 &micro;s</td></tr>
+      <tr><td>KV append (with a cache)</td><td><var>k</var>, <var>v</var> thirds &rarr; cache</td><td>0 / 12.6 MB / 21 &micro;s</td><td>0 / 12 KB / floor</td></tr>
+      <tr><td>scores <var>Q</var><var>K</var><sup>T</sup></td><td>12 &times; [<var>T</var>, 64] &times; [64, <var>T</var>]</td><td>1.6 G / 56.6 MB / 96 &micro;s</td><td>1.6 M / 3.1 MB (keys) / 5 &micro;s</td></tr>
+      <tr><td>softmax</td><td>12&middot;<var>T</var> rows of <var>T</var></td><td>0.06 G / 100.7 MB / 171 &micro;s</td><td>&asymp;0 / 100 KB / floor</td></tr>
+      <tr><td>weighted sum <var>P</var><var>V</var></td><td>12 &times; [<var>T</var>, <var>T</var>] &times; [<var>T</var>, 64]</td><td>1.6 G / 56.6 MB / 96 &micro;s</td><td>1.6 M / 3.1 MB (values) / 5 &micro;s</td></tr>
+      <tr><td>output projection + bias + residual</td><td>[<var>M</var>, 768] &times; [768, 768]</td><td>1.2 G / 11.8 MB / 39 &micro;s</td><td>1.2 M / 2.4 MB / 4 &micro;s</td></tr>
+      <tr><td>MLP up + bias + GELU</td><td>[<var>M</var>, 768] &times; [768, 3,072]</td><td>4.8 G / 25.2 MB / 156 &micro;s</td><td>4.7 M / 9.4 MB / 16 &micro;s</td></tr>
+      <tr><td>MLP down + bias + residual</td><td>[<var>M</var>, 3,072] &times; [3,072, 768]</td><td>4.8 G / 28.3 MB / 156 &micro;s</td><td>4.7 M / 9.4 MB / 16 &micro;s</td></tr>
+      <tr><td><strong>one layer</strong></td><td></td><td><strong>17.7 G / &asymp;0.87 ms</strong></td><td><strong>17 M / 34.6 MB / &asymp;60 &micro;s</strong></td></tr>
+      <tr><td>final layernorm (once)</td><td>[<var>M</var>, 768]</td><td>&asymp;0 / 6.3 MB / 11 &micro;s</td><td>floor</td></tr>
+      <tr><td>LM head (once)</td><td>[<var>M</var>, 768] &times; [768, 50,257]</td><td>79 G / 363 MB / 2.6 ms</td><td>77 M / 154 MB / 0.26 ms</td></tr>
+      <tr><td><strong>whole forward</strong></td><td>12 layers + head</td><td><strong>&asymp;292 G / &asymp;13.1 ms</strong></td><td><strong>&asymp;0.28 G / 570 MB / &asymp;1.0 ms</strong></td></tr>
+    </table>
+    <p>Three things to read off it. In prefill, the LM head is the single biggest kernel, a fifth of the time, scoring all 50,257 words for all 1,024 positions when only the last position&rsquo;s logits are needed to generate: the engine computes the head for the last position only when generating, and for all positions only when verifying. In decode, the total is 570 MB of reads, nearly all weights, for 0.28 GFLOP: intensity 0.5, a thousand times left of the ridge, and about 1 ms per token at the DRAM ceiling before the launch floor, which with about 150 launches of a few microseconds each is of the same size (chapter 11 measures it). And the two regimes never meet on the roofline: prefill is where chapters 7 and 8 earn their keep, decode is where bytes are everything, and the same kernel list serves both with the shape <var>M</var> as the only difference.</p>
+
+    <h3>Embeddings and the LM head</h3>
+    <p>The two ends of the model are both the same [50,257, 768] table <code>wte</code> (chapter 6&rsquo;s weight tying). At the input it is a <strong>gather</strong>: token <var>t</var> at position <var>p</var> becomes the row <code>wte[t] + wpe[p]</code>, one warp per token, each row 3 KB and contiguous, chapter 3&rsquo;s friendly kind of random access. At the output it is a GEMM, <code>logits = x @ wte^T</code>: [<var>M</var>, 768] &times; [768, 50,257], and because <code>wte</code> is stored [50,257, 768] row-major, this is the NT case, B transposed. At decode it is a [1, 768] &times; [768, 50,257] matrix-vector product that reads 154 MB for 77 MFLOPs: the largest single read of the step, a third of the weights, for one word.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. What changed since GPT-2, from the GPU&rsquo;s side</h2>
+
+    <p>GPT-2 is the course&rsquo;s model because it is small, its weights are public, and its block is the one every later model is a variation of. The variations matter to the kernels, and here they are in one table, to be met again in Parts III and IV. The model side of each is covered in the <a href="../modern-transformer/">Modern Transformer</a> page; this is the kernel side.</p>
+    <table>
+      <tr><th>Change (first common in)</th><th>What it is</th><th>What it does to the kernel list</th></tr>
+      <tr><td>RMSNorm (Llama, 2023)</td><td>no mean subtraction, no &beta;</td><td>one reduction instead of two; chapter 9&rsquo;s easy case</td></tr>
+      <tr><td>RoPE, rotary position embedding (GPT-NeoX, Llama)</td><td>no learned <code>wpe</code>; instead <var>q</var> and <var>k</var> are rotated in pairs of channels by an angle that grows with the position, so that <var>q<sub>i</sub></var> &middot; <var>k<sub>j</sub></var> depends on <var>i</var> &minus; <var>j</var></td><td>an elementwise operation on the <var>q</var> and <var>k</var> thirds of <code>qkv</code>: rides in the QKV GEMM&rsquo;s epilogue, and in the cache append (the cache stores rotated keys)</td></tr>
+      <tr><td>SwiGLU MLP (PaLM, Llama)</td><td><code>down(silu(x @ W_gate) * (x @ W_up))</code>: a gate and an up projection multiplied elementwise</td><td>three MLP GEMMs instead of two; gate and up fused into one [<var>C</var>, 2&middot;<var>F</var>] GEMM with the product in its epilogue; hidden width <var>F</var> &asymp; 8/3 &middot; <var>C</var> to keep the parameter count</td></tr>
+      <tr><td>MQA / GQA (PaLM; Llama 2 70B, Llama 3)</td><td>fewer key/value heads than query heads: <var>H</var> query heads share <var>H</var><sub>kv</sub> key/value heads (Llama 3 8B: 32 and 8)</td><td>the <var>k</var> and <var>v</var> thirds of <code>qkv</code> shrink to <var>H</var><sub>kv</sub>&middot;<var>D</var> columns; the cache shrinks by <var>H</var>/<var>H</var><sub>kv</sub>; decode attention reads each cached key once for <var>H</var>/<var>H</var><sub>kv</sub> queries (chapter 15)</td></tr>
+      <tr><td>No biases (Llama)</td><td>linear layers without <var>b</var></td><td>one fewer epilogue passenger; nothing else</td></tr>
+      <tr><td>Untied embeddings, larger vocabulary (Llama 3: 128,256)</td><td>separate input table and LM head</td><td>the LM head GEMM grows; at decode it is the largest weight read of the step</td></tr>
+      <tr><td>Longer contexts (8k to 128k+)</td><td></td><td>everything in section 5, squared: naive attention is out of the question; the cache dominates memory (chapter 13), and its layout becomes a systems problem (paging, chapter 17)</td></tr>
+    </table>
+    <p>None of these changes the list of kernel <em>kinds</em>: GEMMs, a fused attention, row norms, gathers, and epilogue passengers. That is why the engine you build around GPT-2 carries over.</p>
+  </section>
+
+  <section id="s10">
+    <h2>10. Predictions</h2>
+
+    <p>For lab 9 at <var>B</var> = 1, <var>H</var> = 12, <var>D</var> = 64, FP32. Ranges, from the byte counts and the behaviour of the kernels they are built from:</p>
+    <table>
+      <tr><th>Measurement</th><th>Prediction</th><th>Why</th></tr>
+      <tr><td><var>S</var> bytes printed at <var>T</var> = 1,024 / 4,096</td><td>50 MB / 805 MB</td><td>12 &middot; <var>T</var><sup>2</sup> &middot; 4</td></tr>
+      <tr><td>naive scores at 1,024, time</td><td>5&ndash;15&times; the 96 &micro;s roofline</td><td>lab 5&rsquo;s naive matmul behaviour: no reuse, long dependent loads</td></tr>
+      <tr><td>tiled scores at 1,024</td><td>1.5&ndash;3&times; the roofline</td><td>tiling fixes the input reuse; the output write stays</td></tr>
+      <tr><td>cuBLAS batched scores at 1,024</td><td>1.1&ndash;1.6&times; the roofline</td><td>memory-bound on the write of <var>S</var>; cuBLAS cannot beat the bytes</td></tr>
+      <tr><td>softmax share of the three attention kernels (cuBLAS version)</td><td>35&ndash;50%</td><td>two passes over <var>S</var> of the four</td></tr>
+      <tr><td>time at 4,096 vs 1,024 (cuBLAS version)</td><td>14&ndash;18&times;</td><td><var>T</var><sup>2</sup> bytes, with a little better efficiency at the larger size</td></tr>
+      <tr><td><code>waste</code>: tile-skipping saving</td><td>40&ndash;48% at 1,024, approaching 50% at 4,096</td><td>section 6&rsquo;s tile count</td></tr>
+      <tr><td>attention&rsquo;s share of a full block at 1,024 (lab 9 vs lab 7 and lab 8 numbers)</td><td>35&ndash;50%</td><td>section 5&rsquo;s table, scaled by the kernels&rsquo; efficiencies</td></tr>
+    </table>
+  </section>
+
+  <section id="s11">
+    <h2>11. Lab 9: naive attention</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 9</span><span class="lab-title">Causal attention in three kernels, three ways, and the cost of <var>S</var></span><span class="idx-meta">~50 min · <code>mlsys/labs/lab09-attention/</code></span></div>
+      <div class="lab-body">
+        <p>One program, <code>attention</code>, reading <var>q</var>, <var>k</var>, <var>v</var> from a <code>qkv[B*T, 3C]</code> buffer in the engine&rsquo;s layout and writing <code>att[B*T, C]</code>. Three implementations of the scores and weighted-sum matmuls: naive (one thread per element), tiled (chapter 7&rsquo;s shared-memory tiles with a batch index), and cuBLAS strided-batched; one masked softmax from lab 8 in between. Every version is checked against a double-precision CPU reference with the causal mask on random small shapes, including awkward ones. The engine-ready entry point <code>attn_prefill_naive(...)</code> follows the contract of chapter 11 so that it drops into the engine unchanged.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab09-attention
+make test       # three implementations vs the CPU reference: all PASS
+make bench      # T = 128 ... 4096: per-kernel time, S bytes, share, GB/s, TFLOPS
+make waste      # full kernels vs tile-skipping vs truncated softmax rows
+make ncu-table  # DRAM bytes per kernel: is S really written and read four times?</code></pre>
+        <table>
+          <tr><th>Step</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>bench</code>: <var>S</var> bytes at 1,024 and 4,096</td><td>50 MB, 805 MB</td></tr>
+          <tr><td><code>bench</code>: naive vs tiled vs cuBLAS scores at 1,024</td><td>section 10&rsquo;s first three rows</td></tr>
+          <tr><td><code>bench</code>: softmax&rsquo;s share</td><td>35&ndash;50%</td></tr>
+          <tr><td><code>bench</code>: 4,096 over 1,024</td><td>14&ndash;18&times;</td></tr>
+          <tr><td><code>waste</code>: saving from skipping dead tiles</td><td>40&ndash;48%</td></tr>
+          <tr><td><code>ncu-table</code>: DRAM bytes of the three kernels together</td><td>about four times <var>S</var> plus the small operands</td></tr>
+        </table>
+        <p>Paste back the <code>PASTE:</code> lines. Your <var>T</var> = 1,024 numbers are the attention row of chapter 11&rsquo;s timeline, and your 4,096 numbers are the &ldquo;before&rdquo; of chapter 14.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Add <var>B</var> = 4 to the bench and check that the time scales linearly with <var>B</var> while <var>S</var>&rsquo;s bytes do too. Then write <code>attn_decode_simple</code> from section 7&rsquo;s description, for a cache filled by the lab&rsquo;s own prefill: one block per (<var>b</var>, <var>h</var>), the query row in registers, a loop over the cached keys with chapter 9&rsquo;s online softmax, and check it against the CPU reference for the last position. That kernel is the engine&rsquo;s decode attention until chapter 15 replaces it.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Which operations in a transformer block mix information across tokens, and why does it matter for how the kernels see the batch?</summary>
+        <p>Only attention. Every other operation acts on one token&rsquo;s row, so the kernels treat the batch as <var>B</var>&middot;<var>T</var> independent rows. Attention mixes rows within one sequence, so it needs the sequence boundaries, the mask, and a per-sequence (and per-head) batch of matmuls.</p>
+      </details>
+      <details>
+        <summary>Why do the scores get divided by &radic;<var>D</var>, and what would happen to the softmax without it?</summary>
+        <p>A dot product of <var>D</var> unit-variance numbers has variance <var>D</var>, so scores would grow with the head size; the softmax of large scores is nearly one-hot, and its gradients vanish. Dividing by &radic;<var>D</var> keeps scores of order one regardless of <var>D</var>.</p>
+      </details>
+      <details>
+        <summary>The head split [<var>B</var>, <var>T</var>, <var>H</var>, <var>D</var>] &rarr; [<var>B</var>, <var>H</var>, <var>T</var>, <var>D</var>] is a transpose. Why does a good kernel never execute it?</summary>
+        <p>Because head <var>h</var>&rsquo;s matrix is readable in place: rows of <var>D</var> consecutive floats spaced 3<var>C</var> apart, which is a matrix with leading dimension 3<var>C</var>. Batched GEMMs take a leading dimension and a batch stride, so the heads are selected by pointer arithmetic, and the merge of heads on the output side is the same trick with leading dimension <var>C</var>.</p>
+      </details>
+      <details>
+        <summary><var>Q</var><var>K</var><sup>T</sup> is a matrix multiply, yet in naive attention it is memory-bound. Why, and why does tiling not fix it?</summary>
+        <p>Its inner dimension is only <var>D</var> = 64, so each output element costs 128 FLOPs and 4 bytes of output: 28 FLOP/B including the inputs, below the FP32 ridge. The traffic is the write of <var>S</var> itself, not re-reads of the inputs, and tiling only reduces re-reads. The fix is to not write <var>S</var> (chapter 14).</p>
+      </details>
+      <details>
+        <summary>How does the cost of naive attention scale with the sequence length, compared with the rest of the block, and what is the first practical limit you hit?</summary>
+        <p>Quadratically: <var>S</var> has <var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> entries and is written and read four times; everything else scales linearly with <var>T</var>. The first limit is memory: <var>S</var> in FP32 for one GPT-2 layer is 3.2 GB at <var>T</var> = 8,192, before the time.</p>
+      </details>
+      <details>
+        <summary>State precisely why keys and values of earlier tokens can be cached during generation.</summary>
+        <p>Under the causal mask, the stream at position <var>j</var> depends only on tokens 0 to <var>j</var> at every layer, so appending tokens never changes it, and neither its key nor its value (projections of it) ever change. They are computed once, when token <var>j</var> is processed, and reused by every later query. Queries are not cached because no later step asks token <var>j</var>&rsquo;s question again.</p>
+      </details>
+      <details>
+        <summary>Prefill and decode: what is <var>M</var> for the GEMMs in each, and which roof applies?</summary>
+        <p>Prefill: <var>M</var> = <var>B</var>&middot;<var>T</var>, hundreds or thousands of rows, intensity in the hundreds, compute-bound. Decode: <var>M</var> = <var>B</var>, one row per sequence, every weight read once for a few FLOPs each, memory-bound; attention reads each sequence&rsquo;s cache once for one query, also memory-bound and not helped by batching.</p>
+      </details>
+      <details>
+        <summary>RoPE, GQA and SwiGLU: say in one line each what they change in the kernel list.</summary>
+        <p>RoPE: an elementwise rotation of <var>q</var> and <var>k</var> that rides in the QKV epilogue and the cache append. GQA: fewer key/value heads, so narrower <var>k</var> and <var>v</var> columns, a smaller cache, and a decode kernel that serves several queries per cached key. SwiGLU: a third MLP matrix, with gate and up fused into one GEMM and the elementwise product in its epilogue.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>A. Vaswani et al., <em>Attention Is All You Need</em> (2017): scaled dot-product attention, multi-head attention, the 1/&radic;<var>D</var> argument (section 3.2.1).</li>
+      <li>A. Radford et al., <em>Language Models are Unsupervised Multitask Learners</em> (2019), and Hugging Face <code>transformers</code>, <code>modeling_gpt2.py</code>: the fused <code>c_attn</code> projection and its column order, which the engine contract follows.</li>
+      <li>A. Karpathy, <a href="https://github.com/karpathy/llm.c">llm.c</a>, <code>dev/cuda/attention_forward.cu</code>: a progression of attention kernels from naive to batched cuBLAS, which lab 9 follows.</li>
+      <li>N. Shazeer, <em>Fast Transformer Decoding: One Write-Head is All You Need</em> (2019): the KV cache&rsquo;s cost at decode and multi-query attention; J. Ainslie et al., <em>GQA</em> (2023): grouped-query attention.</li>
+      <li>R. Pope et al., <em>Efficiently Scaling Transformer Inference</em> (2022): prefill versus decode, the cache&rsquo;s share of memory and bandwidth, batching limits.</li>
+      <li>J. Su et al., <em>RoFormer: Enhanced Transformer with Rotary Position Embedding</em> (2021); N. Shazeer, <em>GLU Variants Improve Transformer</em> (2020); B. Zhang, R. Sennrich, <em>RMSNorm</em> (2019): the changes of section 9.</li>
+      <li>T. Dao, <em>FlashAttention-2</em> (2023): the IO cost of materializing <var>S</var>, which section 5 counts; chapter 14 covers the kernel.</li>
+      <li>NVIDIA, <em>cuBLAS Library</em> documentation: <code>cublasSgemmStridedBatched</code> and the column-major convention; lab 6&rsquo;s <code>gemm.h</code> has the row-major trick.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-09-softmax-layernorm-fusion.html">&larr; Ch. 9 — Softmax, layernorm, fusion</a>
+      <a href="index.html">Index</a>
+      <a href="cap-11-gpt2-forward-pass.html">Ch. 11 — Lab: a GPT-2 forward pass &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part II · Chapter 10 · FLOP and byte counts computed from GPT-2 small&rsquo;s shapes; roofline times are predictions at the practical ceilings; kernels checked for correctness on cudasim, never run on a GPU, until lab 9 replaces them, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch10.js"></script>
+</body>
+</html>

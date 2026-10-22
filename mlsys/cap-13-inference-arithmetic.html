@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 13 — Inference arithmetic: FLOPs, bytes, KV cache, prefill vs decode · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch13.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-12-triton.html">&larr; Ch. 12 — Triton</a>
+    <a href="index.html">Index</a>
+    <a href="cap-14-flashattention.html">Ch. 14 — FlashAttention 1 &rarr; 2 &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part III — Attention · Chapter 13</div>
+    <h1>Inference arithmetic: FLOPs, bytes, KV cache, prefill vs decode</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 12 · ~45 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>Chapter 1 estimated decode on a whiteboard: read every weight once per token, so tokens per second is bandwidth over model size. It promised this chapter would make that exact, and the exact version has only one new ingredient. Every step of an inference engine costs <strong>max(FLOPs / peak, bytes / bandwidth)</strong> plus overhead, and the bytes are of two kinds: the <strong>weights</strong>, which every sequence in a batch shares, and the <strong>KV cache</strong>, the stored keys and values of each sequence&rsquo;s earlier tokens, which is private to the sequence and grows with its length. <strong>Prefill</strong> pushes a whole prompt through at once, does hundreds of FLOPs per byte and is compute-bound. <strong>Decode</strong> makes one token per sequence per step, reads all the weights and all the caches to do it, and is memory-bound. From counting alone you get the time to the first token, the time per token after that, the throughput, the largest batch that fits in 12 GB, and the batch size and context length where each bound flips, before writing a line of code. The chapter counts GPT-2 small on your card and Llama-3-8B on an H100, builds the calculator, and ends with what the counting misses and why real engines reach 60&ndash;85% of it.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">Two phases, four numbers</a></li>
+      <li><a href="#s2">FLOPs per token, derived</a></li>
+      <li><a href="#s3">Bytes per token: the KV cache</a></li>
+      <li><a href="#s4">Prefill: the time to the first token</a></li>
+      <li><a href="#s5">Decode: shared weights, private caches</a></li>
+      <li><a href="#s6">Both phases on the roofline</a></li>
+      <li><a href="#s7">Attention at decode: the intensity that does not move</a></li>
+      <li><a href="#s8">What the arithmetic misses</a></li>
+      <li><a href="#s9">The whiteboard estimate, and the calculator</a></li>
+      <li><a href="#s10">Lab 12: predicted against measured</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. Two phases, four numbers</h2>
+
+    <p>A request to a language model is a prompt of <var>T</var><sub>p</sub> tokens followed by <var>T</var><sub>out</sub> generated tokens, and the engine handles the two parts differently because they offer the GPU different amounts of parallel work (chapter 6&rsquo;s <var>M</var>). <strong>Prefill</strong> runs the whole prompt through the model in one forward pass: <var>M</var> = <var>T</var><sub>p</sub> rows, every linear layer a real GEMM, and attention over the full <var>T</var><sub>p</sub>&times;<var>T</var><sub>p</sub> causal triangle (chapter 10). Its output is one thing: the next token. <strong>Decode</strong> then runs one forward pass per generated token: <var>M</var> = 1 row per sequence, every linear layer a GEMV, and attention of one query against everything before it. Each decode step appends one token and runs again, <var>T</var><sub>out</sub> times. A <strong>generation step</strong> is one such pass; with a batch of <var>B</var> sequences, one step produces <var>B</var> tokens.</p>
+
+    <figure class="lk-fig" role="img" aria-label="A timeline in milliseconds. Sequence A: one prefill block from 0 to 6.3 ms, then decode steps of 0.85 ms each, one output token at the end of each. From the fourth step sequence B joins: the steps widen to 0.97 ms and each produces two tokens, one per sequence. A bracket marks TTFT from 0 to the first token, another marks TPOT between two tokens.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 222" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One request on a timeline: a prefill, then decode steps</title>
+        <line x1="112" y1="120" x2="511.8" y2="120" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <path d="M112 120v6M131.5 120v3M151 120v3M170.5 120v3M190 120v3M209.5 120v6M229 120v3M248.5 120v3M268 120v3M287.5 120v3M307 120v6M326.5 120v3M346 120v3M365.5 120v3M385 120v3M404.5 120v6M424 120v3M443.5 120v3M463 120v3M482.5 120v3M502 120v6" stroke="var(--lk-rule)"/>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="112" y="138">0</text><text x="209.5" y="138">5</text><text x="307" y="138">10</text><text x="404.5" y="138">15</text><text x="502" y="138">20</text></g>
+        <text x="511.8" y="138" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="end" dx="22">ms</text>
+        <g font-size="11" fill="var(--lk-ink)" font-family="var(--lk-utility)"><text x="8" y="39">sequence A</text><text x="8" y="67">sequence B</text><text x="8" y="79" fill="var(--lk-ink-soft)">joins at step 4</text><text x="8" y="100">tokens out</text></g>
+        <rect x="112" y="26" width="122.1" height="18" fill="var(--lk-forest)"/>
+        <path d="M116 30h114.1" stroke="var(--lk-forest-soft)" stroke-width="1" stroke-dasharray="2 4" opacity=".7"/>
+        <rect x="234.9" y="26" width="15" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="251.5" y="26" width="15" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="268.1" y="26" width="15" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="284.8" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="284.8" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="303.6" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="303.6" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="322.4" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="322.4" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="341.2" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="341.2" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="360.1" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="360.1" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="378.9" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="378.9" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="397.7" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="397.7" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="416.5" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="416.5" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="435.4" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="435.4" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="454.2" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="454.2" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="473" y="26" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <rect x="473" y="58" width="17.2" height="18" fill="var(--lk-vermilion)"/>
+        <line x1="293.4" y1="44" x2="293.4" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="312.2" y1="44" x2="312.2" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="331" y1="44" x2="331" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="349.9" y1="44" x2="349.9" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="368.7" y1="44" x2="368.7" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="387.5" y1="44" x2="387.5" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="406.3" y1="44" x2="406.3" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="425.2" y1="44" x2="425.2" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="444" y1="44" x2="444" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="462.8" y1="44" x2="462.8" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <line x1="481.6" y1="44" x2="481.6" y2="58" stroke="var(--lk-vermilion)" stroke-width="1"/>
+        <g fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".6"><circle cx="234.1" cy="96" r="3.6"/><circle cx="250.7" cy="96" r="3.6"/><circle cx="267.3" cy="96" r="3.6"/><circle cx="284" cy="96" r="3.6"/><circle cx="302.8" cy="91.5" r="3.2"/><circle cx="302.8" cy="100.5" r="3.2"/><circle cx="321.6" cy="91.5" r="3.2"/><circle cx="321.6" cy="100.5" r="3.2"/><circle cx="340.4" cy="91.5" r="3.2"/><circle cx="340.4" cy="100.5" r="3.2"/><circle cx="359.3" cy="91.5" r="3.2"/><circle cx="359.3" cy="100.5" r="3.2"/><circle cx="378.1" cy="91.5" r="3.2"/><circle cx="378.1" cy="100.5" r="3.2"/><circle cx="396.9" cy="91.5" r="3.2"/><circle cx="396.9" cy="100.5" r="3.2"/><circle cx="415.7" cy="91.5" r="3.2"/><circle cx="415.7" cy="100.5" r="3.2"/><circle cx="434.6" cy="91.5" r="3.2"/><circle cx="434.6" cy="100.5" r="3.2"/><circle cx="453.4" cy="91.5" r="3.2"/><circle cx="453.4" cy="100.5" r="3.2"/><circle cx="472.2" cy="91.5" r="3.2"/><circle cx="472.2" cy="100.5" r="3.2"/><circle cx="491" cy="91.5" r="3.2"/><circle cx="491" cy="100.5" r="3.2"/></g>
+        <line x1="234.1" y1="44" x2="234.1" y2="92" stroke="var(--lk-gold)" stroke-width="1" stroke-dasharray="2 2"/>
+        <path d="M112 147v5H234.1v-5" fill="none" stroke="var(--lk-cobalt-dark)" stroke-width="1.3"/><text x="173" y="166" font-size="11" text-anchor="middle" fill="var(--lk-cobalt-dark)">TTFT</text>
+
+        <path d="M267.3 147v5H284v-5" fill="none" stroke="var(--lk-cobalt-dark)" stroke-width="1.3"/><text x="275.6" y="166" font-size="11" text-anchor="middle" fill="var(--lk-cobalt-dark)">TPOT</text>
+
+        <g font-size="11" fill="var(--lk-ink)"><text x="528" y="34">prefill 6.3 ms</text><text x="528" y="52">step B=1 0.85 ms</text><text x="528" y="70">step B=2 0.97 ms</text><text x="528" y="88" fill="var(--lk-ink-soft)">(+13%: B&rsquo;s cache)</text></g>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="8" y="187" width="16" height="10" fill="var(--lk-forest)"/><text x="30" y="196">prefill: 1,024 tokens, compute-bound</text><rect x="262" y="187" width="8" height="10" fill="var(--lk-vermilion)"/><text x="276" y="196">decode step: memory-bound, weights + cache</text><circle cx="13" cy="211" r="3.6" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".6"/><text x="30" y="215">one output token</text><line x1="146" y1="211" x2="164" y2="211" stroke="var(--lk-vermilion)"/><text x="170" y="215">one step serves both rows</text><path d="M346 206v5h18v-5" fill="none" stroke="var(--lk-cobalt-dark)" stroke-width="1.3"/><text x="370" y="215">TTFT: to the first token; TPOT: between tokens</text></g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; One request on a timeline. A single prefill pass over the prompt, then one decode step per output token; every step reads all the weights and the sequence&rsquo;s whole cache. TTFT is the prefill pass (its last position already yields the first token); TPOT is the spacing of the ticks, which widens slowly as the cache grows. A second sequence batched with the first shares the weight reads of every step, so the ticks barely move apart while the tokens per step double. Drawn to GPT-2 small&rsquo;s proportions on your card in FP32 (prefill of 1,024 tokens about 6 ms, steps about 0.9 ms); illustrative, not measured.</figcaption>
+    </figure>
+
+    <p>Four numbers describe the result, and they are the ones every engine benchmark reports:</p>
+    <table>
+      <tr><th>Metric</th><th>Definition</th><th>Set by</th></tr>
+      <tr><td><strong>TTFT</strong>, time to first token</td><td>from request to the first output token: the prefill pass, plus the sampling that picks the token</td><td>prefill FLOPs, compute peak</td></tr>
+      <tr><td><strong>TPOT</strong>, time per output token (inter-token latency)</td><td>the interval between consecutive output tokens of one sequence: one decode step</td><td>weight bytes plus cache bytes, bandwidth</td></tr>
+      <tr><td><strong>Throughput</strong>, tokens/s</td><td>output tokens per second over the whole GPU: <var>B</var> / TPOT at decode, summed over all sequences in flight</td><td>batch, and what the batch does to TPOT</td></tr>
+      <tr><td><strong>Request latency</strong></td><td>TTFT + (<var>T</var><sub>out</sub> &minus; 1) &times; TPOT</td><td>both</td></tr>
+    </table>
+    <p>The tension between the last two is the <strong>latency-throughput trade</strong>: a bigger batch makes each step a little longer (more cache bytes, section 5) and a lot more productive (more tokens per step), so throughput rises while every user&rsquo;s TPOT worsens a little. The whole chapter is about putting numbers on &ldquo;a little&rdquo; and &ldquo;a lot&rdquo;, and both come from two counts per token: FLOPs and bytes.</p>
+  </section>
+
+  <section id="s2">
+    <h2>2. FLOPs per token, derived</h2>
+
+    <p>Chapter 6 counted GPT-2 small by hand: 2 FLOPs per weight of every linear layer, including the LM head. Here is the general form, because the calculator needs it for models that are shaped differently. Call <var>N</var><sub>mm</sub> the number of parameters that sit in matrix multiplies: the four linear layers of every block (or seven in a SwiGLU block: Q, K, V, O, gate, up, down), plus the LM head, which is a GEMM over the vocabulary whether or not its weights are tied to the input embedding. Not in <var>N</var><sub>mm</sub>: the input embedding (a gather, 0 FLOPs), position embeddings, and the norms&rsquo; scale vectors. Then every token, in prefill or decode, costs</p>
+    <p class="c13-eq">FLOPs<sub>linear</sub> = 2 &middot; <var>N</var><sub>mm</sub> per token</p>
+    <p>Attention is the one term that depends on how many tokens came before. For one query at position <var>t</var>, each head computes <var>t</var> scores (a dot product of length <var>D</var>: 2<var>D</var> FLOPs each) and a weighted sum of <var>t</var> value vectors (2<var>D</var> again); over <var>H</var> heads that is 4<var>t</var>&middot;<var>H</var>&middot;<var>D</var> = 4<var>t</var>&middot;<var>C</var> per layer (in GPT-2, <var>H</var>&middot;<var>D</var> = <var>C</var>; in a GQA model the query heads still number <var>H</var>, so the count is unchanged), and over <var>L</var> layers:</p>
+    <p class="c13-eq">FLOPs<sub>attention</sub> = 4 &middot; <var>L</var> &middot; <var>t</var> &middot; <var>C</var> per token at context length <var>t</var></p>
+    <p>Two models, counted with exactly these rules (the calculator&rsquo;s presets reproduce the table; the parameter totals match the published ones):</p>
+    <table>
+      <tr><th></th><th>GPT-2 small</th><th>Llama-3-8B</th></tr>
+      <tr><td><var>L</var> / <var>C</var> / heads <var>H</var> / KV heads / <var>D</var> / MLP width / vocab</td><td>12 / 768 / 12 / 12 / 64 / 3,072 / 50,257</td><td>32 / 4,096 / 32 / 8 / 128 / 14,336 / 128,256</td></tr>
+      <tr><td>Parameters, total</td><td>124,439,808</td><td>8,030,261,248</td></tr>
+      <tr><td><var>N</var><sub>mm</sub> (blocks + LM head)</td><td>123,614,976</td><td>7,504,658,432</td></tr>
+      <tr><td>2 <var>N</var><sub>mm</sub>, FLOPs per token</td><td>247 M</td><td>15.0 G</td></tr>
+      <tr><td>4 <var>L C</var>, attention FLOPs per token per context token</td><td>36,864</td><td>524,288</td></tr>
+      <tr><td>Attention at <var>t</var> = 1,024, as a share of the token&rsquo;s FLOPs</td><td>37.7 M, 13%</td><td>537 M, 3.5%</td></tr>
+    </table>
+    <p>So at the context lengths of this course, attention is a small share of the <em>FLOPs</em> even for GPT-2, whose head dimension is small and whose layers are thin. That is worth holding on to, because sections 5 and 7 will show that attention is a large share of the <em>bytes</em>, and chapter 14 will show that it is the dominant share of the <em>time</em> at long context for a third reason again. Three different reasons, three different fixes.</p>
+
+    <details class="ym">
+      <summary>Your move: at what context length do the attention FLOPs per token equal the linear FLOPs, for GPT-2 small and for Llama-3-8B? Set 4<var>LtC</var> = 2<var>N</var><sub>mm</sub>.</summary>
+      <p><var>t</var> = <var>N</var><sub>mm</sub> / (2<var>LC</var>): 123.6 M / (2 &times; 12 &times; 768) &asymp; <strong>6,700 tokens</strong> for GPT-2 small, and 7.5 G / (2 &times; 32 &times; 4,096) &asymp; <strong>28,600</strong> for Llama-3-8B. Below those lengths the linear layers own the FLOPs. Wide models push the crossover out because <var>N</var><sub>mm</sub> grows with <var>C</var><sup>2</sup> while attention grows with <var>C</var>. A context of 128K tokens, which Llama 3.1 supports, is well past it: there, and only there, attention dominates even the FLOPs.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Bytes per token: the KV cache</h2>
+
+    <p>Chapter 10 made the observation that decode is built on: the key and value vectors of a token depend only on that token and the layers below it, never on the tokens after it, so once computed they never change. Recomputing them at every step would cost a full prefill per token. Instead the engine <strong>caches</strong> them: after the QKV projection of every layer, the new token&rsquo;s <var>k</var> and <var>v</var> (one <var>D</var>-vector per KV head) are appended to a per-sequence, per-layer buffer, and attention reads the buffer instead of recomputing it. The cache is therefore the model&rsquo;s memory of the conversation, and its size per token is fixed by the architecture:</p>
+    <p class="c13-eq">bytes<sub>KV</sub> per token = 2 &middot; <var>L</var> &middot; <var>H</var><sub>kv</sub> &middot; <var>D</var> &middot; <var>s</var></p>
+    <p>where the 2 is &ldquo;keys and values&rdquo;, <var>H</var><sub>kv</sub> is the number of KV heads (equal to <var>H</var> in GPT-2; 8 against 32 query heads in Llama 3&rsquo;s grouped-query attention, which exists precisely to shrink this number), and <var>s</var> is the bytes per element of the cache&rsquo;s format, which need not be the weights&rsquo; format.</p>
+    <table>
+      <tr><th>Model, cache format</th><th>Per token</th><th>Per 1,024-token sequence</th><th>Per 1,024-token sequence, as a share of the weights</th></tr>
+      <tr><td>GPT-2 small, FP32 (the engine)</td><td>2 &middot; 12 &middot; 12 &middot; 64 &middot; 4 = 73.7 KB</td><td>75.5 MB</td><td>15% of 498 MB</td></tr>
+      <tr><td>GPT-2 small, FP16</td><td>36.9 KB</td><td>37.7 MB</td><td>15% of 249 MB</td></tr>
+      <tr><td>Llama-3.2-1B, FP16</td><td>2 &middot; 16 &middot; 8 &middot; 64 &middot; 2 = 32.8 KB</td><td>33.6 MB</td><td>1.4% of 2.47 GB</td></tr>
+      <tr><td>Llama-3-8B, FP16</td><td>2 &middot; 32 &middot; 8 &middot; 128 &middot; 2 = 131 KB</td><td>134 MB</td><td>0.8% of 16.1 GB</td></tr>
+      <tr><td>Llama-3-8B, if it had 32 KV heads</td><td>524 KB</td><td>537 MB</td><td>3.3%</td></tr>
+    </table>
+    <p>The last row is why GQA exists: it divides the cache by the group size (4 here) at a small cost in model quality, and section 7 shows it also multiplies attention&rsquo;s intensity by the same factor.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The engine&#8217;s k_cache and v_cache for one layer, drawn for 2 sequences and 4 heads: each (sequence, head) is a strip of slots up to T_max = 1,024, filled up to position 640; the slot at position 640 is written this step, all filled slots are read. The shelf repeats for each of the 12 layers. Offset = ((b times H + h) times T_max + p) times D; 73,728 bytes written per token; t times 73,728 bytes read per step per sequence.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 384" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>The engine&rsquo;s KV cache for one layer</title>
+        <defs><pattern id="c13-h2" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-vermilion-soft)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-vermilion)" stroke-width="1.6"/></pattern></defs>
+        <defs><pattern id="c13-slots" width="6" height="40" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="40" stroke="var(--lk-paper-light)" stroke-width="1"/></pattern></defs>
+        <text x="8" y="16" font-size="11.5" font-weight="600" fill="var(--lk-cobalt-dark)">k_cache, layer l</text>
+        <text x="8" y="48" font-size="10.5" fill="var(--lk-ink-soft)">b = 0</text>
+        <text x="90" y="32" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h0</text>
+        <rect x="96" y="24" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="24" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="24" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="23" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="44" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h1</text>
+        <rect x="96" y="36" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="36" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="36" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="35" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="56" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h2</text>
+        <rect x="96" y="48" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="48" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="48" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="47" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="68" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h3</text>
+        <rect x="96" y="60" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="60" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="60" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="59" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="8" y="101" font-size="10.5" fill="var(--lk-ink-soft)">b = 1</text>
+        <text x="90" y="85" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h0</text>
+        <rect x="96" y="77" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="77" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="77" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="76" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="97" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h1</text>
+        <rect x="96" y="89" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="89" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="89" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="88" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="109" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h2</text>
+        <rect x="96" y="101" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="101" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="101" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="100" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="121" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h3</text>
+        <rect x="96" y="113" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="113" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="113" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="112" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="8" y="148" font-size="11.5" font-weight="600" fill="var(--lk-cobalt-dark)">v_cache, layer l</text>
+        <text x="8" y="180" font-size="10.5" fill="var(--lk-ink-soft)">b = 0</text>
+        <text x="90" y="164" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h0</text>
+        <rect x="96" y="156" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="156" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="156" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="155" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="176" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h1</text>
+        <rect x="96" y="168" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="168" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="168" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="167" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="188" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h2</text>
+        <rect x="96" y="180" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="180" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="180" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="179" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="200" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h3</text>
+        <rect x="96" y="192" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="192" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="192" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="191" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="8" y="233" font-size="10.5" fill="var(--lk-ink-soft)">b = 1</text>
+        <text x="90" y="217" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h0</text>
+        <rect x="96" y="209" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="209" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="209" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="208" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="229" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h1</text>
+        <rect x="96" y="221" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="221" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="221" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="220" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="241" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h2</text>
+        <rect x="96" y="233" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="233" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="233" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="232" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <text x="90" y="253" font-size="10" fill="var(--lk-ink-soft)" text-anchor="end">h3</text>
+        <rect x="96" y="245" width="240" height="9" fill="url(#c13-h2)"/>
+        <rect x="336" y="245" width="144" height="9" fill="var(--lk-paper)"/>
+        <rect x="96" y="245" width="384" height="9" fill="url(#c13-slots)" stroke="var(--lk-rule)" stroke-width=".8"/>
+        <rect x="336" y="244" width="6" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/>
+        <path d="M96 266H480" stroke="var(--lk-rule)"/>
+        <path d="M96 266v5M120 266v2.5M144 266v2.5M168 266v2.5M192 266v5M216 266v2.5M240 266v2.5M264 266v2.5M288 266v5M312 266v2.5M336 266v2.5M360 266v2.5M384 266v5M408 266v2.5M432 266v2.5M456 266v2.5M480 266v5" stroke="var(--lk-rule)"/>
+        <g font-size="10" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="96" y="282">0</text><text x="192" y="282">256</text><text x="288" y="282">512</text><text x="384" y="282">768</text><text x="480" y="282">1,024</text></g>
+        <text x="339" y="296" font-size="10.5" fill="var(--lk-gold)" text-anchor="middle" font-weight="600">p = 640</text>
+        <g transform="translate(575 85.8)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(570 88)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(565 90.2)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(560 92.4)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(555 94.6)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(550 96.8)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(545 99)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(540 101.2)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(535 103.4)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(530 105.6)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(525 107.8)"><rect width="70" height="60" fill="var(--lk-paper-light)" stroke="var(--lk-rule)" stroke-width="0.7"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="0.55"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g transform="translate(520 110)"><rect width="70" height="60" fill="var(--lk-paper)" stroke="var(--lk-cobalt)" stroke-width="1.2"/><rect width="43.8" height="60" fill="url(#c13-h2)" opacity="1"/><rect x="43.8" width="2" height="60" fill="var(--lk-gold)"/></g>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="582.0" y="198">layers 0 .. 11</text><text x="582.0" y="212">(k and v each)</text></g>
+        <g font-size="11" fill="var(--lk-ink)"><text x="8" y="316">offset = ((b&middot;H + h)&middot;T_max + p)&middot;D</text><text x="8" y="333">write per token: 2 &times; 12 &times; 12 &times; 64 &times; 4 B = 73,728 B</text><text x="8" y="350">read per step per sequence: t &times; 73,728 B</text></g>
+        <g font-size="10.5" fill="var(--lk-ink-soft)"><text x="400" y="316">drawn: B = 2, 4 of 12 heads,</text><text x="400" y="331">1 slot per 16 positions;</text><text x="400" y="346">each slot a 64-float vector, 256 B</text></g>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="8" y="363" width="8" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/><text x="22" y="372">written this step (p)</text><rect x="164" y="363" width="20" height="10" fill="url(#c13-h2)" stroke="var(--lk-rule)" stroke-width=".8"/><text x="190" y="372">read this step (positions 0 .. p)</text><rect x="402" y="363" width="20" height="10" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-width=".8"/><text x="428" y="372">reserved for T_max, still empty</text></g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; The engine&rsquo;s cache, as chapter 11&rsquo;s contract lays it out: per layer, <code>k_cache</code> and <code>v_cache</code> of shape [<var>B</var>][<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>], one head&rsquo;s keys contiguous. A decode step writes one <var>D</var>-vector into every (layer, head) slot at position <var>p</var> (the thin lit column) and then reads every filled position of every (layer, head) back (the whole shaded shelf). The write is 73.7 KB per token for GPT-2 small in FP32; the read is that times the context length, every step, per sequence.</figcaption>
+    </figure>
+
+    <p>Two things follow immediately. The cache is <strong>written once per token and read once per step per sequence</strong>, so at context <var>t</var> a decode step reads <var>t</var> &times; bytes<sub>KV</sub> for each sequence, and the engine&rsquo;s <code>kv_append</code> is a trivial kernel next to the attention that reads the result. And the cache is <strong>allocated for the maximum context</strong> in the engine&rsquo;s plan (<var>T</var><sub>max</sub> = 1,024 for GPT-2), so memory is reserved by the slot, not by the token: a sequence that has used 100 of 1,024 slots still holds 75.5 MB. Chapter 17&rsquo;s paged caches fix that; for now the planning rule is simply</p>
+    <p class="c13-eq">memory = weights + <var>B</var> &middot; <var>T</var><sub>max</sub> &middot; bytes<sub>KV</sub> + activations (small: a few multiples of <var>B</var>&middot;<var>C</var>&middot;<var>s</var>, plus the <var>B</var>&middot;<var>V</var> logits)</p>
+    <p>and the largest batch that fits is (VRAM &minus; weights) / (<var>T</var><sub>max</sub> &middot; bytes<sub>KV</sub>): for GPT-2 small in FP32 on your card, (12 &minus; 0.5) GB / 75.5 MB &asymp; <strong>152 sequences</strong> of 1,024 tokens. For Llama-3-8B in FP16 the weights alone are 16 GB and the question does not arise on a 12 GB card until Part IV quantizes them.</p>
+
+    <details class="ym">
+      <summary>Your move: a chat with 300 tokens of system prompt shared by every user. Does the cache for those 300 tokens have to be private to each sequence?</summary>
+      <p>No, and that is prefix caching. The keys and values of a token depend only on it and on the tokens before it (the causal mask), so every sequence that starts with the same 300 tokens computes exactly the same 300 cache entries, and they can be computed once and shared, which also removes 300 tokens of prefill per request. It needs a cache layout in which a sequence&rsquo;s entries are not one contiguous [<var>T</var><sub>max</sub>][<var>D</var>] strip, since the shared part lives elsewhere: that is one more reason for the paged layout of chapter 17. The arithmetic stays the same: the step still <em>reads</em> the 300 entries for each sequence that attends to them.</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. Prefill: the time to the first token</h2>
+
+    <p>A prefill of <var>T</var><sub>p</sub> tokens runs every linear layer with <var>M</var> = <var>T</var><sub>p</sub> rows and attention over the causal triangle, so the useful FLOPs are the per-token counts of section 2 summed over positions 0 to <var>T</var><sub>p</sub> &minus; 1, with one exception: the LM head runs once, on the last position, because prefill needs only the logits of the next token (chapter 11&rsquo;s engine computes just that row). So the head&rsquo;s 2<var>VC</var> (<var>V</var> the vocabulary) is not in prefill&rsquo;s per-token term; decode still pays it every step, since its one position is always the last:</p>
+    <p class="c13-eq">FLOPs<sub>prefill</sub> = <var>T</var><sub>p</sub> &middot; 2(<var>N</var><sub>mm</sub> &minus; <var>VC</var>) + 2<var>VC</var> + 2 &middot; <var>L</var> &middot; <var>T</var><sub>p</sub><sup>2</sup> &middot; <var>C</var></p>
+    <p>(the attention term is 4<var>LtC</var> summed over <var>t</var>, which gives 2<var>LT</var><sub>p</sub><sup>2</sup><var>C</var>; a naive kernel that computes the masked half too does twice that, chapter 10&rsquo;s causal waste). The bytes are the weights once, the cache written once, and the activations passing between kernels, which chapter 11&rsquo;s timeline measured and which are small next to either with a fused attention kernel; chapter 10&rsquo;s naive attention, which the engine runs, moves about 2.6 GB of score traffic per prefill at <var>T</var><sub>p</sub> = 1,024, more than the weights and the cache together, and that is part of why a measured prefill lands above the roof (chapter 14 removes it). For GPT-2 small at <var>T</var><sub>p</sub> = 1,024 in FP32 on your card:</p>
+    <table>
+      <tr><th></th><th>Count</th><th>Time at the roof</th></tr>
+      <tr><td>Linear FLOPs: 1,024 &times; 170 M (blocks) + 77 M (the head, once)</td><td>174 GFLOP</td><td rowspan="2">194 GFLOP / 30.9 TFLOPS = <strong>6.3 ms</strong></td></tr>
+      <tr><td>Attention FLOPs: 2 &times; 12 &times; 1,024&sup2; &times; 768</td><td>19.3 GFLOP</td></tr>
+      <tr><td>Bytes: 498 MB weights + 75.5 MB cache written (+ activations)</td><td>&asymp; 0.6&ndash;1.2 GB</td><td>0.9&ndash;1.8 ms</td></tr>
+      <tr><td>Intensity</td><td colspan="2">&asymp; 160&ndash;320 FLOP/B: far right of the FP32 ridge of 46. <strong>Compute-bound.</strong></td></tr>
+    </table>
+    <p>That is chapter 6&rsquo;s &ldquo;about 9 ms&rdquo; guess, now itemized and without the head at the 1,023 positions whose logits nobody reads, and the <strong>TTFT</strong> for a 1,024-token prompt is this plus one sampling pass, at the roof. Two readings of the table matter later. First, prefill time grows linearly with <var>T</var><sub>p</sub> through the linear term and quadratically through attention, but the quadratic term is small until the crossover of section 2&rsquo;s guess, so TTFT is nearly proportional to prompt length at these sizes: 2,048 tokens cost about 14 ms, not 25. Second, the bound is set by the FP32 peak because the engine is FP32; in FP16 on the tensor cores the same prompt would take 3.1 ms at the roof, and the bytes would halve too, so it would stay compute-bound. Prefill is where chapters 7, 8 and 12 pay off, and where a single H100 is 16 times your card (989 against 61.7 TFLOPS in FP16).</p>
+
+    <details class="ym">
+      <summary>Your move: an engine prefills a batch of 8 prompts of 1,024 tokens together rather than one after the other. How does the total prefill time change, and the TTFT of the first prompt?</summary>
+      <p>The total barely changes: prefill is compute-bound, and 8 prompts together are 8 times the FLOPs for the same peak, so about 8 &times; 6.3 = 50 ms either way (slightly less together, because the weights are read once instead of 8 times and the GEMMs are larger and closer to the roof). But the first prompt&rsquo;s TTFT grows from 6.3 to 50 ms, because its token is only produced when the whole batch finishes. Batching prefill buys throughput only through the small kernel-efficiency gain, at a real latency cost; batching decode, next section, is a different story. Engines therefore schedule the two phases differently, and chunk long prefills so that decode steps of other users can run between the chunks.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. Decode: shared weights, private caches</h2>
+
+    <p>A decode step for a batch of <var>B</var> sequences at context <var>t</var> does <var>B</var> &times; (2<var>N</var><sub>mm</sub> + 4<var>LtC</var>) FLOPs, and moves two kinds of bytes:</p>
+    <p class="c13-eq">bytes<sub>step</sub> = <var>W</var> + <var>B</var> &middot; <var>t</var> &middot; bytes<sub>KV</sub></p>
+    <p>The weights <var>W</var> are read once for the whole batch: that is chapter 4&rsquo;s batch dial, every weight used <var>B</var> times per trip from DRAM. The caches are read once <em>each</em>: <var>B</var> sequences, <var>B</var> private caches, no sharing. The step time is the larger of the two roof times, and the table shows it for GPT-2 small in FP32 at <var>t</var> = 1,024 on your card, at the spec bandwidth (lab 0&rsquo;s 88% makes every memory time 14% longer):</p>
+    <table>
+      <tr><th><var>B</var></th><th>FLOPs</th><th>Weight bytes</th><th>Cache bytes</th><th>Compute time</th><th>Memory time</th><th>Step</th><th>Tokens/s, all sequences</th><th>Memory, with caches</th></tr>
+      <tr><td>1</td><td>0.28 G</td><td>498 MB</td><td>75 MB</td><td>9 &micro;s</td><td>853 &micro;s</td><td><strong>0.85 ms</strong></td><td>1,170</td><td>0.57 GB</td></tr>
+      <tr><td>4</td><td>1.1 G</td><td>498 MB</td><td>302 MB</td><td>37 &micro;s</td><td>1.19 ms</td><td><strong>1.19 ms</strong></td><td>3,360</td><td>0.80 GB</td></tr>
+      <tr><td>16</td><td>4.6 G</td><td>498 MB</td><td>1.21 GB</td><td>148 &micro;s</td><td>2.54 ms</td><td><strong>2.54 ms</strong></td><td>6,300</td><td>1.7 GB</td></tr>
+      <tr><td>64</td><td>18.2 G</td><td>498 MB</td><td>4.83 GB</td><td>590 &micro;s</td><td>7.93 ms</td><td><strong>7.93 ms</strong></td><td>8,070</td><td>5.3 GB</td></tr>
+      <tr><td>128</td><td>36.5 G</td><td>498 MB</td><td>9.66 GB</td><td>1.18 ms</td><td>15.1 ms</td><td><strong>15.1 ms</strong></td><td>8,460</td><td>10.2 GB</td></tr>
+    </table>
+    <p>Read it row by row and the shape of decode appears. At <var>B</var> = 1 the step is the weights plus a little: chapter 1&rsquo;s 0.74 ms becomes 0.85 ms once the cache is counted, and the ceiling is 1,170 tokens/s instead of 1,350. The compute time is a hundred times smaller: the math units are idle 99% of the step. Going to <var>B</var> = 4 costs 40% more time for 4 times the tokens, the batch dial working as chapter 4 said. But the cache column grows with <var>B</var> while the weight column does not, and by <var>B</var> = 16 the caches are more bytes than the weights; from there each doubling of the batch nearly doubles the step, and throughput saturates near 8,500 tokens/s. The batch where the two columns cross is</p>
+    <p class="c13-eq"><var>B</var> &middot; <var>t</var> = <var>W</var> / bytes<sub>KV</sub> &nbsp;=&nbsp; 498 MB / 73.7 KB &asymp; 6,750 token-slots, i.e. <var>B</var> &asymp; 6.6 at <var>t</var> = 1,024</p>
+    <p>and it is a count of <em>cached tokens across the batch</em>, not of sequences: 8 sequences of 1,024 and 64 of 128 cost the same. Compute never catches up in this table: the batch at which it would (chapter 1&rsquo;s 92, and it is 92 in FP32 too: the peak halves and the bytes per weight double) was computed without a cache, and the cache adds bytes faster than the batch adds FLOPs. Section 6 says exactly when that is so.</p>
+
+    <p>Move the two dials and watch the two kinds of bytes:</p>
+    <div id="w-bytes" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: same model, same <var>B</var> = 64, but the sequences are 128 tokens long instead of 1,024. Estimate the step time and the tokens per second from the table&rsquo;s columns.</summary>
+      <p>The cache bytes scale with <var>t</var>: 4.83 GB / 8 = 0.6 GB, so the step moves 498 + 604 MB &asymp; 1.1 GB, 1.64 ms at 672 GB/s, and 64 tokens per step is about <strong>39,000 tokens/s</strong>, nearly five times the 1,024-token row. Same batch, same weights, same FLOPs per token; only the private bytes changed. This is why serving throughput is quoted at a context length, and why short-context benchmarks flatter every engine.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Both phases on the roofline</h2>
+
+    <p>Put each phase&rsquo;s FLOPs over its bytes and the two phases land in chapter 4&rsquo;s two corners. Prefill: hundreds of FLOP/B, on the roof. Decode at <var>B</var> = 1: 0.28 GFLOP over 573 MB, <strong>0.5 FLOP/B</strong>, the bottom of the slope. The batch dial moves decode right, but not the way it moved a bare GEMV, because the cache bytes grow with <var>B</var> too:</p>
+    <p class="c13-eq">intensity<sub>decode</sub>(<var>B</var>) = <var>B</var> (2<var>N</var><sub>mm</sub> + 4<var>LtC</var>) / (<var>W</var> + <var>B t</var> bytes<sub>KV</sub>) &nbsp;&rarr;&nbsp; (2<var>N</var><sub>mm</sub> + 4<var>LtC</var>) / (<var>t</var> bytes<sub>KV</sub>) as <var>B</var> &rarr; &infin;</p>
+    <p>So there is a ceiling on how far right decode can go, set by the context length alone: at <var>t</var> = 1,024 for GPT-2 small in FP32 it is 285 M / 75.5 MB &asymp; 3.8 FLOP/B, a twelfth of the FP32 ridge. <strong>Compute catches up only if the limit exceeds the ridge</strong>, i.e. if <var>t</var> &middot; bytes<sub>KV</sub> &lt; 2<var>N</var><sub>mm</sub> &middot; (bandwidth / peak), ignoring the attention FLOPs, which only help a little. The right-hand side is the per-sequence weight work expressed as bytes: 5.4 MB for GPT-2 small in FP32 on your card, 51 MB for Llama-3-8B in FP16 on an H100. The left-hand side is one sequence&rsquo;s cache: 75.5 MB and 268 MB (at 2,048) respectively. Both fail, by an order of magnitude. In the language of chapter 4&rsquo;s roofline widget: the linear layers batch, attention does not, and once the cache is the larger part of the bytes the whole step inherits attention&rsquo;s behaviour.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Log-log roofline of the RTX 5070 in FP32: bandwidth slope of 672 GB/s up to the ridge at 46 FLOP per byte, then the 30.9 TFLOP/s roof. Prefill of 1,024 tokens sits on the roof at about 160 FLOP per byte. Decode at context 1,024 climbs the slope from 0.5 FLOP per byte at B = 1 to 3.7 at B = 256, flattening towards a limit at 3.77 set by the cache. Without the cache the same batches would climb to the ridge at B = 92.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 292" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>Prefill and decode on the RTX 5070 FP32 roofline</title>
+        <g stroke="var(--lk-rule-soft)" stroke-width=".8"><line x1="70" y1="30" x2="640" y2="30"/><line x1="70" y1="85" x2="640" y2="85"/><line x1="70" y1="140" x2="640" y2="140"/><line x1="70" y1="195" x2="640" y2="195"/><line x1="184" y1="30" x2="184" y2="250"/><line x1="298" y1="30" x2="298" y2="250"/><line x1="412" y1="30" x2="412" y2="250"/><line x1="526" y1="30" x2="526" y2="250"/></g>
+        <rect x="70" y="30" width="570" height="220" fill="none" stroke="var(--lk-rule)"/>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="70" y="265">0.01</text><text x="184" y="265">0.1</text><text x="298" y="265">1</text><text x="412" y="265">10</text><text x="526" y="265">100</text><text x="640" y="265">1000</text></g>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="end"><text x="64" y="34">100</text><text x="64" y="89">10</text><text x="64" y="144">1</text><text x="64" y="199">0.1</text><text x="64" y="254">0.01</text></g>
+        <text x="355" y="283" font-size="10.5" text-anchor="middle" fill="var(--lk-ink-soft)">arithmetic intensity (FLOP per byte)</text>
+        <text x="16" y="140" font-size="10.5" text-anchor="middle" fill="var(--lk-ink-soft)" transform="rotate(-90 16 140)">TFLOP/s</text>
+        <polyline points="89.7,250 487.5,58.1 640,58.1" fill="none" stroke="var(--lk-ink)" stroke-width="1.4"/>
+        <text x="636" y="50" font-size="10.5" text-anchor="end" fill="var(--lk-ink)">FP32 peak 30.9 TFLOP/s</text>
+        <text x="196" y="226" font-size="10.5" fill="var(--lk-ink)" transform="rotate(-25.8 196 226)">672 GB/s</text>
+        <line x1="487.5" y1="58.1" x2="487.5" y2="250" stroke="var(--lk-rule)" stroke-dasharray="3 3"/>
+        <text x="492" y="244" font-size="10.5" fill="var(--lk-ink-soft)">ridge 46</text>
+        <line x1="363.8" y1="30" x2="363.8" y2="250" stroke="var(--lk-gold)" stroke-width="1.6" stroke-dasharray="6 3"/>
+        <polyline points="263.4,166.2 332.0,133.1 400.6,100.0 469.3,66.9 487.6,58.0" fill="none" stroke="var(--lk-steel)" stroke-width="4" stroke-dasharray="5 3" opacity=".9"/>
+        <g fill="var(--lk-paper-light)" stroke="var(--lk-steel)" stroke-width="1.4"><circle cx="332.0" cy="133.1" r="3.6"/><circle cx="400.6" cy="100.0" r="3.6"/><circle cx="469.3" cy="66.9" r="3.6"/><circle cx="487.6" cy="58.0" r="3.6"/></g>
+        <g font-size="10.5" fill="var(--lk-ink-soft)"><text x="339.0" y="148.1">4</text><text x="407.6" y="115.0">16</text><text x="476.3" y="81.9">64</text><text x="494.6" y="73.0">92</text></g>
+        <polyline points="263.4,166.2 315.5,141.0 346.7,126.0 358.9,120.1 361.3,119.0 362.5,118.4" fill="none" stroke="var(--lk-cobalt)" stroke-width="2.6"/>
+        <g fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width="1"><circle cx="263.4" cy="166.2" r="4.2"/><circle cx="315.5" cy="141.0" r="4.2"/><circle cx="346.7" cy="126.0" r="4.2"/><circle cx="358.9" cy="120.1" r="3.4"/><circle cx="361.3" cy="119.0" r="3.4"/><circle cx="362.5" cy="118.4" r="3.4"/></g>
+        <g font-size="10.5" fill="var(--lk-cobalt-dark)" text-anchor="end"><text x="256.4" y="160.2">B=1</text><text x="308.5" y="135.0">B=4</text><text x="339.7" y="120.0">B=16</text><text x="352.9" y="100.1">B=64, 128, 256</text></g>
+        <rect x="545.5" y="53.1" width="10" height="10" fill="var(--lk-forest)" stroke="var(--lk-paper-light)"/>
+        <text x="550.5" y="78.1" font-size="10.5" fill="var(--lk-forest)" text-anchor="middle">prefill</text>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="84" y="39" width="9" height="9" fill="var(--lk-forest)"/><text x="100" y="47">prefill, T = 1,024 (on the roof)</text><circle cx="88.5" cy="60" r="4" fill="var(--lk-cobalt)"/><text x="100" y="64">decode at t = 1,024, batch B</text><line x1="83" y1="77" x2="94" y2="77" stroke="var(--lk-gold)" stroke-width="1.6" stroke-dasharray="4 2"/><text x="100" y="81">limit at t = 1,024 (cache): 3.77</text><line x1="82" y1="94" x2="95" y2="94" stroke="var(--lk-steel)" stroke-width="4" stroke-dasharray="5 3"/><text x="100" y="98">if the cache were free (ch. 1)</text></g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3</b> &mdash; The two phases on your card&rsquo;s FP32 roofline (spec bandwidth). Prefill of 1,024 tokens sits on the compute roof. Decode at <var>t</var> = 1,024 starts at 0.5 FLOP/B and climbs with the batch along the slope, but the climb flattens towards the dashed limit at 3.8 FLOP/B set by the cache, far short of the ridge at 46; the grey trail shows where the same batches would sit if the cache were free, reaching the ridge near <var>B</var> = 92. Modelled from the counts of sections 2 to 5.</figcaption>
+    </figure>
+
+    <p>There are three ways to move the dashed line, and Parts III and IV are organized around them: make bytes<sub>KV</sub> smaller (fewer KV heads: GQA and MQA; narrower cache formats: FP8 and INT4 caches with per-block scales, chapter 16), make <var>W</var> smaller so the cache matters sooner but the step is shorter (weight quantization, chapter 16), and make the cache bytes that are read actually arrive at full bandwidth (the decode-attention kernels of chapter 15, which is the next section&rsquo;s problem).</p>
+  </section>
+
+  <section id="s7">
+    <h2>7. Attention at decode: the intensity that does not move</h2>
+
+    <p>Inside the decode step, the attention kernel is the one that reads the cache, and its own intensity is fixed by the architecture, not the batch. For one query head against one cached position: 2<var>D</var> FLOPs for the score and 2<var>D</var> for the value, against 2<var>D</var>&middot;<var>s</var> bytes of key and value read: <strong>2 / <var>s</var> FLOP per byte</strong>, 0.5 in FP32, 1 in FP16, 2 in FP8. A batch does not change it (chapter 4&rsquo;s guess: each sequence reads its own cache), and more heads do not either, because each head reads its own keys. The one thing that does is <strong>GQA</strong>: when <var>g</var> = <var>H</var> / <var>H</var><sub>kv</sub> query heads share one KV head, the kernel can load each key and value once and use it for <var>g</var> dot products, so the intensity becomes 2<var>g</var> / <var>s</var>: 4 FLOP/B for Llama 3 in FP16. Still a twenty-third of your card&rsquo;s tensor-core ridge of 92. Decode attention is a GEMV over the cache, memory-bound at any batch, and a kernel for it has one job: read the cache at the full 672 GB/s.</p>
+
+    <p>That job is harder than it sounds, and it is chapter 15. The shape is one query row per (sequence, head) against <var>t</var> keys: at <var>B</var> = 1 and <var>H</var> = 12 there are 12 such rows, one block each in a naive kernel, on a card with 48 SMs; chapter 3&rsquo;s Little&rsquo;s law says 12 blocks cannot keep enough bytes in flight to pull more than a fraction of the bandwidth. The arithmetic of this chapter assumes the cache streams at full speed; the lab&rsquo;s <code>bench-decode</code> will show the engine&rsquo;s simple decode kernel does not, and the gap is what split-K (FlashDecoding) closes.</p>
+
+    <details class="ym">
+      <summary>Your move: switch the engine&rsquo;s cache from FP32 to FP16 while the weights stay FP32. For GPT-2 small at <var>B</var> = 64, <var>t</var> = 1,024, what happens to the step time, from the table in section 5?</summary>
+      <p>The cache bytes halve: 4.83 GB &rarr; 2.42 GB, so the step moves 498 + 2,416 MB = 2.9 GB instead of 5.3: <strong>4.3 ms instead of 7.9</strong>, 1.8 times the throughput, with the weights untouched and no change to any matmul. At <var>B</var> = 1 the same change saves 38 of 573 MB, 7%. The cache format is a decode-throughput lever that only matters at scale, which is why serving engines quantize the cache before they worry about anything else at large batch, and why single-user tools do not bother.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. What the arithmetic misses</h2>
+
+    <p>Every number so far is a roof: FLOPs at peak, bytes at spec bandwidth, nothing else in the step. Real engines land at 60&ndash;85% of these roofs, and the missing 15&ndash;40% has names. Each is a mechanism you have already met, and each can be estimated:</p>
+    <table>
+      <tr><th>What the roof ignores</th><th>Mechanism</th><th>Size, GPT-2 small FP32 on your card</th></tr>
+      <tr><td>Achieved bandwidth</td><td>DRAM never streams at spec (chapter 3, lab 0)</td><td>88% of 672: every memory time +14%</td></tr>
+      <tr><td>The launch floor</td><td>a decode step is 148 kernel launches in chapter 11&rsquo;s engine with the cuBLAS backend (12 per layer, with the cache&rsquo;s <code>kv_append</code> and one decode-attention kernel; plus 4), each with a few microseconds of fixed cost (chapter 4)</td><td>148 &times; 3 &micro;s &asymp; 0.44 ms against a 0.85 ms step at <var>B</var> = 1: the dominant loss for a small model; CUDA graphs cut it several-fold</td></tr>
+      <tr><td>Small-batch inefficiency</td><td>GEMV-shaped kernels at <var>M</var> = 1 to 16 run few blocks (chapter 6&rsquo;s 3-block layer), tail waves (chapter 4), and the decode-attention problem of section 7</td><td>each memory-bound kernel at 50&ndash;90% of the achievable bandwidth rather than 100%</td></tr>
+      <tr><td>Sampling and the CPU</td><td>argmax or top-k over 50,257 logits per sequence; the host loop that launches the step; tokenization</td><td>tens of microseconds per step on the GPU; more on the CPU if it is in the loop</td></tr>
+      <tr><td>Prefill below the roof</td><td>GEMMs at 60&ndash;85% of peak (chapter 8), the naive attention kernel&rsquo;s causal waste and its 2.6 GB of score traffic (chapter 10), small kernels between them</td><td>6.3 ms becomes 11&ndash;17 ms</td></tr>
+      <tr><td>Memory not available for caches</td><td>activations, the logits, workspace, fragmentation, the display</td><td>a few hundred MB to a GB of the 12</td></tr>
+    </table>
+
+    <figure class="lk-fig" role="img" aria-label="Three bars on a 0 to 2 ms scale for one decode step of GPT-2 small in FP32 at B = 1, t = 1,024. Roof: weights 0.74 ms plus cache 0.11 ms, 0.85 ms, 1,170 tokens/s. At 88% bandwidth plus 148 launches at 3 microseconds: 0.97 plus 0.44, 1.41 ms, 708 tokens/s. With a CUDA graph at 0.5 microseconds per launch: 0.97 plus 0.07, 1.04 ms, 958 tokens/s. The compute time, 9 microseconds, is hidden under the memory time.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 660 238" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+        <title>One decode step of GPT-2 small, modelled three ways</title>
+        <defs><pattern id="c13-h4" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-vermilion-soft)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-vermilion)" stroke-width="1.6"/></pattern></defs>
+        <defs><pattern id="c13-fl" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="var(--lk-rule-soft)"/><rect width="2" height="4" fill="var(--lk-steel)"/></pattern></defs>
+        <line x1="160" y1="186" x2="610.0" y2="186" stroke="var(--lk-rule)" stroke-width="1.2"/>
+        <path d="M160.0 186v6M216.2 186v3.5M272.5 186v3.5M328.8 186v3.5M385.0 186v6M441.2 186v3.5M497.5 186v3.5M553.8 186v3.5M610.0 186v6" stroke="var(--lk-rule)"/>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="160.0" y="205">0</text><text x="272.5" y="205">0.5</text><text x="385.0" y="205">1</text><text x="497.5" y="205">1.5</text><text x="610.0" y="205">2</text></g><text x="616.0" y="205" font-size="10.5" fill="var(--lk-ink-soft)">ms</text>
+        <g stroke="var(--lk-rule-soft)" stroke-width=".7"><line x1="216.2" y1="14" x2="216.2" y2="186"/><line x1="272.5" y1="14" x2="272.5" y2="186"/><line x1="328.8" y1="14" x2="328.8" y2="186"/><line x1="385.0" y1="14" x2="385.0" y2="186"/><line x1="441.2" y1="14" x2="441.2" y2="186"/><line x1="497.5" y1="14" x2="497.5" y2="186"/><line x1="553.8" y1="14" x2="553.8" y2="186"/><line x1="610.0" y1="14" x2="610.0" y2="186"/></g>
+        <text x="8" y="34" font-size="11.5" font-weight="600" fill="var(--lk-ink)" font-family="var(--lk-utility)">roof</text>
+        <text x="8" y="49" font-size="10.5" fill="var(--lk-ink-soft)">spec bandwidth</text>
+        <rect x="160.0" y="22" width="166.7" height="22" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".8"/>
+        <rect x="326.7" y="22" width="25.3" height="22" fill="url(#c13-h4)" stroke="var(--lk-vermilion)" stroke-width=".8"/>
+        <rect x="160" y="47" width="2.5" height="5" fill="var(--lk-forest)"/>
+        <text x="359.9" y="37" font-size="11" fill="var(--lk-ink)">0.85 ms</text><text x="359.9" y="51" font-size="10.5" fill="var(--lk-ink-soft)">1,170 tokens/s</text>
+        <text x="8" y="88" font-size="11.5" font-weight="600" fill="var(--lk-ink)" font-family="var(--lk-utility)">88% + floor</text>
+        <text x="8" y="103" font-size="10.5" fill="var(--lk-ink-soft)">lab 0&rsquo;s bandwidth,</text>
+        <text x="8" y="116" font-size="10.5" fill="var(--lk-ink-soft)">148 launches &times; 3 &micro;s</text>
+        <rect x="160.0" y="76" width="189.4" height="22" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".8"/>
+        <rect x="349.4" y="76" width="28.7" height="22" fill="url(#c13-h4)" stroke="var(--lk-vermilion)" stroke-width=".8"/>
+        <rect x="378.1" y="76" width="99.9" height="22" fill="url(#c13-fl)" stroke="var(--lk-steel)" stroke-width=".8"/>
+        <rect x="160" y="101" width="2.5" height="5" fill="var(--lk-forest)"/>
+        <text x="486.0" y="91" font-size="11" fill="var(--lk-ink)">1.41 ms</text><text x="486.0" y="105" font-size="10.5" fill="var(--lk-ink-soft)">708 tokens/s</text>
+        <text x="8" y="142" font-size="11.5" font-weight="600" fill="var(--lk-ink)" font-family="var(--lk-utility)">+ CUDA graph</text>
+        <text x="8" y="157" font-size="10.5" fill="var(--lk-ink-soft)">the same,</text>
+        <text x="8" y="170" font-size="10.5" fill="var(--lk-ink-soft)">148 &times; 0.5 &micro;s</text>
+        <rect x="160.0" y="130" width="189.4" height="22" fill="var(--lk-vermilion)" stroke="var(--lk-vermilion)" stroke-width=".8"/>
+        <rect x="349.4" y="130" width="28.7" height="22" fill="url(#c13-h4)" stroke="var(--lk-vermilion)" stroke-width=".8"/>
+        <rect x="378.1" y="130" width="16.6" height="22" fill="url(#c13-fl)" stroke="var(--lk-steel)" stroke-width=".8"/>
+        <rect x="160" y="155" width="2.5" height="5" fill="var(--lk-forest)"/>
+        <text x="402.8" y="145" font-size="11" fill="var(--lk-ink)">1.04 ms</text><text x="402.8" y="159" font-size="10.5" fill="var(--lk-ink-soft)">958 tokens/s</text>
+        <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="8" y="219" width="16" height="10" fill="var(--lk-vermilion)"/><text x="30" y="228">weight bytes</text><rect x="120" y="219" width="16" height="10" fill="url(#c13-h4)" stroke="var(--lk-vermilion)" stroke-width=".8"/><text x="142" y="228">cache bytes</text><rect x="226" y="219" width="16" height="10" fill="url(#c13-fl)" stroke="var(--lk-steel)" stroke-width=".8"/><text x="248" y="228">launch floor</text><rect x="338" y="222" width="16" height="5" fill="var(--lk-forest)"/><text x="360" y="228">compute (9 &micro;s at the roof), hidden under the memory time</text></g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 4</b> &mdash; One decode step of GPT-2 small in FP32 at <var>B</var> = 1, <var>t</var> = 1,024, three ways: the roof (weights and cache at spec bandwidth, 0.85 ms); the roof at lab 0&rsquo;s achieved bandwidth plus the launch floor of 148 kernels at 3 &micro;s (about 1.4 ms); and the same with the step captured in a CUDA graph (the floor shrinks to the GPU&rsquo;s own per-kernel cost). Bars are modelled; chapter 11&rsquo;s <code>profile</code> mode and lab 12 replace them with measurements.</figcaption>
+    </figure>
+
+    <p>Two lessons from the table. For a <strong>small model</strong>, the overheads are the story: a 0.44 ms launch floor against 0.85 ms of real work means that without fusion or graphs, GPT-2 small on your card is overhead-bound at <var>B</var> = 1, as chapter 1 suspected, and no kernel improvement shows until the floor is lowered. For a <strong>large model</strong>, the floor grows only with the layer count (about 1.2 ms for Llama-3-8B&rsquo;s 32 layers) against a step of 5 to 25 ms, a fifth at most and a few percent once captured in a graph, and the losses that remain are kernel efficiency: achieved bandwidth in the GEMVs and in decode attention. That is why the serving literature&rsquo;s 60&ndash;85% is quoted for large models, and why the same engines look much worse on small ones.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. The whiteboard estimate, and the calculator</h2>
+
+    <p>The question as an interviewer asks it: <em>&ldquo;Llama-3-8B in FP16 on one H100. 64 concurrent users, 2,048-token prompts, 256 output tokens each. What are TTFT, time per token, and throughput, and does it fit?&rdquo;</em> The answer, in the order you now have the pieces:</p>
+    <ol>
+      <li><strong>Weights.</strong> 8.03 G &times; 2 B = 16.1 GB. The H100 has 80 GB and 3.35 TB/s, 989 TFLOPS dense FP16.</li>
+      <li><strong>Cache.</strong> 131 KB per token; each sequence ends at 2,304 tokens: 302 MB. 64 of them: 19.3 GB. Total 35.4 GB plus activations: <strong>fits</strong>, with room for about 3 times the batch at this length.</li>
+      <li><strong>Prefill.</strong> 2,048 &times; 14.0 G (the blocks; the head runs once, 1 GFLOP) + 2 &times; 32 &times; 2,048&sup2; &times; 4,096 = 28.6 + 1.1 = 29.7 TFLOP per prompt: <strong>30 ms</strong> at peak, call it 38&ndash;46 ms as TTFT at 65&ndash;80% efficiency if prompts are prefilled one at a time; 64 together would be 1.9 s, so an engine chunks and interleaves them.</li>
+      <li><strong>Decode step.</strong> Bytes: 16.1 GB + 64 &times; 2,048 &times; 131 KB = 16.1 + 17.2 = 33.3 GB at the start, 35.4 GB at the end: 9.9 to 10.6 ms at spec bandwidth. FLOPs: 64 &times; (15.0 G + 1.07 G) = 1.03 TFLOP, 1.0 ms. Memory-bound by 10 to 1. <strong>TPOT &asymp; 10 ms</strong>, more like 12&ndash;15 ms in practice.</li>
+      <li><strong>Throughput.</strong> 64 tokens per 10 ms: 6,400 tokens/s at the roof, <strong>4,000&ndash;5,500 tokens/s</strong> at 60&ndash;85%. Per user, 65&ndash;100 tokens/s.</li>
+      <li><strong>Where it could go.</strong> The cache is already more bytes than the weights at this batch and length, so doubling the batch adds about 50% throughput for a 50% worse TPOT; an FP8 cache would take 8.6 GB off every step; and the tensor cores are idle 90% of the time, which is the argument for speculative decoding (Part IV), which spends those FLOPs on guesses.</li>
+    </ol>
+
+    <p>The calculator does these steps for five models and two cards, and is the full version of chapter 1&rsquo;s <code>w-decode</code>: it adds the cache, the attention FLOPs, the prefill, the memory check and the efficiency and launch-floor corrections of section 8. Set it to the interview question first, then to your engine (GPT-2 small, RTX 5070, FP32, <var>B</var> = 1, 896 and 128, which fill its 1,024 positions), and keep that second readout: lab 12 measures it.</p>
+
+    <div id="w-calc" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: in the calculator, set Llama-3.2-1B in FP16 on your card and raise the batch from 1 to 64 at a 4,096-token context. Before you do: which column will stop the batch first, memory or time?</summary>
+      <p>Memory. The weights are 2.5 GB, so 9.5 GB is left for caches at 32.8 KB per token: 9.5 GB / (4,096 &times; 32.8 KB) &asymp; <strong>70 sequences</strong>, and the calculator refuses <var>B</var> = 71 before the step time has done anything dramatic (at <var>B</var> = 64 the step is 16 ms, 3,900 tokens/s, still memory-bound at 17 FLOP/B against a ridge of 92). On a 12 GB card the KV cache is the budget, not the time, and it is the first thing a serving engine runs out of.</p>
+    </details>
+  </section>
+
+  <section id="s10">
+    <h2>10. Lab 12: predicted against measured</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 12</span><span class="lab-title">The arithmetic as a script, and the engine&rsquo;s prefill and decode against it</span><span class="idx-meta">~45 min · <code>mlsys/labs/lab12-inference-arithmetic/</code> + <code>labs/gpt2/</code></span></div>
+      <div class="lab-body">
+        <p>Two halves. <code>arith.py</code> (Python standard library only) is the calculator as a script: it prints, for a model, GPU, formats, batch, prompt and output length, every quantity of sections 2 to 9, as the roof and at a chosen efficiency, and it is the reference the widget must agree with. The second half runs chapter 11&rsquo;s engine in its two benchmark modes and puts the measurements next to the predictions.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/lab12-inference-arithmetic
+python3 arith.py --model gpt2-small --gpu rtx5070 --dtype fp32 --kv fp32 --batch 1 --prompt 896 --out 128
+python3 arith.py --model llama-3-8b --gpu h100 --dtype fp16 --batch 64 --prompt 2048 --out 256   # section 9
+make bench-prefill    # the engine: TTFT at T = 128, 256, 512, 1024, B = 1 and 4; predicted beside measured
+make bench-decode     # TPOT at t = 128 .. 1024 and B = 1, 4, 16, 64; bytes, effective GB/s, cache memory
+make compare          # reads both outputs and prints achieved fractions of the roofs</code></pre>
+        <table>
+          <tr><th>Step</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>bench-prefill</code>: TTFT at <var>T</var> = 1,024, <var>B</var> = 1</td><td>6.3 ms at the roof; measured 11&ndash;17 ms (FP32 cuBLAS at 60&ndash;85% of peak, naive attention computing the masked half and moving 2.6 GB of scores, small kernels between)</td></tr>
+          <tr><td><code>bench-prefill</code>: TTFT vs <var>T</var></td><td>nearly linear in <var>T</var> from 256 up; below that, the launch floor flattens it</td></tr>
+          <tr><td><code>bench-decode</code>: TPOT at <var>B</var> = 1, <var>t</var> = 1,024</td><td>0.85 ms at the roof, 0.97 at lab 0&rsquo;s bandwidth; measured 1.3&ndash;2 ms without graphs (the launch floor), the engine&rsquo;s <code>profile</code> mode saying where</td></tr>
+          <tr><td><code>bench-decode</code>: TPOT vs <var>t</var> at <var>B</var> = 1</td><td>flat to within 10% from 128 to 1,024 (the cache is 15% of the bytes at most)</td></tr>
+          <tr><td><code>bench-decode</code>: TPOT vs <var>B</var> at <var>t</var> = 1,024</td><td>section 5&rsquo;s column, plus a constant; the cache overtakes the weights near <var>B</var> = 7; effective GB/s of the attention kernel well below 590 at small <var>B</var> (section 7: chapter 15&rsquo;s problem)</td></tr>
+          <tr><td><code>bench-decode</code>: memory at <var>B</var> = 64</td><td>4.8 GB of cache reported (<code>cache_mb</code>, and the <code>cudaMemGetInfo</code> line), plus the 0.5 GB of weights: section 5&rsquo;s 5.3 GB</td></tr>
+          <tr><td><code>compare</code>: achieved fraction of the roof</td><td>prefill 35&ndash;60%; decode 40&ndash;70% at <var>B</var> = 1 rising with <var>B</var>, and the attention kernel the weakest line</td></tr>
+        </table>
+        <p>Paste back the two <code>arith.py</code> outputs, the <code>PASTE:</code> lines of both bench modes and the <code>compare</code> table. The predicted numbers in this chapter are roofs and ranges; your measurements replace them, and the decode-attention line is the number chapter 15 starts from.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Capture one decode step in a CUDA graph (chapter 5&rsquo;s <code>cudaStreamBeginCapture</code> around the engine&rsquo;s step at a fixed <var>B</var> and <var>t</var>, with the token-id copies left outside it as in chapter 11&rsquo;s stretch) and rerun <code>bench-decode</code> at <var>B</var> = 1. Predict first, from figure 4, how much of the gap to the roof closes. Then run <code>arith.py</code> with <code>--kv fp16</code> on GPT-2 small and compute at which batch the FP16 cache would pay for the conversion kernels it needs.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why is prefill compute-bound and decode memory-bound, for the same model on the same card?</summary>
+        <p>Prefill runs every linear layer with <var>M</var> = prompt-length rows, so each weight read from DRAM is used that many times: intensity in the hundreds, above the ridge. Decode runs them with one row per sequence, each weight used once per sequence per trip, and additionally reads every sequence&rsquo;s private cache: intensity of order 1, far below the ridge.</p>
+      </details>
+      <details>
+        <summary>What does a decode step read that a prefill of the same number of tokens does not, and what does it write that prefill writes too?</summary>
+        <p>It reads the entire KV cache of every sequence in the batch (prefill reads none: it has nothing cached yet). Both write one cache entry per processed token. A decode step also reads all the weights, as does prefill, but per token produced rather than per prompt.</p>
+      </details>
+      <details>
+        <summary>A batch of <var>B</var> sequences at context <var>t</var>. Write the bytes of one decode step and say which term batching amortizes and which it does not.</summary>
+        <p><var>W</var> + <var>B</var>&middot;<var>t</var>&middot;bytes<sub>KV</sub>. The weights <var>W</var> are read once for the whole batch, so their cost per token falls as 1/<var>B</var>; the caches are private, one per sequence, so their cost per token is constant in <var>B</var> and grows with <var>t</var>.</p>
+      </details>
+      <details>
+        <summary>Why does the cache-versus-weights crossover depend on <var>B</var>&middot;<var>t</var> rather than on <var>B</var> alone?</summary>
+        <p>Because the cache bytes read per step are the total number of cached tokens across the batch times the bytes per token; a batch of many short sequences and a batch of few long ones read the same cache bytes. The crossover is at <var>B</var>&middot;<var>t</var> = <var>W</var> / bytes<sub>KV</sub>.</p>
+      </details>
+      <details>
+        <summary>Chapter 1 said compute catches up with memory at a batch of about 92 for an FP16 model. Under what condition is that still true once the KV cache is counted, and what is the condition in words?</summary>
+        <p>Only if one sequence&rsquo;s cache, <var>t</var>&middot;bytes<sub>KV</sub>, is smaller than the weight work per sequence expressed in bytes, 2<var>N</var><sub>mm</sub>&middot;(bandwidth / peak); otherwise the intensity has a ceiling below the ridge and decode stays memory-bound at any batch. In words: the context must be short enough that each sequence adds less private-byte cost than it adds FLOPs-worth of shared work.</p>
+      </details>
+      <details>
+        <summary>What is the arithmetic intensity of decode attention, and why does batching not raise it while GQA does?</summary>
+        <p>Per cached position and head: 4<var>D</var> FLOPs for 2<var>D</var>&middot;<var>s</var> bytes, i.e. 2/<var>s</var> FLOP per byte. Batching adds sequences that each read their own cache, so FLOPs and bytes grow together. GQA lets <var>g</var> query heads use one loaded key and value, so FLOPs grow by <var>g</var> for the same bytes.</p>
+      </details>
+      <details>
+        <summary>Two engines run the same model at <var>B</var> = 1; one is a small model, one is large. Why does the launch floor hurt them so differently?</summary>
+        <p>The floor is a fixed cost per step (kernel count times a few microseconds), independent of the model&rsquo;s width and growing only with its layer count, while the useful memory time grows with the weights. For a small model the floor is comparable to the whole step; for a large model it is a much smaller fraction. Fusion and CUDA graphs matter most where the model is small or the step is short.</p>
+      </details>
+      <details>
+        <summary>What decides the largest batch an engine can serve at a given context length, and why is it reserved by slot rather than by token in the engine of chapter 11?</summary>
+        <p>(VRAM &minus; weights &minus; activations) / (<var>T</var><sub>max</sub> &times; bytes<sub>KV</sub>). The contract allocates each sequence&rsquo;s cache as a contiguous [<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>] strip, so the memory is taken when the slot is assigned, whatever the sequence&rsquo;s actual length. Paged caches (chapter 17) allocate by block of tokens instead.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>kipply, <a href="https://kipp.ly/transformer-inference-arithmetic/"><em>Transformer Inference Arithmetic</em></a> (2022): the FLOPs-per-token and KV-cache-per-token counts, the memory-versus-compute framing of decode, and the batch-size crossover; this chapter follows its structure with GPT-2 and Llama 3 as the worked models.</li>
+      <li>R. Pope et al., <a href="https://arxiv.org/abs/2211.05102"><em>Efficiently Scaling Transformer Inference</em></a> (2022): the roofline treatment of prefill and decode, the latency-throughput trade, and the cost of the cache at large batch, for data-center configurations.</li>
+      <li>A. Radford et al., <em>Language Models are Unsupervised Multitask Learners</em> (2019) and Meta, <em>The Llama 3 Herd of Models</em> (2024): the configurations behind the presets (layers, width, heads, KV heads, MLP width, vocabulary). Parameter counts here are recomputed from them and match the published totals.</li>
+      <li>J. Ainslie et al., <em>GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints</em> (2023); N. Shazeer, <em>Fast Transformer Decoding: One Write-Head is All You Need</em> (2019): why fewer KV heads, and what it does to the cache and to attention&rsquo;s intensity.</li>
+      <li>W. Kwon et al., <em>Efficient Memory Management for Large Language Model Serving with PagedAttention</em> (2023): cache memory as the batch limit, and the paged allocation that chapter 17 previews; also the source of the prefix-sharing observation in section 3.</li>
+      <li>NVIDIA, <em>RTX Blackwell GPU Architecture</em> whitepaper (2025) and <em>H100 Tensor Core GPU Architecture</em> whitepaper (2022): the peak numbers of the two GPU presets.</li>
+      <li>H. He, <em>Making Deep Learning Go Brrrr From First Principles</em> (2022): compute, memory and overhead as the three regimes, which section 8 applies to one decode step.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-12-triton.html">&larr; Ch. 12 — Triton</a>
+      <a href="index.html">Index</a>
+      <a href="cap-14-flashattention.html">Ch. 14 — FlashAttention 1 &rarr; 2 &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part III · Chapter 13 · counts recomputed from the published model configurations; every time in this chapter is a roof or a stated range until lab 12 replaces it with your engine&rsquo;s measurement, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch13.js"></script>
+</body>
+</html>

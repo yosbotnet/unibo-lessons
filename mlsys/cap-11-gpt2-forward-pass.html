@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ch. 11 — Lab: a GPT-2 forward pass in CUDA · MLSYS</title>
+<link rel="stylesheet" href="assets/lesson-kit.css">
+<link rel="stylesheet" href="assets/highlight-github.min.css">
+<link rel="stylesheet" href="assets/mlsys.css">
+<link rel="stylesheet" href="assets/ch11.css">
+<link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="theme-color" content="#1546B8">
+<script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+</head>
+<body class="lk">
+  <nav class="lk-chnav" aria-label="Chapter navigation">
+    <a href="cap-10-transformer-gpu-view.html">&larr; Ch. 10 — The transformer from the GPU&rsquo;s view</a>
+    <a href="index.html">Index</a>
+    <a href="cap-12-triton.html">Ch. 12 — Triton &rarr;</a>
+  </nav>
+
+  <header class="lk-header">
+    <div class="lk-kicker">Part II — Kernels that matter · Chapter 11</div>
+    <h1>Lab: a GPT-2 forward pass in CUDA</h1>
+    <div class="lk-meta"><span>~55 min read</span><span>2 interactive widgets</span><span>2 plates</span><span>lab 10 · ~90 min on your GPU</span></div>
+  </header>
+
+  <div class="lk-overview">
+    <h2>The chapter in one paragraph</h2>
+    <p>This is the milestone of Part II: GPT-2 small runs on your card, in CUDA you can read line by line, and its logits match PyTorch&rsquo;s. You already have every kernel it needs (lab 5&rsquo;s elementwise ops and layernorm, lab 7&rsquo;s GEMM with chapter 9&rsquo;s epilogues, lab 9&rsquo;s attention). What is left is everything <em>around</em> the kernels, and it is what separates a kernel collection from an inference engine: <strong>getting the weights onto the GPU</strong> in the layout the kernels want, fast; <strong>planning memory once</strong>, so that nothing is allocated while the model runs; and <strong>proving the output right</strong>, with a test that needs no files and a verification against the real model. Then generation: picking the next token on the GPU, which is where atomics, privatization and scans enter the course, and a first honest look at where a forward pass spends its time: about 150 kernel launches per token, a launch floor that competes with the DRAM time, and a cost per generated token that grows with the prompt because this chapter&rsquo;s engine recomputes everything. The KV cache that fixes it is already in the code; chapter 13 measures what it buys.</p>
+  </div>
+
+  <div class="lk-toc">
+    <h3>In this chapter</h3>
+    <ol>
+      <li><a href="#s1">What &ldquo;matches PyTorch&rdquo; means</a></li>
+      <li><a href="#s2">The weights: from safetensors to one flat file</a></li>
+      <li><a href="#s3">Getting 500 MB onto the GPU</a></li>
+      <li><a href="#s4">Memory planning: one arena, no allocation in the loop</a></li>
+      <li><a href="#s5">The forward pass as code</a></li>
+      <li><a href="#s6">Checking it, and debugging a mismatch</a></li>
+      <li><a href="#s7">Generation: greedy, temperature, top-<var>k</var> on the GPU</a></li>
+      <li><a href="#s8">Where the time goes</a></li>
+      <li><a href="#s9">Predictions</a></li>
+      <li><a href="#s10">Lab 10: the engine</a></li>
+      <li><a href="#quiz">Check your understanding</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <h2>1. What &ldquo;matches PyTorch&rdquo; means</h2>
+
+    <p>The engine&rsquo;s claim is that for a given prompt it produces the same logits (the 50,257 scores for the next token at every position) as Hugging Face&rsquo;s GPT-2 in PyTorch. &ldquo;The same&rdquo; needs a definition, because bitwise equality is impossible and you should know why before you chase it. Both programs compute in FP32. Both compute the same mathematical function. But a dot product of 768 terms has a result that depends on the order the terms are added (chapter 5&rsquo;s non-associativity), cuBLAS and PyTorch&rsquo;s kernels tile the sums differently, <code>tanhf</code> and <code>expf</code> have several implementations with different last bits, and the differences compound across 12 layers. The result: two correct FP32 forward passes disagree in the fourth or fifth significant digit. GPT-2&rsquo;s logits are of order 100 in magnitude, so a disagreement of 10<sup>&minus;3</sup> to 10<sup>&minus;2</sup> per logit is what correct code looks like, and a disagreement of 1 is a bug.</p>
+    <p>So the engine has two tiers of checking, each with a definition of &ldquo;matches&rdquo;:</p>
+    <table>
+      <tr><th>Mode</th><th>Reference</th><th>Passes when</th><th>Needs</th></tr>
+      <tr><td><code>test</code></td><td>a double-precision CPU forward (<code>cpu_ref.h</code>) over random small models: <var>L</var> = 1&ndash;2, <var>C</var> = 64&ndash;128, random weights</td><td>every logit within 2&times;10<sup>&minus;4</sup> absolute plus 2&times;10<sup>&minus;4</sup> relative; both matmul backends; the full forward, prefill + decode through the cache, and greedy generation with and without the cache giving identical tokens</td><td>nothing: no files, no Python. This is what cudasim runs</td></tr>
+      <tr><td><code>verify</code></td><td>logits from PyTorch (or a numpy forward) for the real weights and a fixed prompt, written by <code>reference.py</code></td><td>max |logit error| below 10<sup>&minus;2</sup> and the top-1 token agreeing at every position, for the full forward and for prefill + decode</td><td><code>gpt2_124M.bin</code> and <code>ref_logits.bin</code></td></tr>
+    </table>
+    <p>The double-precision reference is the stricter of the two: its own rounding is 10<sup>8</sup> times finer than FP32, so every deviation it reports is the GPU&rsquo;s, and a tolerance of 2&times;10<sup>&minus;4</sup> on random models with activations of order one is tight enough to catch a wrong epilogue, a masked entry off by one, or a transposed weight, while leaving room for FP32 rounding across a few layers. The real-weight check is looser because its reference is itself FP32, but it tests the one thing the random models cannot: that the file export, the tensor order and the tied embedding are right for the actual checkpoint.</p>
+
+    <details class="ym">
+      <summary>Your move: the test tolerance is 2&times;10<sup>&minus;4</sup>. Why not 10<sup>&minus;6</sup>, and why would 10<sup>&minus;2</sup> be dangerous?</summary>
+      <p>FP32 has 24 bits of mantissa, a relative spacing of 1.2&times;10<sup>&minus;7</sup> (chapter 6), and a sum of 768 terms in a different order can move the result by tens of ulp; after a residual stream accumulates twelve layers of that, 10<sup>&minus;6</sup> would fail correct code on rounding alone. At 10<sup>&minus;2</sup> on activations of order one, a bug that is off by a percent slips through: a GELU with the wrong constant, a layernorm &epsilon; of 10<sup>&minus;3</sup> instead of 10<sup>&minus;5</sup>, a softmax missing a single masked entry out of a hundred. The tolerance is set just above what rounding produces, so that anything structural shows. The lab prints the maximum error of every check; after a run, you know your rounding floor and can tighten it.</p>
+    </details>
+  </section>
+
+  <section id="s2">
+    <h2>2. The weights: from safetensors to one flat file</h2>
+
+    <p>Hugging Face ships GPT-2 small as <code>model.safetensors</code>: 548 MB, a format chosen for being trivial to read. The file is an 8-byte little-endian length <var>N</var>, then <var>N</var> bytes of JSON mapping each tensor name to its dtype, shape and byte range (<code>data_offsets</code>, relative to the end of the header), then the raw bytes, row-major. No parsing of floats is needed: a tensor is a byte range, and copying it is <code>f.seek(); f.read()</code>. The engine does not read safetensors directly, because C++ has no JSON and because the kernels want one thing: <strong>every tensor in one buffer, in the order the forward pass reads them</strong>. So <code>export.py</code> (Python standard library only) rewrites it once:</p>
+<pre><code class="language-text">gpt2_124M.bin = header (256 int32: magic 20261022, version 1, L, C, H, V, T_max, float count lo, hi; rest zero)
+              + wte [50257, 768]                          154.4 MB   embedding, and the LM head (tied)
+              + wpe [1024, 768]                             3.1 MB   position embedding
+              + for each of 12 layers (28.35 MB each):
+                  ln1_g, ln1_b [768]
+                  qkv_w [768, 2304], qkv_b [2304]          HF attn.c_attn: columns q | k | v
+                  prj_w [768, 768],  prj_b [768]           HF attn.c_proj
+                  ln2_g, ln2_b [768]
+                  fc_w  [768, 3072], fc_b [3072]           HF mlp.c_fc
+                  fc2_w [3072, 768], fc2_b [768]           HF mlp.c_proj
+              + lnf_g, lnf_b [768]
+total 1 KB + 497.8 MB = 124,439,808 floats</code></pre>
+    <p>Three facts decide the layout. <strong>Conv1D is [in, out].</strong> HF&rsquo;s GPT-2 stores every linear weight as the original checkpoint did, [<var>K</var>, <var>N</var>], so <var>y</var> = <var>x</var><var>W</var> + <var>b</var> needs no transpose and the bytes go into the file untouched (chapter 6 warned that this is the cheapest bug to avoid; it is avoided by copying, not by converting). <strong>Layer-major order.</strong> One layer&rsquo;s twelve tensors are contiguous, which is what a decode step streams: layer 0&rsquo;s 28 MB, then layer 1&rsquo;s, a sequential read of the whole file per token. <strong>Tied weights.</strong> The checkpoint has no LM head matrix; <code>wte</code> serves twice, so the file has it once and the engine keeps one pointer to it for both uses.</p>
+
+    <figure class="lk-fig" role="img" aria-label="The weight file gpt2_124M.bin drawn as a ruler 640 pixels long for 497.8 MB. After a 1 KB header, the token embedding wte takes the first 154.4 MB, a third of the file; the position embedding wpe is a 3.1 MB sliver; then 12 layer stripes of 28.35 MB each, L0 to L11, and a 6 KB final layernorm at the end. Above the ruler, the kernels that read each part: the embedding gather reads wte and wpe, each layer's GEMMs read their stripe, and an arrow from the end returns to wte: the LM head reads the embedding table again. Below, layer 6 zoomed: qkv_w 7.08 MB, prj_w 2.36 MB, fc_w 9.44 MB and fc2_w 9.44 MB, with the eight small vectors, 40 KB in all, as thin ticks between them.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 700 226" style="width:700px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+      <title>gpt2_124M.bin as a ruler of bytes</title>
+      <text x="30.0" y="12" font-size="9.5" fill="var(--lk-ink-soft)">layer 6 zoomed 18&times;: bytes 327.6 to 356.0 MB. Every layer is the same 28.35 MB in the same order.</text>
+      <text x="30.0" y="27" font-size="9.5" fill="var(--lk-vermilion)">vermilion ticks: its 8 vectors (2 layernorms&rsquo; gamma and beta, 4 biases), 40 KB, 0.14% of the layer</text>
+      <rect x="30.14" y="50" width="159.77" height="30" fill="var(--lk-cobalt)"/>
+      <text x="110.03" y="62.5" font-size="10" text-anchor="middle" fill="var(--lk-paper-light)">qkv_w [768, 2304]</text>
+      <text x="110.03" y="75" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">7.08 MB</text>
+      <text x="110.03" y="42" font-size="9.5" text-anchor="middle" fill="var(--lk-forest)">QKV GEMM, EPI_BIAS</text>
+      <rect x="190.12" y="50" width="53.26" height="30" fill="var(--lk-cobalt)"/>
+      <text x="216.75" y="62.5" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">prj_w</text>
+      <text x="216.75" y="75" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">2.36 MB</text>
+      <text x="216.75" y="42" font-size="9.5" text-anchor="middle" fill="var(--lk-forest)">proj GEMM</text>
+      <rect x="243.59" y="50" width="213.03" height="30" fill="var(--lk-cobalt)"/>
+      <text x="350.1" y="62.5" font-size="10" text-anchor="middle" fill="var(--lk-paper-light)">fc_w [768, 3072]</text>
+      <text x="350.1" y="75" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">9.44 MB</text>
+      <text x="350.1" y="42" font-size="9.5" text-anchor="middle" fill="var(--lk-forest)">fc GEMM, EPI_BIAS_GELU</text>
+      <rect x="456.9" y="50" width="213.03" height="30" fill="var(--lk-cobalt)"/>
+      <text x="563.41" y="62.5" font-size="10" text-anchor="middle" fill="var(--lk-paper-light)">fc2_w [3072, 768]</text>
+      <text x="563.41" y="75" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">9.44 MB</text>
+      <text x="563.41" y="42" font-size="9.5" text-anchor="middle" fill="var(--lk-forest)">fc2 GEMM, EPI_BIAS_RESIDUAL</text>
+      <g fill="var(--lk-vermilion)"><rect x="29" y="47" width="2.2" height="36"/><rect x="188.91" y="47" width="2.2" height="36"/><rect x="242.38" y="47" width="2.2" height="36"/><rect x="455.62" y="47" width="2.2" height="36"/><rect x="668.8" y="47" width="2.2" height="36"/></g>
+      <path d="M30.0 83L451.27 98V120M670.0 83L487.73 98V120" fill="none" stroke="var(--lk-ink-soft)"/>
+      <g stroke="var(--lk-ink)"><line x1="30" y1="114" x2="30" y2="120"/><line x1="94.29" y1="117" x2="94.29" y2="120"/><line x1="158.58" y1="114" x2="158.58" y2="120"/><line x1="222.86" y1="117" x2="222.86" y2="120"/><line x1="287.15" y1="114" x2="287.15" y2="120"/><line x1="351.44" y1="117" x2="351.44" y2="120"/><line x1="415.73" y1="114" x2="415.73" y2="120"/><line x1="480.02" y1="117" x2="480.02" y2="120"/><line x1="544.3" y1="114" x2="544.3" y2="120"/><line x1="608.59" y1="117" x2="608.59" y2="120"/></g>
+      <g font-size="9.5" fill="var(--lk-ink-soft)" text-anchor="middle"><text x="30" y="110">0 MB</text><text x="158.58" y="110">100</text><text x="287.15" y="110">200</text><text x="415.73" y="110">300</text><text x="544.3" y="110">400</text></g>
+      <line x1="230.53" y1="114" x2="230.53" y2="120" stroke="var(--lk-cobalt-dark)"/>
+      <text x="230.53" y="110" font-size="9.5" text-anchor="middle" fill="var(--lk-cobalt-dark)">wpe 3.1 MB</text>
+      <line x1="671" y1="114" x2="671" y2="120" stroke="var(--lk-ink)"/>
+      <text x="672" y="110" font-size="9.5" text-anchor="end" fill="var(--lk-ink)">lnf; end: 497.8 MB</text>
+      <rect x="27" y="120" width="2.6" height="32" fill="var(--lk-ink)"/>
+      <rect x="30.0" y="120" width="198.51" height="32" fill="var(--lk-cobalt)"/>
+      <rect x="228.51" y="120" width="4.04" height="32" fill="var(--lk-cobalt-dark)"/>
+      <g font-size="10" text-anchor="middle" fill="var(--lk-paper-light)"><text x="129.25" y="133">wte [50257, 768]</text><text x="129.25" y="146">154.4 MB, at byte 1 KB</text></g>
+      <rect x="232.55" y="120" width="36.45" height="32" fill="var(--lk-cobalt-dark)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="269.01" y="120" width="36.45" height="32" fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="305.46" y="120" width="36.45" height="32" fill="var(--lk-cobalt-dark)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="341.91" y="120" width="36.45" height="32" fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="378.37" y="120" width="36.45" height="32" fill="var(--lk-cobalt-dark)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="414.82" y="120" width="36.45" height="32" fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="451.27" y="120" width="36.45" height="32" fill="var(--lk-cobalt-dark)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="487.73" y="120" width="36.45" height="32" fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="524.18" y="120" width="36.45" height="32" fill="var(--lk-cobalt-dark)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="560.63" y="120" width="36.45" height="32" fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="597.09" y="120" width="36.45" height="32" fill="var(--lk-cobalt-dark)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <rect x="633.54" y="120" width="36.45" height="32" fill="var(--lk-cobalt)" stroke="var(--lk-paper-light)" stroke-width=".6"/>
+      <g font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)"><text x="250.78" y="139.5">L0</text><text x="287.23" y="139.5">L1</text><text x="323.69" y="139.5">L2</text><text x="360.14" y="139.5">L3</text><text x="396.59" y="139.5">L4</text><text x="433.05" y="139.5">L5</text><text x="469.5" y="139.5">L6</text><text x="505.95" y="139.5">L7</text><text x="542.41" y="139.5">L8</text><text x="578.86" y="139.5">L9</text><text x="615.31" y="139.5">L10</text><text x="651.77" y="139.5">L11</text></g>
+      <rect x="670" y="120" width="2" height="32" fill="var(--lk-ink)"/>
+      <rect x="451.27" y="120" width="36.45" height="32" fill="none" stroke="var(--lk-ink)" stroke-width="1.5"/>
+      <line x1="28.2" y1="152" x2="28.2" y2="158" stroke="var(--lk-ink)"/>
+      <g font-size="9.5" fill="var(--lk-ink)"><text x="20" y="169">header</text><text x="20" y="180">256 int32</text></g>
+      <rect x="128" y="164" width="92" height="18" rx="2" fill="var(--lk-forest)"/>
+      <text x="174" y="176.5" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">embed (gather)</text>
+      <rect x="236" y="164" width="434" height="18" rx="2" fill="var(--lk-forest)"/>
+      <text x="453" y="176.5" font-size="9.5" text-anchor="middle" fill="var(--lk-paper-light)">every layer: 2 layernorms, 4 GEMMs, attention</text>
+      <g stroke="var(--lk-forest)" fill="var(--lk-forest)" stroke-width="1.2"><line x1="160" y1="164" x2="160" y2="156.5"/><path d="M157 157L163 157L160 152Z" stroke="none"/><path d="M220 173.0H230.53V156.5" fill="none"/><path d="M227.53 157L233.53 157L230.53 152Z" stroke="none"/><line x1="250.78" y1="164" x2="250.78" y2="156.5"/><path d="M247.78 157L253.78 157L250.78 152Z" stroke="none"/><line x1="287.23" y1="164" x2="287.23" y2="156.5"/><path d="M284.23 157L290.23 157L287.23 152Z" stroke="none"/><line x1="323.69" y1="164" x2="323.69" y2="156.5"/><path d="M320.69 157L326.69 157L323.69 152Z" stroke="none"/><line x1="360.14" y1="164" x2="360.14" y2="156.5"/><path d="M357.14 157L363.14 157L360.14 152Z" stroke="none"/><line x1="396.59" y1="164" x2="396.59" y2="156.5"/><path d="M393.59 157L399.59 157L396.59 152Z" stroke="none"/><line x1="433.05" y1="164" x2="433.05" y2="156.5"/><path d="M430.05 157L436.05 157L433.05 152Z" stroke="none"/><line x1="469.5" y1="164" x2="469.5" y2="156.5"/><path d="M466.5 157L472.5 157L469.5 152Z" stroke="none"/><line x1="505.95" y1="164" x2="505.95" y2="156.5"/><path d="M502.95 157L508.95 157L505.95 152Z" stroke="none"/><line x1="542.41" y1="164" x2="542.41" y2="156.5"/><path d="M539.41 157L545.41 157L542.41 152Z" stroke="none"/><line x1="578.86" y1="164" x2="578.86" y2="156.5"/><path d="M575.86 157L581.86 157L578.86 152Z" stroke="none"/><line x1="615.31" y1="164" x2="615.31" y2="156.5"/><path d="M612.31 157L618.31 157L615.31 152Z" stroke="none"/><line x1="651.77" y1="164" x2="651.77" y2="156.5"/><path d="M648.77 157L654.77 157L651.77 152Z" stroke="none"/><path d="M655 182V196H80V156.5" fill="none" stroke-width="1.4"/><path d="M75.5 158L84.5 158L80 152Z" stroke="none"/></g>
+      <text x="368" y="210" font-size="10" text-anchor="middle" fill="var(--lk-forest)">LM head: logits = x wte^T, an NT GEMM that reads the first stripe again</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1</b> &mdash; The weight file as a ruler of bytes, to scale. The embedding table is a third of the file; each layer is a 28 MB stripe whose four matrices (cobalt) are 99.9% of it and whose eight vectors (the layernorm parameters and biases, too thin to draw at this scale) are the rest. Below the ruler, which kernel reads each stripe: the gather at the start, the GEMMs in the layers, the NT GEMM of the LM head at the end reading the first stripe again.</figcaption>
+    </figure>
+
+    <p><code>export.py</code> also writes <code>gpt2_tokens.bin</code>: for every token id, the bytes it stands for, so that <code>generate</code> can print text. The real tokenizer (byte-level BPE with its merge rules) is only needed to turn <em>text into ids</em>, and for that <code>prompt.py</code> uses <code>tiktoken</code> if installed; the engine itself never tokenizes. It reads ids from a file, which keeps the C++ side free of string handling and the correctness story about numbers only.</p>
+
+    <details class="ym">
+      <summary>Your move: <code>export.py</code> copies byte ranges without looking at the values. What goes wrong if the checkpoint were stored in BF16 (as most modern models are), and what would the export have to do?</summary>
+      <p>The byte count would be half what the header claims and every float the engine reads would be two BF16 values glued together: garbage from the first kernel. The export would have to widen each BF16 to FP32, which is cheap (BF16 is FP32&rsquo;s top 16 bits, chapter 6: shift left by 16), but it is a conversion of 124M values in Python, so it should be done with <code>array</code> or <code>struct</code> on whole tensors, not value by value. The dtype field in the safetensors header is there for exactly this check, and <code>export.py</code> refuses anything but <code>F32</code> rather than guess.</p>
+    </details>
+  </section>
+
+  <section id="s3">
+    <h2>3. Getting 500 MB onto the GPU</h2>
+
+    <p>Half a gigabyte has to travel from the disk, through the CPU&rsquo;s memory, over PCIe, into the card&rsquo;s DRAM. Every program so far did this with one <code>cudaMemcpy</code> (chapter 2) and never timed it; an engine that loads a model in several seconds when it could take one is a bad engine, and the reasons it can be slow are worth knowing. Three concepts, defined here because the engine is the first program in the course that needs them:</p>
+    <ul>
+      <li><strong>Pageable and pinned memory.</strong> Ordinary host memory from <code>malloc</code> is <em>pageable</em>: the operating system may move a page or swap it out at any moment, so its physical address is not stable. The copy engine (interlude 5b: a DMA unit that moves data over PCIe without an SM) needs stable physical addresses, so <code>cudaMemcpy</code> from pageable memory secretly copies the data first into a driver-owned <em>pinned</em> buffer (page-locked, never moved), chunk by chunk, and then DMAs from there: two copies, and the CPU does the first. <code>cudaMallocHost</code> gives you pinned memory directly, and a copy from it is one DMA at PCIe speed.</li>
+      <li><strong>Streams.</strong> A stream is a queue of GPU work (kernels, copies) executed in order. Work in different streams may overlap, and a copy in one stream can run while the CPU is busy with something else. Chapter 5 used a stream to capture a graph; here one is used so that <code>cudaMemcpyAsync</code> returns immediately.</li>
+      <li><strong>Events.</strong> A marker recorded into a stream; <code>cudaEventSynchronize</code> waits until the stream has passed it. The labs&rsquo; timer (<code>time_gpu</code> in <code>labs/common/bench.h</code>) uses two of them; here one event per buffer says &ldquo;the copy out of this buffer is done, you may refill it&rdquo;.</li>
+    </ul>
+    <p>The engine loads the weights three ways and times each (<code>bench</code>), so that the numbers below are yours:</p>
+<pre><code class="language-cpp">// gpt2.cu, load_weights: the overlap mode. Two pinned 32 MB buffers; while chunk i crosses PCIe,
+// the CPU reads chunk i + 1 from the file into the other buffer.
+const size_t CH = 32u &lt;&lt; 20;
+char* buf[2]; cudaEvent_t done[2]; cudaStream_t s;
+cudaStreamCreate(&amp;s);
+for (int i = 0; i &lt; 2; ++i) { cudaMallocHost(&amp;buf[i], CH); cudaEventCreate(&amp;done[i]); }
+for (size_t off = 0, i = 0; off &lt; bytes; off += CH, ++i) {
+    const int k = i % 2;
+    const size_t n = std::min(CH, bytes - off);
+    if (i &gt;= 2) cudaEventSynchronize(done[k]);              // the previous copy has left buf[k]
+    fread(buf[k], 1, n, f);                                  // CPU: disk (or page cache) -&gt; pinned buffer
+    cudaMemcpyAsync(dev + off, buf[k], n, cudaMemcpyHostToDevice, s);   // DMA: pinned -&gt; GPU, no waiting
+    cudaEventRecord(done[k], s);
+}
+cudaStreamSynchronize(s);</code></pre>
+    <p>It is chapter 8&rsquo;s double buffer, one level up: two buffers, a producer (the file read) and a consumer (the DMA), an event instead of a barrier. The numbers to expect, as ranges: a pageable <code>cudaMemcpy</code> of 500 MB at 5&ndash;12 GB/s (the hidden staging copy is CPU work); pinned at 20&ndash;50 GB/s on a PCIe 5.0 &times;16 slot (64 GB/s theoretical, each direction); and the overlap mode at the speed of the slower side, which once the file is in the OS page cache is the <code>fread</code> itself, a memory copy of a few GB/s per core. The first run after a reboot reads from the NVMe at 3&ndash;7 GB/s whatever you do. The lesson is not the 50 ms saved on GPT-2; it is that a 70B model is 140 GB in FP16, and engines load it with exactly this loop, with direct I/O and several threads on the producer side.</p>
+
+    <details class="ym">
+      <summary>Your move: in the overlap loop, the <code>fread</code> and the <code>cudaMemcpyAsync</code> of the <em>same</em> chunk are not overlapped, only adjacent chunks are. What is the total time for <var>n</var> chunks in terms of the read time <var>r</var> and the copy time <var>c</var> per chunk, and when does buffer count matter?</summary>
+      <p>About <var>r</var> + max(<var>r</var>, <var>c</var>) &middot; (<var>n</var> &minus; 1) + <var>c</var>, if the slower side never waits: the first read and the last copy are exposed, everything else hides behind the slower of the two. With two buffers that holds as long as each side&rsquo;s time per chunk is steady; if reads are bursty (page-cache hits and disk misses mixed), the copy engine idles during a slow read and a third buffer would absorb it, which is chapter 8&rsquo;s &ldquo;number of stages&rdquo; argument again. The chunk size trades the exposed ends (smaller is better) against per-call overhead (a few microseconds per <code>cudaMemcpyAsync</code>; 32 MB is far above it).</p>
+    </details>
+  </section>
+
+  <section id="s4">
+    <h2>4. Memory planning: one arena, no allocation in the loop</h2>
+
+    <p>A forward pass needs buffers for its activations: the stream <var>x</var>, the normalized copy, the QKV output, the attention output, the 3,072-wide MLP activation, the logits, attention&rsquo;s scratch, and with a cache, the cache. A framework allocates them as it goes and frees them after; an engine <strong>plans them once</strong>. <code>cudaMalloc</code> is slow (tens to hundreds of microseconds, sometimes a device synchronization), fragments the heap when sizes vary, and makes pointers change between runs, which breaks the one optimization that removes the launch floor: a captured CUDA graph replays fixed pointers (chapter 5). So the engine takes the largest batch <var>B</var><sub>max</sub> and context <var>T</var><sub>max</sub> it will serve, computes every buffer&rsquo;s size for them, does <em>one</em> <code>cudaMalloc</code>, and carves it:</p>
+<pre><code class="language-cpp">// gpt2.cu, engine_init(E, weights, cfg, opts, Bmax, Tmax, logit_rows, Tpre = Tmax): one arena, carved
+// into buffers. Tmax sizes the cache; Tpre, the most new tokens per pass, sizes the activations
+// (a decode-only run passes Tpre = 1).
+const size_t rows = (size_t)Bmax * Tpre;
+size_t act   = rows * C * 3 + rows * 3 * C + rows * 4 * C + (size_t)Bmax * C;   // x, ln, att | qkv | fc | last
+size_t scr   = max(Tpre &gt; 1 ? prefill-&gt;scratch(Bmax, Tpre, H, D) : 0, decode-&gt;scratch(Bmax, Tmax, H, D)) / 4 + 1;
+size_t cache = use_cache ? 2 * (size_t)L * Bmax * Tmax * C : 0;                 // k and v, per layer
+size_t lg    = (size_t)logit_rows * V;
+cudaMalloc(&amp;arena, /* act + scr + cache + lg, each buffer padded */ ...);
+float* q = arena;
+auto pad  = [](size_t n) { return (n + 63) / 64 * 64; };    // 256-byte boundaries, as cudaMalloc gives:
+auto take = [&amp;](size_t n) { float* r = q; q += pad(n); return r; };   // float4 loads need aligned rows
+x = take(rows * C); ln = take(rows * C); att = take(rows * C);
+qkv = take(rows * 3 * C); fc = take(rows * 4 * C); last = take(Bmax * C);
+scratch = take(scr); logits = take(lg);
+for (int l = 0; l &lt; L; ++l) { k_cache[l] = take(Bmax * Tmax * C); v_cache[l] = take(Bmax * Tmax * C); }</code></pre>
+    <p>Buffers are reused across layers (one <code>qkv</code>, one <code>fc</code>, written twelve times per pass) because a layer&rsquo;s intermediates are dead once the residual stream has absorbed them. Only the stream <var>x</var> and the cache carry state between layers and steps. At <var>B</var> = 1, <var>T</var><sub>max</sub> = 1,024 the plan is:</p>
+    <table>
+      <tr><th>Buffer</th><th>Shape</th><th>Bytes</th><th>Grows with</th></tr>
+      <tr><td><code>x</code>, <code>ln</code>, <code>att</code></td><td>[<var>B</var>&middot;<var>T</var>, 768] each</td><td>3.1 MB each</td><td><var>B</var>&middot;<var>T</var></td></tr>
+      <tr><td><code>qkv</code></td><td>[<var>B</var>&middot;<var>T</var>, 2,304]</td><td>9.4 MB</td><td><var>B</var>&middot;<var>T</var></td></tr>
+      <tr><td><code>fc</code></td><td>[<var>B</var>&middot;<var>T</var>, 3,072]</td><td>12.6 MB</td><td><var>B</var>&middot;<var>T</var></td></tr>
+      <tr><td>attention scratch (naive: <var>S</var>)</td><td>[<var>B</var>&middot;<var>H</var>, <var>T</var>, <var>T</var>]</td><td>50.3 MB</td><td><var>B</var>&middot;<var>T</var><sup>2</sup></td></tr>
+      <tr><td>KV cache, 12 layers</td><td>2 &times; 12 &times; [<var>B</var>, <var>H</var>, <var>T</var><sub>max</sub>, 64]</td><td>75.5 MB</td><td><var>B</var>&middot;<var>T</var><sub>max</sub></td></tr>
+      <tr><td>logits (verify: all rows; generate: one per sequence)</td><td>[<var>B</var>&middot;<var>T</var>, 50,257] or [<var>B</var>, 50,257]</td><td>206 MB or 0.2 MB</td><td><var>B</var>&middot;<var>T</var> or <var>B</var></td></tr>
+      <tr><td>weights (for scale)</td><td></td><td>498 MB (+154 MB for the own backend&rsquo;s transposed LM head)</td><td></td></tr>
+    </table>
+    <p>Move the sliders and watch which line wins: at <var>B</var> = 1 the weights dominate; raise <var>T</var> and the scratch&rsquo;s <var>T</var><sup>2</sup> takes over; raise <var>B</var> at full context and the cache does. The three regimes are chapters 10, 14 and 13 respectively, as a memory bill.</p>
+
+    <div id="w-memory-plan" class="w"></div>
+
+    <details class="ym">
+      <summary>Your move: the engine serves <var>B</var> = 8 sequences at <var>T</var><sub>max</sub> = 1,024 with the naive attention. Which of scratch, cache and weights is the largest, and does it fit in 12 GB?</summary>
+      <p>Scratch: 8 &times; 12 &times; 1,024<sup>2</sup> &times; 4 B = 403 MB. Cache: 2 &times; 12 &times; 8 &times; 1,024 &times; 768 &times; 4 B = 604 MB. Weights: 498 MB. The cache wins, and all of it together, with the activations (8&times; the table&rsquo;s 31 MB) and the logits, is under 2 GB: it fits ten times over. The limit is not memory at this model size; it is the <var>T</var><sup>2</sup> scratch at long contexts (chapter 10&rsquo;s Your move) and, for the models that matter in Part IV, the cache: Llama-3-8B at FP16 has 131 KB of cache per token, and chapter 13 shows where that runs out.</p>
+    </details>
+  </section>
+
+  <section id="s5">
+    <h2>5. The forward pass as code</h2>
+
+    <p>Chapter 10&rsquo;s kernel list, as a loop. This is the engine&rsquo;s <code>forward()</code> with the profiling hooks and the checks removed; <var>M</var> = <var>B</var>&middot;<var>T</var><sub>new</sub> rows, <code>pos0</code> the position of the first new token (0 without a cache):</p>
+<pre><code class="language-cpp">// gpt2.cu, forward(): B sequences of T_new tokens starting at pos0. use_cache = false in this chapter.
+embed&lt;&lt;&lt;M, 256&gt;&gt;&gt;(tok_d, p.wte, p.wpe, x, T_new, pos0, C);                      // x = wte[tok] + wpe[pos]
+for (int l = 0; l &lt; L; ++l) {
+    const LayerParams&amp; w = p.layer[l];
+    layernorm&lt;&lt;&lt;M, LN_THREADS&gt;&gt;&gt;(x, w.ln1_g, w.ln1_b, ln, C);
+    linear(be, EPI_BIAS,          ln,  w.qkv_w, w.qkv_b, qkv, M, 3 * C, C);     // qkv = ln W + b
+    if (use_cache) kv_append(qkv, k_cache[l], v_cache[l], B, T_new, pos0, H, D, Tmax, 0);
+    if (decode) dec-&gt;run(qkv, k_cache[l], v_cache[l], att, B, H, D, pos0 + 1, Tmax, scratch, 0);
+    else        pre-&gt;run(qkv, att, B, T_new, H, D, scratch, 0);                  // lab 9's attention
+    linear(be, EPI_BIAS_RESIDUAL, att, w.prj_w, w.prj_b, x,   M, C, C);         // x += att W + b
+    layernorm&lt;&lt;&lt;M, LN_THREADS&gt;&gt;&gt;(x, w.ln2_g, w.ln2_b, ln, C);
+    linear(be, EPI_BIAS_GELU,     ln,  w.fc_w,  w.fc_b,  fc,  M, 4 * C, C);     // fc = gelu(ln W + b)
+    linear(be, EPI_BIAS_RESIDUAL, fc,  w.fc2_w, w.fc2_b, x,   M, C, 4 * C);     // x += fc W + b
+}
+layernorm&lt;&lt;&lt;M, LN_THREADS&gt;&gt;&gt;(x, p.lnf_g, p.lnf_b, ln, C);
+if (all_logits) lm_head(be, ln, p.wte, wteT, logits, M, V, C);                  // verify: every position
+else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_head(be, last, p.wte, wteT, logits, B, V, C); }</code></pre>
+    <p>Three design choices in it carry the chapter&rsquo;s weight:</p>
+    <ul>
+      <li><strong>One <code>linear()</code> entry point with an epilogue enum</strong> (<code>EPI_BIAS</code>, <code>EPI_BIAS_GELU</code>, <code>EPI_BIAS_RESIDUAL</code>) and two backends selected by <code>--linear cublas|own</code>. The own backend is lab 7&rsquo;s v7 with chapter 9&rsquo;s epilogue fused into its stores, plus a GEMV-shaped kernel for <var>M</var> &le; 8 (decode: a 128&times;128 tile with one live row and six blocks for <var>N</var> = 768 would starve 48 SMs, like chapter 6&rsquo;s 3-block layer). The cuBLAS backend runs <code>cublasSgemm</code> and then one fused elementwise kernel for the passengers; for the residual it uses &beta; = 1, so that <var>x</var> += &hellip; costs nothing extra. The two backends are the engine&rsquo;s built-in experiment: same model, your kernels against NVIDIA&rsquo;s, one flag.</li>
+      <li><strong>Attention through a table.</strong> <code>pre</code> and <code>dec</code> are entries of <code>PREFILL_IMPLS</code> and <code>DECODE_IMPLS</code> in <code>attention.cuh</code>, chosen by <code>--attn-prefill naive</code> and <code>--attn-decode simple</code>, each with the contract&rsquo;s signature and a scratch-size function the memory plan calls. Two more lines are already registered, <code>flash</code> (chapter 14, its kernel from lab 13) and <code>split</code> (chapter 15, from lab 14); nothing else in the engine changes.</li>
+      <li><strong>The LM head is the one NT GEMM.</strong> <code>logits = ln @ wte^T</code> with <code>wte</code> stored [50,257, 768]. cuBLAS takes the transpose as a flag; the own backend, whose kernel only reads a row-major [<var>K</var>, <var>N</var>] B operand, multiplies by a transposed copy <code>wteT</code> made once at load time with lab 2&rsquo;s tiled transpose: 154 MB of memory for not writing a second kernel layout, a trade the comment in the code states so that you can disagree with it.</li>
+    </ul>
+    <p>Note what is <em>not</em> in the loop: no allocation, no host synchronization, no copy except the token ids at the start (an ordinary <code>cudaMemcpy</code> of a few bytes, which does synchronize: a known cost, counted in section 8). The whole pass is a sequence of launches into the default stream, which is exactly the shape a CUDA graph can capture later.</p>
+
+    <details class="ym">
+      <summary>Your move: <code>EPI_BIAS_RESIDUAL</code> updates <var>x</var> in place: the GEMM reads <code>att</code> and writes <code>x</code> += result. The MLP&rsquo;s second GEMM does the same with <code>fc</code>. What would go wrong if an epilogue read and wrote the <em>same</em> buffer as its A operand, and why is that not a problem for the residual?</summary>
+      <p>A GEMM reads tiles of A at every <var>k</var> step and writes C once at the end; if C aliased A, a block that finished early would overwrite rows of A that other blocks (other <var>k</var> ranges of other tiles) still need to read: a write-after-read race across blocks, undetectable by a test on small shapes where all blocks fit in one wave. The residual is safe because <var>x</var> is neither GEMM&rsquo;s A operand: the attention projection reads <code>att</code>, the MLP projection reads <code>fc</code>, and <var>x</var> is only touched in the epilogue, each element by exactly one thread, read and then written. <code>linear()</code>&rsquo;s comment says &ldquo;x must not alias out&rdquo; for this reason.</p>
+    </details>
+  </section>
+
+  <section id="s6">
+    <h2>6. Checking it, and debugging a mismatch</h2>
+
+    <p><code>./gpt2 test</code> runs section 1&rsquo;s first tier: a handful of random configurations (small <var>L</var>, <var>C</var>, <var>H</var>, <var>V</var>, several <var>B</var> and <var>T</var>, including odd <var>T</var>), each through both backends, each checked three ways: the full forward against the CPU reference at every position; a prefill of half the tokens into the cache followed by one-token decode steps, against the same reference (so the cache path is proven now even though this chapter does not use it for speed); and, for the single-sequence configuration, greedy generation with and without the cache, which must produce identical token ids, because the two paths compute the same function. Then the sampling kernels against a CPU definition on rows of 50,257 random logits. It needs no files and runs on cudasim, which is how it was checked before it ever met a GPU.</p>
+    <p><code>./gpt2 verify</code> runs the second tier on the real weights: <code>reference.py</code> writes <code>ref_logits.bin</code> (a header, the prompt&rsquo;s token ids, and <var>T</var> &times; 50,257 FP32 logits, from <code>transformers</code> if it is installed and from a plain numpy forward if not). Neither path reads the engine&rsquo;s file: the numpy forward reads <code>model.safetensors</code> itself, so a mistake in <code>export.py</code> cannot hide by being made on both sides. The engine prints the maximum logit error and the top-1 agreement for the full forward and for prefill + decode.</p>
+
+    <h3>When it does not match</h3>
+    <p>It will not, the first time; a forward pass has a dozen places to be wrong by a little. The method is <strong>bisection by layer</strong>: both the reference and the engine compute the residual stream <var>x</var> after every layer, so dump both (<code>python3 reference.py --dump L</code> writes <var>x</var> after layer <var>L</var> to <code>dump_L_ref.bin</code>; <code>./gpt2 verify --dump L</code> writes its own to <code>dump_L.bin</code> and prints the largest difference) and find the first layer where they diverge. If layer 0&rsquo;s output is already wrong, the bug is in the embedding, the first layernorm, the QKV GEMM, attention or the two epilogues, and you dump those intermediates next. The classic faults and their fingerprints:</p>
+    <table>
+      <tr><th>Fingerprint</th><th>Usual cause</th></tr>
+      <tr><td>wrong from the embedding on, everything garbage</td><td>tensor order or offsets in the export; header count mismatch (the loader checks it)</td></tr>
+      <tr><td>every position wrong by a lot, first layer</td><td>a transposed weight: cuBLAS flags or leading dimensions in the row-major trick</td></tr>
+      <tr><td>position 0 right, later positions wrong</td><td>attention: head column offsets (<var>h</var>&middot;<var>D</var> inside each third), the key third at +<var>C</var>, the scale, or the mask off by one (query sees <var>j</var> &le; <var>i</var>)</td></tr>
+      <tr><td>wrong by a few percent everywhere</td><td>exact GELU instead of the tanh form (HF&rsquo;s <code>gelu_new</code>), or &epsilon; in the layernorm</td></tr>
+      <tr><td>full forward right, decode wrong</td><td>position embedding not offset by <code>pos0</code>, or the cache written at the wrong position (<code>pos0 + t</code>)</td></tr>
+      <tr><td>right up to the last layernorm, logits wrong</td><td>the LM head&rsquo;s transpose, or reading a separate head matrix that the checkpoint does not have</td></tr>
+      <tr><td>right at small <var>T</var>, NaN at large <var>T</var></td><td>a softmax without the max subtraction, or scratch sized for the wrong <var>T</var></td></tr>
+    </table>
+
+    <details class="ym">
+      <summary>Your move: your engine passes <code>test</code> on every random configuration but <code>verify</code> fails with top-1 agreement at no position and errors of order 10. Which parts of the engine does <code>test</code> exonerate, and where do you look first?</summary>
+      <p><code>test</code> builds its weights in memory in the engine&rsquo;s own order, so it proves the kernels, the loop, the epilogues, the attention and the cache path. It never touches <code>export.py</code>, the file header, or the assumption that HF&rsquo;s tensors are [in, out] and in the expected order. Everything wrong is therefore between the checkpoint and the flat file, or in <code>reference.py</code>&rsquo;s own prompt: check that the ids in <code>ref_logits.bin</code> are the ids the engine read, then dump the embedding row of token 0 from both sides. Random-model tests are blind to file-format bugs by construction, which is why the lab&rsquo;s end-to-end test writes a tiny fake safetensors file and runs it through export, reference and verify.</p>
+    </details>
+  </section>
+
+  <section id="s7">
+    <h2>7. Generation: greedy, temperature, top-<var>k</var> on the GPU</h2>
+
+    <p>A forward pass ends with one row of 50,257 logits per sequence. <strong>Greedy</strong> decoding takes the largest; <strong>sampling</strong> draws a token with probability softmax(logits / <var>temperature</var>), where a temperature below 1 sharpens the distribution and above 1 flattens it; <strong>top-<var>k</var></strong> sampling first keeps only the <var>k</var> largest logits (40 is the usual default), so that the long tail of implausible tokens can never be drawn. All three are small jobs, 200 KB of logits per sequence, and a first engine would copy the row to the CPU and do them there. Two reasons not to: at <var>B</var> = 64 that is 13 MB per step over PCIe, and worse, it is a round trip per token that puts the CPU on the critical path and prevents the whole step from ever becoming one graph. So the engine picks the token on the GPU, one block of 1,024 threads per row, and the host only fetches the chosen ids. This is where three tools enter the course, each defined by the job it does here.</p>
+
+    <h3>Greedy: a max with its index</h3>
+    <p>Chapter 5&rsquo;s reduction, carrying a pair (value, index) and breaking ties toward the smaller index so that the result is deterministic: each thread scans its stride of the row, warps merge by shuffles, warp leaders merge through shared memory. <code>argmax_rows</code> in <code>sample.cuh</code>, forty lines.</p>
+
+    <h3>Top-<var>k</var> without sorting: radix select</h3>
+    <p>Sorting 50,257 values to keep 40 is wasteful. What top-<var>k</var> really needs is a <strong>threshold</strong>: the value of the <var>k</var>-th largest logit, after which &ldquo;keep the top <var>k</var>&rdquo; is the elementwise test <var>x</var> &ge; threshold. <strong>Radix select</strong> finds that value in a fixed number of passes by looking at the numbers one byte at a time, from the most significant byte down:</p>
+    <ol>
+      <li>Map each float to a 32-bit unsigned <strong>key</strong> that sorts the same way as the float (flip the sign bit for positives, flip all bits for negatives; <code>float_key</code> in the code). Now &ldquo;larger logit&rdquo; is &ldquo;larger unsigned integer&rdquo; and bytes can be compared independently.</li>
+      <li>Build a <strong>histogram</strong> of the top byte over all candidates: 256 bins, how many keys have each value there.</li>
+      <li>Walk the bins from 255 downwards, accumulating counts, until the running total reaches <var>k</var>. That bin is the top byte of the <var>k</var>-th largest key, and the number still to find inside it is <var>k</var> minus the count of the bins above.</li>
+      <li>Repeat for the next byte, counting only the keys whose top byte matches. Four passes fix all 32 bits, and the key is the threshold.</li>
+    </ol>
+    <p>A toy with 4-bit keys and 2-bit digits, <var>k</var> = 3, keys {13, 7, 12, 2, 9, 14, 5, 11}:</p>
+    <table>
+      <tr><th>Pass</th><th>Candidates</th><th>Histogram of the digit (bin: count)</th><th>Walk from the top</th><th>Found</th></tr>
+      <tr><td>1 (top 2 bits)</td><td>all 8</td><td>11: 3 &nbsp; 10: 2 &nbsp; 01: 2 &nbsp; 00: 1</td><td>bin 11 alone holds 3 &ge; <var>k</var> = 3</td><td>prefix 11, rank 3 inside it</td></tr>
+      <tr><td>2 (low 2 bits)</td><td>keys with prefix 11: {13, 12, 14}</td><td>11: 0 &nbsp; 10: 1 &nbsp; 01: 1 &nbsp; 00: 1</td><td>10 &rarr; 1, 01 &rarr; 2, 00 &rarr; 3 &ge; 3</td><td>threshold 1100 = 12</td></tr>
+    </table>
+    <p>Keys &ge; 12 are {14, 13, 12}: the top three, no sort. The real kernel does this over 50,257 keys with 8-bit digits, and each pass is two things you have met in simpler forms:</p>
+    <ul>
+      <li>The histogram is built with <strong>atomics</strong>: an atomic add is a read-modify-write that the hardware performs as one indivisible operation, so that two threads incrementing the same bin at the same moment both count (chapter 5&rsquo;s <code>atomicAdd</code> into the final sum was one per block; here it is one per element). Atomics on global memory are executed in the L2 (interlude 5b) and serialize per address: 50,257 increments spread over 256 addresses, from 1,024 threads, would queue there. So the histogram is <strong>privatized</strong>: each block builds its own in shared memory, where atomics are per-SM and far cheaper, and only the finished histogram is read. Chapter 5&rsquo;s per-block partial sums were privatization too; this is the general form, and PMPP&rsquo;s name for it.</li>
+      <li>The walk from the top is a <strong>scan</strong> (a prefix sum): thread <var>t</var> holds bin 255 &minus; <var>t</var>, and after an inclusive scan it knows how many keys lie in its bin and all bins above it. The one thread whose exclusive prefix is below <var>k</var> and inclusive prefix at or above it has found the digit. A scan over 1,024 values is a warp scan with <code>__shfl_up_sync</code> (lane <var>l</var> adds lane <var>l</var> &minus; 1&rsquo;s running sum, then <var>l</var> &minus; 2, <var>l</var> &minus; 4, &hellip;: five steps), one value per warp into shared memory, a scan of those 32, and each lane adds its warp&rsquo;s offset: chapter 5&rsquo;s reduction tree, run so that every position keeps its own partial result.</li>
+    </ul>
+    <p>Step through the select, then the sample:</p>
+    <div id="w-radix-select" class="w"></div>
+
+    <h3>Drawing the token</h3>
+    <p>With the threshold known, the block computes the row max (for a stable softmax, chapter 9), then each thread sums e<sup>(<var>x</var> &minus; max)/<var>temp</var></sup> over a contiguous chunk of about 50 logits, skipping those below the threshold. A scan of the 1,024 chunk sums turns them into a cumulative distribution in index order: thread <var>t</var> knows the probability mass before its chunk and after it. The host supplies one uniform random number <var>u</var> per row (so that a run is reproducible from its seed); the thread whose interval contains <var>u</var> &middot; total walks its chunk once more and stops at the token where the running sum passes the target. One block, one row, five barriers, no sort and no copy to the host but the chosen id.</p>
+
+    <details class="ym">
+      <summary>Your move: the histogram has 256 bins and 1,024 threads add into it. Logits of a trained model cluster: most of the 50,257 keys share the same top byte. What does that do to the first pass, and what would a library do about it?</summary>
+      <p>Shared-memory atomics on the same address serialize, so when nearly every key lands in two or three bins, the first pass runs at the rate of one increment per address per clock or worse, not 1,024 per clock: a few hundred microseconds instead of a few. The second pass is better (keys spread over the second byte) and the third and fourth better still. A library privatizes one more level: each warp keeps its own 256 bins (or uses <code>__match_any_sync</code> to count equal keys within the warp first), and the per-warp histograms are summed once; it may also start from the second byte when the first is known to be uniform. Timing the four passes separately would show the skew (the lab does not; a stretch); at <var>B</var> = 1 the whole kernel is still far below the launch floor of the forward pass that precedes it.</p>
+    </details>
+  </section>
+
+  <section id="s8">
+    <h2>8. Where the time goes</h2>
+
+    <p><code>./gpt2 bench</code> times one forward pass at <var>T</var> = 64 to 1,024 (last-token logits, no cache), then runs it with an event around every operation and sums the time per class: embedding, layernorm, the four linear layers, attention, the LM head. <code>make nsys</code> records <code>profile</code>, a prefill of 256 tokens and 16 generated tokens, and prints the kernel table. Three things to look for, each a prediction until your trace replaces it.</p>
+    <p><strong>The launch count.</strong> Count the loop of section 5 with the cuBLAS backend: per layer, a layernorm, a GEMM plus its bias kernel, three attention kernels, a GEMM plus bias, a layernorm, a GEMM plus bias-GELU, a GEMM plus bias: 13 launches, 156 for twelve layers, plus the embedding, the final layernorm, the gather and the head: <strong>about 160 launches per forward pass</strong>, and about 110 with the own backend, whose epilogues are inside the GEMMs. Each launch costs a few microseconds of CPU and GPU time whatever it does (chapter 4&rsquo;s floor; chapter 5&rsquo;s graphs demo measured yours). At <var>T</var> = 1,024 the pass is 15&ndash;25 ms of real kernel time and the floor is a few percent; at <var>T</var> = 64 the kernels are tiny and the floor is a third or more of the pass. Decode with a cache, chapter 13&rsquo;s regime, is the <var>T</var> = 1 version of this: nearly the same launches (148 with cuBLAS: one attention kernel instead of three, plus the cache append) for 1 ms of DRAM time.</p>
+    <p><strong>The shape of the timeline.</strong> On the nsys row for the GPU, a prefill is a dense band; the generated tokens follow as one band each, with two gaps per token: the synchronous copy of the ids in and the fetch of the chosen id out, each a round trip through the CPU. Between kernels inside a band there should be no white space at <var>T</var> = 256 and visible white space at <var>T</var> = 1, where the GPU finishes each kernel before the CPU has issued the next.</p>
+    <p><strong>Generation without a cache.</strong> Each generated token reruns the forward pass over the whole sequence, so the time per token grows linearly with the length so far, and generating <var>n</var> tokens after a prompt of <var>T</var> costs about <var>n</var>(<var>T</var> + <var>n</var>/2) token-forwards: 64 tokens after a 256-token prompt is 18,000 token-forwards, where the cached engine does 256 + 64. <code>generate</code> prints the time to the first token and the time per token after it; with <code>--no-cache</code> the second number is tens of milliseconds and rising, with the cache it should be close to the 1 ms of chapter 10&rsquo;s decode column plus the launch floor. Chapter 13 takes that comparison apart.</p>
+
+    <figure class="lk-fig" role="img" aria-label="Two stylized timelines, each with a CPU row of launch calls and a GPU row of kernels. Left, without a cache: each generated token is a dense band of about 160 kernels over the whole sequence, and the bands lengthen from 257 to 258 to 259 tokens; the CPU issues all its launches early in each band and then waits. Right, with the KV cache: each decode step is a short band of about 150 tiny kernels with idle gaps between them, each kernel just after its launch call. In both, vermilion blocks before and after each band are the host round trips: the token ids copied in and the chosen token copied out.">
+      <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
+      <svg viewBox="0 0 700 196" style="width:700px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
+      <title>Generation without and with the KV cache, as a timeline</title>
+      <text x="14" y="14" font-size="10.5" font-weight="700" fill="var(--lk-ink)">no cache: every token reruns the sequence</text>
+      <g font-size="9.5" fill="var(--lk-ink-soft)"><text x="14" y="55">CPU</text><text x="14" y="86">GPU</text></g>
+      <rect x="46" y="44" width="292" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+      <rect x="46" y="70" width="292" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+      <g fill="var(--lk-forest)"><rect x="56" y="72" width="1.31" height="20"/><rect x="58.11" y="72" width="0.93" height="20"/><rect x="59.85" y="72" width="1.77" height="20"/><rect x="62.42" y="72" width="1.08" height="20"/><rect x="64.3" y="72" width="0.83" height="20"/><rect x="65.93" y="72" width="1.79" height="20"/><rect x="68.52" y="72" width="3.27" height="20"/><rect x="72.59" y="72" width="2.93" height="20"/><rect x="76.32" y="72" width="2.83" height="20"/><rect x="79.96" y="72" width="1.27" height="20"/><rect x="82.03" y="72" width="2.18" height="20"/><rect x="85.01" y="72" width="1.43" height="20"/><rect x="87.24" y="72" width="1.13" height="20"/><rect x="89.17" y="72" width="0.94" height="20"/><rect x="90.91" y="72" width="1.25" height="20"/><rect x="92.96" y="72" width="3.3" height="20"/><rect x="97.06" y="72" width="3.02" height="20"/><rect x="100.88" y="72" width="2.95" height="20"/><rect x="104.63" y="72" width="2.93" height="20"/><rect x="108.37" y="72" width="1.19" height="20"/><rect x="110.36" y="72" width="1.53" height="20"/><rect x="112.69" y="72" width="2.44" height="20"/><rect x="115.92" y="72" width="2.74" height="20"/><rect x="119.46" y="72" width="3.09" height="20"/><rect x="123.35" y="72" width="3.16" height="20"/><rect x="127.31" y="72" width="0.89" height="20"/><rect x="145" y="72" width="2.54" height="20"/><rect x="148.34" y="72" width="2.74" height="20"/><rect x="151.88" y="72" width="2.24" height="20"/><rect x="154.92" y="72" width="1.25" height="20"/><rect x="156.97" y="72" width="2.14" height="20"/><rect x="159.91" y="72" width="0.98" height="20"/><rect x="161.69" y="72" width="3.53" height="20"/><rect x="166.03" y="72" width="3.33" height="20"/><rect x="170.15" y="72" width="2.37" height="20"/><rect x="173.32" y="72" width="1.62" height="20"/><rect x="175.74" y="72" width="3.46" height="20"/><rect x="179.99" y="72" width="2.44" height="20"/><rect x="183.23" y="72" width="3.38" height="20"/><rect x="187.41" y="72" width="3.27" height="20"/><rect x="191.48" y="72" width="2.25" height="20"/><rect x="194.53" y="72" width="1.96" height="20"/><rect x="197.29" y="72" width="2.52" height="20"/><rect x="200.61" y="72" width="2.01" height="20"/><rect x="203.42" y="72" width="1.2" height="20"/><rect x="205.42" y="72" width="1.63" height="20"/><rect x="207.85" y="72" width="3.17" height="20"/><rect x="211.82" y="72" width="0.84" height="20"/><rect x="213.46" y="72" width="0.85" height="20"/><rect x="215.11" y="72" width="2.6" height="20"/><rect x="218.52" y="72" width="1.56" height="20"/><rect x="220.87" y="72" width="2.33" height="20"/><rect x="240" y="72" width="2.5" height="20"/><rect x="243.3" y="72" width="2.07" height="20"/><rect x="246.17" y="72" width="4.29" height="20"/><rect x="251.27" y="72" width="1.57" height="20"/><rect x="253.63" y="72" width="2.31" height="20"/><rect x="256.74" y="72" width="1.59" height="20"/><rect x="259.13" y="72" width="3.05" height="20"/><rect x="262.98" y="72" width="1.84" height="20"/><rect x="265.62" y="72" width="2.11" height="20"/><rect x="268.53" y="72" width="3.44" height="20"/><rect x="272.78" y="72" width="1.99" height="20"/><rect x="275.57" y="72" width="2.8" height="20"/><rect x="279.17" y="72" width="3.98" height="20"/><rect x="283.95" y="72" width="1.24" height="20"/><rect x="285.99" y="72" width="1.11" height="20"/><rect x="287.9" y="72" width="1.68" height="20"/><rect x="290.38" y="72" width="3.5" height="20"/><rect x="294.68" y="72" width="2.99" height="20"/><rect x="298.48" y="72" width="1.71" height="20"/><rect x="300.99" y="72" width="2.03" height="20"/><rect x="303.81" y="72" width="1.5" height="20"/><rect x="306.12" y="72" width="2.46" height="20"/><rect x="309.38" y="72" width="1.05" height="20"/><rect x="311.23" y="72" width="3.27" height="20"/><rect x="315.3" y="72" width="3.95" height="20"/><rect x="320.05" y="72" width="4.15" height="20"/><rect x="55" y="46" width="0.9" height="10"/><rect x="55.95" y="46" width="0.9" height="10"/><rect x="56.91" y="46" width="0.9" height="10"/><rect x="57.86" y="46" width="0.9" height="10"/><rect x="58.82" y="46" width="0.9" height="10"/><rect x="59.77" y="46" width="0.9" height="10"/><rect x="60.73" y="46" width="0.9" height="10"/><rect x="61.68" y="46" width="0.9" height="10"/><rect x="62.64" y="46" width="0.9" height="10"/><rect x="63.59" y="46" width="0.9" height="10"/><rect x="64.55" y="46" width="0.9" height="10"/><rect x="65.5" y="46" width="0.9" height="10"/><rect x="66.46" y="46" width="0.9" height="10"/><rect x="67.41" y="46" width="0.9" height="10"/><rect x="68.36" y="46" width="0.9" height="10"/><rect x="69.32" y="46" width="0.9" height="10"/><rect x="70.27" y="46" width="0.9" height="10"/><rect x="71.23" y="46" width="0.9" height="10"/><rect x="72.18" y="46" width="0.9" height="10"/><rect x="73.14" y="46" width="0.9" height="10"/><rect x="74.09" y="46" width="0.9" height="10"/><rect x="75.05" y="46" width="0.9" height="10"/><rect x="76" y="46" width="0.9" height="10"/><rect x="76.96" y="46" width="0.9" height="10"/><rect x="77.91" y="46" width="0.9" height="10"/><rect x="78.87" y="46" width="0.9" height="10"/><rect x="144" y="46" width="0.9" height="10"/><rect x="145.03" y="46" width="0.9" height="10"/><rect x="146.07" y="46" width="0.9" height="10"/><rect x="147.1" y="46" width="0.9" height="10"/><rect x="148.13" y="46" width="0.9" height="10"/><rect x="149.17" y="46" width="0.9" height="10"/><rect x="150.2" y="46" width="0.9" height="10"/><rect x="151.23" y="46" width="0.9" height="10"/><rect x="152.26" y="46" width="0.9" height="10"/><rect x="153.3" y="46" width="0.9" height="10"/><rect x="154.33" y="46" width="0.9" height="10"/><rect x="155.36" y="46" width="0.9" height="10"/><rect x="156.4" y="46" width="0.9" height="10"/><rect x="157.43" y="46" width="0.9" height="10"/><rect x="158.46" y="46" width="0.9" height="10"/><rect x="159.5" y="46" width="0.9" height="10"/><rect x="160.53" y="46" width="0.9" height="10"/><rect x="161.56" y="46" width="0.9" height="10"/><rect x="162.6" y="46" width="0.9" height="10"/><rect x="163.63" y="46" width="0.9" height="10"/><rect x="164.66" y="46" width="0.9" height="10"/><rect x="165.69" y="46" width="0.9" height="10"/><rect x="166.73" y="46" width="0.9" height="10"/><rect x="167.76" y="46" width="0.9" height="10"/><rect x="168.79" y="46" width="0.9" height="10"/><rect x="169.83" y="46" width="0.9" height="10"/><rect x="239" y="46" width="0.9" height="10"/><rect x="240.11" y="46" width="0.9" height="10"/><rect x="241.22" y="46" width="0.9" height="10"/><rect x="242.33" y="46" width="0.9" height="10"/><rect x="243.45" y="46" width="0.9" height="10"/><rect x="244.56" y="46" width="0.9" height="10"/><rect x="245.67" y="46" width="0.9" height="10"/><rect x="246.78" y="46" width="0.9" height="10"/><rect x="247.89" y="46" width="0.9" height="10"/><rect x="249" y="46" width="0.9" height="10"/><rect x="250.12" y="46" width="0.9" height="10"/><rect x="251.23" y="46" width="0.9" height="10"/><rect x="252.34" y="46" width="0.9" height="10"/><rect x="253.45" y="46" width="0.9" height="10"/><rect x="254.56" y="46" width="0.9" height="10"/><rect x="255.67" y="46" width="0.9" height="10"/><rect x="256.78" y="46" width="0.9" height="10"/><rect x="257.9" y="46" width="0.9" height="10"/><rect x="259.01" y="46" width="0.9" height="10"/><rect x="260.12" y="46" width="0.9" height="10"/><rect x="261.23" y="46" width="0.9" height="10"/><rect x="262.34" y="46" width="0.9" height="10"/><rect x="263.45" y="46" width="0.9" height="10"/><rect x="264.57" y="46" width="0.9" height="10"/><rect x="265.68" y="46" width="0.9" height="10"/><rect x="266.79" y="46" width="0.9" height="10"/></g>
+      <g fill="var(--lk-vermilion)"><rect x="49" y="45" width="6" height="12"/><rect x="49" y="71" width="6" height="22"/><rect x="130" y="45" width="6" height="12"/><rect x="130" y="71" width="6" height="22"/><rect x="138" y="45" width="6" height="12"/><rect x="138" y="71" width="6" height="22"/><rect x="225" y="45" width="6" height="12"/><rect x="225" y="71" width="6" height="22"/><rect x="233" y="45" width="6" height="12"/><rect x="233" y="71" width="6" height="22"/><rect x="326" y="45" width="6" height="12"/><rect x="326" y="71" width="6" height="22"/></g>
+      <g font-size="9.5" fill="var(--lk-vermilion)"><text x="55" y="107" text-anchor="end">ids in</text><text x="130" y="107">token out</text></g>
+      <text x="92.5" y="38" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">257 tokens</text>
+      <text x="184.5" y="38" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">258 tokens</text>
+      <text x="282.5" y="38" font-size="9.5" text-anchor="middle" fill="var(--lk-ink)">259 tokens</text>
+      <path d="M46 118H332" stroke="var(--lk-ink-soft)"/><path d="M331 114.5L338 118L331 121.5Z" fill="var(--lk-ink-soft)"/>
+      <text x="338" y="132" font-size="9.5" text-anchor="end" fill="var(--lk-ink-soft)">time &rarr;</text>
+      <text x="366" y="14" font-size="10.5" font-weight="700" fill="var(--lk-ink)">KV cache: decode steps after the prefill</text>
+      <g font-size="9.5" fill="var(--lk-ink-soft)"><text x="366" y="55">CPU</text><text x="366" y="86">GPU</text></g>
+      <rect x="398" y="44" width="292" height="14" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+      <rect x="398" y="70" width="292" height="24" fill="var(--lk-paper-light)" stroke="var(--lk-rule-soft)"/>
+      <g fill="var(--lk-forest)"><rect x="409.2" y="72" width="1.3" height="20"/><rect x="412.06" y="72" width="1.3" height="20"/><rect x="414.91" y="72" width="1.3" height="20"/><rect x="417.77" y="72" width="1.3" height="20"/><rect x="420.63" y="72" width="1.3" height="20"/><rect x="423.49" y="72" width="1.3" height="20"/><rect x="426.34" y="72" width="1.3" height="20"/><rect x="429.2" y="72" width="1.3" height="20"/><rect x="432.06" y="72" width="1.3" height="20"/><rect x="434.91" y="72" width="1.3" height="20"/><rect x="437.77" y="72" width="1.3" height="20"/><rect x="440.63" y="72" width="1.3" height="20"/><rect x="443.49" y="72" width="1.3" height="20"/><rect x="446.34" y="72" width="1.3" height="20"/><rect x="465.2" y="72" width="1.3" height="20"/><rect x="468.06" y="72" width="1.3" height="20"/><rect x="470.91" y="72" width="1.3" height="20"/><rect x="473.77" y="72" width="1.3" height="20"/><rect x="476.63" y="72" width="1.3" height="20"/><rect x="479.49" y="72" width="1.3" height="20"/><rect x="482.34" y="72" width="1.3" height="20"/><rect x="485.2" y="72" width="1.3" height="20"/><rect x="488.06" y="72" width="1.3" height="20"/><rect x="490.91" y="72" width="1.3" height="20"/><rect x="493.77" y="72" width="1.3" height="20"/><rect x="496.63" y="72" width="1.3" height="20"/><rect x="499.49" y="72" width="1.3" height="20"/><rect x="502.34" y="72" width="1.3" height="20"/><rect x="521.2" y="72" width="1.3" height="20"/><rect x="524.06" y="72" width="1.3" height="20"/><rect x="526.91" y="72" width="1.3" height="20"/><rect x="529.77" y="72" width="1.3" height="20"/><rect x="532.63" y="72" width="1.3" height="20"/><rect x="535.49" y="72" width="1.3" height="20"/><rect x="538.34" y="72" width="1.3" height="20"/><rect x="541.2" y="72" width="1.3" height="20"/><rect x="544.06" y="72" width="1.3" height="20"/><rect x="546.91" y="72" width="1.3" height="20"/><rect x="549.77" y="72" width="1.3" height="20"/><rect x="552.63" y="72" width="1.3" height="20"/><rect x="555.49" y="72" width="1.3" height="20"/><rect x="558.34" y="72" width="1.3" height="20"/><rect x="408.1" y="46" width="0.9" height="10"/><rect x="410.96" y="46" width="0.9" height="10"/><rect x="413.81" y="46" width="0.9" height="10"/><rect x="416.67" y="46" width="0.9" height="10"/><rect x="419.53" y="46" width="0.9" height="10"/><rect x="422.39" y="46" width="0.9" height="10"/><rect x="425.24" y="46" width="0.9" height="10"/><rect x="428.1" y="46" width="0.9" height="10"/><rect x="430.96" y="46" width="0.9" height="10"/><rect x="433.81" y="46" width="0.9" height="10"/><rect x="436.67" y="46" width="0.9" height="10"/><rect x="439.53" y="46" width="0.9" height="10"/><rect x="442.39" y="46" width="0.9" height="10"/><rect x="445.24" y="46" width="0.9" height="10"/><rect x="464.1" y="46" width="0.9" height="10"/><rect x="466.96" y="46" width="0.9" height="10"/><rect x="469.81" y="46" width="0.9" height="10"/><rect x="472.67" y="46" width="0.9" height="10"/><rect x="475.53" y="46" width="0.9" height="10"/><rect x="478.39" y="46" width="0.9" height="10"/><rect x="481.24" y="46" width="0.9" height="10"/><rect x="484.1" y="46" width="0.9" height="10"/><rect x="486.96" y="46" width="0.9" height="10"/><rect x="489.81" y="46" width="0.9" height="10"/><rect x="492.67" y="46" width="0.9" height="10"/><rect x="495.53" y="46" width="0.9" height="10"/><rect x="498.39" y="46" width="0.9" height="10"/><rect x="501.24" y="46" width="0.9" height="10"/><rect x="520.1" y="46" width="0.9" height="10"/><rect x="522.96" y="46" width="0.9" height="10"/><rect x="525.81" y="46" width="0.9" height="10"/><rect x="528.67" y="46" width="0.9" height="10"/><rect x="531.53" y="46" width="0.9" height="10"/><rect x="534.39" y="46" width="0.9" height="10"/><rect x="537.24" y="46" width="0.9" height="10"/><rect x="540.1" y="46" width="0.9" height="10"/><rect x="542.96" y="46" width="0.9" height="10"/><rect x="545.81" y="46" width="0.9" height="10"/><rect x="548.67" y="46" width="0.9" height="10"/><rect x="551.53" y="46" width="0.9" height="10"/><rect x="554.39" y="46" width="0.9" height="10"/><rect x="557.24" y="46" width="0.9" height="10"/></g>
+      <g fill="var(--lk-vermilion)"><rect x="401" y="45" width="6" height="12"/><rect x="401" y="71" width="6" height="22"/><rect x="449" y="45" width="6" height="12"/><rect x="449" y="71" width="6" height="22"/><rect x="457" y="45" width="6" height="12"/><rect x="457" y="71" width="6" height="22"/><rect x="505" y="45" width="6" height="12"/><rect x="505" y="71" width="6" height="22"/><rect x="513" y="45" width="6" height="12"/><rect x="513" y="71" width="6" height="22"/><rect x="561" y="45" width="6" height="12"/><rect x="561" y="71" width="6" height="22"/></g>
+      <g font-size="9.5" fill="var(--lk-vermilion)"><text x="407" y="107" text-anchor="end">ids in</text><text x="449" y="107">token out</text></g>
+      <g font-size="9.5" fill="var(--lk-ink-soft)"><text x="578" y="80">the same 3 tokens,</text><text x="578" y="91">done sooner</text></g>
+      <path d="M398 118H684" stroke="var(--lk-ink-soft)"/><path d="M683 114.5L690 118L683 121.5Z" fill="var(--lk-ink-soft)"/>
+      <text x="690" y="132" font-size="9.5" text-anchor="end" fill="var(--lk-ink-soft)">time &rarr;</text>
+      <path d="M408 40V36H448V40" fill="none" stroke="var(--lk-ink)"/>
+      <text x="408" y="32" font-size="9.5" fill="var(--lk-ink)">~150 launches, a few &micro;s each</text>
+      <g font-size="9.5" fill="var(--lk-ink)"><rect x="14" y="158" width="10" height="10" fill="var(--lk-forest)"/><text x="29" y="167">kernel running</text><rect x="140" y="157" width="1.2" height="12" fill="var(--lk-forest)"/><text x="147" y="167">one launch call on the CPU</text><rect x="330" y="158" width="10" height="10" fill="var(--lk-vermilion)"/><text x="345" y="167">host round trip (a synchronous copy)</text><rect x="580" y="158" width="10" height="10" fill="var(--lk-paper-light)" stroke="var(--lk-rule)"/><text x="595" y="167">idle</text></g>
+      <text x="14" y="186" font-size="9.5" fill="var(--lk-ink-soft)">Stylized: about 160 kernels per band are drawn as 26 (left) and 150 as 14 (right); widths are not to scale.</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 2</b> &mdash; A generation step on the timeline, stylized (your <code>make nsys</code> trace has the real proportions). Top: the CPU issues launches; bottom: the GPU executes them. Without a cache (left), each token&rsquo;s band is a full forward over all tokens so far, and the bands lengthen. With the cache (right), each band is a decode step: about 150 launches, each a few microseconds, with the GPU idle between them when the CPU cannot issue fast enough. The vermilion gaps at the ends of each band are the two host round trips: ids in, chosen token out.</figcaption>
+    </figure>
+
+    <p>What to do about the floor is Part IV&rsquo;s business (graph capture, fewer and fatter kernels, keeping sampling and the id copies on the GPU for many steps). What this chapter asks is that you measure it: the own backend&rsquo;s 110 launches against cuBLAS&rsquo;s 160 at <var>T</var> = 64 is the first comparison, and the per-class table at <var>T</var> = 1,024, where the attention kernels of lab 9 should be the largest line after the linear layers, is the second.</p>
+  </section>
+
+  <section id="s9">
+    <h2>9. Predictions</h2>
+    <table>
+      <tr><th>Measurement</th><th>Prediction</th><th>Why</th></tr>
+      <tr><td><code>test</code></td><td>all PASS, max error 10<sup>&minus;6</sup>&ndash;10<sup>&minus;5</sup> on random models</td><td>FP32 rounding across 2&ndash;3 small layers</td></tr>
+      <tr><td><code>verify</code>, max logit error</td><td>10<sup>&minus;3</sup>&ndash;10<sup>&minus;2</sup>, top-1 at every position</td><td>two FP32 pipelines with different summation orders over 12 layers</td></tr>
+      <tr><td>upload: pageable / pinned / overlap</td><td>5&ndash;12 / 20&ndash;50 / limited by <code>fread</code> GB/s</td><td>the staging copy; PCIe 5.0 &times;16; the page cache</td></tr>
+      <tr><td>forward at <var>T</var> = 1,024, cuBLAS backend</td><td>12&ndash;20 ms</td><td>a roofline floor of about 10.8 ms: chapter 10&rsquo;s 13.1 ms less 2.3 ms of LM head, since <code>bench</code> computes one logit row (0.26 ms, not 2.6); kernels at 60&ndash;90% of their roofs, naive attention worst</td></tr>
+      <tr><td>forward at <var>T</var> = 64</td><td>1.5&ndash;3 ms, not 1/16 of the above</td><td>the launch floor: 160 launches at a few &micro;s</td></tr>
+      <tr><td>own backend vs cuBLAS at <var>T</var> = 1,024</td><td>1.1&ndash;1.5&times; slower</td><td>v7 at 70&ndash;90% of cuBLAS (chapter 8), epilogues fused</td></tr>
+      <tr><td>own backend vs cuBLAS at <var>T</var> = 64</td><td>close, or faster</td><td>50 fewer launches; the GEMV path for <var>M</var> &le; 8 does not apply here</td></tr>
+      <tr><td>where the time goes at 1,024; at 64</td><td>linear 40&ndash;60%, attention 30&ndash;55%, head 2&ndash;4%, the rest under 5%; at 64: linear 55&ndash;80%, head 15&ndash;30%, attention 5&ndash;10%, the rest under 10%</td><td>chapter 10&rsquo;s table with one logit row, scaled by the kernels&rsquo; efficiencies; at 64 the head still reads its 154 MB, the linear layers turn into weight reads, and launches weigh</td></tr>
+      <tr><td><code>generate --no-cache</code>, ms per token after a 256-token prompt</td><td>tens of ms, growing</td><td>a full forward per token</td></tr>
+      <tr><td><code>generate</code> with the cache</td><td>1.5&ndash;3 ms per token</td><td>1 ms of weight reads plus the floor; chapter 13 measures it properly</td></tr>
+    </table>
+  </section>
+
+  <section id="s10">
+    <h2>10. Lab 10: the engine</h2>
+
+    <div class="lab">
+      <div class="lab-head"><span class="lab-tag">Lab 10</span><span class="lab-title">GPT-2 small, forward pass and generation, matching PyTorch</span><span class="idx-meta">~90 min · <code>mlsys/labs/gpt2/</code></span></div>
+      <div class="lab-body">
+        <p>One program, <code>gpt2.cu</code>, with its kernels in headers beside it (<code>kernels.cuh</code>, <code>attention.cuh</code>, <code>sample.cuh</code>, <code>model.h</code>, <code>cpu_ref.h</code>), and four Python scripts: <code>export.py</code> (downloads <code>model.safetensors</code>, <code>config.json</code> and <code>vocab.json</code> into <code>hf/small</code> if absent, or takes them from <code>--model DIR</code>; writes the two <code>.bin</code> files), <code>reference.py</code> (logits for a fixed prompt from <code>transformers</code> if installed, else numpy reading <code>model.safetensors</code> directly), <code>prompt.py</code> (text to ids with <code>tiktoken</code>) and <code>make_tiny.py</code> (a random two-layer model in Hugging Face&rsquo;s format, for <code>make e2e</code>). The engine is the spine project from here to the end of the course: chapters 13, 14 and 15 add modes and attention implementations to it.</p>
+<pre><code class="language-bash">cd ~/unibo-lessons/mlsys/labs/gpt2
+make                       # gpt2, with -Xptxas -v
+make test                  # random models vs the CPU reference, both backends, sampling: ALL PASS
+make export                # python3 export.py: model.safetensors -&gt; gpt2_124M.bin, gpt2_tokens.bin
+make reference             # python3 reference.py: ref_logits.bin for the fixed prompt
+make verify                # the real weights vs PyTorch's logits: PASS, and the max error
+make generate              # text from prompt.txt: greedy, then top-k 40 at temperature 0.8
+make bench                 # upload three ways; forward vs T; where the time goes; both backends
+make nsys                  # the timeline of a prefill and 16 generated tokens, with and without the cache
+make e2e                   # a fake tiny safetensors (make_tiny.py) through export, reference (numpy) and verify
+make bench-prefill         # chapter 13's measurements, PASTE lines for lab 12 (and make bench-decode)</code></pre>
+        <table>
+          <tr><th>Step</th><th>Prediction to write down first</th></tr>
+          <tr><td><code>verify</code>: max logit error</td><td>10<sup>&minus;3</sup>&ndash;10<sup>&minus;2</sup>; top-1 everywhere</td></tr>
+          <tr><td><code>bench</code>: pinned over pageable</td><td>2&ndash;5&times;</td></tr>
+          <tr><td><code>bench</code>: forward at 1,024 vs at 64</td><td>8&ndash;12&times;, not 16&times;</td></tr>
+          <tr><td><code>bench</code>: own vs cuBLAS at 1,024 and at 64</td><td>slower at 1,024; close at 64</td></tr>
+          <tr><td><code>nsys</code>: launches per decode step</td><td>about 150 (cuBLAS), 100 (own); a pass without the cache about 160 and 110</td></tr>
+          <tr><td><code>generate --no-cache</code> vs cache, ms per token</td><td>tens vs a few</td></tr>
+        </table>
+        <p>Paste back the <code>PASTE:</code> lines from <code>test</code>, <code>verify</code> and <code>bench</code>, and the kernel table from <code>make nsys</code>. Your forward time at <var>T</var> = 1,024 is the &ldquo;before&rdquo; of every chapter that follows.</p>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <span class="callout-label">Stretch</span>
+      <p>Swap lab 8&rsquo;s fused <code>residual_layernorm</code> and register-row layernorm into <code>kernels.cuh</code> in place of lab 5&rsquo;s kernel, rerun <code>test</code> and <code>bench</code>, and report what the launch count and the per-class table did. Then capture one decode step as a CUDA graph (chapter 5&rsquo;s three calls around the loop of section 5, with the id copies left outside it) and measure the step with and without it. That is the first of Part IV&rsquo;s optimizations, and the engine is already shaped for it.</p>
+    </div>
+  </section>
+
+  <section id="quiz">
+    <h2>Check your understanding</h2>
+    <div class="lk-quiz">
+      <details>
+        <summary>Why can two correct FP32 implementations of the same model never agree bitwise, and how does the engine define &ldquo;matches&rdquo; instead?</summary>
+        <p>Floating-point addition is not associative; different kernels sum in different orders and use different implementations of <code>exp</code> and <code>tanh</code>, and the differences compound over layers. The engine checks random small models against a double-precision reference with a tolerance just above FP32 rounding, and the real weights against PyTorch&rsquo;s FP32 logits with a looser tolerance plus top-1 agreement at every position.</p>
+      </details>
+      <details>
+        <summary>What does <code>export.py</code> change about the checkpoint, and what does it deliberately not change?</summary>
+        <p>It changes the container: from a JSON-indexed safetensors file to one flat buffer with a fixed header and a fixed, layer-major tensor order that the C++ side can map with pointer arithmetic. It does not change a single value or layout inside a tensor: the [in, out] Conv1D weights are copied as bytes, so the GEMMs need no transpose, and the tied embedding is stored once.</p>
+      </details>
+      <details>
+        <summary>Why is a <code>cudaMemcpy</code> from <code>malloc</code> memory slower than from <code>cudaMallocHost</code> memory?</summary>
+        <p>The copy engine needs physical addresses that will not move, and pageable memory can be moved or swapped by the OS. So the driver stages pageable data through its own pinned buffer, chunk by chunk, with the CPU doing that first copy; pinned memory is DMA&rsquo;d directly at PCIe speed.</p>
+      </details>
+      <details>
+        <summary>Give two reasons an engine allocates all activation memory once, up front.</summary>
+        <p><code>cudaMalloc</code> is slow and can synchronize the device, and repeated allocation fragments memory; and fixed pointers are required to capture the step as a CUDA graph, which replays exactly the recorded addresses. A single arena carved by a plan also makes the memory bill explicit: which buffer grows with <var>B</var>&middot;<var>T</var>, which with <var>T</var><sup>2</sup>, which with <var>B</var>&middot;<var>T</var><sub>max</sub>.</p>
+      </details>
+      <details>
+        <summary>You have a mismatch against PyTorch. Describe the bisection method and name one fault it would localize to the attention kernel.</summary>
+        <p>Dump the residual stream after every layer from both implementations and find the first layer that diverges, then dump that layer&rsquo;s intermediates. A fault that shows as &ldquo;position 0 correct, later positions wrong&rdquo; is in attention: head column offsets, the key third&rsquo;s offset, the scale, or the mask boundary, since position 0 attends only to itself and bypasses all of them.</p>
+      </details>
+      <details>
+        <summary>How does radix select find the <var>k</var>-th largest of 50,257 logits without sorting, and why is its histogram kept in shared memory?</summary>
+        <p>It maps floats to order-preserving unsigned keys, histograms one byte at a time from the top, and scans the bins downward to find the byte in which the cumulative count reaches <var>k</var>; four passes fix the threshold. The histogram is built with atomic increments, which serialize per address; in shared memory they are per-SM and cheap, and only the finished 256 counts are read (privatization).</p>
+      </details>
+      <details>
+        <summary>What is a scan, and where does the sampling kernel use one?</summary>
+        <p>A prefix sum: every position receives the sum of all values up to it, computed in log steps with shuffles within a warp and a second level across warps. Sampling uses it twice: over the histogram bins, to find which bin contains the <var>k</var>-th largest; and over the per-thread probability sums, to turn them into a cumulative distribution so that one thread can locate the token where the random target falls.</p>
+      </details>
+      <details>
+        <summary>Why does generation without a KV cache get slower with every token, and what is the total cost of <var>n</var> tokens after a prompt of <var>T</var>?</summary>
+        <p>Each new token reruns the forward pass over every token so far, so the step costs <var>T</var> + <var>i</var> token-forwards at step <var>i</var>: about <var>n</var>(<var>T</var> + <var>n</var>/2) in total, against <var>T</var> + <var>n</var> with a cache. The keys and values of earlier tokens never change under the causal mask, so recomputing them is pure waste.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources and further reading</h2>
+    <ul class="srcs">
+      <li>Hugging Face, <a href="https://github.com/huggingface/safetensors">safetensors</a> format specification: the 8-byte length, JSON header and <code>data_offsets</code>; Hugging Face <code>transformers</code>, <code>modeling_gpt2.py</code>: Conv1D, <code>gelu_new</code>, the tensor names.</li>
+      <li>A. Karpathy, <a href="https://github.com/karpathy/llm.c">llm.c</a>: the flat weight file with a header, the activation plan, and the CPU reference forward that lab 10 follows in spirit (<code>train_gpt2.c</code>, <code>test_gpt2.cu</code>).</li>
+      <li>NVIDIA, <em>CUDA C++ Programming Guide</em>: page-locked host memory, asynchronous concurrent execution (streams, events), <code>cudaMemcpyAsync</code>; <em>CUDA Best Practices Guide</em>: pinned memory and overlapping transfers.</li>
+      <li>Hwu, Kirk, El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (2023), ch. 9 (parallel histogram: atomics, privatization), ch. 11 (prefix sum), ch. 13 (radix sort): the three mechanisms of section 7.</li>
+      <li>T. Alabi, J. D. Blanchard, B. Gordon, R. Steinbach, <em>Fast k-Selection Algorithms for Graphics Processing Units</em> (ACM JEA, 2012): radix select on GPUs; the same idea underlies CUB&rsquo;s and PyTorch&rsquo;s <code>topk</code>.</li>
+      <li>A. Fan, M. Lewis, Y. Dauphin, <em>Hierarchical Neural Story Generation</em> (2018): top-<var>k</var> sampling; A. Holtzman et al., <em>The Curious Case of Neural Text Degeneration</em> (2020): why the tail is truncated.</li>
+      <li>NVIDIA, <em>Nsight Systems User Guide</em>: reading the CUDA API and GPU rows, <code>nsys stats</code> reports.</li>
+    </ul>
+  </section>
+
+  <footer class="lk-foot">
+    <nav class="lk-chnav" aria-label="Chapter navigation">
+      <a href="cap-10-transformer-gpu-view.html">&larr; Ch. 10 — The transformer from the GPU&rsquo;s view</a>
+      <a href="index.html">Index</a>
+      <a href="cap-12-triton.html">Ch. 12 — Triton &rarr;</a>
+    </nav>
+    <p>ML Systems &amp; GPU Performance · Part II · Chapter 11 · the engine is checked for correctness on cudasim against a double-precision reference, never run on a GPU; the real-weight verification, upload rates and timings are predictions until lab 10 replaces them, October 2026</p>
+  </footer>
+  <script src="assets/highlight.min.js"></script>
+  <script src="assets/lesson-kit.js"></script>
+  <script src="assets/ch11.js"></script>
+</body>
+</html>

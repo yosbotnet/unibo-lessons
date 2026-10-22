@@ -57,3 +57,18 @@ inline cublasStatus_t cublasGemmEx(cublasHandle_t, cublasOperation_t ta, cublasO
     else return CUBLAS_STATUS_NOT_SUPPORTED;
     return CUBLAS_STATUS_SUCCESS;
 }
+
+// Strided batched SGEMM: batchCount independent column-major GEMMs, the i-th
+// one on A + i*strideA, B + i*strideB, C + i*strideC (lab 9's heads).
+inline cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t, cublasOperation_t ta, cublasOperation_t tb,
+                                                int m, int n, int k, const float* alpha,
+                                                const float* A, int lda, long long int strideA,
+                                                const float* B, int ldb, long long int strideB,
+                                                const float* beta, float* C, int ldc, long long int strideC,
+                                                int batchCount)
+{
+    for (int i = 0; i < batchCount; ++i)
+        cudasim::gemm_colmajor(ta, tb, m, n, k, *alpha, A + i * strideA, lda, B + i * strideB, ldb,
+                               *beta, C + i * strideC, ldc);
+    return CUBLAS_STATUS_SUCCESS;
+}

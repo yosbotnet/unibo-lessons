@@ -12,6 +12,7 @@ inline __half __hmul(__half a, __half b) { return (__half)((float)a * (float)b);
 struct __half2 { __half x, y; };
 inline __half2 __halves2half2(__half a, __half b) { return {a, b}; }
 inline __half2 __float2half2_rn(float f) { return {(__half)f, (__half)f}; }
+inline __half2 __floats2half2_rn(float lo, float hi) { return {(__half)lo, (__half)hi}; }   // lo -> low 16 bits
 inline float __low2float(__half2 h) { return (float)h.x; }
 inline float __high2float(__half2 h) { return (float)h.y; }
 // One rounding per lane, like HFMA2: the product of two halves is exact in float.

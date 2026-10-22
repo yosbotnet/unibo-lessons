@@ -205,9 +205,23 @@ template <typename T> T __shfl_up_sync(unsigned, T v, unsigned d, int = 32)
 template <typename T> T __shfl_xor_sync(unsigned, T v, int m, int = 32)
 { unsigned lane = cudasim::linear_tid() % 32; return cudasim::shfl(v, (int)(lane ^ m)); }
 
-// One OS thread runs everything, so plain read-modify-write is atomic here.
+// One OS thread runs everything, so plain read-modify-write is atomic here,
+// and every write is visible to the next block: __threadfence() has nothing to do.
 template <typename T> T atomicAdd(T* p, T v) { T o = *p; *p = o + v; return o; }
-inline float atomicMax(float* p, float v) { float o = *p; if (v > o) *p = v; return o; }
+template <typename T> T atomicMax(T* p, T v) { T o = *p; if (v > o) *p = v; return o; }
+template <typename T> T atomicMin(T* p, T v) { T o = *p; if (v < o) *p = v; return o; }
+template <typename T> T atomicExch(T* p, T v) { T o = *p; *p = v; return o; }
+template <typename T> T atomicCAS(T* p, T cmp, T v) { T o = *p; if (o == cmp) *p = v; return o; }
+template <typename T> T atomicInc(T* p, T lim) { T o = *p; *p = (o >= lim) ? 0 : o + 1; return o; }
+inline void __threadfence() {}
+inline void __threadfence_block() {}
+// CUDA's integer min/max are global device functions.
+inline int min(int a, int b) { return a < b ? a : b; }
+inline int max(int a, int b) { return a > b ? a : b; }
+inline unsigned min(unsigned a, unsigned b) { return a < b ? a : b; }
+inline unsigned max(unsigned a, unsigned b) { return a > b ? a : b; }
+inline long long min(long long a, long long b) { return a < b ? a : b; }
+inline long long max(long long a, long long b) { return a > b ? a : b; }
 
 // Math intrinsics used by the labs
 inline float __expf(float x) { return std::exp(x); }
@@ -226,6 +240,8 @@ inline float __int2float_rn(int x) { return (float)x; }
 inline int __float2int_rn(float x) { return (int)std::nearbyint(x); }
 inline int __float_as_int(float f) { int i; std::memcpy(&i, &f, 4); return i; }
 inline float __int_as_float(int i) { float f; std::memcpy(&f, &i, 4); return f; }
+inline unsigned __float_as_uint(float f) { unsigned i; std::memcpy(&i, &f, 4); return i; }
+inline float __uint_as_float(unsigned i) { float f; std::memcpy(&f, &i, 4); return f; }
 #include <math.h>   // fmaxf, expf, tanhf, ... as global functions, like CUDA's
 
 // ---------------------------------------------------------------------------
@@ -248,6 +264,12 @@ template <typename T> cudaError_t cudaMalloc(T** p, size_t n)
 { *p = (T*)std::aligned_alloc(256, (n + 255) / 256 * 256); return *p ? cudaSuccess : cudaErrorMemoryAllocation; }
 inline cudaError_t cudaMemGetInfo(size_t* f, size_t* t) { *f = 1ull << 30; *t = 12ull << 30; return cudaSuccess; }
 inline cudaError_t cudaFree(void* p) { std::free(p); return cudaSuccess; }
+template <typename T> cudaError_t cudaMallocHost(T** p, size_t n) { return cudaMalloc(p, n); }
+inline cudaError_t cudaFreeHost(void* p) { std::free(p); return cudaSuccess; }
+// Streams exist so that code compiles; everything still runs in program order.
+inline cudaError_t cudaStreamCreate(cudaStream_t* s) { *s = nullptr; return cudaSuccess; }
+inline cudaError_t cudaStreamDestroy(cudaStream_t) { return cudaSuccess; }
+inline cudaError_t cudaStreamWaitEvent(cudaStream_t, cudaEvent_t, unsigned = 0) { return cudaSuccess; }
 inline cudaError_t cudaMemcpy(void* d, const void* s, size_t n, cudaMemcpyKind) { std::memcpy(d, s, n); return cudaSuccess; }
 inline cudaError_t cudaMemcpyAsync(void* d, const void* s, size_t n, cudaMemcpyKind, cudaStream_t = nullptr) { std::memcpy(d, s, n); return cudaSuccess; }
 inline cudaError_t cudaMemset(void* d, int v, size_t n) { std::memset(d, v, n); return cudaSuccess; }
@@ -281,3 +303,7 @@ inline cudaError_t cudaDeviceGetAttribute(int* v, cudaDeviceAttr a, int)
     }
     return cudaSuccess;
 }
+
+// Lab 14 (decode attention): 16-byte integer vector, the type of an FP16 cache's 8-half loads.
+struct alignas(16) uint4 { unsigned x, y, z, w; };
+inline uint4 make_uint4(unsigned x, unsigned y, unsigned z, unsigned w) { return {x, y, z, w}; }

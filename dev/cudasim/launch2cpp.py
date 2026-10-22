@@ -51,4 +51,21 @@ def convert(src):
         i = q + 1
     return ''.join(out)
 
-sys.stdout.write(convert(open(sys.argv[1]).read()))
+# Headers next to the source (kernels.cuh, attention.cuh, ...) can contain
+# launches too, so quoted includes found relative to the including file are
+# inlined, each once (like #pragma once), before the launches are rewritten.
+# Anything else (cudasim's own headers, ../common via -I) stays an #include.
+import os, re
+INC = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
+def inline(path, seen):
+    path = os.path.realpath(path)
+    if path in seen:
+        return ''
+    seen.add(path)
+    here = os.path.dirname(path)
+    def sub(m):
+        q = os.path.join(here, m.group(1))
+        return inline(q, seen) if os.path.exists(q) else m.group(0)
+    return INC.sub(sub, open(path).read())
+
+sys.stdout.write(convert(inline(sys.argv[1], set())))
