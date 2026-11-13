@@ -1,59 +1,47 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-14-flashattention.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 14 — FlashAttention 1 to 2 · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch14.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch14.css?v=93ba0a3b">
 <link rel="stylesheet" href="assets/xp/xp.css">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-13-inference-arithmetic.html">&larr; Ch. 13 — Inference arithmetic</a>
-    <a href="index.html">Index</a>
-    <a href="cap-15-decode-attention.html">Ch. 15 — Decode attention &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part III · Attention</div>
+<h3><a href="#top">FlashAttention 1 → 2<small>14</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 6 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>14.1</small><span>What naive attention pays for</span></a></li><li data-for="s2"><a href="#s2"><small>14.2</small><span>Tiling, and the problem softmax makes</span></a></li><li data-for="s3"><a href="#s3"><small>14.3</small><span>Online softmax with an output</span></a></li><li data-for="s4"><a href="#s4"><small>14.4</small><span>FlashAttention-1: the algorithm and its IO</span></a></li><li data-for="s5"><a href="#s5"><small>14.5</small><span>FlashAttention-2: five problems, five fixes</span></a></li><li data-for="s6"><a href="#s6"><small>14.6</small><span>On the tensor cores: fragments that never leave</span></a></li><li data-for="s7"><a href="#s7"><small>14.7</small><span>The kernel, line by line</span></a></li><li data-for="s8"><a href="#s8"><small>14.8</small><span>Causal masking at tile granularity</span></a></li><li data-for="s9"><a href="#s9"><small>14.9</small><span>After FA2: names for Part V, and the backward pass</span></a></li><li data-for="s10"><a href="#s10"><small>14.10</small><span>Predictions</span></a></li><li data-for="s11"><a href="#s11"><small>14.11</small><span>Lab 13: three attention kernels</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-13-inference-arithmetic.html">&larr; Ch. 13</a><a href="index.html">&uarr; Index</a><a href="cap-15-decode-attention.html">Ch. 15 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part III — Attention · Chapter 14</div>
-    <h1>FlashAttention 1 &rarr; 2: attention without the score matrix</h1>
-    <div class="lk-meta"><span>~75 min read</span><span>1 animated figure</span><span>1 interactive widget</span><span>4 plates</span><span>lab 13 · ~60 min on your GPU</span></div>
-  </header>
+  <header class="chap"><div class="num">14</div><div class="kicker">Part III &middot; Attention · Chapter 14</div><div class="numeral" aria-hidden="true">14</div><h1>FlashAttention 1 &rarr; 2: attention without the score matrix</h1><ul class="meta"><li>~75 min read</li><li>1 animated figure</li><li>1 interactive widget</li><li>4 plates</li><li>lab 13 · ~60 min on your GPU</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>Chapter 10 computed attention as three kernels around a <var>T</var>&times;<var>T</var> score matrix and counted its bytes; at long <var>T</var> that matrix, not the arithmetic, is the cost: it is written to DRAM and read back twice, it grows with <var>T</var><sup>2</sup>, and at 8K tokens a batch of four no longer fits in your card&rsquo;s memory. <strong>FlashAttention</strong> computes the identical output without ever storing it. It tiles Q and K/V the way chapter 7 tiled a matmul, and it gets past the one thing tiling cannot do, a softmax that needs its whole row, with chapter 9&rsquo;s online-softmax merge extended to carry the output: each query row keeps a running max, a running sum and an unnormalized output on chip, and rescales them whenever a new tile raises the max. FlashAttention-1 made this work; FlashAttention-2 made it fast, by changing who loops over what: a thread block per Q tile so the output never leaves registers, normalization once at the end, parallelism over sequence blocks, warps split over query rows so no reduction crosses warps, and causal tiles skipped rather than masked. The last third of the chapter is the tensor-core mapping, with chapter 8&rsquo;s <code>mma.sync</code> fragments: the trick that makes it all fit is that the accumulator fragment of S = QK<sup>T</sup> has exactly the layout the A operand of P&middot;V needs, so P is converted to FP16 in registers and never touches shared memory.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~75 min read</li><li>1 animated figure</li><li>1 interactive widget</li><li>4 plates</li><li>lab 13 · ~60 min on your GPU</li></ul></aside><div class="ov-learn"><p class="ov-lead">Chapter 10 computed attention as three kernels around a <var>T</var>&times;<var>T</var> score matrix and counted its bytes; at long <var>T</var> that matrix, not the arithmetic, is the cost: it is written to DRAM and read back twice, it grows with <var>T</var><sup>2</sup>, and at 8K tokens a batch of four no longer fits in your card&rsquo;s memory. <strong>FlashAttention</strong> computes the identical output without ever storing it. It tiles Q and K/V the way chapter 7 tiled a matmul, and it gets past the one thing tiling cannot do, a softmax that needs its whole row, with chapter 9&rsquo;s online-softmax merge extended to carry the output: each query row keeps a running max, a running sum and an unnormalized output on chip, and rescales them whenever a new tile raises the max. FlashAttention-1 made this work; FlashAttention-2 made it fast, by changing who loops over what: a thread block per Q tile so the output never leaves registers, normalization once at the end, parallelism over sequence blocks, warps split over query rows so no reduction crosses warps, and causal tiles skipped rather than masked. The last third of the chapter is the tensor-core mapping, with chapter 8&rsquo;s <code>mma.sync</code> fragments: the trick that makes it all fit is that the accumulator fragment of S = QK<sup>T</sup> has exactly the layout the A operand of P&middot;V needs, so P is converted to FP16 in registers and never touches shared memory.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">What naive attention pays for</a></li>
-      <li><a href="#s2">Tiling, and the problem softmax makes</a></li>
-      <li><a href="#s3">Online softmax with an output</a></li>
-      <li><a href="#s4">FlashAttention-1: the algorithm and its IO</a></li>
-      <li><a href="#s5">FlashAttention-2: five problems, five fixes</a></li>
-      <li><a href="#s6">On the tensor cores: fragments that never leave</a></li>
-      <li><a href="#s7">The kernel, line by line</a></li>
-      <li><a href="#s8">Causal masking at tile granularity</a></li>
-      <li><a href="#s9">After FA2: names for Part V, and the backward pass</a></li>
-      <li><a href="#s10">Predictions</a></li>
-      <li><a href="#s11">Lab 13: three attention kernels</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. What naive attention pays for</h2>
+    <h2><small>14.1</small><a href="#s1">What naive attention pays for</a></h2>
 
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Recall chapter 10&rsquo;s attention for one head: <var>T</var> query rows q<sub><var>i</var></sub> and <var>T</var> key and value rows k<sub><var>j</var></sub>, v<sub><var>j</var></sub>, each of <var>D</var> = 64 numbers. The scores S = QK<sup>T</sup> / &radic;<var>D</var> form a <var>T</var>&times;<var>T</var> matrix, the causal mask sets S[<var>i</var>][<var>j</var>] = &minus;&infin; for <var>j</var> &gt; <var>i</var>, P = softmax(S) row by row, and the output is O = PV. Lab 9 ran it as three kernels: a batched GEMM for S, chapter 9&rsquo;s row softmax, a batched GEMM for O. The organising fact of this chapter is where those kernels spend their time, and it is not in the FLOPs.</p>
 
     <p>Count one head. The two GEMMs do 2<var>T</var><sup>2</sup><var>D</var> FLOPs each, 4<var>T</var><sup>2</sup><var>D</var> in total. The score matrix in FP32 is 4<var>T</var><sup>2</sup> bytes, and it makes four trips: the first GEMM writes S, the softmax reads S and writes P, the second GEMM reads P. Sixteen bytes per score against 4<var>D</var> = 256 FLOPs per score: <strong>16 FLOP per byte</strong>, whatever <var>T</var> is. That is below the FP32 ridge (46) and far below the tensor-core ridge (92): the three-kernel attention is memory-bound on your card, and the tensor cores cannot help it. The inputs, by contrast, are tiny: Q, K, V and O together are 4&middot;<var>T</var>&middot;<var>D</var>&middot;4 bytes, 1 MB at <var>T</var> = 1,024, and they are read once.</p>
@@ -69,7 +57,7 @@
 
     <p>Two more problems hide in the last row. The score buffer must exist as a whole, so its <var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> floats compete with the weights and the KV cache for 12 GB: at <var>T</var> = 8K a batch of four does not fit. And at <var>T</var> = 1,024 the traffic is only partly real: 50 MB of scores is about the size of your L2, so lab 9&rsquo;s kernels at short <var>T</var> run better than the DRAM count predicts, and the gap to what follows opens as <var>T</var> grows. Keep that in mind when you read lab 13&rsquo;s numbers.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two ways to run one attention head. Left, three kernels: S = Q K transpose, a row softmax, and O = P V. Each writes or reads a T by T matrix in DRAM: S goes down, comes back up, P goes down, comes back up, four wide bands of 4 T squared bytes. Right, FlashAttention: one kernel holds a Q tile and its rows' running max, sum and output in registers while K and V tiles stream past; only Q, K, V and O cross the DRAM line, and where the score matrix was there is an empty dashed outline.">
+    <figure class="lk-fig wide" role="img" aria-label="Two ways to run one attention head. Left, three kernels: S = Q K transpose, a row softmax, and O = P V. Each writes or reads a T by T matrix in DRAM: S goes down, comes back up, P goes down, comes back up, four wide bands of 4 T squared bytes. Right, FlashAttention: one kernel holds a Q tile and its rows' running max, sum and output in registers while K and V tiles stream past; only Q, K, V and O cross the DRAM line, and where the score matrix was there is an empty dashed outline.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 312" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Naive attention against FlashAttention: what crosses the DRAM line</title>
@@ -174,28 +162,32 @@
         </g>
       </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; The same attention head two ways. Left, chapter 10&rsquo;s three kernels: S goes to DRAM, comes back for the softmax, P goes out, comes back for the product; four trips of 4<var>T</var><sup>2</sup> bytes, drawn as the wide vermilion band. Right, FlashAttention: one kernel holds a tile of Q and its rows&rsquo; output in registers while blocks of K and V stream past; only Q, K, V and O cross the DRAM boundary. The arithmetic is identical; the band is gone.</figcaption>
+      <figcaption><b>Figure 1.</b> The same attention head two ways. Left, chapter 10&rsquo;s three kernels: S goes to DRAM, comes back for the softmax, P goes out, comes back for the product; four trips of 4<var>T</var><sup>2</sup> bytes, drawn as the wide vermilion band. Right, FlashAttention: one kernel holds a tile of Q and its rows&rsquo; output in registers while blocks of K and V stream past; only Q, K, V and O cross the DRAM boundary. The arithmetic is identical; the band is gone.</figcaption>
     </figure>
 
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>The fix is to never materialize S. That is easy for the two GEMMs, which tile naturally (chapter 7), and hard for the softmax in the middle. The next two sections are about why it is hard and how the problem dissolves.</p>
   </section>
 
   <section id="s2">
-    <h2>2. Tiling, and the problem softmax makes</h2>
+    <h2><small>14.2</small><a href="#s2">Tiling, and the problem softmax makes</a></h2>
 
+    <aside class="m-rem"><p><b>Tiling</b> <a href="cap-07-matmul-tiling.html#s5">ch.&nbsp;7 &sect;5</a>. A block walks along K in phases of width <var>T</var>, loading one tile of each input into shared memory. Each loaded element is then read by <var>T</var> threads.</p></aside>
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>Tile the score matrix into blocks of <var>B<sub>r</sub></var> query rows by <var>B<sub>c</sub></var> key columns. A block of S is a small matmul of a Q tile (<var>B<sub>r</sub></var>&times;<var>D</var>) and a K tile (<var>B<sub>c</sub></var>&times;<var>D</var>), small enough to live in shared memory and registers. Multiplying that block by the matching V tile (<var>B<sub>c</sub></var>&times;<var>D</var>) gives a <var>B<sub>r</sub></var>&times;<var>D</var> contribution to O, and O is the sum of those contributions over all key tiles, exactly like the <var>k</var> loop of a matmul. If attention were O = (QK<sup>T</sup>)V, chapter 7 would be the whole story.</p>
 
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>It is not, because the softmax sits between the two products, and softmax is a <em>row</em> operation: P[<var>i</var>][<var>j</var>] = exp(S[<var>i</var>][<var>j</var>] &minus; <var>m<sub>i</sub></var>) / <var>l<sub>i</sub></var>, where <var>m<sub>i</sub></var> is the maximum of the whole row and <var>l<sub>i</sub></var> the sum of all its exponentials. A tile sees <var>B<sub>c</sub></var> of the <var>T</var> columns. It can compute exponentials, but it does not know the row&rsquo;s max to subtract or the row&rsquo;s sum to divide by, and both depend on tiles it has not seen yet. Chapter 9&rsquo;s three-pass softmax gets around this by reading the row twice before writing; here there is no stored row to re-read.</p>
 
-    <details class="ym">
-      <summary>Your move: a tile uses its own local max <var>m&#771;</var> and local sum <var>l&#771;</var>, computes P&#771; = exp(S&#771; &minus; <var>m&#771;</var>), and adds P&#771;V to O. Later a tile with a larger max arrives. What exactly is wrong with the O computed so far, and is it fixable without recomputing the first tile?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">A tile uses its own local max <var>m&#771;</var> and local sum <var>l&#771;</var>, computes P&#771; = exp(S&#771; &minus; <var>m&#771;</var>), and adds P&#771;V to O. Later a tile with a larger max arrives. What exactly is wrong with the O computed so far, and is it fixable without recomputing the first tile?</p><details><summary class="btn">Show the answer</summary>
       <p>Every exponential of the first tile was taken relative to the wrong max, so each is too large by the factor exp(<var>m</var><sub>new</sub> &minus; <var>m&#771;</var>), and the contribution to O is too large by the same single factor, the same for every element of those rows. One multiplication of the stored rows of O by exp(<var>m&#771;</var> &minus; <var>m</var><sub>new</sub>) fixes it. The sum has the same property. So nothing needs recomputing: a factor per row, applied late. That is chapter 9&rsquo;s online-softmax merge, and the next section writes it down with the output included.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s3">
-    <h2>3. Online softmax with an output</h2>
+    <h2><small>14.3</small><a href="#s3">Online softmax with an output</a></h2>
 
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Chapter 9 kept two running values per row, the max <var>m</var> and the sum of exp(<var>s</var> &minus; <var>m</var>), which it called <var>d</var>; the FlashAttention papers call that sum <var>l</var>, and so does this chapter, so that the listings match the papers. Chapter 9 merged two partial pairs with <var>m</var> = max(<var>m</var><sub>1</sub>, <var>m</var><sub>2</sub>), <var>l</var> = <var>l</var><sub>1</sub>e<sup><var>m</var><sub>1</sub>&minus;<var>m</var></sup> + <var>l</var><sub>2</sub>e<sup><var>m</var><sub>2</sub>&minus;<var>m</var></sup>. Add a third running value, the <strong>unnormalized output</strong> <var>&Otilde;</var> = &sum;<sub><var>j</var></sub> exp(<var>s<sub>j</sub></var> &minus; <var>m</var>) v<sub><var>j</var></sub>, a vector of <var>D</var> numbers. It is a weighted sum with the same weights as <var>l</var>, so it rescales by the same factor:</p>
 
 <pre><code class="language-text">merge (m1, l1, O1) with (m2, l2, O2):
@@ -217,14 +209,13 @@ final output of the row:  O / l</code></pre>
 
     <p>Check it against the direct formula: the weights exp(<var>s</var> &minus; 5) are 0.018, 0.135, 0.050, 1 with sum 1.204, and (0.018&middot;10 + 0.135&middot;20 + 0.050&middot;30 + 40) / 1.204 = 36.9. The same number, from a procedure that only ever saw two keys at a time and never stored the row. This is the whole mathematical content of FlashAttention. Everything after this section is about doing it on a GPU without wasting anything.</p>
 
-    <details class="ym">
-      <summary>Your move: the merge rule treats the two sides symmetrically. Two blocks process the first and second halves of the keys <em>independently</em>, each producing its own (<var>m</var>, <var>l</var>, <var>&Otilde;</var>). Can their results be merged afterwards, and does the order matter?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The merge rule treats the two sides symmetrically. Two blocks process the first and second halves of the keys <em>independently</em>, each producing its own (<var>m</var>, <var>l</var>, <var>&Otilde;</var>). Can their results be merged afterwards, and does the order matter?</p><details><summary class="btn">Show the answer</summary>
       <p>Yes, with the same three lines, and no: the merge is associative and commutative, because max and weighted sums are, and the rescale factors only depend on the two maxes. Any partition of the keys, merged in any tree, gives the same row. This chapter uses the rule sequentially, one tile after another; chapter 15 uses exactly this parallel form, with many blocks splitting the keys of one query and a final merge, and that is FlashDecoding.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s4">
-    <h2>4. FlashAttention-1: the algorithm and its IO</h2>
+    <h2><small>14.4</small><a href="#s4">FlashAttention-1: the algorithm and its IO</a></h2>
 
     <p>FlashAttention-1 (Dao, Fu, Ermon, Rudra, R&eacute;, 2022) turned section 3 into a kernel and, just as importantly, into an argument about bytes. Its loop nest, in the paper&rsquo;s own order:</p>
 
@@ -245,9 +236,10 @@ for each K/V tile j (Bc rows of K and V):                 // outer loop
     <h3>The IO argument</h3>
     <p>The paper&rsquo;s contribution was to count DRAM traffic as the cost. With a shared memory of <var>M</var> elements (the paper counts values, not bytes) the tiles are sized so that K<sub><var>j</var></sub>, V<sub><var>j</var></sub>, Q<sub><var>i</var></sub> and S&#771; fit: <var>B<sub>c</sub></var> &asymp; <var>M</var> / 4<var>D</var>. K and V are read once (the outer loop). Q and O are re-read and re-written once per K/V tile: <var>T</var>/<var>B<sub>c</sub></var> times, each time <var>T</var>&middot;<var>D</var> values. So the traffic is about <var>T</var><sup>2</sup><var>D</var><sup>2</sup>/<var>M</var> elements, which the paper writes as &Theta;(<var>T</var><sup>2</sup><var>D</var><sup>2</sup><var>M</var><sup>&minus;1</sup>), against &Theta;(<var>T</var><var>D</var> + <var>T</var><sup>2</sup>) for the three-kernel version. The ratio is <var>M</var>/<var>D</var><sup>2</sup>: with 100 KB of shared memory, 25,600 FP32 values, and <var>D</var> = 64 it is about 6&times; fewer bytes (12&times; in FP16), and the paper also proves no exact attention algorithm can do asymptotically better for a given <var>M</var>. In practice the re-reads of the inner loop mostly hit the L2, so the DRAM traffic is closer to &ldquo;Q, K, V, O once&rdquo;; the important part is that <strong>no term grows with <var>T</var><sup>2</sup> that goes to DRAM</strong>. The table in section 1 becomes: 4&middot;<var>T</var>&middot;<var>D</var>&middot;4 bytes per head (1 MB at <var>T</var> = 1,024), growing only linearly, and the <var>T</var><sup>2</sup> buffer is gone from memory altogether.</p>
 
+    <aside class="m-link"><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p></aside>
     <p>FA1 was two to four times faster than the three-kernel attention and made 16K-token training feasible, but its kernel reached only 25&ndash;40% of the A100&rsquo;s tensor-core peak. The reasons are in the listing and in two facts about its launch: it ran <strong>one thread block per (batch, head)</strong>, so a batch of 1 with 12 heads used 12 SMs; and inside the block the warps split the <em>keys</em> between them (the paper calls this &ldquo;split-K&rdquo;; not chapter 15&rsquo;s meaning), so that every row max and row sum needed all four warps to exchange partials through shared memory and synchronize, at every tile.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two loop nests over a 4 by 4 grid of score tiles. Left, FA1: the key tile column j = 1 is fixed by the outer loop and an arrow runs down it over the four Q tiles; each Q tile row loads and stores its rows' m, l and O through DRAM, four pairs of vermilion arrows. Inside the block, the four warps split the tile's keys into vertical strips, and a row max is assembled from four partials in shared memory with a barrier. Right, FA2: the Q tile row i = 1 belongs to one block, an arrow runs along it over the key tiles, and the row state stays in registers; K and V tiles come up from DRAM by cp.async. The four warps split the rows into horizontal bands of 16 and reduce with shuffles inside a quad. Grid: one block per batch and head for FA1, sixteen at T = 1,024 for FA2.">
+    <figure class="lk-fig wide" role="img" aria-label="Two loop nests over a 4 by 4 grid of score tiles. Left, FA1: the key tile column j = 1 is fixed by the outer loop and an arrow runs down it over the four Q tiles; each Q tile row loads and stores its rows' m, l and O through DRAM, four pairs of vermilion arrows. Inside the block, the four warps split the tile's keys into vertical strips, and a row max is assembled from four partials in shared memory with a barrier. Right, FA2: the Q tile row i = 1 belongs to one block, an arrow runs along it over the key tiles, and the row state stays in registers; K and V tiles come up from DRAM by cp.async. The four warps split the rows into horizontal bands of 16 and reduce with shuffles inside a quad. Grid: one block per batch and head for FA1, sixteen at T = 1,024 for FA2.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 360" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>FA1 against FA2: who loops over what</title>
@@ -344,12 +336,12 @@ for each K/V tile j (Bc rows of K and V):                 // outer loop
         <text x="342" y="350" font-size="10" font-weight="700" fill="var(--lk-ink)">grid: 16 blocks per (b, h) at T = 1,024</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; Who loops over what. Left, FA1: the key tile is fixed by the outer loop and the Q tiles cycle through it; each cycle loads a Q tile and its rows&rsquo; (<var>m</var>, <var>l</var>, O) from DRAM, updates, and writes them back (vermilion arrows), and the four warps each own a slice of the keys, so a row&rsquo;s max is assembled from four partials through shared memory. Right, FA2: a thread block takes one Q tile and keeps its rows&rsquo; state in registers for the whole key loop; each warp owns 16 complete rows and never shares a reduction. Only K and V stream in.</figcaption>
+      <figcaption><b>Figure 2.</b> Who loops over what. Left, FA1: the key tile is fixed by the outer loop and the Q tiles cycle through it; each cycle loads a Q tile and its rows&rsquo; (<var>m</var>, <var>l</var>, O) from DRAM, updates, and writes them back (vermilion arrows), and the four warps each own a slice of the keys, so a row&rsquo;s max is assembled from four partials through shared memory. Right, FA2: a thread block takes one Q tile and keeps its rows&rsquo; state in registers for the whole key loop; each warp owns 16 complete rows and never shares a reduction. Only K and V stream in.</figcaption>
     </figure>
   </section>
 
   <section id="s5">
-    <h2>5. FlashAttention-2: five problems, five fixes</h2>
+    <h2><small>14.5</small><a href="#s5">FlashAttention-2: five problems, five fixes</a></h2>
 
     <p>FlashAttention-2 (Dao, 2023) is the same mathematics with the engineering turned around. Each change answers a cost you can now see in FA1&rsquo;s listing.</p>
 
@@ -360,12 +352,16 @@ for each K/V tile j (Bc rows of K and V):                 // outer loop
     <p>Keep <var>&Otilde;</var> unnormalized and divide by <var>l</var> once, at the end: one rescale (multiply by &alpha;) per tile instead of a division and a multiplication. For the backward pass, store one number per row, <var>L</var> = <var>m</var> + log <var>l</var> (the log-sum-exp), instead of <var>m</var> and <var>l</var> separately; P can be recomputed from S and <var>L</var>. This matters more than it looks, because the non-matmul work of attention runs on the FP32 and SFU pipes, which are 16&times; slower than the tensor cores on an A100 (and 2&ndash;8&times; on your card, interlude 5b): every scalar operation per score is expensive relative to the 4<var>D</var> tensor FLOPs it accompanies.</p>
 
     <h3>Problem 3: B&middot;H blocks. Fix: parallelize over sequence blocks</h3>
+    <aside class="m-rem"><p><b>Occupancy</b> <a href="cap-02-execution-model.html#s9">ch.&nbsp;2 &sect;9</a>. The number of warps resident on an SM divided by the maximum, 48 on your card.</p></aside>
     <p>With the Q tile as the unit of work, the grid becomes (<var>T</var>/<var>B<sub>r</sub></var>) &times; <var>B</var> &times; <var>H</var>. At <var>T</var> = 1,024 and <var>B<sub>r</sub></var> = 64 one head alone is 16 blocks; 12 heads are 192, four blocks per SM on your card. Long sequences, which were FA1&rsquo;s worst case for occupancy, become its best. The blocks of one head are launched adjacently so that they stream the same K/V through the L2 at about the same time.</p>
 
     <h3>Problem 4: warps split the keys. Fix: split the queries</h3>
+    <aside class="m-rem"><p><b>Double buffer</b> <a href="cap-08-matmul-tensor-cores.html#s7">ch.&nbsp;8 &sect;7</a>. Two buffers: while the warps compute on one, the copies for the next phase are already in flight into the other.</p></aside>
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Give each warp 16 complete rows of the Q tile and the whole K tile, instead of all rows and a slice of the keys. A row&rsquo;s max and sum are then computed entirely inside one warp, in registers and shuffles; the four warps never exchange partials and never synchronize for a reduction. The only block-level barriers left are the ones around the shared-memory tiles of K and V (chapter 8&rsquo;s double buffer). With <var>B<sub>r</sub></var> = 64 and four warps, &ldquo;16 rows per warp&rdquo; is also exactly one <code>mma.sync.m16n8k16</code> tall, which is not a coincidence; section 6 uses it.</p>
 
     <h3>Problem 5: masked tiles still cost tensor time. Fix: skip them</h3>
+    <aside class="m-rem"><p><b>The masked half</b> <a href="cap-10-transformer-gpu-view.html#s6">ch.&nbsp;10 &sect;6</a>. Under the causal mask just under half of S is known to be &minus;&infin;. Skipping whole tiles above the diagonal recovers most of that waste.</p></aside>
     <p>Under the causal mask, the Q tile for rows [<var>i</var><sub>0</sub>, <var>i</var><sub>0</sub> + <var>B<sub>r</sub></var>) needs key tiles only up to the one containing key <var>i</var><sub>0</sub> + <var>B<sub>r</sub></var> &minus; 1. Tiles entirely above the diagonal are never loaded or multiplied; only the one tile that straddles the diagonal applies the mask element by element. Lab 9 computed the whole square and masked half of it afterwards; here about half the work disappears, and a block&rsquo;s loop length depends on its position (section 8).</p>
 
     <p>The result: FA2 is about 2&times; FA1 and reaches 50&ndash;73% of the A100&rsquo;s peak in the paper&rsquo;s measurements, against 25&ndash;40% for FA1. Its forward pass, in the form lab 13&rsquo;s <code>flash2_mma</code> implements:</p>
@@ -387,21 +383,33 @@ O = O~ / l;  write O (FP16) and L = m + log(l)</code></pre>
     <p>Watch it run. The figure below plays the same algorithm on toy sizes you can follow (16 keys, tiles of 4, <var>D</var> = 4), with the row state and the byte counter driven by the real formulas:</p>
 
     <figure id="fig-flash" class="c14-film">
-      <figcaption><b>Fig. 3</b> &mdash; One Q tile (4 query rows, cobalt tray) held still while K/V tiles of 4 keys slide past from the right. For each tile the 4&times;4 score block appears in the tray, the row gauges update (max needle, sum column, the four output cells), and when a tile raises a row&rsquo;s max the gauges visibly shrink by &alpha; before the new tile is added. The ghost grid on the floor is the score matrix that is never written. Counter: bytes to DRAM so far, naive (vermilion, the four trips of the score matrix) against flash (forest, Q, K, V, O only), for the toy size and scaled to <var>T</var> = 4,096 by the same formula. Final act: all four Q tiles run as parallel blocks, and the tiles above the diagonal never slide. Values are a fixed illustrative example; the merge arithmetic is exact.</figcaption>
+      <figcaption><b>Figure 3.</b> One Q tile (4 query rows, cobalt tray) held still while K/V tiles of 4 keys slide past from the right. For each tile the 4&times;4 score block appears in the tray, the row gauges update (max needle, sum column, the four output cells), and when a tile raises a row&rsquo;s max the gauges visibly shrink by &alpha; before the new tile is added. The ghost grid on the floor is the score matrix that is never written. Counter: bytes to DRAM so far, naive (vermilion, the four trips of the score matrix) against flash (forest, Q, K, V, O only), for the toy size and scaled to <var>T</var> = 4,096 by the same formula. Final act: all four Q tiles run as parallel blocks, and the tiles above the diagonal never slide. Values are a fixed illustrative example; the merge arithmetic is exact.</figcaption>
     </figure>
 
-    <details class="ym">
-      <summary>Your move: FA2 keeps the full P&#771;V product accumulating in registers across <var>T</var>/<var>B<sub>c</sub></var> tiles. A row&rsquo;s <var>&Otilde;</var> is 64 FP32 values; with 16 rows per warp, that is 1,024 floats per warp. How many registers per lane is that alone, and what does it say about the number of warps per SM this kernel can run?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">FA2 keeps the full P&#771;V product accumulating in registers across <var>T</var>/<var>B<sub>c</sub></var> tiles. A row&rsquo;s <var>&Otilde;</var> is 64 FP32 values; with 16 rows per warp, that is 1,024 floats per warp. How many registers per lane is that alone, and what does it say about the number of warps per SM this kernel can run?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Rows per warp</dt><dd>16</dd><dt>Values in one row of &Otilde;</dt><dd>64 FP32 numbers</dd><dt>Lanes per warp</dt><dd>32</dd><dt>Registers per lane assumed</dt><dd>128</dd><dt>Register file per SM</dt><dd>64K registers</dd><dt>Warps per block</dt><dd>4</dd><dt>Warp slots per SM</dt><dd>48</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Registers per lane for &Otilde;</span><input inputmode="decimal" autocomplete="off" data-want="32" data-tol="0.05" data-hint="Hint: count the floats of &amp;Otilde; in one warp, then divide by the lanes of a warp." aria-label="Registers per lane for Õ"> registers</label>
+<label><span class="l">Warps resident per SM</span><input inputmode="decimal" autocomplete="off" data-want="16" data-tol="0.05" data-hint="Hint: one warp needs its registers per lane times the lanes per warp; divide the register file by that, and round down to whole blocks of warps." aria-label="Warps resident per SM"> warps</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>1,024 / 32 lanes = 32 registers per lane for <var>&Otilde;</var>. Add the Q fragments held for the whole loop (16 rows &times; 64 FP16 halves = 16 registers per lane), the S&#771; tile of 16&times;64 FP32 scores (another 32), and addresses, maxes and sums: comfortably over 100, likely 128&ndash;160. At 128 registers, 4 blocks of 4 warps fit the 64K register file: 16 warps, a third of the 48 slots. Like chapter 8&rsquo;s GEMMs, the kernel runs at low occupancy by design and hides latency with the double buffer and with the many independent MMAs of one tile.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s6">
-    <h2>6. On the tensor cores: fragments that never leave</h2>
+    <h2><small>14.6</small><a href="#s6">On the tensor cores: fragments that never leave</a></h2>
 
     <p>Everything so far would run on the FP32 lanes (lab 13&rsquo;s <code>flash_fp32</code> does, and it is the version the FP32 engine uses). The fast version runs both products on the tensor cores, and the organising idea of this section is a lucky fit: <strong>the output of the first MMA already sits in the registers where the second MMA wants its input</strong>, so P is masked, exponentiated, summed, converted to FP16 and multiplied by V without ever being written to shared memory. The fit is not luck in NVIDIA&rsquo;s layouts; it is why they look the way they do.</p>
 
     <h3>The three fragments of <code>m16n8k16</code>, recalled</h3>
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Chapter 8&rsquo;s fragment explorer gave the rule. With <var>g</var> = lane / 4 (the lane&rsquo;s <em>group</em>, 0&ndash;7) and <var>t</var> = lane mod 4 (its position in the group):</p>
     <table>
       <tr><th>Fragment</th><th>Shape</th><th>Per lane</th><th>Lane (<var>g</var>, <var>t</var>) holds</th></tr>
@@ -429,7 +437,7 @@ a[3] = pack_half2(s[2*s + 1][2], s[2*s + 1][3]);   // row g+8, keys 16s+8+2t, +1
 
     <p>Four conversions per k-step, no data movement at all. The accumulator layout of one 16&times;8 tile and the A layout of a 16&times;16 tile were designed so that two adjacent accumulator tiles <em>are</em> an A fragment. WMMA hides the layout, which is why chapter 8 said serious kernels drop to <code>mma.sync</code>: masking a score needs to know its (row, key), exponentiating and summing needs the row structure, and this reuse needs the register-level layout. The B operand of the PV product is V<sub><var>j</var></sub> itself: k = key, n = head dimension, so lane (<var>g</var>, <var>t</var>) needs V[keys 2<var>t</var>, 2<var>t</var>+1][dim <var>g</var>]: two elements from two different <em>rows</em> of the row-major V tile. <code>ldmatrix</code> cannot hand those out from the rows as stored, so the kernel uses its <code>.trans</code> form.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Left: two adjacent 16 by 8 accumulator tiles of S tilde, keys 0 to 7 and 8 to 15. Lane 5, group 1 and position 1, holds rows 1 and 9, columns 2 and 3, in each: c0, c1 in row 1 and c2, c3 in row 9. Right: the 16 by 16 A fragment of the next MMA, where lane 5 must supply rows 1 and 9, columns 2 to 3 and 10 to 11, registers a0 to a3. They are the same elements. Below: row 1 over keys 0 to 15, each score marked with the lane that holds it, lanes 4 to 7 only, and the two xor shuffles that combine those four lanes.">
+    <figure class="lk-fig wide" role="img" aria-label="Left: two adjacent 16 by 8 accumulator tiles of S tilde, keys 0 to 7 and 8 to 15. Lane 5, group 1 and position 1, holds rows 1 and 9, columns 2 and 3, in each: c0, c1 in row 1 and c2, c3 in row 9. Right: the 16 by 16 A fragment of the next MMA, where lane 5 must supply rows 1 and 9, columns 2 to 3 and 10 to 11, registers a0 to a3. They are the same elements. Below: row 1 over keys 0 to 15, each score marked with the lane that holds it, lanes 4 to 7 only, and the two xor shuffles that combine those four lanes.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 352" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>The S accumulator layout is the A fragment layout</title>
@@ -574,7 +582,7 @@ a[3] = pack_half2(s[2*s + 1][2], s[2*s + 1][3]);   // row g+8, keys 16s+8+2t, +1
         <text x="408" y="342" font-size="9" fill="var(--lk-ink)">row max, row sum: two __shfl_xor_sync</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 4</b> &mdash; Why P&#771; needs no shuffle. Left: two adjacent 16&times;8 accumulator tiles of S&#771; (keys 0&ndash;7 and 8&ndash;15), with the four floats lane 5 (<var>g</var> = 1, <var>t</var> = 1) holds in each: rows 1 and 9, columns 2&ndash;3. Right: the 16&times;16 A fragment of the next MMA, with the eight halves lane 5 must supply: rows 1 and 9, columns 2&ndash;3 and 10&ndash;11. Same elements, same lane; a conversion in place joins them. Below: the four lanes of group 1 together hold all of rows 1 and 9, which is why a row max is two <code>shfl_xor</code>.</figcaption>
+      <figcaption><b>Figure 4.</b> Why P&#771; needs no shuffle. Left: two adjacent 16&times;8 accumulator tiles of S&#771; (keys 0&ndash;7 and 8&ndash;15), with the four floats lane 5 (<var>g</var> = 1, <var>t</var> = 1) holds in each: rows 1 and 9, columns 2&ndash;3. Right: the 16&times;16 A fragment of the next MMA, with the eight halves lane 5 must supply: rows 1 and 9, columns 2&ndash;3 and 10&ndash;11. Same elements, same lane; a conversion in place joins them. Below: the four lanes of group 1 together hold all of rows 1 and 9, which is why a row max is two <code>shfl_xor</code>.</figcaption>
     </figure>
 
     <h3><code>ldmatrix</code>, straight and transposed</h3>
@@ -604,22 +612,23 @@ __device__ __forceinline__ void ldmatrix_x4_trans(uint32_t r[4], const void* sme
     </div>
 
     <h3>Scale and exponentials</h3>
+    <aside class="m-rem"><p><b>SFU</b> <a href="cap-05x-the-hardware-underneath.html#s4">interlude 5b &sect;4</a>. The SFU only computes 2<sup><var>x</var></sup> (<code>MUFU.EX2</code>), approximately. An accurate <code>expf</code> adds a few FMAs around that one instruction.</p></aside>
     <p>Two details from interlude 5b. The scores are scaled by 1/&radic;<var>D</var> and the exponentials are taken relative to the running max; the kernel folds 1/&radic;<var>D</var> and log<sub>2</sub> e into one constant, scales S&#771; once by it, and uses <code>exp2f</code>, which is a single <code>MUFU.EX2</code> rather than <code>expf</code>&rsquo;s handful of instructions. With 32 exponentials per lane per tile against 64 tensor-core MMAs per warp per tile, the SFU needs about an eighth of the tensor time on your card (interlude 5b&rsquo;s table), which can hide behind the MMAs; on a B200 it could not, and that is FA4&rsquo;s polynomial trick (section 9). Lab 13&rsquo;s <code>flash_fp32</code> uses <code>expf</code> because its cost is invisible there: the FP32 FMAs are the bottleneck, not the SFU.</p>
 
     <h3>Tile sizes</h3>
     <p>With everything above, the resources of one block follow from (<var>B<sub>r</sub></var>, <var>B<sub>c</sub></var>, <var>D</var>, stages). Explore them; the defaults are lab 13&rsquo;s kernel, and the right-hand readouts are the DRAM bytes against the three-kernel version:</p>
 
-    <div id="w-tiles" class="w"></div>
+    <div id="w-tiles" class="w wide"></div>
 
-    <details class="ym">
-      <summary>Your move: in the widget, raise <var>B<sub>c</sub></var> from 64 to 128 at <var>B<sub>r</sub></var> = 64. The DRAM-byte readout barely changes, shared memory doubles, and the registers per lane go up by 32. Where do the 32 come from, and what did the bigger key tile buy?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">In the widget, raise <var>B<sub>c</sub></var> from 64 to 128 at <var>B<sub>r</sub></var> = 64. The DRAM-byte readout barely changes, shared memory doubles, and the registers per lane go up by 32. Where do the 32 come from, and what did the bigger key tile buy?</p><details><summary class="btn">Show the answer</summary>
       <p>S&#771; per warp is 16 rows by <var>B<sub>c</sub></var> keys, so doubling <var>B<sub>c</sub></var> doubles the accumulator fragment: from 8 to 16 n-tiles of 4 floats, 32 more registers per lane. What it bought is fewer tiles per row (half as many rescales, barriers and <code>cp.async</code> waits), not fewer bytes: K and V are read <var>T</var>/<var>B<sub>r</sub></var> times whatever <var>B<sub>c</sub></var> is. Bytes depend on <var>B<sub>r</sub></var>; per-tile overheads depend on <var>B<sub>c</sub></var>; registers pay for both. That is why FA2&rsquo;s production kernels pick (<var>B<sub>r</sub></var>, <var>B<sub>c</sub></var>) per head dimension and per GPU, as chapter 8&rsquo;s autotuning picked GEMM tiles.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s7">
-    <h2>7. The kernel, line by line</h2>
+    <h2><small>14.7</small><a href="#s7">The kernel, line by line</a></h2>
 
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p>Lab 13&rsquo;s <code>flash2_mma</code>, with the loops of section 5 and the fragments of section 6. <var>B<sub>r</sub></var> = <var>B<sub>c</sub></var> = <var>D</var> = 64, 128 threads, grid (<var>T</var>/64, <var>B</var>&middot;<var>H</var>). Q, K, V are FP16, read from a <code>[B&middot;T, 3C]</code> buffer with the engine&rsquo;s column layout (chapter 10), O is written in FP16 with FP32 accumulation throughout:</p>
 
 <pre><code class="language-cpp">// lab 13, flash2_mma: one block = 64 query rows of head (b, h); warp w owns rows 16w..16w+15
@@ -672,20 +681,22 @@ for (int j = 0; j &lt; n_tiles; ++j) {
 for (n) { store(row g,   dims n*8 + 2t, +1:  o[n][0] / l[0], o[n][1] / l[0]);
           store(row g+8, dims n*8 + 2t, +1:  o[n][2] / l[1], o[n][3] / l[1]); }</code></pre>
 
+    <aside class="m-rem"><p><b>Bank conflict</b> <a href="cap-03-memory-hierarchy.html#s7">ch.&nbsp;3 &sect;7</a>. Shared memory has 32 banks. A warp&rsquo;s access takes one pass only if its 32 lanes hit 32 different banks.</p></aside>
+    <aside class="m-link"><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>The lab&rsquo;s file is longer only by the address arithmetic and the guards. Three places deserve a comment. The <code>ldmatrix</code> row address: lanes 0&ndash;7, 8&ndash;15, 16&ndash;23, 24&ndash;31 supply the rows of the four 8&times;8 blocks, so the expression inside <code>&amp;Ks[...]</code> says which block each lane group addresses; for K the four blocks are (keys <var>n</var>&middot;8.., dims 0&ndash;7), (same keys, dims 8&ndash;15), (keys +8, dims 0&ndash;7), (keys +8, dims 8&ndash;15), which land in registers as b0, b1 of n-tile <var>n</var> and b0, b1 of n-tile <var>n</var>+1. The <code>__shfl_xor_sync</code> pairs: lane <var>x</var> exchanges with <var>x</var>^1 then <var>x</var>^2, which stays inside the group of four. And the padding to 72 halves: a row of 64 halves is 128 bytes, so the eight row addresses of an <code>ldmatrix</code> block would fall on the same banks (chapter 3); 144 bytes per row shifts each row by four banks, and the eight rows cover all 32.</p>
 
-    <details class="ym">
-      <summary>Your move: the K and V loads for tile <var>j</var>+1 are issued before the MMAs of tile <var>j</var>, and <code>wait_prior(1)</code> waits for all but the newest group. Which barrier protects the <em>next</em> iteration&rsquo;s refill, and what breaks if the first <code>__syncthreads()</code> (after the wait) is removed?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The K and V loads for tile <var>j</var>+1 are issued before the MMAs of tile <var>j</var>, and <code>wait_prior(1)</code> waits for all but the newest group. Which barrier protects the <em>next</em> iteration&rsquo;s refill, and what breaks if the first <code>__syncthreads()</code> (after the wait) is removed?</p><details><summary class="btn">Show the answer</summary>
       <p>The last <code>__syncthreads()</code> of the loop body protects the refill: it guarantees that no warp is still issuing <code>ldmatrix</code> on buffer <var>j</var>&amp;1 when iteration <var>j</var>+1 starts copying tile <var>j</var>+2 into it (chapter 8&rsquo;s write-after-read hazard). The first barrier protects the read side: <code>wait_prior</code> only covers the copies <em>this thread</em> issued; tile <var>j</var>&rsquo;s 8 KB was copied by all 128 threads, 4 chunks each, and a warp may only read the rows other warps copied once everyone has passed the wait. Remove it and a fast warp multiplies Q by whatever was in the buffer: usually the previous tile, with no error message.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s8">
-    <h2>8. Causal masking at tile granularity</h2>
+    <h2><small>14.8</small><a href="#s8">Causal masking at tile granularity</a></h2>
 
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Three kinds of tile meet the diagonal. For a Q block of rows [<var>i</var><sub>0</sub>, <var>i</var><sub>0</sub>+64) and a K tile of keys [<var>j</var><sub>0</sub>, <var>j</var><sub>0</sub>+64), with <var>B<sub>r</sub></var> = <var>B<sub>c</sub></var>: if <var>j</var><sub>0</sub> + 63 &le; <var>i</var><sub>0</sub> the tile is fully visible (no mask); if <var>j</var><sub>0</sub> &gt; <var>i</var><sub>0</sub> + 63 it is fully hidden (never loaded: the loop stops before it); and the one tile with <var>j</var><sub>0</sub> = <var>i</var><sub>0</sub> straddles the diagonal. In that tile the lane knows the global row and key of every score it holds, <var>i</var> = <var>i</var><sub>0</sub> + 16&middot;warp + <var>g</var> (+8) and <var>j</var> = <var>j</var><sub>0</sub> + 8<var>n</var> + 2<var>t</var> (+1), and sets the score to &minus;&infin; where <var>j</var> &gt; <var>i</var> before the row max. The exponential of &minus;&infin; minus a finite max is 0, so masked keys contribute nothing to <var>l</var> or <var>&Otilde;</var>. Because the loop always starts at key 0 and row <var>i</var> can see key 0, no row is ever fully masked and the NaN of chapter 9&rsquo;s empty row cannot occur here. With unequal tile sizes the arithmetic is the same with <var>B<sub>r</sub></var> and <var>B<sub>c</sub></var> in place of 64, and more than one tile may straddle.</p>
 
-    <figure class="lk-fig" role="img" aria-label="An 8 by 8 grid of 64 by 64 tiles for a 512-token score matrix under the causal mask. Tiles below the diagonal are forest, fully visible; the eight diagonal tiles are gold and apply the mask element by element; the tiles above the diagonal are pale and never loaded. Block 0 runs one tile, block 7 runs eight: 36 of 64 tiles in all. One diagonal tile is enlarged: the keys after each row are masked to minus infinity.">
+    <figure class="lk-fig wide" role="img" aria-label="An 8 by 8 grid of 64 by 64 tiles for a 512-token score matrix under the causal mask. Tiles below the diagonal are forest, fully visible; the eight diagonal tiles are gold and apply the mask element by element; the tiles above the diagonal are pale and never loaded. Block 0 runs one tile, block 7 runs eight: 36 of 64 tiles in all. One diagonal tile is enlarged: the keys after each row are masked to minus infinity.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 330" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Causal masking at tile granularity, T = 512</title>
@@ -749,20 +760,33 @@ for (n) { store(row g,   dims n*8 + 2t, +1:  o[n][0] / l[0], o[n][1] / l[0]);
         <text x="52" y="316" font-size="9.5" fill="var(--lk-ink)">computed: 1 + 2 + ... + 8 = <tspan font-weight="700" fill="var(--lk-forest)">36</tspan> of 64 tiles; loop length = Q block + 1</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 5</b> &mdash; A <var>T</var> = 512 score matrix cut into 64&times;64 tiles, under the causal mask. Forest tiles are fully visible and run unmasked; the gold diagonal tiles are the only ones that apply the mask element by element; the pale tiles above the diagonal are never loaded or multiplied. Q block 0 runs one tile, Q block 7 runs eight: the loop length is the Q block&rsquo;s index + 1, and the launch order puts the long blocks first (lab 13 gives <var>blockIdx.x</var> = 0 the last Q block) so they do not finish last.</figcaption>
+      <figcaption><b>Figure 5.</b> A <var>T</var> = 512 score matrix cut into 64&times;64 tiles, under the causal mask. Forest tiles are fully visible and run unmasked; the gold diagonal tiles are the only ones that apply the mask element by element; the pale tiles above the diagonal are never loaded or multiplied. Q block 0 runs one tile, Q block 7 runs eight: the loop length is the Q block&rsquo;s index + 1, and the launch order puts the long blocks first (lab 13 gives <var>blockIdx.x</var> = 0 the last Q block) so they do not finish last.</figcaption>
     </figure>
 
     <p>The skipped tiles are why the causal work is about half the square: &sum;(<var>b</var>+1) over <var>T</var>/64 blocks is (<var>T</var>/64)(<var>T</var>/64 + 1)/2 tiles against (<var>T</var>/64)<sup>2</sup>. They are also an imbalance: the last block of a head has <var>T</var>/64 tiles to the first block&rsquo;s one. FA2 launches the blocks of a head in reverse order (longest first; lab 13 does the same), so that the short blocks fill the gaps left as the long ones finish; with 192 blocks over 48 SMs the tail is small, and at <var>T</var> = 256 (four blocks per head) there is nothing to balance.</p>
 
-    <details class="ym">
-      <summary>Your move: a 2,048-token prompt is processed causally with 64&times;64 tiles. Relative to lab 9&rsquo;s kernels, which computed the full square and masked afterwards, by what factor does the tensor-core work drop, and why is the measured speedup likely to be a little less?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">A 2,048-token prompt is processed causally with 64&times;64 tiles. Relative to lab 9&rsquo;s kernels, which computed the full square and masked afterwards, by what factor does the tensor-core work drop, and why is the measured speedup likely to be a little less?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Prompt length</dt><dd>2,048 tokens</dd><dt>Tile size</dt><dd>64&times;64</dd><dt>Causal tiles for n blocks</dt><dd>n(n+1)/2</dd><dt>Full square for n blocks</dt><dd>n&times;n tiles</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Tiles in the full square</span><input inputmode="decimal" autocomplete="off" data-want="1024" data-tol="0.05" data-hint="Hint: divide the prompt length by the tile side to get n, then square it." aria-label="Tiles in the full square"> tiles</label>
+<label><span class="l">Tiles computed causally</span><input inputmode="decimal" autocomplete="off" data-want="528" data-tol="0.05" data-hint="Hint: use the causal formula in the Given list with the same n." aria-label="Tiles computed causally"> tiles</label>
+<label><span class="l">Work reduction factor</span><input inputmode="decimal" autocomplete="off" data-want="1.94" data-tol="0.05" data-hint="Hint: divide the tiles of the full square by the tiles computed causally." aria-label="Work reduction factor"> &times;</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>32 blocks per head; tiles computed = 32&middot;33/2 = 528 against 1,024: 1.94&times; fewer, approaching 2&times; as <var>T</var> grows. Measured: a little less, because the 32 diagonal tiles do the same MMAs plus the masking work, the blocks are unequal in length (the longest runs 32 tiles while the shortest runs one), and the first and last tiles of every block pay the pipeline&rsquo;s fill and drain. Those are fixed costs per block that the halving does not touch.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s9">
-    <h2>9. After FA2: names for Part V, and the backward pass</h2>
+    <h2><small>14.9</small><a href="#s9">After FA2: names for Part V, and the backward pass</a></h2>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Two more generations exist, and both are tied to hardware your card does not have (chapter 8&rsquo;s callout). You need their names and their one-line ideas, not their code:</p>
     <table>
       <tr><th>Version</th><th>Hardware</th><th>What it changed</th></tr>
@@ -776,7 +800,7 @@ for (n) { store(row g,   dims n*8 + 2t, +1:  o[n][0] / l[0], o[n][1] / l[0]);
   </section>
 
   <section id="s10">
-    <h2>10. Predictions</h2>
+    <h2><small>14.10</small><a href="#s10">Predictions</a></h2>
 
     <p>Batch 1, 12 heads, <var>D</var> = 64, causal, from the mechanisms and the papers&rsquo; measured fractions on other cards; ranges, not promises. The FLOPs are the causal half, 2<var>T</var><sup>2</sup><var>D</var> per head; the naive kernel does the full square.</p>
     <table>
@@ -786,11 +810,12 @@ for (n) { store(row g,   dims n*8 + 2t, +1:  o[n][0] / l[0], o[n][1] / l[0]);
       <tr><td><code>flash2_mma</code></td><td>0.05&ndash;0.09 ms</td><td>0.8&ndash;1.4 ms</td><td>3&ndash;5.5 ms</td><td>tensor cores at 30&ndash;55% of 61.7 TFLOPS; softmax work between the MMAs</td></tr>
       <tr><td>torch SDPA (flash backend), if available</td><td colspan="3">within 2&times; of <code>flash2_mma</code>, either way</td><td>a tuned FA2 with larger tiles; or no sm_120 kernel yet</td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Three things to compare when the numbers are in. The naive-to-flash ratio at 1K against 8K: the byte count says it should grow with <var>T</var>; the L2 says the growth starts above 1K. <code>flash_fp32</code> against naive: it moves <var>T</var>/<var>D</var> times fewer bytes (64&times; at <var>T</var> = 4,096) and does half the FLOPs, yet it is only a few times faster, because it moved the bottleneck from DRAM to the FP32 pipe, which chapter 8 showed is slow without register tiling. And <code>flash2_mma</code>&rsquo;s achieved TFLOPS against cuBLAS HGEMM from lab 7: attention&rsquo;s softmax between the two products is the gap, and it is why FA3 and FA4 are about overlap.</p>
   </section>
 
   <section id="s11">
-    <h2>11. Lab 13: three attention kernels</h2>
+    <h2><small>14.11</small><a href="#s11">Lab 13: three attention kernels</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 13</span><span class="lab-title">naive, flash_fp32, flash2_mma: one head at a time, then the engine</span><span class="idx-meta">~60 min · <code>mlsys/labs/lab13-flash-attention/</code></span></div>
@@ -817,8 +842,7 @@ python3 sdpa.py    # optional: torch.nn.functional.scaled_dot_product_attention 
     </div>
 
     <div class="callout note">
-      <span class="callout-label">Stretch</span>
-      <p><strong>Larger tiles:</strong> make <var>B<sub>r</sub></var> = 128 with 8 warps (the Q tile and <var>&Otilde;</var> double, the K/V tiles do not), and compare at 4K: the widget predicts the shared memory and registers. <strong>Three stages:</strong> chapter 8&rsquo;s stretch, applied to K and V. <strong><var>D</var> = 128:</strong> Llama&rsquo;s head size; <var>&Otilde;</var> doubles to 64 registers per lane, and the question is whether anything spills.</p>
+      <span class="callout-label">Stretch</span><ul><li><strong>Larger tiles:</strong> make <var>B<sub>r</sub></var> = 128 with 8 warps (the Q tile and <var>&Otilde;</var> double, the K/V tiles do not), and compare at 4K: the widget predicts the shared memory and registers.</li><li><strong>Three stages:</strong> chapter 8&rsquo;s stretch, applied to K and V.</li><li><strong><var>D</var> = 128:</strong> Llama&rsquo;s head size; <var>&Otilde;</var> doubles to 64 registers per lane, and the question is whether anything spills.</li></ul>
     </div>
   </section>
 
@@ -874,14 +898,10 @@ python3 sdpa.py    # optional: torch.nn.functional.scaled_dot_product_attention 
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-13-inference-arithmetic.html">&larr; Ch. 13 — Inference arithmetic</a>
-      <a href="index.html">Index</a>
-      <a href="cap-15-decode-attention.html">Ch. 15 — Decode attention &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part III · Chapter 14 · kernels checked for correctness on cudasim, never run on a GPU; fragment layouts from the PTX ISA; performance ranges are predictions until lab 13 replaces them, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-13-inference-arithmetic.html">&lsaquo; Ch. 13: Inference arithmetic</a><a class="btn primary" href="cap-15-decode-attention.html">Next: Ch. 15, Decode attention &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part III · Chapter 14 · kernels checked for correctness on cudasim, never run on a GPU; fragment layouts from the PTX ISA; performance ranges are predictions until lab 13 replaces them, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/xp/xp-core.js"></script>
@@ -890,5 +910,51 @@ python3 sdpa.py    # optional: torch.nn.functional.scaled_dot_product_attention 
   <script src="assets/xp/xp-time.js"></script>
   <script src="assets/fig-flash.js"></script>
   <script src="assets/ch14.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>

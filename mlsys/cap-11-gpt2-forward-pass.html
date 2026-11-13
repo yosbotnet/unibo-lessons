@@ -1,57 +1,47 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-11-gpt2-forward-pass.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 11 — Lab: a GPT-2 forward pass in CUDA · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch11.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch11.css?v=be220a3b">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-10-transformer-gpu-view.html">&larr; Ch. 10 — The transformer from the GPU&rsquo;s view</a>
-    <a href="index.html">Index</a>
-    <a href="cap-12-triton.html">Ch. 12 — Triton &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part II · Kernels that matter</div>
+<h3><a href="#top">Lab: a GPT-2 forward pass in CUDA<small>11</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 7 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>11.1</small><span>What &ldquo;matches PyTorch&rdquo; means</span></a></li><li data-for="s2"><a href="#s2"><small>11.2</small><span>The weights: from safetensors to one flat file</span></a></li><li data-for="s3"><a href="#s3"><small>11.3</small><span>Getting 500 MB onto the GPU</span></a></li><li data-for="s4"><a href="#s4"><small>11.4</small><span>Memory planning: one arena, no allocation in the loop</span></a></li><li data-for="s5"><a href="#s5"><small>11.5</small><span>The forward pass as code</span></a></li><li data-for="s6"><a href="#s6"><small>11.6</small><span>Checking it, and debugging a mismatch</span></a></li><li data-for="s7"><a href="#s7"><small>11.7</small><span>Generation: greedy, temperature, top-<var>k</var> on the GPU</span></a></li><li data-for="s8"><a href="#s8"><small>11.8</small><span>Where the time goes</span></a></li><li data-for="s9"><a href="#s9"><small>11.9</small><span>Predictions</span></a></li><li data-for="s10"><a href="#s10"><small>11.10</small><span>Lab 10: the engine</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-10-transformer-gpu-view.html">&larr; Ch. 10</a><a href="index.html">&uarr; Index</a><a href="cap-12-triton.html">Ch. 12 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part II — Kernels that matter · Chapter 11</div>
-    <h1>Lab: a GPT-2 forward pass in CUDA</h1>
-    <div class="lk-meta"><span>~55 min read</span><span>2 interactive widgets</span><span>2 plates</span><span>lab 10 · ~90 min on your GPU</span></div>
-  </header>
+  <header class="chap"><div class="num">11</div><div class="kicker">Part II &middot; Kernels that matter · Chapter 11</div><div class="numeral" aria-hidden="true">11</div><h1>Lab: a GPT-2 forward pass in CUDA</h1><ul class="meta"><li>~55 min read</li><li>2 interactive widgets</li><li>2 plates</li><li>lab 10 · ~90 min on your GPU</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>This is the milestone of Part II: GPT-2 small runs on your card, in CUDA you can read line by line, and its logits match PyTorch&rsquo;s. You already have every kernel it needs (lab 5&rsquo;s elementwise ops and layernorm, lab 7&rsquo;s GEMM with chapter 9&rsquo;s epilogues, lab 9&rsquo;s attention). What is left is everything <em>around</em> the kernels, and it is what separates a kernel collection from an inference engine: <strong>getting the weights onto the GPU</strong> in the layout the kernels want, fast; <strong>planning memory once</strong>, so that nothing is allocated while the model runs; and <strong>proving the output right</strong>, with a test that needs no files and a verification against the real model. Then generation: picking the next token on the GPU, which is where atomics, privatization and scans enter the course, and a first honest look at where a forward pass spends its time: about 150 kernel launches per token, a launch floor that competes with the DRAM time, and a cost per generated token that grows with the prompt because this chapter&rsquo;s engine recomputes everything. The KV cache that fixes it is already in the code; chapter 13 measures what it buys.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~55 min read</li><li>2 interactive widgets</li><li>2 plates</li><li>lab 10 · ~90 min on your GPU</li></ul></aside><div class="ov-learn"><p class="ov-lead">This is the milestone of Part II: GPT-2 small runs on your card, in CUDA you can read line by line, and its logits match PyTorch&rsquo;s. You already have every kernel it needs (lab 5&rsquo;s elementwise ops and layernorm, lab 7&rsquo;s GEMM with chapter 9&rsquo;s epilogues, lab 9&rsquo;s attention). What is left is everything <em>around</em> the kernels, and it is what separates a kernel collection from an inference engine: <strong>getting the weights onto the GPU</strong> in the layout the kernels want, fast; <strong>planning memory once</strong>, so that nothing is allocated while the model runs; and <strong>proving the output right</strong>, with a test that needs no files and a verification against the real model. Then generation: picking the next token on the GPU, which is where atomics, privatization and scans enter the course, and a first honest look at where a forward pass spends its time: about 150 kernel launches per token, a launch floor that competes with the DRAM time, and a cost per generated token that grows with the prompt because this chapter&rsquo;s engine recomputes everything. The KV cache that fixes it is already in the code; chapter 13 measures what it buys.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">What &ldquo;matches PyTorch&rdquo; means</a></li>
-      <li><a href="#s2">The weights: from safetensors to one flat file</a></li>
-      <li><a href="#s3">Getting 500 MB onto the GPU</a></li>
-      <li><a href="#s4">Memory planning: one arena, no allocation in the loop</a></li>
-      <li><a href="#s5">The forward pass as code</a></li>
-      <li><a href="#s6">Checking it, and debugging a mismatch</a></li>
-      <li><a href="#s7">Generation: greedy, temperature, top-<var>k</var> on the GPU</a></li>
-      <li><a href="#s8">Where the time goes</a></li>
-      <li><a href="#s9">Predictions</a></li>
-      <li><a href="#s10">Lab 10: the engine</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. What &ldquo;matches PyTorch&rdquo; means</h2>
+    <h2><small>11.1</small><a href="#s1">What &ldquo;matches PyTorch&rdquo; means</a></h2>
 
+    <aside class="m-rem"><p><b>Non-associativity</b> <a href="cap-05-profiling.html#s6">ch.&nbsp;5 &sect;6</a>. For floats, each order of additions rounds differently, so a GPU sum and a CPU sum of the same floats differ in the last bits.</p></aside>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <p>The engine&rsquo;s claim is that for a given prompt it produces the same logits (the 50,257 scores for the next token at every position) as Hugging Face&rsquo;s GPT-2 in PyTorch. &ldquo;The same&rdquo; needs a definition, because bitwise equality is impossible and you should know why before you chase it. Both programs compute in FP32. Both compute the same mathematical function. But a dot product of 768 terms has a result that depends on the order the terms are added (chapter 5&rsquo;s non-associativity), cuBLAS and PyTorch&rsquo;s kernels tile the sums differently, <code>tanhf</code> and <code>expf</code> have several implementations with different last bits, and the differences compound across 12 layers. The result: two correct FP32 forward passes disagree in the fourth or fifth significant digit. GPT-2&rsquo;s logits are of order 100 in magnitude, so a disagreement of 10<sup>&minus;3</sup> to 10<sup>&minus;2</sup> per logit is what correct code looks like, and a disagreement of 1 is a bug.</p>
     <p>So the engine has two tiers of checking, each with a definition of &ldquo;matches&rdquo;:</p>
     <table>
@@ -61,14 +51,13 @@
     </table>
     <p>The double-precision reference is the stricter of the two: its own rounding is 5.4&times;10<sup>8</sup> times finer than FP32, so every deviation it reports is the GPU&rsquo;s, and a tolerance of 2&times;10<sup>&minus;4</sup> on random models with activations of order one is tight enough to catch a wrong epilogue, a masked entry off by one, or a transposed weight, while leaving room for FP32 rounding across a few layers. The real-weight check is looser because its reference is itself FP32, but it tests the one thing the random models cannot: that the file export, the tensor order and the tied embedding are right for the actual checkpoint.</p>
 
-    <details class="ym">
-      <summary>Your move: the test tolerance is 2&times;10<sup>&minus;4</sup>. Why not 10<sup>&minus;6</sup>, and why would 10<sup>&minus;2</sup> be dangerous?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The test tolerance is 2&times;10<sup>&minus;4</sup>. Why not 10<sup>&minus;6</sup>, and why would 10<sup>&minus;2</sup> be dangerous?</p><details><summary class="btn">Show the answer</summary>
       <p>FP32 has 24 bits of mantissa, a relative spacing of 1.2&times;10<sup>&minus;7</sup> (chapter 6), and a sum of 768 terms in a different order can move the result by tens of ulp; after a residual stream accumulates twelve layers of that, 10<sup>&minus;6</sup> would fail correct code on rounding alone. At 10<sup>&minus;2</sup> on activations of order one, a bug that is off by a percent slips through: a GELU with the wrong constant, a layernorm &epsilon; of 10<sup>&minus;3</sup> instead of 10<sup>&minus;5</sup>, a softmax missing a single masked entry out of a hundred. The tolerance is set just above what rounding produces, so that anything structural shows. The lab prints the maximum error of every check; after a run, you know your rounding floor and can tighten it.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s2">
-    <h2>2. The weights: from safetensors to one flat file</h2>
+    <h2><small>11.2</small><a href="#s2">The weights: from safetensors to one flat file</a></h2>
 
     <p>Hugging Face ships GPT-2 small as <code>model.safetensors</code>: 548 MB, a format chosen for being trivial to read. The file is an 8-byte little-endian length <var>N</var>, then <var>N</var> bytes of JSON mapping each tensor name to its dtype, shape and byte range (<code>data_offsets</code>, relative to the end of the header), then the raw bytes, row-major. No parsing of floats is needed: a tensor is a byte range, and copying it is <code>f.seek(); f.read()</code>. The engine does not read safetensors directly, because C++ has no JSON and because the kernels want one thing: <strong>every tensor in one buffer, in the order the forward pass reads them</strong>. So <code>export.py</code> (Python standard library only) rewrites it once:</p>
 <pre><code class="language-text">gpt2_124M.bin = header (256 int32: magic 20261022, version 1, L, C, H, V, T_max, float count lo, hi; rest zero)
@@ -83,9 +72,10 @@
                   fc2_w [3072, 768], fc2_b [768]           HF mlp.c_proj
               + lnf_g, lnf_b [768]
 total 1 KB + 497.8 MB = 124,439,808 floats</code></pre>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Three facts decide the layout. <strong>Conv1D is [in, out].</strong> HF&rsquo;s GPT-2 stores every linear weight as the original checkpoint did, [<var>K</var>, <var>N</var>], so <var>y</var> = <var>x</var><var>W</var> + <var>b</var> needs no transpose and the bytes go into the file untouched (chapter 6 warned that this is the cheapest bug to avoid; it is avoided by copying, not by converting). <strong>Layer-major order.</strong> One layer&rsquo;s twelve tensors are contiguous, which is what a decode step streams: layer 0&rsquo;s 28 MB, then layer 1&rsquo;s, a sequential read of the whole file per token. <strong>Tied weights.</strong> The checkpoint has no LM head matrix; <code>wte</code> serves twice, so the file has it once and the engine keeps one pointer to it for both uses.</p>
 
-    <figure class="lk-fig" role="img" aria-label="The weight file gpt2_124M.bin drawn as a ruler 640 pixels long for 497.8 MB. After a 1 KB header, the token embedding wte takes the first 154.4 MB, a third of the file; the position embedding wpe is a 3.1 MB sliver; then 12 layer stripes of 28.35 MB each, L0 to L11, and a 6 KB final layernorm at the end. Above the ruler, the kernels that read each part: the embedding gather reads wte and wpe, each layer's GEMMs read their stripe, and an arrow from the end returns to wte: the LM head reads the embedding table again. Below, layer 6 zoomed: qkv_w 7.08 MB, prj_w 2.36 MB, fc_w 9.44 MB and fc2_w 9.44 MB, with the eight small vectors, 40 KB in all, as thin ticks between them.">
+    <figure class="lk-fig wide" role="img" aria-label="The weight file gpt2_124M.bin drawn as a ruler 640 pixels long for 497.8 MB. After a 1 KB header, the token embedding wte takes the first 154.4 MB, a third of the file; the position embedding wpe is a 3.1 MB sliver; then 12 layer stripes of 28.35 MB each, L0 to L11, and a 6 KB final layernorm at the end. Above the ruler, the kernels that read each part: the embedding gather reads wte and wpe, each layer's GEMMs read their stripe, and an arrow from the end returns to wte: the LM head reads the embedding table again. Below, layer 6 zoomed: qkv_w 7.08 MB, prj_w 2.36 MB, fc_w 9.44 MB and fc2_w 9.44 MB, with the eight small vectors, 40 KB in all, as thin ticks between them.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 700 226" style="width:700px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
       <title>gpt2_124M.bin as a ruler of bytes</title>
@@ -144,21 +134,22 @@ total 1 KB + 497.8 MB = 124,439,808 floats</code></pre>
       <text x="368" y="210" font-size="10" text-anchor="middle" fill="var(--lk-forest)">LM head: logits = x wte^T, an NT GEMM that reads the first stripe again</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; The weight file as a ruler of bytes, to scale. The embedding table is a third of the file; each layer is a 28 MB stripe whose four matrices (cobalt) are 99.9% of it and whose eight vectors (the layernorm parameters and biases, too thin to draw at this scale) are the rest. Below the ruler, which kernel reads each stripe: the gather at the start, the GEMMs in the layers, the NT GEMM of the LM head at the end reading the first stripe again.</figcaption>
+      <figcaption><b>Figure 1.</b> The weight file as a ruler of bytes, to scale. The embedding table is a third of the file; each layer is a 28 MB stripe whose four matrices (cobalt) are 99.9% of it and whose eight vectors (the layernorm parameters and biases, too thin to draw at this scale) are the rest. Below the ruler, which kernel reads each stripe: the gather at the start, the GEMMs in the layers, the NT GEMM of the LM head at the end reading the first stripe again.</figcaption>
     </figure>
 
     <p><code>export.py</code> also writes <code>gpt2_tokens.bin</code>: for every token id, the bytes it stands for, so that <code>generate</code> can print text. The real tokenizer (byte-level BPE with its merge rules) is only needed to turn <em>text into ids</em>, and for that <code>prompt.py</code> uses <code>tiktoken</code> if installed; the engine itself never tokenizes. It reads ids from a file, which keeps the C++ side free of string handling and the correctness story about numbers only.</p>
 
-    <details class="ym">
-      <summary>Your move: <code>export.py</code> copies byte ranges without looking at the values. What goes wrong if the checkpoint were stored in BF16 (as most modern models are), and what would the export have to do?</summary>
+    <div class="move"><h4>Your move</h4><p class="q"><code>export.py</code> copies byte ranges without looking at the values. What goes wrong if the checkpoint were stored in BF16 (as most modern models are), and what would the export have to do?</p><details><summary class="btn">Show the answer</summary>
       <p>The byte count would be half what the header claims and every float the engine reads would be two BF16 values glued together: garbage from the first kernel. The export would have to widen each BF16 to FP32, which is cheap (BF16 is FP32&rsquo;s top 16 bits, chapter 6: shift left by 16), but it is a conversion of 124M values in Python, so it should be done with <code>array</code> or <code>struct</code> on whole tensors, not value by value. The dtype field in the safetensors header is there for exactly this check, and <code>export.py</code> refuses anything but <code>F32</code> rather than guess.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s3">
-    <h2>3. Getting 500 MB onto the GPU</h2>
+    <h2><small>11.3</small><a href="#s3">Getting 500 MB onto the GPU</a></h2>
 
+    <aside class="m-link"><p><a href="cap-02-execution-model.html">Ch.&nbsp;2 &middot; The execution model</a></p></aside>
     <p>Half a gigabyte has to travel from the disk, through the CPU&rsquo;s memory, over PCIe, into the card&rsquo;s DRAM. Every program so far did this with one <code>cudaMemcpy</code> (chapter 2) and never timed it; an engine that loads a model in several seconds when it could take one is a bad engine, and the reasons it can be slow are worth knowing. Three concepts, defined here because the engine is the first program in the course that needs them:</p>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <ul>
       <li><strong>Pageable and pinned memory.</strong> Ordinary host memory from <code>malloc</code> is <em>pageable</em>: the operating system may move a page or swap it out at any moment, so its physical address is not stable. The copy engine (interlude 5b: a DMA unit that moves data over PCIe without an SM) needs stable physical addresses, so <code>cudaMemcpy</code> from pageable memory secretly copies the data first into a driver-owned <em>pinned</em> buffer (page-locked, never moved), chunk by chunk, and then DMAs from there: two copies, and the CPU does the first. <code>cudaMallocHost</code> gives you pinned memory directly, and a copy from it is one DMA at PCIe speed.</li>
       <li><strong>Streams.</strong> A stream is a queue of GPU work (kernels, copies) executed in order. Work in different streams may overlap, and a copy in one stream can run while the CPU is busy with something else. Chapter 5 used a stream to capture a graph; here one is used so that <code>cudaMemcpyAsync</code> returns immediately.</li>
@@ -180,17 +171,20 @@ for (size_t off = 0, i = 0; off &lt; bytes; off += CH, ++i) {
     cudaEventRecord(done[k], s);
 }
 cudaStreamSynchronize(s);</code></pre>
+    <aside class="m-rem"><p><b>Double buffer</b> <a href="cap-08-matmul-tensor-cores.html#s7">ch.&nbsp;8 &sect;7</a>. Keep two buffers. While the warps compute on one, the copies for the next phase are already in flight into the other.</p></aside>
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>It is chapter 8&rsquo;s double buffer, one level up: two buffers, a producer (the file read) and a consumer (the DMA), an event instead of a barrier. The numbers to expect, as ranges: a pageable <code>cudaMemcpy</code> of 500 MB at 5&ndash;12 GB/s (the hidden staging copy is CPU work); pinned at 20&ndash;50 GB/s on a PCIe 5.0 &times;16 slot (64 GB/s theoretical, each direction); and the overlap mode at the speed of the slower side, which once the file is in the OS page cache is the <code>fread</code> itself, a memory copy of a few GB/s per core. The first run after a reboot reads from the NVMe at 3&ndash;7 GB/s whatever you do. The lesson is not the 50 ms saved on GPT-2; it is that a 70B model is 140 GB in FP16, and engines load it with exactly this loop, with direct I/O and several threads on the producer side.</p>
 
-    <details class="ym">
-      <summary>Your move: in the overlap loop, the <code>fread</code> and the <code>cudaMemcpyAsync</code> of the <em>same</em> chunk are not overlapped, only adjacent chunks are. What is the total time for <var>n</var> chunks in terms of the read time <var>r</var> and the copy time <var>c</var> per chunk, and when does buffer count matter?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">In the overlap loop, the <code>fread</code> and the <code>cudaMemcpyAsync</code> of the <em>same</em> chunk are not overlapped, only adjacent chunks are. What is the total time for <var>n</var> chunks in terms of the read time <var>r</var> and the copy time <var>c</var> per chunk, and when does buffer count matter?</p><details><summary class="btn">Show the answer</summary>
       <p>About <var>r</var> + max(<var>r</var>, <var>c</var>) &middot; (<var>n</var> &minus; 1) + <var>c</var>, if the slower side never waits: the first read and the last copy are exposed, everything else hides behind the slower of the two. With two buffers that holds as long as each side&rsquo;s time per chunk is steady; if reads are bursty (page-cache hits and disk misses mixed), the copy engine idles during a slow read and a third buffer would absorb it, which is chapter 8&rsquo;s &ldquo;number of stages&rdquo; argument again. The chunk size trades the exposed ends (smaller is better) against per-call overhead (a few microseconds per <code>cudaMemcpyAsync</code>; 32 MB is far above it).</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s4">
-    <h2>4. Memory planning: one arena, no allocation in the loop</h2>
+    <h2><small>11.4</small><a href="#s4">Memory planning: one arena, no allocation in the loop</a></h2>
 
+    <aside class="m-rem"><p><b>CUDA graph</b> <a href="cap-05-profiling.html#s3">ch.&nbsp;5 &sect;3</a>. A recording of GPU work that can be replayed with one call. You make one by capturing a stream.</p></aside>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <p>A forward pass needs buffers for its activations: the stream <var>x</var>, the normalized copy, the QKV output, the attention output, the 3,072-wide MLP activation, the logits, attention&rsquo;s scratch, and with a cache, the cache. A framework allocates them as it goes and frees them after; an engine <strong>plans them once</strong>. <code>cudaMalloc</code> is slow (tens to hundreds of microseconds, sometimes a device synchronization), fragments the heap when sizes vary, and makes pointers change between runs, which breaks the one optimization that removes the launch floor: a captured CUDA graph replays fixed pointers (chapter 5). So the engine takes the largest batch <var>B</var><sub>max</sub> and context <var>T</var><sub>max</sub> it will serve, computes every buffer&rsquo;s size for them, does <em>one</em> <code>cudaMalloc</code>, and carves it:</p>
 <pre><code class="language-cpp">// gpt2.cu, engine_init(E, weights, cfg, opts, Bmax, Tmax, logit_rows, Tpre = Tmax): one arena, carved
 // into buffers. Tmax sizes the cache; Tpre, the most new tokens per pass, sizes the activations
@@ -219,19 +213,32 @@ for (int l = 0; l &lt; L; ++l) { k_cache[l] = take(Bmax * Tmax * C); v_cache[l] 
       <tr><td>logits (verify: all rows; generate: one per sequence)</td><td>[<var>B</var>&middot;<var>T</var>, 50,257] or [<var>B</var>, 50,257]</td><td>206 MB or 0.2 MB</td><td><var>B</var>&middot;<var>T</var> or <var>B</var></td></tr>
       <tr><td>weights (for scale)</td><td></td><td>498 MB (+154 MB for the own backend&rsquo;s transposed LM head)</td><td></td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p>Move the sliders and watch which line wins: at <var>B</var> = 1 the weights dominate; raise <var>T</var> and the scratch&rsquo;s <var>T</var><sup>2</sup> takes over; raise <var>B</var> at full context and the cache does. The three regimes are chapters 10, 14 and 13 respectively, as a memory bill.</p>
 
-    <div id="w-memory-plan" class="w"></div>
+    <div id="w-memory-plan" class="w wide"></div>
 
-    <details class="ym">
-      <summary>Your move: the engine serves <var>B</var> = 8 sequences at <var>T</var><sub>max</sub> = 1,024 with the naive attention. Which of scratch, cache and weights is the largest, and does it fit in 12 GB?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">The engine serves <var>B</var> = 8 sequences at <var>T</var><sub>max</sub> = 1,024 with the naive attention. Which of scratch, cache and weights is the largest, and does it fit in 12 GB?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Layers</dt><dd>12</dd><dt>Heads</dt><dd>12</dd><dt>Model width</dt><dd>768</dd><dt>Bytes per FP32 number</dt><dd>4 B</dd><dt>Weights</dt><dd>498 MB</dd><dt>GPU memory</dt><dd>12 GB</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Attention scratch</span><input inputmode="decimal" autocomplete="off" data-want="403" data-tol="0.05" data-hint="Hint: multiply B by the 12 heads, by T_max squared, by 4 bytes." aria-label="Attention scratch"> MB</label>
+<label><span class="l">KV cache</span><input inputmode="decimal" autocomplete="off" data-want="604" data-tol="0.05" data-hint="Hint: multiply 2 (k and v) by 12 layers, B, T_max, the width 768 and 4 bytes." aria-label="KV cache"> MB</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>Scratch: 8 &times; 12 &times; 1,024<sup>2</sup> &times; 4 B = 403 MB. Cache: 2 &times; 12 &times; 8 &times; 1,024 &times; 768 &times; 4 B = 604 MB. Weights: 498 MB. The cache wins, and all of it together, with the activations (8&times; the table&rsquo;s 31 MB) and the logits, is under 2 GB: it fits almost seven times over. The limit is not memory at this model size; it is the <var>T</var><sup>2</sup> scratch at long contexts (chapter 10&rsquo;s Your move) and, for the models that matter in Part IV, the cache: Llama-3-8B at FP16 has 131 KB of cache per token, and chapter 13 shows where that runs out.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s5">
-    <h2>5. The forward pass as code</h2>
+    <h2><small>11.5</small><a href="#s5">The forward pass as code</a></h2>
 
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p>Chapter 10&rsquo;s kernel list, as a loop. This is the engine&rsquo;s <code>forward()</code> with the profiling hooks and the checks removed; <var>M</var> = <var>B</var>&middot;<var>T</var><sub>new</sub> rows, <code>pos0</code> the position of the first new token (0 without a cache):</p>
 <pre><code class="language-cpp">// gpt2.cu, forward(): B sequences of T_new tokens starting at pos0. use_cache = false in this chapter.
 embed&lt;&lt;&lt;M, 256&gt;&gt;&gt;(tok_d, p.wte, p.wpe, x, T_new, pos0, C);                      // x = wte[tok] + wpe[pos]
@@ -251,6 +258,8 @@ layernorm&lt;&lt;&lt;M, LN_THREADS&gt;&gt;&gt;(x, p.lnf_g, p.lnf_b, ln, C);
 if (all_logits) lm_head(be, ln, p.wte, wteT, logits, M, V, C);                  // verify: every position
 else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_head(be, last, p.wte, wteT, logits, B, V, C); }</code></pre>
     <p>Three design choices in it carry the chapter&rsquo;s weight:</p>
+    <aside class="m-rem"><p><b>Epilogue</b> <a href="cap-06-neural-networks-as-a-workload.html#s3">ch.&nbsp;6 &sect;3</a>. The final step of a matmul kernel. Bias, activation and residual add can be done there while the result is still in registers.</p></aside>
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p></aside>
     <ul>
       <li><strong>One <code>linear()</code> entry point with an epilogue enum</strong> (<code>EPI_BIAS</code>, <code>EPI_BIAS_GELU</code>, <code>EPI_BIAS_RESIDUAL</code>) and two backends selected by <code>--linear cublas|own</code>. The own backend is lab 7&rsquo;s v7 with chapter 9&rsquo;s epilogue fused into its stores, plus a GEMV-shaped kernel for <var>M</var> &le; 8 (decode: a 128&times;128 tile with one live row and six blocks for <var>N</var> = 768 would starve 48 SMs, like chapter 6&rsquo;s 3-block layer). The cuBLAS backend runs <code>cublasSgemm</code> and then one fused elementwise kernel for the passengers; for the residual it uses &beta; = 1, so that <var>x</var> += &hellip; costs nothing extra. The two backends are the engine&rsquo;s built-in experiment: same model, your kernels against NVIDIA&rsquo;s, one flag.</li>
       <li><strong>Attention through a table.</strong> <code>pre</code> and <code>dec</code> are entries of <code>PREFILL_IMPLS</code> and <code>DECODE_IMPLS</code> in <code>attention.cuh</code>, chosen by <code>--attn-prefill naive</code> and <code>--attn-decode simple</code>, each with the contract&rsquo;s signature and a scratch-size function the memory plan calls. Two more lines are already registered, <code>flash</code> (chapter 14, its kernel from lab 13) and <code>split</code> (chapter 15, from lab 14); nothing else in the engine changes.</li>
@@ -258,14 +267,13 @@ else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_he
     </ul>
     <p>Note what is <em>not</em> in the loop: no allocation, no host synchronization, no copy except the token ids at the start (an ordinary <code>cudaMemcpy</code> of a few bytes, which does synchronize: a known cost, counted in section 8). The whole pass is a sequence of launches into the default stream, which is exactly the shape a CUDA graph can capture later.</p>
 
-    <details class="ym">
-      <summary>Your move: <code>EPI_BIAS_RESIDUAL</code> updates <var>x</var> in place: the GEMM reads <code>att</code> and writes <code>x</code> += result. The MLP&rsquo;s second GEMM does the same with <code>fc</code>. What would go wrong if an epilogue read and wrote the <em>same</em> buffer as its A operand, and why is that not a problem for the residual?</summary>
+    <div class="move"><h4>Your move</h4><p class="q"><code>EPI_BIAS_RESIDUAL</code> updates <var>x</var> in place: the GEMM reads <code>att</code> and writes <code>x</code> += result. The MLP&rsquo;s second GEMM does the same with <code>fc</code>. What would go wrong if an epilogue read and wrote the <em>same</em> buffer as its A operand, and why is that not a problem for the residual?</p><details><summary class="btn">Show the answer</summary>
       <p>A GEMM reads tiles of A at every <var>k</var> step and writes C once at the end; if C aliased A, a block that finished early would overwrite rows of A that other blocks (other <var>k</var> ranges of other tiles) still need to read: a write-after-read race across blocks, undetectable by a test on small shapes where all blocks fit in one wave. The residual is safe because <var>x</var> is neither GEMM&rsquo;s A operand: the attention projection reads <code>att</code>, the MLP projection reads <code>fc</code>, and <var>x</var> is only touched in the epilogue, each element by exactly one thread, read and then written. <code>linear()</code>&rsquo;s comment says &ldquo;x must not alias out&rdquo; for this reason.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s6">
-    <h2>6. Checking it, and debugging a mismatch</h2>
+    <h2><small>11.6</small><a href="#s6">Checking it, and debugging a mismatch</a></h2>
 
     <p><code>./gpt2 test</code> runs section 1&rsquo;s first tier: a handful of random configurations (small <var>L</var>, <var>C</var>, <var>H</var>, <var>V</var>, several <var>B</var> and <var>T</var>, including odd <var>T</var>), each through both backends, each checked three ways: the full forward against the CPU reference at every position; a prefill of half the tokens into the cache followed by one-token decode steps, against the same reference (so the cache path is proven now even though this chapter does not use it for speed); and, for the single-sequence configuration, greedy generation with and without the cache, which must produce identical token ids, because the two paths compute the same function. Then the sampling kernels against a CPU definition on rows of 50,257 random logits. It needs no files and runs on cudasim, which is how it was checked before it ever met a GPU.</p>
     <p><code>./gpt2 verify</code> runs the second tier on the real weights: <code>reference.py</code> writes <code>ref_logits.bin</code> (a header, the prompt&rsquo;s token ids, and <var>T</var> &times; 50,257 FP32 logits, from <code>transformers</code> if it is installed and from a plain numpy forward if not). Neither path reads the engine&rsquo;s file: the numpy forward reads <code>model.safetensors</code> itself, so a mistake in <code>export.py</code> cannot hide by being made on both sides. The engine prints the maximum logit error and the top-1 agreement for the full forward and for prefill + decode.</p>
@@ -283,18 +291,18 @@ else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_he
       <tr><td>right at small <var>T</var>, NaN at large <var>T</var></td><td>a softmax without the max subtraction, or scratch sized for the wrong <var>T</var></td></tr>
     </table>
 
-    <details class="ym">
-      <summary>Your move: your engine passes <code>test</code> on every random configuration but <code>verify</code> fails with top-1 agreement at no position and errors of order 10. Which parts of the engine does <code>test</code> exonerate, and where do you look first?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">Your engine passes <code>test</code> on every random configuration but <code>verify</code> fails with top-1 agreement at no position and errors of order 10. Which parts of the engine does <code>test</code> exonerate, and where do you look first?</p><details><summary class="btn">Show the answer</summary>
       <p><code>test</code> builds its weights in memory in the engine&rsquo;s own order, so it proves the kernels, the loop, the epilogues, the attention and the cache path. It never touches <code>export.py</code>, the file header, or the assumption that HF&rsquo;s tensors are [in, out] and in the expected order. Everything wrong is therefore between the checkpoint and the flat file, or in <code>reference.py</code>&rsquo;s own prompt: check that the ids in <code>ref_logits.bin</code> are the ids the engine read, then dump the embedding row of token 0 from both sides. Random-model tests are blind to file-format bugs by construction, which is why the lab&rsquo;s end-to-end test writes a tiny fake safetensors file and runs it through export, reference and verify.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s7">
-    <h2>7. Generation: greedy, temperature, top-<var>k</var> on the GPU</h2>
+    <h2><small>11.7</small><a href="#s7">Generation: greedy, temperature, top-<var>k</var> on the GPU</a></h2>
 
     <p>A forward pass ends with one row of 50,257 logits per sequence. <strong>Greedy</strong> decoding takes the largest; <strong>sampling</strong> draws a token with probability softmax(logits / <var>temperature</var>), where a temperature below 1 sharpens the distribution and above 1 flattens it; <strong>top-<var>k</var></strong> sampling first keeps only the <var>k</var> largest logits (40 is the usual default), so that the long tail of implausible tokens can never be drawn. All three are small jobs, 200 KB of logits per sequence, and a first engine would copy the row to the CPU and do them there. Two reasons not to: at <var>B</var> = 64 that is 13 MB per step over PCIe, and worse, it is a round trip per token that puts the CPU on the critical path and prevents the whole step from ever becoming one graph. So the engine picks the token on the GPU, one block of 1,024 threads per row, and the host only fetches the chosen ids. This is where three tools enter the course, each defined by the job it does here.</p>
 
     <h3>Greedy: a max with its index</h3>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <p>Chapter 5&rsquo;s reduction, carrying a pair (value, index) and breaking ties toward the smaller index so that the result is deterministic: each thread scans its stride of the row, warps merge by shuffles, warp leaders merge through shared memory. <code>argmax_rows</code> in <code>sample.cuh</code>, forty lines.</p>
 
     <h3>Top-<var>k</var> without sorting: radix select</h3>
@@ -317,26 +325,29 @@ else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_he
       <li>The walk from the top is a <strong>scan</strong> (a prefix sum): thread <var>t</var> holds bin 255 &minus; <var>t</var>, and after an inclusive scan it knows how many keys lie in its bin and all bins above it. The one thread whose exclusive prefix is below <var>k</var> and inclusive prefix at or above it has found the digit. A scan over 1,024 values is a warp scan with <code>__shfl_up_sync</code> (lane <var>l</var> adds lane <var>l</var> &minus; 1&rsquo;s running sum, then <var>l</var> &minus; 2, <var>l</var> &minus; 4, &hellip;: five steps), one value per warp into shared memory, a scan of those 32, and each lane adds its warp&rsquo;s offset: chapter 5&rsquo;s reduction tree, run so that every position keeps its own partial result.</li>
     </ul>
     <p>Step through the select, then the sample:</p>
-    <div id="w-radix-select" class="w"></div>
+    <div id="w-radix-select" class="w wide"></div>
 
     <h3>Drawing the token</h3>
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>With the threshold known, the block computes the row max (for a stable softmax, chapter 9), then each thread sums e<sup>(<var>x</var> &minus; max)/<var>temp</var></sup> over a contiguous chunk of about 50 logits, skipping those below the threshold. A scan of the 1,024 chunk sums turns them into a cumulative distribution in index order: thread <var>t</var> knows the probability mass before its chunk and after it. The host supplies one uniform random number <var>u</var> per row (so that a run is reproducible from its seed); the thread whose interval contains <var>u</var> &middot; total walks its chunk once more and stops at the token where the running sum passes the target. One block, one row, five barriers, no sort and no copy to the host but the chosen id.</p>
 
-    <details class="ym">
-      <summary>Your move: the histogram has 256 bins and 1,024 threads add into it. Logits of a trained model cluster: most of the 50,257 keys share the same top byte. What does that do to the first pass, and what would a library do about it?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The histogram has 256 bins and 1,024 threads add into it. Logits of a trained model cluster: most of the 50,257 keys share the same top byte. What does that do to the first pass, and what would a library do about it?</p><details><summary class="btn">Show the answer</summary>
       <p>Shared-memory atomics on the same address serialize, so when nearly every key lands in two or three bins, the first pass runs at the rate of one increment per address per clock or worse, not 1,024 per clock: a few hundred microseconds instead of a few. The second pass is better (keys spread over the second byte) and the third and fourth better still. A library privatizes one more level: each warp keeps its own 256 bins (or uses <code>__match_any_sync</code> to count equal keys within the warp first), and the per-warp histograms are summed once; it may also start from the second byte when the first is known to be uniform. Timing the four passes separately would show the skew (the lab does not; a stretch); at <var>B</var> = 1 the whole kernel is still far below the launch floor of the forward pass that precedes it.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s8">
-    <h2>8. Where the time goes</h2>
+    <h2><small>11.8</small><a href="#s8">Where the time goes</a></h2>
 
     <p><code>./gpt2 bench</code> times one forward pass at <var>T</var> = 64 to 1,024 (last-token logits, no cache), then runs it with an event around every operation and sums the time per class: embedding, layernorm, the four linear layers, attention, the LM head. <code>make nsys</code> records <code>profile</code>, a prefill of 256 tokens and 16 generated tokens, and prints the kernel table. Three things to look for, each a prediction until your trace replaces it.</p>
+    <aside class="m-rem"><p><b>Launch floor</b> <a href="cap-04-roofline.html#s6">ch.&nbsp;4 &sect;6</a>. For small kernels, the fixed cost of a launch dominates: a few microseconds, whatever the size of the work.</p></aside>
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p><p><a href="cap-13-inference-arithmetic.html">Ch.&nbsp;13 &middot; Inference arithmetic</a></p></aside>
     <p><strong>The launch count.</strong> Count the loop of section 5 with the cuBLAS backend: per layer, a layernorm, a GEMM plus its bias kernel, three attention kernels, a GEMM plus bias, a layernorm, a GEMM plus bias-GELU, a GEMM plus bias: 13 launches, 156 for twelve layers, plus the embedding, the final layernorm, the gather and the head: <strong>about 160 launches per forward pass</strong>, and about 110 with the own backend, whose epilogues are inside the GEMMs. Each launch costs a few microseconds of CPU and GPU time whatever it does (chapter 4&rsquo;s floor; chapter 5&rsquo;s graphs demo measured yours). At <var>T</var> = 1,024 the pass is 15&ndash;25 ms of real kernel time and the floor is a few percent; at <var>T</var> = 64 the kernels are tiny and the floor is a third or more of the pass. Decode with a cache, chapter 13&rsquo;s regime, is the <var>T</var> = 1 version of this: nearly the same launches (148 with cuBLAS: one attention kernel instead of three, plus the cache append) for 1 ms of DRAM time.</p>
     <p><strong>The shape of the timeline.</strong> On the nsys row for the GPU, a prefill is a dense band; the generated tokens follow as one band each, with two gaps per token: the synchronous copy of the ids in and the fetch of the chosen id out, each a round trip through the CPU. Between kernels inside a band there should be no white space at <var>T</var> = 256 and visible white space at <var>T</var> = 1, where the GPU finishes each kernel before the CPU has issued the next.</p>
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p><strong>Generation without a cache.</strong> Each generated token reruns the forward pass over the whole sequence, so the time per token grows linearly with the length so far, and generating <var>n</var> tokens after a prompt of <var>T</var> costs about <var>n</var>(<var>T</var> + <var>n</var>/2) token-forwards: 64 tokens after a 256-token prompt is 18,000 token-forwards, where the cached engine does 256 + 64. <code>generate</code> prints the time to the first token and the time per token after it; with <code>--no-cache</code> the second number is tens of milliseconds and rising, with the cache it should be close to the 1 ms of chapter 10&rsquo;s decode column plus the launch floor. Chapter 13 takes that comparison apart.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two stylized timelines, each with a CPU row of launch calls and a GPU row of kernels. Left, without a cache: each generated token is a dense band of about 160 kernels over the whole sequence, and the bands lengthen from 257 to 258 to 259 tokens; the CPU issues all its launches early in each band and then waits. Right, with the KV cache: each decode step is a short band of about 150 tiny kernels with idle gaps between them, each kernel just after its launch call. In both, vermilion blocks before and after each band are the host round trips: the token ids copied in and the chosen token copied out.">
+    <figure class="lk-fig wide" role="img" aria-label="Two stylized timelines, each with a CPU row of launch calls and a GPU row of kernels. Left, without a cache: each generated token is a dense band of about 160 kernels over the whole sequence, and the bands lengthen from 257 to 258 to 259 tokens; the CPU issues all its launches early in each band and then waits. Right, with the KV cache: each decode step is a short band of about 150 tiny kernels with idle gaps between them, each kernel just after its launch call. In both, vermilion blocks before and after each band are the host round trips: the token ids copied in and the chosen token copied out.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 700 196" style="width:700px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
       <title>Generation without and with the KV cache, as a timeline</title>
@@ -368,14 +379,14 @@ else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_he
       <text x="14" y="186" font-size="9.5" fill="var(--lk-ink-soft)">Stylized: about 160 kernels per band are drawn as 26 (left) and 150 as 14 (right); widths are not to scale.</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; A generation step on the timeline, stylized (your <code>make nsys</code> trace has the real proportions). Top: the CPU issues launches; bottom: the GPU executes them. Without a cache (left), each token&rsquo;s band is a full forward over all tokens so far, and the bands lengthen. With the cache (right), each band is a decode step: about 150 launches, each a few microseconds, with the GPU idle between them when the CPU cannot issue fast enough. The vermilion gaps at the ends of each band are the two host round trips: ids in, chosen token out.</figcaption>
+      <figcaption><b>Figure 2.</b> A generation step on the timeline, stylized (your <code>make nsys</code> trace has the real proportions). Top: the CPU issues launches; bottom: the GPU executes them. Without a cache (left), each token&rsquo;s band is a full forward over all tokens so far, and the bands lengthen. With the cache (right), each band is a decode step: about 150 launches, each a few microseconds, with the GPU idle between them when the CPU cannot issue fast enough. The vermilion gaps at the ends of each band are the two host round trips: ids in, chosen token out.</figcaption>
     </figure>
 
     <p>What to do about the floor is Part IV&rsquo;s business (graph capture, fewer and fatter kernels, keeping sampling and the id copies on the GPU for many steps). What this chapter asks is that you measure it: the own backend&rsquo;s 110 launches against cuBLAS&rsquo;s 160 at <var>T</var> = 64 is the first comparison, and the per-class table at <var>T</var> = 1,024, where the attention kernels of lab 9 should be the largest line after the linear layers, is the second.</p>
   </section>
 
   <section id="s9">
-    <h2>9. Predictions</h2>
+    <h2><small>11.9</small><a href="#s9">Predictions</a></h2>
     <table>
       <tr><th>Measurement</th><th>Prediction</th><th>Why</th></tr>
       <tr><td><code>test</code></td><td>all PASS, max error 10<sup>&minus;6</sup>&ndash;10<sup>&minus;5</sup> on random models</td><td>FP32 rounding across 2&ndash;3 small layers</td></tr>
@@ -392,7 +403,7 @@ else { gather_last_rows&lt;&lt;&lt;B, 256&gt;&gt;&gt;(ln, last, T_new, C); lm_he
   </section>
 
   <section id="s10">
-    <h2>10. Lab 10: the engine</h2>
+    <h2><small>11.10</small><a href="#s10">Lab 10: the engine</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 10</span><span class="lab-title">GPT-2 small, forward pass and generation, matching PyTorch</span><span class="idx-meta">~90 min · <code>mlsys/labs/gpt2/</code></span></div>
@@ -479,16 +490,58 @@ make bench-prefill         # chapter 13's measurements, PASTE lines for lab 12 (
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-10-transformer-gpu-view.html">&larr; Ch. 10 — The transformer from the GPU&rsquo;s view</a>
-      <a href="index.html">Index</a>
-      <a href="cap-12-triton.html">Ch. 12 — Triton &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part II · Chapter 11 · the engine is checked for correctness on cudasim against a double-precision reference, never run on a GPU; the real-weight verification, upload rates and timings are predictions until lab 10 replaces them, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-10-transformer-gpu-view.html">&lsaquo; Ch. 10: The transformer from the GPU’s view</a><a class="btn primary" href="cap-12-triton.html">Next: Ch. 12, Triton &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part II · Chapter 11 · the engine is checked for correctness on cudasim against a double-precision reference, never run on a GPU; the real-weight verification, upload rates and timings are predictions until lab 10 replaces them, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ch11.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>

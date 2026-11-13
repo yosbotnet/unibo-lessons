@@ -1,57 +1,46 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-09-softmax-layernorm-fusion.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 9 — Softmax, layernorm, online softmax and fusion · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch9.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch9.css?v=56731dd0">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-08-matmul-tensor-cores.html">&larr; Ch. 8 — Matmul II</a>
-    <a href="index.html">Index</a>
-    <a href="cap-10-transformer-gpu-view.html">Ch. 10 — The transformer from the GPU&rsquo;s view &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part II · Kernels that matter</div>
+<h3><a href="#top">Softmax, layernorm, online softmax and fusion<small>9</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 5 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>9.1</small><span>The leftovers, and what a pass costs</span></a></li><li data-for="s2"><a href="#s2"><small>9.2</small><span>One row, how many threads?</span></a></li><li data-for="s3"><a href="#s3"><small>9.3</small><span>Softmax in three passes</span></a></li><li data-for="s4"><a href="#s4"><small>9.4</small><span>Online softmax: the merge</span></a></li><li data-for="s5"><a href="#s5"><small>9.5</small><span>The row on chip: one read</span></a></li><li data-for="s6"><a href="#s6"><small>9.6</small><span>Numerics: masks, overflow, FP32 sums, <code>__expf</code></span></a></li><li data-for="s7"><a href="#s7"><small>9.7</small><span>Layernorm: one pass, without the cancellation</span></a></li><li data-for="s8"><a href="#s8"><small>9.8</small><span>Fusion: removing the round trips between kernels</span></a></li><li data-for="s9"><a href="#s9"><small>9.9</small><span>Predictions</span></a></li><li data-for="s10"><a href="#s10"><small>9.10</small><span>Lab 8: softmax, layernorm, epilogues</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-08-matmul-tensor-cores.html">&larr; Ch. 8</a><a href="index.html">&uarr; Index</a><a href="cap-10-transformer-gpu-view.html">Ch. 10 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part II — Kernels that matter · Chapter 9</div>
-    <h1>Softmax, layernorm, online softmax and fusion</h1>
-    <div class="lk-meta"><span>~60 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 8 · ~50 min on your GPU</span></div>
-  </header>
+  <header class="chap"><div class="num">9</div><div class="kicker">Part II &middot; Kernels that matter · Chapter 9</div><div class="numeral" aria-hidden="true">9</div><h1>Softmax, layernorm, online softmax and fusion</h1><ul class="meta"><li>~60 min read</li><li>2 interactive widgets</li><li>4 plates</li><li>lab 8 · ~50 min on your GPU</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>Chapters 7 and 8 made the matmuls fast. Everything else in a transformer is memory-bound (chapter 6), so for the rest of the block a perfect kernel is one that reads its input once, writes its output once, and nothing else. Softmax and layernorm are the hard cases: each is a <strong>row operation</strong>, &ldquo;reduce the row to a few numbers, then apply a formula that needs them&rdquo;, and the formula cannot start until the reduction is done, so the obvious kernel walks the row two or three times. The cost of a row operation is <strong>the number of passes over the row times the row&rsquo;s bytes</strong>. This chapter gets softmax and layernorm to one pass. The tool is the same in both cases: a <strong>running summary</strong> that can be updated one element at a time and <strong>merged</strong> between two partial rows (online softmax&rsquo;s (<var>m</var>, <var>d</var>) pair, Welford&rsquo;s (<var>n</var>, mean, <var>M</var><sub>2</sub>) triple), plus keeping the row on chip so that the formula pass costs no DRAM at all. Then it goes after the passes that cross kernel boundaries: <strong>fusion</strong> folds bias, GELU and residual adds into the matmul&rsquo;s epilogue and into the next layernorm, and the chapter ends at the limit of fusion, which is exactly where chapter 14&rsquo;s FlashAttention starts.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~60 min read</li><li>2 interactive widgets</li><li>4 plates</li><li>lab 8 · ~50 min on your GPU</li></ul></aside><div class="ov-learn"><p class="ov-lead">Chapters 7 and 8 made the matmuls fast. Everything else in a transformer is memory-bound (chapter 6), so for the rest of the block a perfect kernel is one that reads its input once, writes its output once, and nothing else. Softmax and layernorm are the hard cases: each is a <strong>row operation</strong>, &ldquo;reduce the row to a few numbers, then apply a formula that needs them&rdquo;, and the formula cannot start until the reduction is done, so the obvious kernel walks the row two or three times. The cost of a row operation is <strong>the number of passes over the row times the row&rsquo;s bytes</strong>. This chapter gets softmax and layernorm to one pass. The tool is the same in both cases: a <strong>running summary</strong> that can be updated one element at a time and <strong>merged</strong> between two partial rows (online softmax&rsquo;s (<var>m</var>, <var>d</var>) pair, Welford&rsquo;s (<var>n</var>, mean, <var>M</var><sub>2</sub>) triple), plus keeping the row on chip so that the formula pass costs no DRAM at all. Then it goes after the passes that cross kernel boundaries: <strong>fusion</strong> folds bias, GELU and residual adds into the matmul&rsquo;s epilogue and into the next layernorm, and the chapter ends at the limit of fusion, which is exactly where chapter 14&rsquo;s FlashAttention starts.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">The leftovers, and what a pass costs</a></li>
-      <li><a href="#s2">One row, how many threads?</a></li>
-      <li><a href="#s3">Softmax in three passes</a></li>
-      <li><a href="#s4">Online softmax: the merge</a></li>
-      <li><a href="#s5">The row on chip: one read</a></li>
-      <li><a href="#s6">Numerics: masks, overflow, FP32 sums, <code>__expf</code></a></li>
-      <li><a href="#s7">Layernorm: one pass, without the cancellation</a></li>
-      <li><a href="#s8">Fusion: removing the round trips between kernels</a></li>
-      <li><a href="#s9">Predictions</a></li>
-      <li><a href="#s10">Lab 8: softmax, layernorm, epilogues</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. The leftovers, and what a pass costs</h2>
+    <h2><small>9.1</small><a href="#s1">The leftovers, and what a pass costs</a></h2>
 
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Take one GPT-2 block at prefill with <var>T</var> = 1,024 tokens (chapter 6&rsquo;s census, FP32). Its four weight GEMMs do 14.5 GFLOP and, at chapter 8&rsquo;s speeds, take about half a millisecond. Around them sit the operations this chapter is about, and none of them does arithmetic worth counting:</p>
     <table>
       <tr><th>Operation</th><th>Rows &times; length</th><th>Bytes per pass over the input</th><th>Reduction needed</th></tr>
@@ -60,10 +49,11 @@
       <tr><td>Bias add, GELU</td><td>1,024 &times; 3,072</td><td>12.6 MB</td><td>none</td></tr>
       <tr><td>Residual add (two per block)</td><td>1,024 &times; 768 (two inputs)</td><td>6.3 MB</td><td>none</td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p>The attention row needs one sentence before chapter 10 builds attention properly: in each head, every token (a <em>query</em>) gets one score per token of the sequence (the <em>keys</em>), so a head at <var>T</var> = 1,024 holds a 1,024 &times; 1,024 matrix of scores, one row per query, and softmax turns each row into weights that sum to 1; the <em>causal mask</em> hides the later tokens from each row, so a token weighs only itself and the tokens before it.</p>
     <p>A <strong>pass</strong> is one trip of the data between DRAM and the SMs: a read of every byte of the input, or a write of every byte of the output. The elementwise operations cost exactly two passes (read, write), and chapter 6 priced them: bytes over bandwidth. The row operations are different. Softmax&rsquo;s formula, e<sup><var>x<sub>i</sub></var> &minus; max</sup> / &sum; e<sup><var>x<sub>j</sub></var> &minus; max</sup>, needs the row&rsquo;s max before the first exponential and the row&rsquo;s sum before the first division; layernorm needs the mean before the first deviation and the variance before the first output. A kernel that computes them in the obvious order reads the row once for the max, once for the sum, and once more while writing the output: <strong>three read passes and one write pass</strong>, four trips for a job that algorithmically needs two.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two panels. Left, v2: a 4 KB row in DRAM is read three times by the SM, once for the max, once for the sum, once to produce the output, and written once: 4 passes, 16 KB per row. Right, v4: the row is read once into registers, max, sum and normalize run on chip, and the result is written once: 2 passes, 8 KB per row.">
+    <figure class="lk-fig wide" role="img" aria-label="Two panels. Left, v2: a 4 KB row in DRAM is read three times by the SM, once for the max, once for the sum, once to produce the output, and written once: 4 passes, 16 KB per row. Right, v4: the row is read once into registers, max, sum and normalize run on chip, and the result is written once: 2 passes, 8 KB per row.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 294" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Three passes versus one read</title>
@@ -121,7 +111,7 @@
         <text x="330" y="284" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">3 KB rows mostly hit L1 on the rereads; 32 KB rows do not</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; One 4 KB row of attention scores, and its trips between DRAM and an SM. Left: the three-pass softmax reads the row for the max, again for the sum, again to write the normalized output. Right: the row is read once into registers and written once. The arithmetic is identical; the vermilion byte counter is what you pay for. For a short row the second and third reads may hit in L1 or L2, which is why the lab measures both 768-float and 8,192-float rows.</figcaption>
+      <figcaption><b>Figure 1.</b> One 4 KB row of attention scores, and its trips between DRAM and an SM. Left: the three-pass softmax reads the row for the max, again for the sum, again to write the normalized output. Right: the row is read once into registers and written once. The arithmetic is identical; the vermilion byte counter is what you pay for. For a short row the second and third reads may hit in L1 or L2, which is why the lab measures both 768-float and 8,192-float rows.</figcaption>
     </figure>
 
     <p>So the plan for every row operation is the same, and it is the organising idea of the chapter: <strong>get to one read and one write</strong>. There are two ways, and the fast kernels use both. Make the reduction <em>incremental</em>, so that it needs only one look at each element (sections 4 and 7). And keep the row <em>on chip</em> between the reduction and the formula, so that the second look is free (section 5). After that, the only trips left are the ones between kernels: the output of the matmul written to DRAM so that a bias kernel can read it, written again so that GELU can read it. Section 8 removes those by moving the small operations inside their neighbours.</p>
@@ -133,16 +123,20 @@
   </section>
 
   <section id="s2">
-    <h2>2. One row, how many threads?</h2>
+    <h2><small>9.2</small><a href="#s2">One row, how many threads?</a></h2>
 
+    <aside class="m-rem"><p><b>Sector rule, coalescing</b> <a href="cap-03-memory-hierarchy.html#s3">ch.&nbsp;3 &sect;3</a>. Global memory moves in 32-byte sectors. A warp&rsquo;s load costs as many sectors as its 32 addresses touch.</p></aside>
+    <aside class="m-link"><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>A row operation is independent per row, so the first design decision is how many threads share a row. It is decided by the row&rsquo;s length and by chapter 3&rsquo;s coalescing rule: the 32 lanes of a warp should read 32 consecutive floats per load instruction.</p>
+    <aside class="m-rem"><p><b>Warp shuffle</b> <a href="cap-05-profiling.html#s5">ch.&nbsp;5 &sect;5</a>. A warp shuffle replaces the last barrier-separated levels of a reduction and needs no barrier at all.</p></aside>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <ul>
       <li><strong>One thread per row.</strong> Thread <var>i</var> walks row <var>i</var> from start to end. Simple, no cooperation, and a coalescing disaster: at any instant the 32 lanes of a warp read element <var>j</var> of 32 <em>different</em> rows, 3 KB apart. Every load instruction touches 32 sectors for 128 useful bytes. Lab 8&rsquo;s v1 exists to show you the number.</li>
       <li><strong>One warp per row.</strong> Lane <var>l</var> handles elements <var>l</var>, <var>l</var>+32, <var>l</var>+64, &hellip;: each load instruction reads 128 contiguous bytes, fully coalesced, and the lanes combine their partial results with chapter 5&rsquo;s shuffles, no shared memory and no barrier. This is the right shape for rows of a few hundred to a few thousand elements, and the one most of this chapter uses.</li>
       <li><strong>One block per row.</strong> For long rows (a 32 KB attention row at <var>T</var> = 8,192, or rows that must sit in shared memory), 256 or more threads share the row and combine through lab 5&rsquo;s <code>block_sum</code>: warp shuffles, then one small shared array and a barrier.</li>
     </ul>
 
-    <figure class="lk-fig" role="img" aria-label="Three panels show which addresses one warp-wide load instruction touches. Thread per row: element 0 of 32 different rows, 32 sectors for 128 useful bytes. Warp per row: 32 consecutive floats of row 0, one 128-byte request; the next 32 are the next load. Block per row: 8 warps cover 256 consecutive floats and their 8 partial results meet in shared memory behind one barrier.">
+    <figure class="lk-fig wide" role="img" aria-label="Three panels show which addresses one warp-wide load instruction touches. Thread per row: element 0 of 32 different rows, 32 sectors for 128 useful bytes. Warp per row: 32 consecutive floats of row 0, one 128-byte request; the next 32 are the next load. Block per row: 8 warps cover 256 consecutive floats and their 8 partial results meet in shared memory behind one barrier.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 312" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Rows to threads</title>
@@ -219,7 +213,7 @@
         <text x="330" y="302" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">rows = independence; warps = coalescing</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; Three ways to hand rows to threads, drawn as which addresses one warp-wide load instruction touches. Thread per row: 32 lanes, 32 rows, 32 sectors for 128 useful bytes. Warp per row: 32 consecutive floats of one row, one 128-byte request. Block per row: eight warps cover 256 consecutive floats, and their partial results meet in shared memory. Rows are the unit of independence; warps are the unit of coalescing.</figcaption>
+      <figcaption><b>Figure 2.</b> Three ways to hand rows to threads, drawn as which addresses one warp-wide load instruction touches. Thread per row: 32 lanes, 32 rows, 32 sectors for 128 useful bytes. Warp per row: 32 consecutive floats of one row, one 128-byte request. Block per row: eight warps cover 256 consecutive floats, and their partial results meet in shared memory. Rows are the unit of independence; warps are the unit of coalescing.</figcaption>
     </figure>
 
     <p>The reductions themselves are chapter 5&rsquo;s, so the rest of the chapter uses two one-line helpers without comment:</p>
@@ -227,15 +221,17 @@
 __device__ float warp_sum(float v) { for (int o = 16; o &gt; 0; o &gt;&gt;= 1) v += __shfl_xor_sync(0xffffffffu, v, o); return v; }</code></pre>
     <p>With <code>__shfl_xor_sync</code> every lane ends up holding the warp&rsquo;s result, not just lane 0, which is what a row operation wants: every lane goes on to apply the formula to its own elements.</p>
 
-    <details class="ym">
-      <summary>Your move: a warp-per-row softmax over 12,288 rows of 1,024 floats launches 12,288 warps, 384 blocks of 32 warps. A thread-per-row kernel launches 12,288 threads: 48 blocks of 256. Before any coalescing argument, what does chapter 2 say about the second launch on a 48-SM card?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">A warp-per-row softmax over 12,288 rows of 1,024 floats launches 12,288 warps, 384 blocks of 32 warps. A thread-per-row kernel launches 12,288 threads: 48 blocks of 256. Before any coalescing argument, what does chapter 2 say about the second launch on a 48-SM card?</p><div class="sub">Given</div>
+<dl class="given"><dt>Warp slots per SM</dt><dd>48 warps</dd><dt>Bytes per float</dt><dd>4 bytes</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>One block per SM, eight warps each: 8 of 48 warp slots, and only 12,288 threads in flight for a 100 MB job. Chapter 3&rsquo;s Little&rsquo;s-law argument needs hundreds of kilobytes in flight; 12,288 threads loading one float each is 48 KB. So thread-per-row loses twice: too few bytes in flight <em>and</em> 32 sectors per useful 128 bytes. The warp-per-row kernel has 32&times; the threads and each of its loads is one sector. The lab&rsquo;s v1 should land far below the DRAM ceiling for both reasons at once; <code>make ncu-table</code> separates them (achieved occupancy and sectors per request).</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s3">
-    <h2>3. Softmax in three passes</h2>
+    <h2><small>9.3</small><a href="#s3">Softmax in three passes</a></h2>
 
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>The baseline, written the way chapter 6&rsquo;s formula reads, one warp per row:</p>
 <pre><code class="language-cpp">// v2: one warp per row, three passes. Lane l owns columns l, l+32, l+64, ...
 __global__ void softmax_warp3(const float* __restrict__ x, float* __restrict__ y, int M, int T)
@@ -257,7 +253,7 @@ __global__ void softmax_warp3(const float* __restrict__ x, float* __restrict__ y
   </section>
 
   <section id="s4">
-    <h2>4. Online softmax: the merge</h2>
+    <h2><small>9.4</small><a href="#s4">Online softmax: the merge</a></h2>
 
     <p>The problem: compute <var>d</var> = &sum;<sub><var>j</var></sub> e<sup><var>x<sub>j</sub></var> &minus; <var>m</var></sup> where <var>m</var> is the max of the row, in one pass, when you only learn the final <var>m</var> at the end of the row. The fix (Milakov and Gimelshein, 2018) is to carry a <strong>running pair</strong> (<var>m</var>, <var>d</var>): the max of the elements seen so far, and the sum of their exponentials <em>relative to that max</em>. When a new element <var>x</var> arrives:</p>
     <ul>
@@ -279,10 +275,12 @@ __global__ void softmax_warp3(const float* __restrict__ x, float* __restrict__ y
     <h3>Merging two partial rows</h3>
     <p>The per-element update is a special case of something more useful. A single element <var>x</var> is itself a pair (<var>x</var>, 1): max <var>x</var>, one term, equal to e<sup>0</sup>. So the update rule is really a rule for combining <em>two pairs</em>, each summarizing a different set of elements:</p>
     <p class="c9-eq">(<var>m<sub>a</sub></var>, <var>d<sub>a</sub></var>) &oplus; (<var>m<sub>b</sub></var>, <var>d<sub>b</sub></var>) = (<var>m</var>, <var>d<sub>a</sub></var> e<sup><var>m<sub>a</sub></var> &minus; <var>m</var></sup> + <var>d<sub>b</sub></var> e<sup><var>m<sub>b</sub></var> &minus; <var>m</var></sup>), with <var>m</var> = max(<var>m<sub>a</sub></var>, <var>m<sub>b</sub></var>)</p>
+    <aside class="m-rem"><p><b>Reduction</b> <a href="cap-05-profiling.html#s6">ch.&nbsp;5 &sect;6</a>. A reduction turns an array into one value: a sum, a maximum, a norm. Softmax needs a max and a sum per row.</p></aside>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <p>This operator is <strong>associative and commutative</strong>: it does not matter in which order, or in which grouping, the pieces of a row are combined, as long as every element is in exactly one piece. That is what makes it a parallel reduction in chapter 5&rsquo;s sense. On the toy row, split it as [2, 5, 1] and [7, 3]: the first half gives (5, 1.068), the second (7, 1.018), and merging them gives <var>m</var> = 7, <var>d</var> = 1.068 &times; e<sup>&minus;2</sup> + 1.018 = 1.163. Neither half had to be reread when the other turned out to contain the larger max; the rescale factor carried the correction.</p>
 
     <p>Step through it, then split the row and merge the halves:</p>
-    <div id="w-online-softmax" class="w"></div>
+    <div id="w-online-softmax" class="w wide"></div>
 
     <p>In a warp-per-row kernel the merge is the reduction across lanes: each lane runs the per-element update over its own 32 elements and ends with a pair, and five shuffle steps merge the 32 pairs into one:</p>
 <pre><code class="language-cpp">// v3: one warp per row, two passes. Pass 1 builds (m, d) in one look at each element.
@@ -303,17 +301,20 @@ for (int o = 16; o &gt; 0; o &gt;&gt;= 1) {                                  // 
 }
 float inv = 1.0f / d;
 for (int i = lane; i &lt; T; i += 32) y[(size_t)row * T + i] = expf(xr[i] - m) * inv;   // pass 2</code></pre>
+    <aside class="m-link"><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p></aside>
     <p>Two reads instead of three, and one fewer reduction. The remaining read is the formula pass, and section 5 removes it. The merge operator itself is the thing to remember from this chapter: chapter 14 uses exactly this (<var>m</var>, <var>d</var>) pair, extended with the running output row, to compute attention one tile of keys at a time without ever holding the full row of scores, and chapter 15 uses it to merge partial results from blocks that each saw a slice of the keys.</p>
 
-    <details class="ym">
-      <summary>Your move: the per-element update does one more exponential than the three-pass kernel&rsquo;s pass 2 (the rescale factor, every element). Does online softmax therefore do more arithmetic than v2, and does it matter?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The per-element update does one more exponential than the three-pass kernel&rsquo;s pass 2 (the rescale factor, every element). Does online softmax therefore do more arithmetic than v2, and does it matter?</p><div class="sub">Given</div>
+<dl class="given"><dt>Exponentials per element in v2</dt><dd>2 (one in pass 2, one in pass 3)</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>Per element it is two <code>expf</code> in the update plus one in v3&rsquo;s pass 2, three overall, against v2&rsquo;s one in pass 2 plus one in pass 3, two: one more per element, and the lane-merge adds a few dozen more per row, nothing. The compiler also turns <code>expf(m - mn)</code> into a multiply by 1 when the max did not move only if it can prove it, which it cannot, so the exponential is really computed; a branch that skips it when <var>v</var> &le; <var>m</var> is what the original paper suggests, and it costs a divergence instead (chapter 2). Either way the kernel is memory-bound by a factor of fifty (chapter 6&rsquo;s intensity table), so a handful of extra FLOPs per element changes nothing. What matters is the pass count: the exponential is free, the byte is not.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s5">
-    <h2>5. The row on chip: one read</h2>
+    <h2><small>9.5</small><a href="#s5">The row on chip: one read</a></h2>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Online softmax took the reduction to one look. The formula pass still rereads the row, and the only way to avoid that is for each lane to still <em>have</em> its elements when the row&rsquo;s (<var>m</var>, <var>d</var>) is known. A row of 1,024 floats spread over 32 lanes is 32 floats per lane, which fit in registers (chapter 8&rsquo;s budget: 255 per thread). So v4 loads them once into a register array, reduces, and writes from the array:</p>
 <pre><code class="language-cpp">// v4: one warp per row, the row in registers, one read and one write. T must be a multiple of 32 here;
 // the lab's version pads the tail with -INFINITY and guards the store.
@@ -341,18 +342,32 @@ __global__ void softmax_warp_reg(const float* __restrict__ x, float* __restrict_
       <tr><td>4,096 &ndash; 12,288</td><td>128 &ndash; 384: too many</td><td>shared memory, one block per row (16&ndash;48 KB)</td><td><code>softmax_block_smem</code></td></tr>
       <tr><td>Longer, or not in memory at all</td><td></td><td>nowhere: stream it with online softmax</td><td>chapter 14</td></tr>
     </table>
+    <aside class="m-rem"><p><b>Register spills</b> <a href="cap-08-matmul-tensor-cores.html#s3">ch.&nbsp;8 &sect;3</a>. A kernel that needs more than 255 registers per thread spills: the compiler parks values in local memory, which is really DRAM behind the L1.</p></aside>
+    <aside class="m-link"><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>The register version has a condition you have met before: <var>PER_LANE</var> must be a compile-time constant, or the array lands in local memory (chapter 8&rsquo;s spills) and every access becomes a DRAM access. That is why <code>T</code> is a template parameter, and why the kernel is instantiated for a handful of lengths and the tail is padded. The shared-memory version has no such limit up to the 48 KB of a default block allocation (chapter 3), at the cost of a barrier between the reduction and the formula.</p>
 
-    <details class="ym">
-      <summary>Your move: at <var>T</var> = 8,192 the block-per-row kernel holds a 32 KB row in shared memory per block. How many such blocks fit on one SM, how many warps is that, and is it enough to keep DRAM busy?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">At <var>T</var> = 8,192 the block-per-row kernel holds a 32 KB row in shared memory per block. How many such blocks fit on one SM, how many warps is that, and is it enough to keep DRAM busy?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Shared memory for blocks on one SM</dt><dd>100 KB</dd><dt>Warps per block</dt><dd>8 warps</dd><dt>Warp slots per SM</dt><dd>48 warps</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Blocks per SM</span><input inputmode="decimal" autocomplete="off" data-want="3" data-tol="0.05" data-hint="Hint: divide the 100 KB of shared memory by the 32 KB each block holds, and round down." aria-label="Blocks per SM"> blocks</label>
+<label><span class="l">Warps per SM</span><input inputmode="decimal" autocomplete="off" data-want="24" data-tol="0.05" data-hint="Hint: multiply your block count by the 8 warps in each block." aria-label="Warps per SM"> warps</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>Three blocks at most in the SM&rsquo;s 100 KB of shared memory (chapter 3&rsquo;s configurable split; 128 KB combined with L1 on your card), so 3 &times; 8 = 24 warps of 48, half occupancy. Enough: each warp issues 8 independent 128-byte loads per instruction stream as it fills its slice of the row, so the bytes in flight per SM are 24 warps &times; a few KB, well above the ~7 KB per SM that Little&rsquo;s law asked for in chapter 3. The row-in-shared-memory kernel should sit near the DRAM ceiling despite the occupancy; if it does not, <code>ncu</code> will show the barrier, not the memory system, as the stall.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s6">
-    <h2>6. Numerics: masks, overflow, FP32 sums, <code>__expf</code></h2>
+    <h2><small>9.6</small><a href="#s6">Numerics: masks, overflow, FP32 sums, <code>__expf</code></a></h2>
 
     <p>Softmax is where attention&rsquo;s numerical accidents happen, and every one of them is a one-line guard once you know it exists.</p>
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <ul>
       <li><strong>Masked entries are &minus;&infin;, not a large negative number.</strong> Causal attention (chapter 10) forbids a token from looking at later tokens, and the clean way to express &ldquo;forbidden&rdquo; is a score of &minus;&infin;: e<sup>&minus;&infin; &minus; <var>m</var></sup> is exactly 0, the entry contributes nothing and the row still sums to 1. A finite stand-in like &minus;10<sup>9</sup> works too but overflows to &minus;&infin; after the scale is applied in FP16, so engines use real infinities and handle them.</li>
       <li><strong>A fully masked row gives NaN unless guarded.</strong> If every entry is &minus;&infin;, then <var>m</var> = &minus;&infin;, and the first argument <var>x</var> &minus; <var>m</var> is &minus;&infin; &minus; (&minus;&infin;) = NaN, which then poisons the whole output tensor one matmul later. Online softmax has the same hole: the merge computes e<sup><var>m<sub>a</sub></var> &minus; <var>m</var></sup> with both infinite, and in a warp-per-row kernel it opens on every lane whose elements are all masked, which a causal row produces even when the row as a whole is not; there the fix is to subtract 0 inside the exponentials while the max is still &minus;&infin; (the lab&rsquo;s <code>m_safe</code>). The guard: if <var>m</var> is &minus;&infin; after the reduction, write zeros (or whatever your reference defines) and return. Padded sequences in a batch produce exactly such rows, so the lab tests one.</li>
@@ -363,8 +378,9 @@ __global__ void softmax_warp_reg(const float* __restrict__ x, float* __restrict_
   </section>
 
   <section id="s7">
-    <h2>7. Layernorm: one pass, without the cancellation</h2>
+    <h2><small>9.7</small><a href="#s7">Layernorm: one pass, without the cancellation</a></h2>
 
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Layernorm has the same shape as softmax, two reductions and then a formula: the mean &mu; and the variance &sigma;<sup>2</sup> = mean((<var>x</var> &minus; &mu;)<sup>2</sup>), then <var>y</var> = &gamma; (<var>x</var> &minus; &mu;) / &radic;(&sigma;<sup>2</sup> + &epsilon;) + &beta; (chapter 6). Lab 5&rsquo;s kernel is the honest two-pass version: a block per row, one read for the mean, one for the variance around it, one more while writing. The algebra offers a shortcut, and it is a trap.</p>
 
     <h3>The one-pass formula and why it fails</h3>
@@ -410,21 +426,24 @@ float rstd = rsqrtf(M2 / n + LN_EPS);</code></pre>
     <h3>RMSNorm</h3>
     <p>Most models after GPT-2 (Llama, Mistral, Gemma) replace layernorm with <strong>RMSNorm</strong> (Zhang and Sennrich, 2019): no mean subtraction, no &beta;, just <var>y</var> = &gamma; &middot; <var>x</var> / &radic;(mean(<var>x</var><sup>2</sup>) + &epsilon;). It was proposed because the re-centering turned out not to matter for quality, and from the GPU&rsquo;s side it is the easy case: one sum, one shuffle reduction, no cancellation to worry about, because there is no subtraction. Lab 8 includes it so that the engine has it when Part IV moves to a modern model.</p>
 
-    <details class="ym">
-      <summary>Your move: a colleague argues that for GPT-2 the one-pass E[<var>x</var><sup>2</sup>] &minus; E[<var>x</var>]<sup>2</sup> formula is fine in practice, because activations are small. What would you check before agreeing, and what does it cost to be safe?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">A colleague argues that for GPT-2 the one-pass E[<var>x</var><sup>2</sup>] &minus; E[<var>x</var>]<sup>2</sup> formula is fine in practice, because activations are small. What would you check before agreeing, and what does it cost to be safe?</p><div class="sub">Given</div>
+<dl class="given"><dt>Row length in GPT-2 layernorm</dt><dd>768 values</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>Check the actual rows: the residual stream of a trained transformer has a few channels with values in the hundreds (the &ldquo;massive activations&rdquo; that quantization papers worry about), and a row with one large channel has a large mean and a variance dominated by that channel, which is the shape where cancellation starts to bite even if it does not fail outright. The safe version costs nothing measurable: Welford is a few more FLOPs per element in a kernel that is memory-bound fifty times over, and the two-pass version is just as cheap when the row is in registers. There is no performance argument for the one-pass formula; the only argument is that it is shorter to type.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s8">
-    <h2>8. Fusion: removing the round trips between kernels</h2>
+    <h2><small>9.8</small><a href="#s8">Fusion: removing the round trips between kernels</a></h2>
 
     <p>Sections 3 to 7 made each row operation cost one read and one write. The remaining waste is between kernels: the matmul writes its output to DRAM, the bias kernel reads and writes it, GELU reads and writes it, the residual add reads it, and the next layernorm reads the result. Each boundary between two kernels is one write plus one read of the whole tensor, 25 MB for the MLP&rsquo;s [1,024, 3,072] activation. <strong>Fusion</strong> means doing two operations in one kernel so that the intermediate never leaves the chip. There are three kinds in a transformer block, in increasing order of difficulty.</p>
 
     <h3>Vertical fusion: elementwise chains</h3>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-12-triton.html">Ch.&nbsp;12 &middot; Triton</a></p></aside>
     <p>Two elementwise operations in a row fuse trivially: compute both in the same thread on the same value, and the intermediate lives in a register. Lab 5&rsquo;s <code>bias_gelu</code> was this, and chapter 6&rsquo;s Your-move priced it: a chain of <var>k</var> elementwise kernels costs 2<var>k</var> passes, fused it costs 2. Anything with no reduction and the same shape in and out fuses this way, and compilers do it automatically (<code>torch.compile</code>&rsquo;s pointwise fusion, chapter 12&rsquo;s Triton makes it one program).</p>
 
     <h3>Epilogue fusion: passengers on the GEMM</h3>
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Chapter 6 named the matmul&rsquo;s <strong>epilogue</strong>: the moment when a tile of outputs is finished in registers and about to be stored. Anything elementwise can ride along for free at that moment, because the value is already in a register and the store was going to happen anyway. Chapter 8&rsquo;s v7 ends with a loop over its 8&times;16 accumulators calling <code>store4</code>; replace the store with &ldquo;add the bias for this column, apply GELU, store&rdquo; and the two separate kernels, and their four passes, disappear:</p>
 <pre><code class="language-cpp">// lab 8's epilogue variant of lab 7's v7: EPI decides what happens to each finished accumulator
 struct EpiBiasGelu  { const float* bias; __device__ float operator()(float acc, int r, int c) const { return gelu(acc + bias[c]); } };
@@ -437,7 +456,7 @@ o.z = epi(acc[i][j + 2], r, c + 2);  o.w = epi(acc[i][j + 3], r, c + 3);
 *reinterpret_cast&lt;float4*&gt;(&amp;C[(size_t)r * N + c]) = o;</code></pre>
     <p>The bias read is 12 KB per launch and hits L1 or L2; the residual read in the second epilogue is a genuine extra input (the GEMM needs it anyway: a separate residual-add kernel would read it too, plus the GEMM&rsquo;s output). cuBLAS exposes the same thing as <code>cublasLt</code> epilogues (<code>CUBLASLT_EPILOGUE_GELU_BIAS</code> and friends), and every inference engine uses them.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two timelines. Top: a GEMM kernel writes the 1,024 by 3,072 activation to DRAM, a bias kernel reads and writes it, a GELU kernel reads it and writes the output: four extra passes of 12.6 MB, 50 MB. Bottom: one GEMM kernel whose epilogue adds the bias and applies GELU to each accumulator in registers, then writes the output once: zero extra passes. An inset shows one thread's 8 by 16 accumulators and acc to gelu(acc + bias[c]) to store.">
+    <figure class="lk-fig wide" role="img" aria-label="Two timelines. Top: a GEMM kernel writes the 1,024 by 3,072 activation to DRAM, a bias kernel reads and writes it, a GELU kernel reads it and writes the output: four extra passes of 12.6 MB, 50 MB. Bottom: one GEMM kernel whose epilogue adds the bias and applies GELU to each accumulator in registers, then writes the output once: zero extra passes. An inset shows one thread's 8 by 16 accumulators and acc to gelu(acc + bias[c]) to store.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 344" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>The epilogue</title>
@@ -491,19 +510,22 @@ o.z = epi(acc[i][j + 2], r, c + 2);  o.w = epi(acc[i][j + 3], r, c + 3);
         <text x="650" y="336" font-size="11" fill="var(--lk-ink-soft)" text-anchor="end">&rarr; time</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 3</b> &mdash; The MLP&rsquo;s first half as kernels. Top: GEMM, bias, GELU as three launches; the [1,024, 3,072] activation crosses to DRAM and back twice between them (four passes of 12.6 MB). Bottom: the bias and GELU ride in the GEMM&rsquo;s epilogue, applied to each accumulator while it is still in a register, and the activation is written once. The matmul&rsquo;s own loads are unchanged; only the vermilion passes disappear.</figcaption>
+      <figcaption><b>Figure 3.</b> The MLP&rsquo;s first half as kernels. Top: GEMM, bias, GELU as three launches; the [1,024, 3,072] activation crosses to DRAM and back twice between them (four passes of 12.6 MB). Bottom: the bias and GELU ride in the GEMM&rsquo;s epilogue, applied to each accumulator while it is still in a register, and the activation is written once. The matmul&rsquo;s own loads are unchanged; only the vermilion passes disappear.</figcaption>
     </figure>
 
     <h3>Add and norm: a reduction fused with its neighbour</h3>
+    <aside class="m-link"><p><a href="cap-11-gpt2-forward-pass.html">Ch.&nbsp;11 &middot; Lab</a></p></aside>
     <p>The residual add feeds the next layernorm, and both are row-shaped, so one kernel can read the two inputs, add them, write the new residual stream (it is needed later, for the next residual add), and in the same breath compute the row&rsquo;s statistics on the values it holds and write the normalized row too. Two inputs read once, two outputs written once: four passes for what the separate kernels do in five, and one launch instead of two. In GPT-2 this happens 24 times per forward pass. Lab 8&rsquo;s <code>residual_layernorm</code> is this kernel, and chapter 11&rsquo;s stretch swaps it into the engine.</p>
 
     <p>Count the bytes of the whole MLP sublayer as you move the kernel boundaries. Each boundary you remove deletes one write and one read of the tensor that crossed it:</p>
-    <div id="w-fusion-bytes" class="w"></div>
+    <div id="w-fusion-bytes" class="w wide"></div>
 
     <h3>The limit of fusion</h3>
+    <aside class="m-rem"><p><b>Blocks are independent</b> <a href="cap-02-execution-model.html#s3">ch.&nbsp;2 &sect;3</a>. Blocks cannot wait for each other and get no ordering guarantee. Block 7 may finish before block 0 starts.</p></aside>
+    <aside class="m-link"><p><a href="cap-02-execution-model.html">Ch.&nbsp;2 &middot; The execution model</a></p></aside>
     <p>Why not fuse the layernorm into the GEMM&rsquo;s epilogue too, and have one kernel per sublayer? Because an epilogue sees a <em>tile</em>. Chapter 8&rsquo;s v7 block computes a 128&times;128 tile of the output, and the row of that output is 768 or 3,072 wide: the block holds one sixth, or one twenty-fourth, of each row it touches. A row reduction needs the whole row, and the other pieces are in other blocks, on other SMs, which cannot wait for each other (chapter 2). The rule: <strong>an operation can ride in a GEMM&rsquo;s epilogue only if it needs nothing outside the tile.</strong> Elementwise operations qualify; per-row and per-column reductions do not.</p>
 
-    <figure class="lk-fig" role="img" aria-label="A 1,024 by 3,072 GEMM output drawn as 24 by 8 tiles of 128 by 128. One tile is lit: the block that owns it can apply any elementwise function. The band of 24 tiles through it is outlined: a layernorm row needs all 24, and the other 23 belong to other blocks on other SMs. Two ways out: each tile writes partial statistics and a small kernel merges them with Chan's rule; or one block sees the whole row, which works for attention (chapter 14).">
+    <figure class="lk-fig wide" role="img" aria-label="A 1,024 by 3,072 GEMM output drawn as 24 by 8 tiles of 128 by 128. One tile is lit: the block that owns it can apply any elementwise function. The band of 24 tiles through it is outlined: a layernorm row needs all 24, and the other 23 belong to other blocks on other SMs. Two ways out: each tile writes partial statistics and a small kernel merges them with Chan's rule; or one block sees the whole row, which works for attention (chapter 14).">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 288" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>The fusion boundary</title>
@@ -540,20 +562,23 @@ o.z = epi(acc[i][j + 2], r, c + 2);  o.w = epi(acc[i][j + 3], r, c + 3);
         <text x="352" y="268" font-size="11" fill="var(--lk-ink)" text-anchor="start">all keys, streamed in tiles: ch. 14</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 4</b> &mdash; The fusion boundary. A [1,024, 3,072] GEMM output with one 128&times;128 tile lit: the block that owns it can apply any elementwise function to its 16,384 values, but a layernorm over the highlighted row needs the 23 other tiles in that row, owned by other blocks. Two ways out, both costing a pass over the statistics rather than the data: each tile writes its partial (<var>n</var>, mean, <var>M</var><sub>2</sub>) and a small second kernel merges them with Chan&rsquo;s rule; or the tile is made as wide as the row, which the tensor-core kernels of chapter 14 do for attention.</figcaption>
+      <figcaption><b>Figure 4.</b> The fusion boundary. A [1,024, 3,072] GEMM output with one 128&times;128 tile lit: the block that owns it can apply any elementwise function to its 16,384 values, but a layernorm over the highlighted row needs the 23 other tiles in that row, owned by other blocks. Two ways out, both costing a pass over the statistics rather than the data: each tile writes its partial (<var>n</var>, mean, <var>M</var><sub>2</sub>) and a small second kernel merges them with Chan&rsquo;s rule; or the tile is made as wide as the row, which the tensor-core kernels of chapter 14 do for attention.</figcaption>
     </figure>
 
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p></aside>
     <p>There are two ways around the limit, and both are built from this chapter&rsquo;s merge operators. The first is a <strong>split reduction</strong>: each tile writes its partial summary (a few floats per row), and a tiny second kernel merges the partials and applies the formula; the data crosses to DRAM once, the statistics twice, which is a rounding error against the data. The second is to <strong>reshape the work so that one block sees a whole row</strong>. That is impossible for a 3,072-wide GEMM output tile, but it is exactly possible for attention, where the &ldquo;row&rdquo; is one query&rsquo;s scores against all keys, and a block can own a few queries against <em>all</em> keys, streaming them in tiles and carrying (<var>m</var>, <var>d</var>) across the tiles. That kernel fuses two matmuls and a softmax into one launch that never writes the <var>T</var>&times;<var>T</var> score matrix. Chapter 10 shows what that matrix costs; chapter 14 builds the kernel.</p>
 
-    <details class="ym">
-      <summary>Your move: the engine of chapter 11 has, per block, two layernorms, four GEMMs with biases, one GELU, two residual adds and the attention kernels. Using only the fusions of this section, how many launches does the non-attention part of a block need, and which intermediates still cross to DRAM?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The engine of chapter 11 has, per block, two layernorms, four GEMMs with biases, one GELU, two residual adds and the attention kernels. Using only the fusions of this section, how many launches does the non-attention part of a block need, and which intermediates still cross to DRAM?</p><div class="sub">Given</div>
+<dl class="given"><dt>Layernorms per block</dt><dd>2</dd><dt>GEMMs per block</dt><dd>4</dd><dt>Width of the GELU output</dt><dd>3,072</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>Six: layernorm, QKV GEMM with a bias epilogue, output projection with a bias + residual epilogue, layernorm, MLP up with a bias + GELU epilogue, MLP down with a bias + residual epilogue. Putting the residual add into the add-and-norm kernel instead of the GEMM epilogue gives the same count; what changes is which kernel reads the residual stream. What still crosses to DRAM: the normalized inputs of the GEMMs (needed by the matmul as its A operand, no way around it), the QKV output (the attention kernels read it), the 3,072-wide GELU output (the down GEMM&rsquo;s A operand), and the residual stream itself. Every one of those is a GEMM input or an attention input, and an input to a GEMM has to be in memory for the tiles to load it. The fusions removed the intermediates that were nobody&rsquo;s input.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s9">
-    <h2>9. Predictions</h2>
+    <h2><small>9.9</small><a href="#s9">Predictions</a></h2>
 
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Ranges from the mechanisms, as always, and only for the shapes where the kernel is large enough to escape the launch floor (chapter 4). The ideal time is the algorithmic bytes at ~590 GB/s, chapter 6&rsquo;s practical ceiling.</p>
     <table>
       <tr><th>Kernel, shape</th><th>Ideal bytes</th><th>Prediction</th><th>What to look for</th></tr>
@@ -570,7 +595,7 @@ o.z = epi(acc[i][j + 2], r, c + 2);  o.w = epi(acc[i][j + 3], r, c + 3);
   </section>
 
   <section id="s10">
-    <h2>10. Lab 8: softmax, layernorm, epilogues</h2>
+    <h2><small>9.10</small><a href="#s10">Lab 8: softmax, layernorm, epilogues</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 8</span><span class="lab-title">Row operations to one pass, and fused into their neighbours</span><span class="idx-meta">~50 min · <code>mlsys/labs/lab08-softmax-layernorm/</code></span></div>
@@ -653,16 +678,58 @@ make ncu-table     # sectors per request, L2 hit rate, DRAM bytes, occupancy per
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-08-matmul-tensor-cores.html">&larr; Ch. 8 — Matmul II</a>
-      <a href="index.html">Index</a>
-      <a href="cap-10-transformer-gpu-view.html">Ch. 10 — The transformer from the GPU&rsquo;s view &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part II · Chapter 9 · kernels checked for correctness on cudasim, never run on a GPU; byte counts computed from the shapes; performance ranges are predictions until lab 8 replaces them, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-08-matmul-tensor-cores.html">&lsaquo; Ch. 8: Matmul II</a><a class="btn primary" href="cap-10-transformer-gpu-view.html">Next: Ch. 10, The transformer from the GPU’s view &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part II · Chapter 9 · kernels checked for correctness on cudasim, never run on a GPU; byte counts computed from the shapes; performance ranges are predictions until lab 8 replaces them, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ch9.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>

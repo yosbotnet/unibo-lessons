@@ -1,66 +1,57 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-15-decode-attention.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 15 — Decode attention: split-K, FlashDecoding, KV-cache kernels · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch15.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch15.css?v=622dc950">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-14-flashattention.html">&larr; Ch. 14 — FlashAttention 1 &rarr; 2</a>
-    <a href="index.html">Index</a>
-    <a href="index.html">Ch. 16 — Quantization (in writing) &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part III · Attention</div>
+<h3><a href="#top">Decode attention<small>15</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 5 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>15.1</small><span>The shape, and the bytes</span></a></li><li data-for="s2"><a href="#s2"><small>15.2</small><span>Why one block per head starves the GPU</span></a></li><li data-for="s3"><a href="#s3"><small>15.3</small><span>Split-K: partials and the combine</span></a></li><li data-for="s4"><a href="#s4"><small>15.4</small><span>Combining without a second kernel</span></a></li><li data-for="s5"><a href="#s5"><small>15.5</small><span>Inside a block: lanes over <var>D</var>, loads in flight</span></a></li><li data-for="s6"><a href="#s6"><small>15.6</small><span>Grouped-query attention: one read, several heads</span></a></li><li data-for="s7"><a href="#s7"><small>15.7</small><span>The kernels around the cache</span></a></li><li data-for="s8"><a href="#s8"><small>15.8</small><span>Variants, as names</span></a></li><li data-for="s9"><a href="#s9"><small>15.9</small><span>Predictions</span></a></li><li data-for="s10"><a href="#s10"><small>15.10</small><span>Lab 14: decode attention, v1 to v5</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-14-flashattention.html">&larr; Ch. 14</a><a href="index.html">&uarr; Index</a><a href="index.html">Ch. 16 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part III — Attention · Chapter 15</div>
-    <h1>Decode attention: split-K, FlashDecoding, KV-cache kernels</h1>
-    <div class="lk-meta"><span>~70 min read</span><span>1 interactive widget</span><span>6 plates</span><span>lab 14 · ~50 min on your GPU</span></div>
-  </header>
+  <header class="chap"><div class="num">15</div><div class="kicker">Part III &middot; Attention · Chapter 15</div><div class="numeral" aria-hidden="true">15</div><h1>Decode attention: split-K, FlashDecoding, KV-cache kernels</h1><ul class="meta"><li>~70 min read</li><li>1 interactive widget</li><li>6 plates</li><li>lab 14 · ~50 min on your GPU</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>At decode, attention has one query row per head and a cache of <var>T</var> keys and values to read against it. There is no <var>T</var><sup>2</sup> matrix and almost no arithmetic: the operation is a matrix-vector product over the cache, half a FLOP per byte, and its only possible goal is to read the cache at full DRAM bandwidth. Chapter 14&rsquo;s kernel cannot do that, for a reason chapter 2 taught: its parallelism was over query blocks, and a decode step has <var>B</var>&middot;<var>H</var> query rows, often a dozen blocks for 48 SMs, far too few to keep the bytes in flight that Little&rsquo;s law demands. The fix is to split the <em>keys</em> across blocks (<strong>split-K</strong>, which chapters 6 and 8 promised): every block produces a partial (<var>m</var>, <var>l</var>, <var>&Otilde;</var>) for its slice of the cache, and chapter 14&rsquo;s merge, which is associative, combines them. That is <strong>FlashDecoding</strong>. The chapter then goes down one level (how a warp reads a key row with 16-byte loads and reduces with shuffles, and how many loads it must keep in flight), looks at two ways of merging without a second kernel (the last-block pattern with atomics and <code>__threadfence</code>, and thread block clusters with distributed shared memory), and ends with the kernels that surround the cache: the append, the layouts, grouped-query attention that lets one cache read serve several heads, and the half- and quarter-size caches that Part IV will fill.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~70 min read</li><li>1 interactive widget</li><li>6 plates</li><li>lab 14 · ~50 min on your GPU</li></ul></aside><div class="ov-learn"><p class="ov-lead">At decode, attention has one query row per head and a cache of <var>T</var> keys and values to read against it. There is no <var>T</var><sup>2</sup> matrix and almost no arithmetic: the operation is a matrix-vector product over the cache, half a FLOP per byte, and its only possible goal is to read the cache at full DRAM bandwidth. Chapter 14&rsquo;s kernel cannot do that, for a reason chapter 2 taught: its parallelism was over query blocks, and a decode step has <var>B</var>&middot;<var>H</var> query rows, often a dozen blocks for 48 SMs, far too few to keep the bytes in flight that Little&rsquo;s law demands. The fix is to split the <em>keys</em> across blocks (<strong>split-K</strong>, which chapters 6 and 8 promised): every block produces a partial (<var>m</var>, <var>l</var>, <var>&Otilde;</var>) for its slice of the cache, and chapter 14&rsquo;s merge, which is associative, combines them. That is <strong>FlashDecoding</strong>. The chapter then goes down one level (how a warp reads a key row with 16-byte loads and reduces with shuffles, and how many loads it must keep in flight), looks at two ways of merging without a second kernel (the last-block pattern with atomics and <code>__threadfence</code>, and thread block clusters with distributed shared memory), and ends with the kernels that surround the cache: the append, the layouts, grouped-query attention that lets one cache read serve several heads, and the half- and quarter-size caches that Part IV will fill.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">The shape, and the bytes</a></li>
-      <li><a href="#s2">Why one block per head starves the GPU</a></li>
-      <li><a href="#s3">Split-K: partials and the combine</a></li>
-      <li><a href="#s4">Combining without a second kernel</a></li>
-      <li><a href="#s5">Inside a block: lanes over <var>D</var>, loads in flight</a></li>
-      <li><a href="#s6">Grouped-query attention: one read, several heads</a></li>
-      <li><a href="#s7">The kernels around the cache</a></li>
-      <li><a href="#s8">Variants, as names</a></li>
-      <li><a href="#s9">Predictions</a></li>
-      <li><a href="#s10">Lab 14: decode attention, v1 to v5</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. The shape, and the bytes</h2>
+    <h2><small>15.1</small><a href="#s1">The shape, and the bytes</a></h2>
 
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p><p><a href="cap-13-inference-arithmetic.html">Ch.&nbsp;13 &middot; Inference arithmetic</a></p></aside>
     <p>Chapter 10 named the two phases and chapter 13 costed them; recall only what this chapter builds on. After prefill, every layer holds a <strong>KV cache</strong>: the keys and values of all tokens so far, one [<var>T</var>, <var>D</var>] array of each per (sequence, head), written once and read at every later step. A decode step appends the new token&rsquo;s key and value (section 7) and then, for each sequence <var>b</var> and head <var>h</var>, computes attention for <em>one</em> query row q against the <var>T</var> cached rows:</p>
 
 <pre><code class="language-text">s[j] = q . k[j] / sqrt(D)      for j = 0 .. T-1        // a GEMV: [1, D] x [D, T]
 p    = softmax(s)                                       // one row
 o    = sum_j p[j] v[j]                                  // a GEMV: [1, T] x [T, D]</code></pre>
 
+    <aside class="m-rem"><p><b>Ridge point</b> <a href="cap-04-roofline.html#s1">ch.&nbsp;4 &sect;1</a>. The intensity a kernel needs before the math units can be the limit. Everything to the left of a ridge is memory-bound.</p></aside>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <p>No mask: the new token sees everything. The scores are a row of <var>T</var> numbers, not a matrix, and the arithmetic is 4<var>T</var><var>D</var> FLOPs for 2<var>T</var><var>D</var> values read. In FP32 that is <strong>0.5 FLOP per byte</strong>: chapter 6&rsquo;s &ldquo;linear <var>M</var> = 1&rdquo; point on the roofline, a hundred times left of the ridge. And unlike the weights, the cache is private to its sequence (chapter 4): a bigger batch reads more caches, not the same one more often. So the kernel is a stream over the cache, and the whole design question is whether it streams at 590 GB/s or at a fraction of it.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Decode attention for one sequence and head. A query row of 8 cells is dotted with row 4 of a 12-row key cache, giving one score in a column of 12 scores; the scores pass through a softmax into a column of 12 probabilities, one of them large; the probabilities weight the 12 rows of the value cache, summed into one output row. Under the arrays: 2 times T times D values read, 4 times T times D FLOPs, 0.5 FLOP per byte in FP32, and no T by T matrix.">
+    <figure class="lk-fig wide" role="img" aria-label="Decode attention for one sequence and head. A query row of 8 cells is dotted with row 4 of a 12-row key cache, giving one score in a column of 12 scores; the scores pass through a softmax into a column of 12 probabilities, one of them large; the probabilities weight the 12 rows of the value cache, summed into one output row. Under the arrays: 2 times T times D values read, 4 times T times D FLOPs, 0.5 FLOP per byte in FP32, and no T by T matrix.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
 <svg viewBox="0 0 660 262" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
 <title>Decode attention for one (sequence, head)</title>
@@ -200,7 +191,7 @@ o    = sum_j p[j] v[j]                                  // a GEMV: [1, T] x [T, 
 <text x="16" y="256" font-size="11" fill="var(--lk-ink-soft)">drawn: T = 12 keys, D = 8 (GPT-2: D = 64)</text>
 </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; Decode attention for one (sequence, head): a single query row (cobalt) against the cached keys, each dot product one score; the row of scores through one softmax; the weighted sum of the cached values into one output row. The two tall arrays are the bytes (vermilion edge): 2&middot;<var>T</var>&middot;<var>D</var> values read for 4&middot;<var>T</var>&middot;<var>D</var> FLOPs. Nothing is reused and nothing is <var>T</var><sup>2</sup>.</figcaption>
+      <figcaption><b>Figure 1.</b> Decode attention for one (sequence, head): a single query row (cobalt) against the cached keys, each dot product one score; the row of scores through one softmax; the weighted sum of the cached values into one output row. The two tall arrays are the bytes (vermilion edge): 2&middot;<var>T</var>&middot;<var>D</var> values read for 4&middot;<var>T</var>&middot;<var>D</var> FLOPs. Nothing is reused and nothing is <var>T</var><sup>2</sup>.</figcaption>
     </figure>
 
     <p>The bytes, for the engine&rsquo;s FP32 cache (<var>D</var> = 64, 256 bytes per key row, 512 per key with its value):</p>
@@ -215,10 +206,13 @@ o    = sum_j p[j] v[j]                                  // a GEMV: [1, T] x [T, 
   </section>
 
   <section id="s2">
-    <h2>2. Why one block per head starves the GPU</h2>
+    <h2><small>15.2</small><a href="#s2">Why one block per head starves the GPU</a></h2>
 
+    <aside class="m-link"><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p></aside>
     <p>Take chapter 14&rsquo;s design and set the query count to one: a thread block per (sequence, head) holding q in registers, streaming K and V tiles past it, with a running (<var>m</var>, <var>l</var>, <var>&Otilde;</var>). It is correct, lab 14&rsquo;s <code>v2</code> is exactly that, and it is slow. The grid is <var>B</var>&middot;<var>H</var> blocks: at batch 1 with GPT-2&rsquo;s 12 heads, <strong>12 blocks on 48 SMs</strong>. Thirty-six SMs idle, and that is only the first problem.</p>
 
+    <aside class="m-rem"><p><b>Little&rsquo;s law</b> <a href="cap-03-memory-hierarchy.html#s5">ch.&nbsp;3 &sect;5</a>. To saturate 672 GB/s at about 500 ns of latency, about 336 KB must be in flight, about 7 KB per SM.</p></aside>
+    <aside class="m-link"><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>The second is chapter 3&rsquo;s Little&rsquo;s law. To sustain 672 GB/s at about 500 ns of DRAM latency, the GPU needs about 336 KB of requests in flight, 7 KB per SM, all the time. A block of 128 threads with one 16-byte load outstanding per thread has 2 KB in flight; with four keys unrolled and both K and V requested ahead, 16 KB (section 5). Twelve such blocks: 192 KB, 57% of what is needed, so the stream runs at about 57% of peak, from this one cause, before any other inefficiency. Put the two problems together in a model (it is the widget&rsquo;s): <strong>bandwidth = min(peak, bytes in flight / latency)</strong>, and bytes in flight = blocks &times; what each block keeps outstanding, capped by how many blocks the SMs can hold.</p>
 
     <table>
@@ -228,9 +222,10 @@ o    = sum_j p[j] v[j]                                  // a GEMV: [1, T] x [T, 
       <tr><td>192 (<var>B</var> = 16, or 12 heads &times; 16 splits)</td><td>3 MB</td><td>900%</td><td>590 GB/s</td></tr>
     </table>
 
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <p>The model is crude (the per-SM load queues, the DRAM pattern and the tail of the last wave are not in it), but it says the right thing: the one-block-per-head kernel is bandwidth-starved exactly when the batch is small, which is when a user is waiting for each token. At batch 16 the same kernel is fine. Chapter 4 called this &ldquo;attention does not batch&rdquo;; here is the other side of it: attention does not <em>parallelize</em> either, unless you split something other than the queries.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two panels of 48 SM squares. Left: 12 SMs hold one block each with 4 request chips; the requests-in-flight gauge reaches 192 KB, short of the 336 KB mark, and the six DRAM channels are 57 percent busy. Right: every SM holds 4 blocks, 192 in all; the gauge overflows the mark at 3 MB and the channels are full; 16 partial tiles of one head feed a combine box. Same 25 MB of cache, batch 1, 12 heads, T 4096, FP32.">
+    <figure class="lk-fig wide" role="img" aria-label="Two panels of 48 SM squares. Left: 12 SMs hold one block each with 4 request chips; the requests-in-flight gauge reaches 192 KB, short of the 336 KB mark, and the six DRAM channels are 57 percent busy. Right: every SM holds 4 blocks, 192 in all; the gauge overflows the mark at 3 MB and the channels are full; 16 partial tiles of one head feed a combine box. Same 25 MB of cache, batch 1, 12 heads, T 4096, FP32.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
 <svg viewBox="0 0 660 364" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
 <title>One block per head versus sixteen splits per head on 48 SMs</title><defs><pattern id="f15-2h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-paper-light)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-vermilion)" stroke-width="1.2"/></pattern></defs>
@@ -672,18 +667,20 @@ o    = sum_j p[j] v[j]                                  // a GEMV: [1, T] x [T, 
 <text x="587" y="216.5" font-size="11" text-anchor="middle" font-weight="700" fill="var(--lk-gold)">combine</text>
 </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; The same 25 MB of cache (<var>B</var> = 1, 12 heads, <var>T</var> = 4,096) read two ways. Left: 12 blocks on 12 of 48 SMs, each with its 16 KB of requests in flight; the DRAM channels at the bottom are mostly idle (model: 57% of the required bytes in flight). Right: each head&rsquo;s keys cut into 16 chunks, 192 blocks across all 48 SMs, the channels full. The partial results of the 16 chunks (small cobalt tiles) still have to be merged: section 3.</figcaption>
+      <figcaption><b>Figure 2.</b> The same 25 MB of cache (<var>B</var> = 1, 12 heads, <var>T</var> = 4,096) read two ways. Left: 12 blocks on 12 of 48 SMs, each with its 16 KB of requests in flight; the DRAM channels at the bottom are mostly idle (model: 57% of the required bytes in flight). Right: each head&rsquo;s keys cut into 16 chunks, 192 blocks across all 48 SMs, the channels full. The partial results of the 16 chunks (small cobalt tiles) still have to be merged: section 3.</figcaption>
     </figure>
 
-    <details class="ym">
-      <summary>Your move: a serving engine runs batch 64 with 32 heads: 2,048 blocks. Is one block per (sequence, head) still a problem, and what in section 1&rsquo;s arithmetic becomes the problem instead?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">A serving engine runs batch 64 with 32 heads: 2,048 blocks. Is one block per (sequence, head) still a problem, and what in section 1&rsquo;s arithmetic becomes the problem instead?</p><details><summary class="btn">Show the answer</summary>
       <p>Not for bandwidth: 2,048 blocks are 43 per SM, far more than the SMs hold at once, so the stream runs at peak and the only loss is the last wave&rsquo;s tail. The problem is the bytes themselves: 64 private caches, each read once per step, with nothing shared between sequences. Fixing the kernel cannot help; only smaller caches can (FP16 and FP8 in section 7, and GQA in section 6, which lets one cache serve several heads).</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s3">
-    <h2>3. Split-K: partials and the combine</h2>
+    <h2><small>15.3</small><a href="#s3">Split-K: partials and the combine</a></h2>
 
+    <aside class="m-rem"><p><b>Merge rule</b> <a href="cap-14-flashattention.html#s3">ch.&nbsp;14 &sect;3</a>. Two partial (<var>m</var>, <var>l</var>, <var>&Otilde;</var>) triples merge with the new max and rescale factors; the merge is associative and commutative.</p></aside>
+    <aside class="m-rem"><p><b>Split-K</b> <a href="cap-08-matmul-tensor-cores.html#s8">ch.&nbsp;8 &sect;8</a>. Several blocks share one output tile and add their partial sums; used when the output has too few tiles to fill the SMs.</p></aside>
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p></aside>
     <p>The dot products of a GEMV sum over <var>K</var> (here, over the keys), and nothing requires one block to do the whole sum: chapter 8 named this <strong>split-K</strong> for matmuls with too few output tiles, and chapter 6 promised it for decode. Cut the <var>T</var> keys of a (sequence, head) into <var>S</var> chunks, give each chunk to a block, and the grid becomes <var>B</var>&middot;<var>H</var>&middot;<var>S</var>. The attention wrinkle is the softmax: a block that saw only its chunk cannot normalize. But you already know what to do, from chapter 14&rsquo;s second Your move: each block produces a partial (<var>m</var>, <var>l</var>, <var>&Otilde;</var>) for its chunk, and the merge rule combines partials in any order. That is FlashDecoding (Dao, Haziza, Massa, Sizov, 2023): FlashAttention&rsquo;s loop with one more level of parallelism, over the key sequence, plus a reduction.</p>
 
 <pre><code class="language-text">// FlashDecoding, one (b, h).  Kernel 1: grid (B*H, S), block s handles keys [s*chunk, (s+1)*chunk)
@@ -705,7 +702,7 @@ O = sum_s O~_s * exp(m_s - M) / L</code></pre>
     </table>
     <p>The blocks never communicated, and the order of the rows in the table does not matter. The partials are small: <var>D</var> + 2 floats per block, 264 bytes at <var>D</var> = 64, against the chunk&rsquo;s 512&middot;<var>T</var>/<var>S</var> bytes of cache; with 256 keys per chunk, 0.2% of the traffic.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Split-K with three splits on the toy row. The keys, with scores 1, 3, 2, 5, 4, 0, and values 10 to 60, are cut into three chunks of two. Three blocks each stream a chunk and write a partial tile: m 3, l 1.135, O-tilde 21.35; m 5, l 1.050, O-tilde 41.49; m 4, l 1.018, O-tilde 51.10. Arrows into the combine are scaled by 0.135, 1 and 0.368. The combine gives L 1.578, O-tilde 63.18, and O 40.0.">
+    <figure class="lk-fig wide" role="img" aria-label="Split-K with three splits on the toy row. The keys, with scores 1, 3, 2, 5, 4, 0, and values 10 to 60, are cut into three chunks of two. Three blocks each stream a chunk and write a partial tile: m 3, l 1.135, O-tilde 21.35; m 5, l 1.050, O-tilde 41.49; m 4, l 1.018, O-tilde 51.10. Arrows into the combine are scaled by 0.135, 1 and 0.368. The combine gives L 1.578, O-tilde 63.18, and O 40.0.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
 <svg viewBox="0 0 660 300" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
 <title>Split-K with three splits and the combine</title>
@@ -860,7 +857,7 @@ O = sum_s O~_s * exp(m_s - M) / L</code></pre>
 <text x="330" y="292" font-size="11.5" text-anchor="middle" font-weight="700" fill="var(--lk-ink)">L = 1.578, &#213; = 63.18, O = 40.0</text>
 </svg>
       </div>
-      <figcaption><b>Fig. 3</b> &mdash; Split-K for one (sequence, head), <var>S</var> = 3. Three blocks (forest) each stream a chunk of the key and value arrays (vermilion edge) and leave a partial (cobalt tile: <var>m</var>, <var>l</var>, and the <var>D</var> cells of <var>&Otilde;</var>) in scratch memory. The combine (gold) reads the three tiles, rescales each by exp(<var>m<sub>s</sub></var> &minus; <var>M</var>) (the shrinking arrows), sums, and divides once. Shown for the toy row of the table: the second split holds the max and is not rescaled.</figcaption>
+      <figcaption><b>Figure 3.</b> Split-K for one (sequence, head), <var>S</var> = 3. Three blocks (forest) each stream a chunk of the key and value arrays (vermilion edge) and leave a partial (cobalt tile: <var>m</var>, <var>l</var>, and the <var>D</var> cells of <var>&Otilde;</var>) in scratch memory. The combine (gold) reads the three tiles, rescales each by exp(<var>m<sub>s</sub></var> &minus; <var>M</var>) (the shrinking arrows), sums, and divides once. Shown for the toy row of the table: the second split holds the max and is not rescaled.</figcaption>
     </figure>
 
     <h3>Choosing the number of splits</h3>
@@ -873,18 +870,20 @@ int choose_splits(int B, int H, int T_ctx) {
 }</code></pre>
     <p>With <var>B</var> = 1 and 12 heads at <var>T</var> = 4,096: 16 splits of 256 keys, 192 blocks. At <var>B</var> = 16: one split, because 192 blocks already exist, and the combine kernel is not launched at all. At <var>T</var> = 256 and <var>B</var> = 1: one split, however starved, because there is nothing to cut.</p>
 
-    <details class="ym">
-      <summary>Your move: at <var>B</var> = 1, 12 heads, <var>T</var> = 1,024, the rule gives 4 splits (48 blocks). The combine kernel costs a launch (a few microseconds) and the stream of 6.3 MB costs about 11 &micro;s at full bandwidth. Is splitting still worth it here?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">At <var>B</var> = 1, 12 heads, <var>T</var> = 1,024, the rule gives 4 splits (48 blocks). The combine kernel costs a launch (a few microseconds) and the stream of 6.3 MB costs about 11 &micro;s at full bandwidth. Is splitting still worth it here?</p><div class="sub">Given</div>
+<dl class="given"><dt>Modelled stream without splits</dt><dd>57% of peak (section 2)</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>Barely, and it depends on the launch floor. Without splits, 12 blocks at the modelled 57% take about 16 &micro;s; with four splits, 48 blocks reach close to full bandwidth for about 11 &micro;s, plus 3&ndash;5 &micro;s for the second kernel: a saving of at most a couple of microseconds out of sixteen, and it vanishes if the kernels are not back to back in a CUDA graph. The short-context, small-batch corner is where the launch floor, not the bandwidth, decides; chapter 11 measured it. Section 4&rsquo;s single-kernel combine exists for exactly this corner.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s4">
-    <h2>4. Combining without a second kernel</h2>
+    <h2><small>15.4</small><a href="#s4">Combining without a second kernel</a></h2>
 
     <p>The combine is a second launch and a dependency: the engine cannot start the next GEMM until it has run. Two ways to fold it into the first kernel, one old and one new, and both need vocabulary this course has used only in passing.</p>
 
     <h3>Atomics, scopes and fences</h3>
+    <aside class="m-link"><p><a href="cap-11-gpt2-forward-pass.html">Ch.&nbsp;11 &middot; Lab</a></p></aside>
     <p>An <strong>atomic operation</strong> is a read-modify-write of one memory word that no other thread can interleave with: <code>atomicAdd(&amp;x, 1)</code> returns the old value and stores the new one as one indivisible step, performed by the L2 slice that owns the address (chapter 11 used them for the histogram of top-k sampling). Its <strong>scope</strong> says who it is indivisible with respect to: <code>atomicAdd_block</code> among the threads of the block, <code>atomicAdd</code> (the default) among all threads on the device, <code>atomicAdd_system</code> including the CPU. The atomic itself is not the hard part. The hard part is that ordinary stores are <em>not ordered</em> as seen from another block: a block that writes its partial and then increments a counter may have the increment become visible first, because the partial&rsquo;s stores are still on their way to L2 while the atomic, which goes straight to L2, has already landed. A <strong>memory fence</strong> fixes the order: <code>__threadfence()</code> guarantees that every write this thread made before the fence is visible to every thread on the device before any write it makes after the fence. It has the same three scopes (<code>__threadfence_block</code>, <code>__threadfence</code>, <code>__threadfence_system</code>). A fence orders; it does not wait for anyone, and it does not make the data arrive sooner.</p>
 
     <h3>The last-block pattern</h3>
@@ -909,7 +908,7 @@ if (tid == 0) counter[bh] = 0;                             // reset for the next
 
     <p>Every line answers a failure. Without the first fence, the last block can read a partial that is not there yet. Without the <code>__syncthreads()</code> before the atomic, thread 0 can take its ticket while a neighbour is still storing its part of <var>&Otilde;</var>. Without <code>__ldcg</code> (or a <code>volatile</code> pointer, which the CUDA Programming Guide&rsquo;s example uses), the reads may be served from an L1 that is per SM and never kept coherent; a block that has not touched those lines will miss its L1 anyway, but the habit is what keeps the next kernel correct. And the counter must be zero before the launch (a <code>cudaMemset</code> once, then the last block resets it). The cost is one atomic per block (an L2 round trip, a microsecond or so at the end of each block, not on its critical path) and the merge serialized into one block per (<var>b</var>, <var>h</var>), which is what the separate kernel did anyway. The saving is the launch and the dependency.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two timelines of four blocks. With the fence: each block streams its chunk, writes its partial, fences, then takes a ticket from a counter that ends at 4; block 3 gets ticket 0, block 0 ticket 1, block 1 ticket 2, and block 2, the longest, ticket 3; block 2 then reads the other partials and merges. Without the fence: block 0 takes its ticket while its partial store is still in flight, and the last block reads block 0 partial before it lands, marked with a cross.">
+    <figure class="lk-fig wide" role="img" aria-label="Two timelines of four blocks. With the fence: each block streams its chunk, writes its partial, fences, then takes a ticket from a counter that ends at 4; block 3 gets ticket 0, block 0 ticket 1, block 1 ticket 2, and block 2, the longest, ticket 3; block 2 then reads the other partials and merges. Without the fence: block 0 takes its ticket while its partial store is still in flight, and the last block reads block 0 partial before it lands, marked with a cross.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
 <svg viewBox="0 0 660 352" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
 <title>The last-block pattern with and without the fence</title><defs><pattern id="f15-4h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-paper-light)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-vermilion)" stroke-width="1.2"/></pattern></defs>
@@ -1030,7 +1029,7 @@ if (tid == 0) counter[bh] = 0;                             // reset for the next
 <text x="16" y="344" font-size="11" font-weight="700" fill="var(--lk-ink)">The ticket can land before the data; the fence orders them.</text>
 </svg>
       </div>
-      <figcaption><b>Fig. 4</b> &mdash; Four blocks finishing at different times (rows, time left to right). Each writes its partial (vermilion), fences (the vertical bar), then takes a ticket from the counter (cobalt dial: 0 &rarr; 4). Block 2, ticket 3, is last: it reads all four partials (forest arrows) and writes the output (gold). Lower panel, the failure without the fence: block 0&rsquo;s ticket arrives at the counter before its partial has landed in L2, and the last block reads stale memory at the position marked.</figcaption>
+      <figcaption><b>Figure 4.</b> Four blocks finishing at different times (rows, time left to right). Each writes its partial (vermilion), fences (the vertical bar), then takes a ticket from the counter (cobalt dial: 0 &rarr; 4). Block 2, ticket 3, is last: it reads all four partials (forest arrows) and writes the output (gold). Lower panel, the failure without the fence: block 0&rsquo;s ticket arrives at the counter before its partial has landed in L2, and the last block reads stale memory at the position marked.</figcaption>
     </figure>
 
     <h3>Thread block clusters and distributed shared memory</h3>
@@ -1041,15 +1040,17 @@ if (tid == 0) counter[bh] = 0;                             // reset for the next
       <p>The CUDA C++ Programming Guide&rsquo;s feature table (CUDA 13, checked in October 2026) lists <em>Thread Block Cluster</em> and <em>Distributed Shared Memory</em> as supported for compute capabilities 9.0, 10.x, 11.0 and 12.x, which includes your card, and as unsupported on 7.x and 8.x. This has <strong>not been verified on an RTX 5070</strong> in this course; the hardware is documented but the kernel has never run here, and forum reports suggest that the related TMA multicast across a cluster is absent on consumer parts. Lab 14&rsquo;s <code>v6_cluster</code> is therefore optional: it compiles only for <code>ARCH &ge; sm_90</code>, asks the driver with <code>cudaOccupancyMaxActiveClusters</code> how many clusters of 8 can be resident, and skips itself with a message if the answer is zero. If it runs and passes, that is the verification; paste the line.</p>
     </div>
 
-    <details class="ym">
-      <summary>Your move: in the last-block kernel, a colleague moves the <code>__threadfence()</code> to <em>after</em> the <code>atomicAdd</code>, arguing that the fence should come as late as possible. What can now go wrong, and how often will it show?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">In the last-block kernel, a colleague moves the <code>__threadfence()</code> to <em>after</em> the <code>atomicAdd</code>, arguing that the fence should come as late as possible. What can now go wrong, and how often will it show?</p><details><summary class="btn">Show the answer</summary>
       <p>The ticket can become visible before the partial: the last block reads a partial whose <var>&Otilde;</var> is still in flight and merges garbage, or zeros from a previous launch. It will show rarely, because the stores usually land within the microsecond the atomic takes, and almost never on cudasim, which runs blocks one after another. That is the signature of a memory-ordering bug: a correct answer most of the time and a wrong one under load, on a different GPU, or after an unrelated change. The fence must sit between the data and the signal.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s5">
-    <h2>5. Inside a block: lanes over <var>D</var>, loads in flight</h2>
+    <h2><small>15.5</small><a href="#s5">Inside a block: lanes over <var>D</var>, loads in flight</a></h2>
 
+    <aside class="m-rem"><p><b>Sectors, coalescing</b> <a href="cap-03-memory-hierarchy.html#s3">ch.&nbsp;3 &sect;3</a>. 32 threads reading 32 consecutive floats touch 4 sectors, and every byte is used. This is a coalesced access.</p></aside>
+    <aside class="m-rem"><p><b>Warp shuffle</b> <a href="cap-05-profiling.html#s6">ch.&nbsp;5 &sect;6</a>. The lanes of a warp can exchange registers directly, with no shared memory and no barrier.</p></aside>
+    <aside class="m-link"><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>Sections 2&ndash;4 decided how many blocks there are. Inside a block, the question is chapter 3&rsquo;s: do the warps read whole sectors, and do they keep enough requests outstanding? The organising choice is <strong>lanes across the head dimension</strong>: a key row is <var>D</var> = 64 floats, 256 contiguous bytes, and a <code>float4</code> per lane covers it with 16 lanes. So a warp handles two keys per step: lanes 0&ndash;15 read key <var>j</var>, lanes 16&ndash;31 read key <var>j</var>+1, each lane one 16-byte load, the warp 512 contiguous bytes, every sector fully used. Each lane multiplies its four values of q (held in registers since the start) by its four of k and adds: a partial dot product. The full score is the sum over the 16 lanes of the half-warp, which is four <code>__shfl_xor_sync</code> steps (8, 4, 2, 1), after which every lane of the half-warp holds the score. The online update follows per key, with the half-warp&rsquo;s running <var>m</var> and <var>l</var> duplicated in all 16 lanes, and <var>&Otilde;</var> spread the same way as the loads: each lane owns four of the 64 output dimensions and does o4 += p &middot; v4 with the four values of v it loaded.</p>
 
 <pre><code class="language-cpp">// lab 14, decode_v2_online / v3: the inner loop of one warp (half = lane / 16, c = lane % 16)
@@ -1067,9 +1068,10 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
 }
 // then: the 8 half-warps of the block merge their (m, l, o4-slices) through shared memory; thread d writes o[d] / l</code></pre>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>As written, each lane has one key&rsquo;s K and V loads (32 bytes) outstanding before it needs them: 1 KB per warp, 4 KB per block, a quarter of the 16 KB section 2 assumed. The fix is chapter 3&rsquo;s again, in the form chapter 8 used for the double buffer: <strong>issue the loads for several keys before using any of them</strong>. The lab&rsquo;s kernels unroll four keys per half-warp (<code>DEC_UNROLL = 4</code>): eight <code>float4</code> loads issued back to back, 128 bytes per lane in flight, then the four shuffle-reductions and updates. The compiler hoists the loads only if nothing between them can alias the stores, which is why the cache pointers are <code>const __restrict__</code>. With 16 KB per block and 192 blocks the grid keeps 3 MB in flight, ten times what Little&rsquo;s law needs; the stream is then limited by DRAM, which is the goal.</p>
 
-    <figure class="lk-fig" role="img" aria-label="One warp over the cache. Two key rows of 16 float4 cells: lanes 0 to 15 read the first, lanes 16 to 31 the second, 512 contiguous bytes in 16 sectors, with three paler rows behind for the four unrolled keys, 128 bytes per lane in flight. A shuffle tree sums 16 partial products in four steps: xor 8, xor 4, xor 2, xor 1. Lane 3 updates its four output dimensions, 12 to 15, from the matching float4 of a value row.">
+    <figure class="lk-fig wide" role="img" aria-label="One warp over the cache. Two key rows of 16 float4 cells: lanes 0 to 15 read the first, lanes 16 to 31 the second, 512 contiguous bytes in 16 sectors, with three paler rows behind for the four unrolled keys, 128 bytes per lane in flight. A shuffle tree sums 16 partial products in four steps: xor 8, xor 4, xor 2, xor 1. Lane 3 updates its four output dimensions, 12 to 15, from the matching float4 of a value row.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
 <svg viewBox="0 0 660 344" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
 <title>One warp over the cache: loads, shuffle tree, output slice</title>
@@ -1307,18 +1309,18 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
 <text x="244" y="308" font-size="11" fill="var(--lk-cobalt-dark)">lane 3: o4 = &#945;&#183;o4 + p&#183;v4 (dims 12..15)</text>
 </svg>
       </div>
-      <figcaption><b>Fig. 5</b> &mdash; One warp over the cache. Top: two key rows of 64 floats (16 cells of 16 bytes each); lanes 0&ndash;15 take the first row, 16&ndash;31 the second, one <code>float4</code> each; the warp&rsquo;s load covers 512 contiguous bytes, 16 full sectors. Middle: the shuffle tree that sums the 16 partial products of a half-warp in four steps (xor 8, 4, 2, 1). Bottom: the lane&rsquo;s slice of the output, four of 64 dimensions, updated with the four values it loaded; and the four unrolled keys whose loads are in flight together (the pale rows behind).</figcaption>
+      <figcaption><b>Figure 5.</b> One warp over the cache. Top: two key rows of 64 floats (16 cells of 16 bytes each); lanes 0&ndash;15 take the first row, 16&ndash;31 the second, one <code>float4</code> each; the warp&rsquo;s load covers 512 contiguous bytes, 16 full sectors. Middle: the shuffle tree that sums the 16 partial products of a half-warp in four steps (xor 8, 4, 2, 1). Bottom: the lane&rsquo;s slice of the output, four of 64 dimensions, updated with the four values it loaded; and the four unrolled keys whose loads are in flight together (the pale rows behind).</figcaption>
     </figure>
 
-    <details class="ym">
-      <summary>Your move: switch the cache to FP16. A 16-byte load now holds 8 values, so a 64-wide key row takes 8 lanes. How does the warp&rsquo;s step change, what happens to the shuffle tree, and what must not change?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">Switch the cache to FP16. A 16-byte load now holds 8 values, so a 64-wide key row takes 8 lanes. How does the warp&rsquo;s step change, what happens to the shuffle tree, and what must not change?</p><details><summary class="btn">Show the answer</summary>
       <p>Eight lanes per key, four keys per warp-step, and each lane&rsquo;s slice of the output grows to 8 dimensions. The shuffle tree loses one level (xor 4, 2, 1: three steps over eight lanes). The loads must stay 16 bytes (<code>uint4</code> or <code>__half2</code> &times; 4) and the warp must still read a contiguous run: four keys &times; 128 bytes, 16 sectors, as before. What must not change is the arithmetic: the halves are converted to FP32 before the FMAs, and <var>m</var>, <var>l</var>, <var>&Otilde;</var> stay FP32 (chapter 6&rsquo;s accumulation lesson; a running sum of thousands of exponentials in FP16 loses digits). That is lab 14&rsquo;s <code>v4_half</code>: half the bytes, nearly half the time.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s6">
-    <h2>6. Grouped-query attention: one read, several heads</h2>
+    <h2><small>15.6</small><a href="#s6">Grouped-query attention: one read, several heads</a></h2>
 
+    <aside class="m-link"><p><a href="cap-13-inference-arithmetic.html">Ch.&nbsp;13 &middot; Inference arithmetic</a></p></aside>
     <p>Everything so far reads each cached key once per query head. GPT-2 has one key head per query head, so there is nothing to share. Modern models change that on purpose. <strong>Multi-query attention</strong> (MQA, Shazeer 2019) keeps <var>H</var> query heads but a single key head and value head; <strong>grouped-query attention</strong> (GQA, Ainslie et al. 2023) keeps <var>H<sub>kv</sub></var> key/value heads and lets a <em>group</em> of <var>g</var> = <var>H</var>/<var>H<sub>kv</sub></var> query heads share each one. Llama-3-8B has 32 query heads and 8 key/value heads: <var>g</var> = 4. The model was trained that way, so the sharing is exact, not an approximation, and it exists for this chapter&rsquo;s reason: the cache shrinks by <var>g</var> (chapter 13 counted it), and the kernel reads each key <em>once for the whole group</em>.</p>
 
     <p>The kernel change is small. A block (or a cluster of splits) now serves one (<var>b</var>, kv-head) and the <var>g</var> query rows of its group, held in shared memory or registers. Each key row loaded gives <var>g</var> dot products instead of one, each with its own softmax state and its own <var>&Otilde;</var> slice per lane: <var>g</var> times the FMAs and the registers, the same bytes. Intensity goes from 0.5 to 0.5<var>g</var> FLOP/B in FP32, <var>g</var> in FP16; at <var>g</var> = 4 it is still far below the ridge, so the kernel stays memory-bound and gets faster by exactly the bytes it no longer reads. When the group is large (<var>g</var> = 8 or more) the <var>g</var> query rows against the chunk&rsquo;s keys form a small matrix product with <var>M</var> = <var>g</var>, and production kernels put the group into the M dimension of an <code>mma.sync</code> so that the scores come from the tensor cores: FlashDecoding&rsquo;s kernels and TensorRT-LLM&rsquo;s XQA do this. For <var>g</var> = 4 on your card the FP32 lanes keep up, and lab 14&rsquo;s <code>v5_gqa</code> stays scalar.</p>
@@ -1330,16 +1332,28 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
       <tr><td>MQA (e.g. PaLM, Falcon-7B)</td><td><var>H</var></td><td>1</td><td><var>H</var></td><td>1 &times; <var>D</var> &times; 4 B</td><td>1/<var>H</var></td></tr>
     </table>
 
-    <details class="ym">
-      <summary>Your move: Llama-3-8B at batch 1, 8K context, FP16 cache, 32 layers. Using the table, how many bytes does one decode step read from the cache, and what would it be without GQA?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">Llama-3-8B at batch 1, 8K context, FP16 cache, 32 layers. Using the table, how many bytes does one decode step read from the cache, and what would it be without GQA?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Cache per token per layer, with GQA (FP16)</dt><dd>4 KB</dd><dt>Context length</dt><dd>8,192 tokens</dd><dt>Layers</dt><dd>32</dd><dt>KV heads with GQA</dt><dd>8</dd><dt>KV heads without GQA</dt><dd>32 (one per query head)</dd><dt>DRAM bandwidth</dt><dd>590 GB/s</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Cache read with GQA</span><input inputmode="decimal" autocomplete="off" data-want="1.07" data-tol="0.05" data-hint="Hint: multiply the cache bytes per token per layer by the number of tokens and by the number of layers." aria-label="Cache read with GQA"> GB</label>
+<label><span class="l">Cache read without GQA</span><input inputmode="decimal" autocomplete="off" data-want="4.3" data-tol="0.05" data-hint="Hint: the cache per token grows with the number of KV heads, so scale the first answer from 8 KV heads to 32." aria-label="Cache read without GQA"> GB</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>4 KB per token per layer &times; 8,192 &times; 32 = 1.07 GB per step, about 1.8 ms at 590 GB/s, against the 27 ms that reading the model&rsquo;s 16 GB of FP16 weights would take if they fit in 12 GB (they do not: Part IV&rsquo;s problem). Without GQA, 32 KV heads: 4.3 GB per step and 7.3 ms, a quarter of the weight time instead of a fifteenth. The group of 4 is worth 4&times; on the dominant term at long context, which is why every recent model uses it.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s7">
-    <h2>7. The kernels around the cache</h2>
+    <h2><small>15.7</small><a href="#s7">The kernels around the cache</a></h2>
 
     <h3>The append</h3>
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Before attention reads the cache, the new token&rsquo;s k and v must be in it. In the engine that is the contract&rsquo;s <code>kv_append</code>: for each (<var>b</var>, <var>h</var>), copy the 64 floats of k from the <code>qkv</code> row (columns <var>C</var> + <var>h</var>&middot;<var>D</var> onward) to position <var>p</var> of <code>k_cache[b][h]</code>, and v likewise. A pure copy, 2&middot;<var>B</var>&middot;<var>C</var>&middot;4 bytes read and written per step, one thread per float, coalesced on both sides; at prefill it copies <var>T</var> tokens at once. Real engines do not run it as a kernel at all: the QKV GEMM&rsquo;s epilogue writes k and v straight into the cache instead of into the <code>qkv</code> buffer (chapter 9&rsquo;s epilogue fusion, with a different destination), and in models with rotary position embeddings the rotation of q and k happens in the same epilogue, before the write, so the cache holds <em>rotated</em> keys and the rotation is never redone (the Modern Transformer page covers what RoPE computes; here it is one more passenger of the epilogue).</p>
 
     <h3>Layouts</h3>
@@ -1352,7 +1366,7 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
     </table>
     <p>Paging is the memory system&rsquo;s own idea applied to the cache, and chapter 17 builds it; its kernel cost is one extra indirection per page (look up the page&rsquo;s address, then stream it), which interlude 5b&rsquo;s rule says is nearly free as long as the page is a few KB.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Three cache layouts for two sequences and two heads, T_max 8, sequence 0 at 5 tokens, sequence 1 at 3. Head-major: four strips of 8 slots with the empty slots at the end; the 5 keys of sequence 0 head 1 are contiguous. Token-major: 8 groups of 4, one per token; the keys of sequence 0 head 1 are one per group, strided. Paged with 4-token pages: a pool of 8 pages in arbitrary order; sequence 0 head 1 uses pages 2 and 5, listed in its page table.">
+    <figure class="lk-fig wide" role="img" aria-label="Three cache layouts for two sequences and two heads, T_max 8, sequence 0 at 5 tokens, sequence 1 at 3. Head-major: four strips of 8 slots with the empty slots at the end; the 5 keys of sequence 0 head 1 are contiguous. Token-major: 8 groups of 4, one per token; the keys of sequence 0 head 1 are one per group, strided. Paged with 4-token pages: a pool of 8 pages in arbitrary order; sequence 0 head 1 uses pages 2 and 5, listed in its page table.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
 <svg viewBox="0 0 660 300" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
 <title>Three KV-cache layouts</title><defs><pattern id="f15-6h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--lk-paper-light)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--lk-rule)" stroke-width="1.2"/></pattern></defs>
@@ -1511,15 +1525,16 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
 <text x="33" y="289" font-size="11" fill="var(--lk-ink)">free page</text>
 </svg>
       </div>
-      <figcaption><b>Fig. 6</b> &mdash; Three cache layouts for two sequences and two heads, <var>T</var><sub>max</sub> = 8 with sequence 0 at 5 tokens and sequence 1 at 3. Head-major: each (b, h) is a contiguous strip with empty slots at its end (hatched waste). Token-major: each token is one strip across heads, and a head&rsquo;s keys are a stride apart. Paged: 4-token pages, scattered, with a page table per sequence pointing at them; waste is less than a page. Cobalt marks the keys the next step reads for sequence 0, head 1: contiguous, strided, or page by page.</figcaption>
+      <figcaption><b>Figure 6.</b> Three cache layouts for two sequences and two heads, <var>T</var><sub>max</sub> = 8 with sequence 0 at 5 tokens and sequence 1 at 3. Head-major: each (b, h) is a contiguous strip with empty slots at its end (hatched waste). Token-major: each token is one strip across heads, and a head&rsquo;s keys are a stride apart. Paged: 4-token pages, scattered, with a page table per sequence pointing at them; waste is less than a page. Cobalt marks the keys the next step reads for sequence 0, head 1: contiguous, strided, or page by page.</figcaption>
     </figure>
 
     <h3>Smaller numbers</h3>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Section 5&rsquo;s Your move already built the FP16 cache: half the bytes, 16-byte loads of 8 values, FP32 arithmetic. The next step is FP8 (E4M3, chapter 6&rsquo;s table): a quarter of the FP32 bytes, with a <strong>scale factor</strong> per block of values, typically one per key row per head or per 64 values, because 448 is the largest E4M3 number and keys are not naturally in that range. The kernel loads 16 bytes (16 values and, from a side array, their scale), converts to FP32, multiplies by the scale, and proceeds as before; the dot product, the softmax and <var>&Otilde;</var> stay FP32. Chapter 16 is about where the scales come from and what the rounding costs in accuracy; the kernel side is what you just read: bytes shrink, arithmetic does not change, and the merge is untouched.</p>
   </section>
 
   <section id="s8">
-    <h2>8. Variants, as names</h2>
+    <h2><small>15.8</small><a href="#s8">Variants, as names</a></h2>
     <table>
       <tr><th>Name</th><th>What it changes</th><th>Why</th></tr>
       <tr><td>FlashDecoding++ (Hong et al., 2023)</td><td>Replaces the running max by a fixed per-head &ldquo;unified max&rdquo; chosen from statistics, with a recovery path if a score exceeds it; partials then need no rescale and the softmax is asynchronous with the loads</td><td>the rescales and the max-dependent control flow cost time on the non-matmul pipes</td></tr>
@@ -1531,11 +1546,11 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
     </table>
     <p>Every one of them is sections 3&ndash;7 rearranged: a partition of the keys, a partial per block, the merge, and a cache layout. The model in the widget below covers the part they share.</p>
 
-    <div id="w-decode" class="w"></div>
+    <div id="w-decode" class="w wide"></div>
   </section>
 
   <section id="s9">
-    <h2>9. Predictions</h2>
+    <h2><small>15.9</small><a href="#s9">Predictions</a></h2>
 
     <p>Batch 1, 12 heads, <var>D</var> = 64, FP32 cache unless noted, <var>T</var> = 4,096 (25 MB of cache, 43 &micro;s at 590 GB/s); from the bytes-in-flight model of section 2 and the launch floor; ranges, not promises. Lab 14 measures the same kernels at 1K&ndash;32K and at batch 1&ndash;16.</p>
     <table>
@@ -1551,7 +1566,7 @@ for (int j = key0 + half; j &lt; key_end; j += 2 * 4) {           // 4 warps x 2
   </section>
 
   <section id="s10">
-    <h2>10. Lab 14: decode attention, v1 to v5</h2>
+    <h2><small>15.10</small><a href="#s10">Lab 14: decode attention, v1 to v5</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 14</span><span class="lab-title">one query row against the cache: from one block per head to split-K, FP16 and GQA</span><span class="idx-meta">~50 min · <code>mlsys/labs/lab14-decode-attention/</code></span></div>
@@ -1636,16 +1651,58 @@ make nofence       # v3b without its fences, 200 runs: count the wrong answers</
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-14-flashattention.html">&larr; Ch. 14 — FlashAttention 1 &rarr; 2</a>
-      <a href="index.html">Index</a>
-      <a href="index.html">Ch. 16 — Quantization (in writing) &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part III · Chapter 15 · kernels checked for correctness on cudasim, never run on a GPU; bandwidth figures are a bytes-in-flight model until lab 14 replaces them; cluster support on sm_120 is documented, not verified here, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-14-flashattention.html">&lsaquo; Ch. 14: FlashAttention 1 → 2</a><a class="btn primary" href="index.html">Next: Ch. 16, Quantization (in writing) &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part III · Chapter 15 · kernels checked for correctness on cudasim, never run on a GPU; bandwidth figures are a bytes-in-flight model until lab 14 replaces them; cluster support on sm_120 is documented, not verified here, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ch15.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>

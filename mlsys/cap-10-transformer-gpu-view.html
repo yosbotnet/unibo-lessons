@@ -1,65 +1,54 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-10-transformer-gpu-view.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 10 — The transformer from the GPU&rsquo;s point of view · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch10.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch10.css?v=6b2d3a73">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-09-softmax-layernorm-fusion.html">&larr; Ch. 9 — Softmax, layernorm, fusion</a>
-    <a href="index.html">Index</a>
-    <a href="cap-11-gpt2-forward-pass.html">Ch. 11 — Lab: a GPT-2 forward pass &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part II · Kernels that matter</div>
+<h3><a href="#top">The transformer from the GPU’s point of view<small>10</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 5 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>10.1</small><span>The block in five lines, and the two mixing directions</span></a></li><li data-for="s2"><a href="#s2"><small>10.2</small><span>Attention as a lookup</span></a></li><li data-for="s3"><a href="#s3"><small>10.3</small><span>Heads, the fused QKV GEMM, and the layout the kernels want</span></a></li><li data-for="s4"><a href="#s4"><small>10.4</small><span>Naive attention as kernels</span></a></li><li data-for="s5"><a href="#s5"><small>10.5</small><span>The score matrix: <var>T</var><sup>2</sup> and the passes over it</span></a></li><li data-for="s6"><a href="#s6"><small>10.6</small><span>The masked half</span></a></li><li data-for="s7"><a href="#s7"><small>10.7</small><span>Generation: the KV cache, prefill and decode</span></a></li><li data-for="s8"><a href="#s8"><small>10.8</small><span>The whole model as a kernel list</span></a></li><li data-for="s9"><a href="#s9"><small>10.9</small><span>What changed since GPT-2, from the GPU&rsquo;s side</span></a></li><li data-for="s10"><a href="#s10"><small>10.10</small><span>Predictions</span></a></li><li data-for="s11"><a href="#s11"><small>10.11</small><span>Lab 9: naive attention</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-09-softmax-layernorm-fusion.html">&larr; Ch. 9</a><a href="index.html">&uarr; Index</a><a href="cap-11-gpt2-forward-pass.html">Ch. 11 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part II — Kernels that matter · Chapter 10</div>
-    <h1>The transformer from the GPU&rsquo;s point of view</h1>
-    <div class="lk-meta"><span>~65 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 9 · ~50 min on your GPU</span></div>
-  </header>
+  <header class="chap"><div class="num">10</div><div class="kicker">Part II &middot; Kernels that matter · Chapter 10</div><div class="numeral" aria-hidden="true">10</div><h1>The transformer from the GPU&rsquo;s point of view</h1><ul class="meta"><li>~65 min read</li><li>2 interactive widgets</li><li>4 plates</li><li>lab 9 · ~50 min on your GPU</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>Chapter 6 drew the transformer block as a list of operations and left one box closed: <strong>attention</strong>. This chapter opens it, from the side the GPU sees. A block is two sublayers, each &ldquo;normalize, mix, add back&rdquo;; the MLP mixes the channels <em>within</em> a token, and attention mixes <em>across</em> tokens, the only operation in the model that does. Attention is a content-based lookup: every token asks a question (its <strong>query</strong>), every token advertises what it holds (its <strong>key</strong>) and what it would hand over (its <strong>value</strong>), and each token&rsquo;s output is the average of the values, weighted by how well its query matches each key. To the GPU that is two matrix multiplies whose operands are <em>both activations</em>, around a softmax (chapter 9) over a matrix of scores that has <var>T</var><sup>2</sup> entries per head: at 1,024 tokens, 50 MB per layer, larger than every weight matrix in the block, and growing with the square of the context while everything else grows linearly. The chapter counts what that costs, shows that the causal mask wastes half of it, and then takes the step that makes generation affordable: because a token can only look backwards, the keys and values of earlier tokens never change, so they can be computed once and kept. That is the <strong>KV cache</strong>, and it splits inference into <strong>prefill</strong> and <strong>decode</strong>, the two regimes the rest of the course is organized around.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~65 min read</li><li>2 interactive widgets</li><li>4 plates</li><li>lab 9 · ~50 min on your GPU</li></ul></aside><div class="ov-learn"><p class="ov-lead">Chapter 6 drew the transformer block as a list of operations and left one box closed: <strong>attention</strong>. This chapter opens it, from the side the GPU sees. A block is two sublayers, each &ldquo;normalize, mix, add back&rdquo;; the MLP mixes the channels <em>within</em> a token, and attention mixes <em>across</em> tokens, the only operation in the model that does. Attention is a content-based lookup: every token asks a question (its <strong>query</strong>), every token advertises what it holds (its <strong>key</strong>) and what it would hand over (its <strong>value</strong>), and each token&rsquo;s output is the average of the values, weighted by how well its query matches each key. To the GPU that is two matrix multiplies whose operands are <em>both activations</em>, around a softmax (chapter 9) over a matrix of scores that has <var>T</var><sup>2</sup> entries per head: at 1,024 tokens, 50 MB per layer, larger than every weight matrix in the block, and growing with the square of the context while everything else grows linearly. The chapter counts what that costs, shows that the causal mask wastes half of it, and then takes the step that makes generation affordable: because a token can only look backwards, the keys and values of earlier tokens never change, so they can be computed once and kept. That is the <strong>KV cache</strong>, and it splits inference into <strong>prefill</strong> and <strong>decode</strong>, the two regimes the rest of the course is organized around.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">The block in five lines, and the two mixing directions</a></li>
-      <li><a href="#s2">Attention as a lookup</a></li>
-      <li><a href="#s3">Heads, the fused QKV GEMM, and the layout the kernels want</a></li>
-      <li><a href="#s4">Naive attention as kernels</a></li>
-      <li><a href="#s5">The score matrix: <var>T</var><sup>2</sup> and the passes over it</a></li>
-      <li><a href="#s6">The masked half</a></li>
-      <li><a href="#s7">Generation: the KV cache, prefill and decode</a></li>
-      <li><a href="#s8">The whole model as a kernel list</a></li>
-      <li><a href="#s9">What changed since GPT-2, from the GPU&rsquo;s side</a></li>
-      <li><a href="#s10">Predictions</a></li>
-      <li><a href="#s11">Lab 9: naive attention</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. The block in five lines, and the two mixing directions</h2>
+    <h2><small>10.1</small><a href="#s1">The block in five lines, and the two mixing directions</a></h2>
 
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Chapter 6&rsquo;s Fig. 4 is the whole model; here is one block of it as five lines, for a stream <var>x</var> of shape [<var>B</var>&middot;<var>T</var>, <var>C</var>], one row per token:</p>
 <pre><code class="language-python">h = x + attention(layernorm_1(x))      # sublayer 1: normalize, mix across tokens, add back
 y = h + mlp(layernorm_2(h))            # sublayer 2: normalize, mix across channels, add back
 # mlp(u) = gelu(u @ W_fc + b_fc) @ W_proj + b_proj</code></pre>
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>The two sublayers have the same skeleton: <strong>normalize</strong> the row (chapter 9), <strong>mix</strong>, <strong>add the result back</strong> to the stream (the residual, so that each sublayer contributes a correction instead of replacing the signal). What differs is the direction of the mixing. The MLP takes one token&rsquo;s 768 channels and produces that token&rsquo;s new 768 channels; it never looks at another row. If the model were only MLPs, each token would be processed in complete isolation and the output for &ldquo;bank&rdquo; could not depend on whether &ldquo;river&rdquo; came before it. Attention is the one operation that mixes <em>rows</em>: a token&rsquo;s output is built from other tokens&rsquo; values. Everything the model knows about context passes through it.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two copies of an 8-token by 12-channel matrix. Left, the MLP: row 3 is read and the same row 3 is written; no row looks at another, so B and T merge into M rows. Right, attention: row 5 is the output, built from rows 0 to 5, outlined; rows 6 and 7 are masked. Attention mixes only within one sequence. Weights never mix tokens; only attention does.">
+    <figure class="lk-fig wide" role="img" aria-label="Two copies of an 8-token by 12-channel matrix. Left, the MLP: row 3 is read and the same row 3 is written; no row looks at another, so B and T merge into M rows. Right, attention: row 5 is the output, built from rows 0 to 5, outlined; rows 6 and 7 are masked. Attention mixes only within one sequence. Weights never mix tokens; only attention does.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 680 330" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>The two mixing directions on one sequence&rsquo;s [T, C] activations</title>
@@ -310,16 +299,18 @@ y = h + mlp(layernorm_2(h))            # sublayer 2: normalize, mix across chann
         <text x="340" y="312" font-size="12" fill="var(--lk-ink)" text-anchor="middle" font-weight="700">weights never mix tokens; only this op does</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; The two mixing directions on the [<var>T</var>, <var>C</var>] activation matrix of one sequence. The MLP (forest) reads one row and writes the same row: every token independently, which is why chapter 6 could merge <var>B</var> and <var>T</var> into one matrix dimension. Attention (cobalt) writes row <var>i</var> from rows 0 to <var>i</var>: it reads down the column of tokens, within one sequence only, and never past the current token (the causal mask of section 2). The weights of the block never mix anything across tokens; only this one operation does.</figcaption>
+      <figcaption><b>Figure 1.</b> The two mixing directions on the [<var>T</var>, <var>C</var>] activation matrix of one sequence. The MLP (forest) reads one row and writes the same row: every token independently, which is why chapter 6 could merge <var>B</var> and <var>T</var> into one matrix dimension. Attention (cobalt) writes row <var>i</var> from rows 0 to <var>i</var>: it reads down the column of tokens, within one sequence only, and never past the current token (the causal mask of section 2). The weights of the block never mix anything across tokens; only this one operation does.</figcaption>
     </figure>
 
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>From the GPU&rsquo;s side, the block is therefore: four GEMMs against weights (QKV projection, output projection, MLP up, MLP down; chapters 7 and 8), two GEMMs whose operands are <em>both activations</em> (the two inside attention; new in this chapter), one softmax whose rows are as long as the sequence (chapter 9), and the small operations fused into the rest. The next sections open the attention box.</p>
   </section>
 
   <section id="s2">
-    <h2>2. Attention as a lookup</h2>
+    <h2><small>10.2</small><a href="#s2">Attention as a lookup</a></h2>
 
     <p>In goes a sequence of <var>T</var> vectors (one per token, <var>C</var> = 768 channels each, already layer-normalized); out comes a sequence of <var>T</var> vectors of the same shape, where each output vector is a mixture of information from the tokens before it. The mechanism, defined term by term:</p>
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <ul>
       <li>Three linear projections turn each token&rsquo;s vector <var>x<sub>i</sub></var> into a <strong>query</strong> <var>q<sub>i</sub></var> = <var>x<sub>i</sub></var><var>W<sub>q</sub></var>, a <strong>key</strong> <var>k<sub>i</sub></var> = <var>x<sub>i</sub></var><var>W<sub>k</sub></var> and a <strong>value</strong> <var>v<sub>i</sub></var> = <var>x<sub>i</sub></var><var>W<sub>v</sub></var>, each a vector of <var>D</var> numbers. The names are a database metaphor that happens to be exact: the query is what token <var>i</var> is looking for, the key is what token <var>j</var> offers to be matched against, the value is what token <var>j</var> hands over if matched.</li>
       <li>The <strong>score</strong> <var>s<sub>ij</sub></var> = <var>q<sub>i</sub></var> &middot; <var>k<sub>j</sub></var> / &radic;<var>D</var> says how well token <var>i</var>&rsquo;s question matches token <var>j</var>&rsquo;s key. A dot product of <var>D</var> numbers of unit variance has variance <var>D</var>, so without the 1/&radic;<var>D</var> the scores would grow with the head size and the softmax below would saturate into a one-hot pick; the scale keeps them of order one whatever <var>D</var> is.</li>
@@ -331,23 +322,24 @@ y = h + mlp(layernorm_2(h))            # sublayer 2: normalize, mix across chann
     <p class="c10-eq"><var>S</var> = <var>Q</var><var>K</var><sup>T</sup> / &radic;<var>D</var> &nbsp;[<var>T</var>, <var>T</var>]; &nbsp; <var>P</var> = softmax<sub>rows</sub>(mask(<var>S</var>)); &nbsp; <var>O</var> = <var>P</var><var>V</var> &nbsp;[<var>T</var>, <var>D</var>]</p>
     <p>Two matrix multiplies and a row softmax. Play with it at toy size, <var>T</var> = 8 tokens and <var>D</var> = 4: click a query row and follow what it reads.</p>
 
-    <div id="w-attn-explorer" class="w"></div>
+    <div id="w-attn-explorer" class="w wide"></div>
 
-    <details class="ym">
-      <summary>Your move: with the causal mask on, what is the output of token 0, before you look at any number?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">With the causal mask on, what is the output of token 0, before you look at any number?</p><details><summary class="btn">Show the answer</summary>
       <p>Its own value, <var>v</var><sub>0</sub>, exactly. Row 0 of the masked scores has one finite entry, <var>s</var><sub>00</sub>, and &minus;&infin; everywhere else, so the softmax gives <var>p</var><sub>00</sub> = 1 and zero for the rest. Token 0 has nobody to look at. Token 1 mixes two values, and the last token mixes all <var>T</var>: the amount of work per row grows down the matrix, which is section 6&rsquo;s point.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s3">
-    <h2>3. Heads, the fused QKV GEMM, and the layout the kernels want</h2>
+    <h2><small>10.3</small><a href="#s3">Heads, the fused QKV GEMM, and the layout the kernels want</a></h2>
 
     <p>One lookup per token is one <em>kind</em> of relation (say, &ldquo;the noun this adjective modifies&rdquo;). The model wants several at once, so it runs <var>H</var> independent lookups, called <strong>heads</strong>, each with its own <var>W<sub>q</sub></var>, <var>W<sub>k</sub></var>, <var>W<sub>v</sub></var> and its own score matrix. To keep the cost fixed, the heads split the channels: GPT-2 small has <var>H</var> = 12 heads of <var>D</var> = 64, so 12 &times; 64 = 768 = <var>C</var>. The outputs of the heads are concatenated back into one [<var>T</var>, <var>C</var>] matrix and passed through the output projection <var>W<sub>o</sub></var> [<var>C</var>, <var>C</var>], which mixes the heads&rsquo; findings.</p>
 
     <h3>One GEMM, not thirty-six</h3>
+    <aside class="m-rem"><p><b>Tiling</b> <a href="cap-07-matmul-tiling.html#s5">ch.&nbsp;7 &sect;5</a>. Each block computes a <var>T</var>&times;<var>T</var> tile of C, walking along <var>K</var> in phases. The tiled kernel issues 2<var>K</var>/<var>T</var> global loads per output, <var>T</var> times fewer than the naive one.</p></aside>
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>Thirty-six small projections (3 per head, 12 heads) would be thirty-six launches of [<var>T</var>, 768] &times; [768, 64] GEMMs with <var>N</var> = 64, too narrow to tile well (chapter 7). So the weights are stored side by side as one matrix <var>W<sub>qkv</sub></var> of shape [768, 2,304] = [<var>C</var>, 3<var>C</var>], and one GEMM produces everything: <code>qkv = x @ W_qkv + b_qkv</code>, shape [<var>B</var>&middot;<var>T</var>, 3<var>C</var>]. The column order is the one Hugging Face&rsquo;s GPT-2 checkpoint uses and the one the engine contract fixes: columns [0, <var>C</var>) are the queries, [<var>C</var>, 2<var>C</var>) the keys, [2<var>C</var>, 3<var>C</var>) the values, and within each third, head <var>h</var> owns the 64 columns <var>h</var>&middot;<var>D</var> to <var>h</var>&middot;<var>D</var> + 63.</p>
 
-    <figure class="lk-fig" role="img" aria-label="One row of the qkv buffer: 2,304 floats split into thirds q, k and v of 768 floats, each third split into 12 heads of 64. Head 3 of the k third is highlighted: 64 contiguous floats, 256 bytes, at qkv[(b*T + t)*3C + C + h*D + d]. The same head in the next token starts 2,304 floats later: the row stride. Head 3 keys of one sequence form a matrix of T rows with leading dimension 3C. Below, a row of att with 12 heads of 64; head 3 written at att[(b*T + i)*C + h*D + d].">
+    <figure class="lk-fig wide" role="img" aria-label="One row of the qkv buffer: 2,304 floats split into thirds q, k and v of 768 floats, each third split into 12 heads of 64. Head 3 of the k third is highlighted: 64 contiguous floats, 256 bytes, at qkv[(b*T + t)*3C + C + h*D + d]. The same head in the next token starts 2,304 floats later: the row stride. Head 3 keys of one sequence form a matrix of T rows with leading dimension 3C. Below, a row of att with 12 heads of 64; head 3 written at att[(b*T + i)*C + h*D + d].">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 680 330" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>One row of the qkv buffer and where head 3 lives in it</title>
@@ -490,10 +482,11 @@ y = h + mlp(layernorm_2(h))            # sublayer 2: normalize, mix across chann
         <text x="290" y="310" font-size="11" fill="var(--lk-ink)" text-anchor="start">the merge of heads is the same trick</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; One row of the <code>qkv</code> buffer: token <var>t</var> of sequence <var>b</var>, 2,304 floats. The three thirds are <var>q</var>, <var>k</var>, <var>v</var>; inside each, twelve runs of 64 are the heads. Head <var>h</var>&rsquo;s key for this token is the 64 floats at <code>qkv[(b*T + t)*3C + C + h*D]</code>: a contiguous 256-byte piece, which is why a warp can load it in two coalesced instructions. The &ldquo;head split&rdquo; [<var>B</var>, <var>T</var>, <var>H</var>, <var>D</var>] &rarr; [<var>B</var>, <var>H</var>, <var>T</var>, <var>D</var>] of chapter 6&rsquo;s callout is this index formula, not a copy.</figcaption>
+      <figcaption><b>Figure 2.</b> One row of the <code>qkv</code> buffer: token <var>t</var> of sequence <var>b</var>, 2,304 floats. The three thirds are <var>q</var>, <var>k</var>, <var>v</var>; inside each, twelve runs of 64 are the heads. Head <var>h</var>&rsquo;s key for this token is the 64 floats at <code>qkv[(b*T + t)*3C + C + h*D]</code>: a contiguous 256-byte piece, which is why a warp can load it in two coalesced instructions. The &ldquo;head split&rdquo; [<var>B</var>, <var>T</var>, <var>H</var>, <var>D</var>] &rarr; [<var>B</var>, <var>H</var>, <var>T</var>, <var>D</var>] of chapter 6&rsquo;s callout is this index formula, not a copy.</figcaption>
     </figure>
 
     <h3>The head split is indexing, not copying</h3>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Chapter 6 warned that [<var>B</var>, <var>T</var>, <var>H</var>, <var>D</var>] &rarr; [<var>B</var>, <var>H</var>, <var>T</var>, <var>D</var>] is a transpose, and a copy if you materialize it. Nobody materializes it. Head <var>h</var>&rsquo;s <var>Q</var> for sequence <var>b</var> is a [<var>T</var>, <var>D</var>] matrix whose rows are 64 consecutive floats, spaced 3<var>C</var> = 2,304 floats apart: a matrix with a <strong>leading dimension</strong> (the stride between rows) of 3<var>C</var> instead of <var>D</var>. Every GEMM routine takes a leading dimension, so the kernel reads the heads in place:</p>
 <pre><code class="language-cpp">// where head h of sequence b lives inside qkv[B*T, 3C]; row stride (leading dimension) is 3C everywhere
 const float* Q = qkv + (size_t)b * T * 3 * C + 0 * C + h * D;   // Q[i][d] = Q[i * 3C + d]
@@ -505,22 +498,23 @@ float*       O = att + (size_t)b * T * C + h * D;              // O[i][d] = O[i 
     <h3>Batched GEMM</h3>
     <p>Attention&rsquo;s matmuls are small (<var>T</var> &times; <var>T</var> &times; 64 per head) and there are <var>B</var>&middot;<var>H</var> of them, all the same shape, at regular distances in memory. That is a <strong>batched GEMM</strong>: one launch, grid dimension <var>z</var> = the batch index, and each block adds <code>z * stride</code> to its pointers. cuBLAS calls it <code>cublasSgemmStridedBatched</code>; the stride between heads is <var>D</var> floats and between sequences <var>T</var>&middot;3<var>C</var>. Lab 9 writes both a hand-made batched kernel and the cuBLAS call.</p>
 
-    <details class="ym">
-      <summary>Your move: why is the head size a round <var>D</var> = 64 (or 128) in nearly every model from GPT-2 to Llama 3, rather than 32 or 256?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">Why is the head size a round <var>D</var> = 64 (or 128) in nearly every model from GPT-2 to Llama 3, rather than 32 or 256?</p><details><summary class="btn">Show the answer</summary>
       <p>A guess from this course&rsquo;s material: the per-head matmuls have inner dimension <var>D</var> for <var>Q</var><var>K</var><sup>T</sup> and output width <var>D</var> for <var>P</var><var>V</var>, so <var>D</var> sets the arithmetic intensity of attention&rsquo;s matmuls and the width of the fragments a warp holds; 64 FP16 values is 128 bytes, one full memory transaction and a round number of <code>m16n8k16</code> fragments, and a 64-wide tile of <var>K</var> or <var>V</var> fits shared memory comfortably. Smaller heads make the matmuls thin and memory-bound; bigger heads cost registers in the fused kernels of chapter 14 and give the model fewer relations to learn. Nobody proved 64 optimal; it is where the hardware&rsquo;s round numbers and the model&rsquo;s preferences met, and it has stuck (Llama 3 uses 128, which is the same argument one size up).</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s4">
-    <h2>4. Naive attention as kernels</h2>
+    <h2><small>10.4</small><a href="#s4">Naive attention as kernels</a></h2>
 
     <p>The straightforward implementation, which is lab 9 and the engine&rsquo;s first attention, runs the formula as four launches per layer:</p>
+    <aside class="m-rem"><p><b>Warp per row</b> <a href="cap-09-softmax-layernorm-fusion.html#s2">ch.&nbsp;9 &sect;2</a>. One warp owns a row. Its 32 lanes read 32 consecutive floats per load instruction, so each load is one sector.</p></aside>
     <ol>
       <li><strong>Scores</strong>, batched over <var>B</var>&middot;<var>H</var>: <var>S</var> = <var>Q</var><var>K</var><sup>T</sup> &middot; 1/&radic;<var>D</var>, each [<var>T</var>, <var>T</var>]. An ordinary GEMM with <var>M</var> = <var>N</var> = <var>T</var>, <var>K</var> = 64, except that the B operand is transposed (chapter 6&rsquo;s NT case) and that the output goes to a scratch buffer of <var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> floats. The mask can be applied here (write &minus;&infin; where <var>j</var> &gt; <var>i</var>) or in the softmax.</li>
       <li><strong>Masked row softmax</strong>: chapter 9&rsquo;s warp-per-row kernel over the <var>B</var>&middot;<var>H</var>&middot;<var>T</var> rows of <var>S</var>, in place. Rows are never fully masked under a causal mask (the diagonal is always allowed), but the guard stays.</li>
       <li><strong>Weighted sum</strong>, batched: <var>O</var> = <var>P</var><var>V</var>, [<var>T</var>, <var>T</var>] &times; [<var>T</var>, 64], written into <code>att</code> with the head&rsquo;s column offset.</li>
       <li><strong>Output projection</strong>: <code>att @ W_o + b_o</code>, one GEMM of [<var>B</var>&middot;<var>T</var>, 768] &times; [768, 768], then the residual add (chapter 9&rsquo;s epilogue).</li>
     </ol>
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>The simplest scores kernel is chapter 7&rsquo;s naive matmul with the batch index on <code>blockIdx.z</code> and the mask folded in:</p>
 <pre><code class="language-cpp">// lab 9, attn_scores_naive: one thread per score. grid = (ceil(T/16), ceil(T/16), B*H), block = (16, 16)
 __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restrict__ S,
@@ -541,7 +535,7 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
 }</code></pre>
     <p>It is lab 5&rsquo;s matmul in a new costume, with the same flaw: every thread walks its own 64-long dot product from global memory and nothing is reused on chip. Lab 9&rsquo;s second version tiles it with chapter 7&rsquo;s shared-memory tiles, and the third hands both matmuls to cuBLAS. The cuBLAS call needs the row-major trick of lab 6&rsquo;s harness (compute <var>S</var><sup>T</sup> = <var>K</var><var>Q</var><sup>T</sup> in column-major terms) with the head stride as the batch stride; the lab&rsquo;s README spells it out, because getting a transpose flag wrong is the classic attention bug and the CPU reference catches it.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Naive attention for one head at T = 1,024 to scale. Q, K and V are thin 1,024 by 64 strips of 262 KB; S and P are 1,024 by 1,024 squares of 4.2 MB with the masked upper triangle hatched. Kernel 1 computes S from Q and K, kernel 2 the softmax in place, kernel 3 multiplies P by V into O. Four vermilion passes over S: write, read, write, read: 4 times 4.2 MB per head, times 12 heads, 201 MB per layer.">
+    <figure class="lk-fig wide" role="img" aria-label="Naive attention for one head at T = 1,024 to scale. Q, K and V are thin 1,024 by 64 strips of 262 KB; S and P are 1,024 by 1,024 squares of 4.2 MB with the masked upper triangle hatched. Kernel 1 computes S from Q and K, kernel 2 the softmax in place, kernel 3 multiplies P by V into O. Four vermilion passes over S: write, read, write, read: 4 times 4.2 MB per head, times 12 heads, 201 MB per layer.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 680 350" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Naive attention for one head at T = 1,024, drawn to scale</title>
@@ -610,12 +604,12 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
         <text x="340" y="18" font-size="11" fill="var(--lk-ink-soft)" text-anchor="middle">one head, T = 1,024, areas to scale: S is 16 times the size of Q</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 3</b> &mdash; Naive attention for one head at <var>T</var> = 1,024, drawn to scale. <var>Q</var>, <var>K</var>, <var>V</var> are 1,024 &times; 64 (262 KB each); <var>S</var> and <var>P</var> are 1,024 &times; 1,024 (4.2 MB): sixteen times larger than the operands that produced them, and the only thing the softmax kernel touches. The vermilion arrows are the four passes over <var>S</var>: written by the scores kernel, read and written by the softmax, read by the weighted sum. At <var>T</var> = 8,192 the ratio is 128.</figcaption>
+      <figcaption><b>Figure 3.</b> Naive attention for one head at <var>T</var> = 1,024, drawn to scale. <var>Q</var>, <var>K</var>, <var>V</var> are 1,024 &times; 64 (262 KB each); <var>S</var> and <var>P</var> are 1,024 &times; 1,024 (4.2 MB): sixteen times larger than the operands that produced them, and the only thing the softmax kernel touches. The vermilion arrows are the four passes over <var>S</var>: written by the scores kernel, read and written by the softmax, read by the weighted sum. At <var>T</var> = 8,192 the ratio is 128.</figcaption>
     </figure>
   </section>
 
   <section id="s5">
-    <h2>5. The score matrix: <var>T</var><sup>2</sup> and the passes over it</h2>
+    <h2><small>10.5</small><a href="#s5">The score matrix: <var>T</var><sup>2</sup> and the passes over it</a></h2>
 
     <p>Everything in the block except attention has a cost that grows linearly with the number of tokens: twice the tokens, twice the GEMM FLOPs, twice the layernorm bytes. Attention&rsquo;s score matrix has <var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> entries. For one sequence of GPT-2 small, in FP32:</p>
     <table>
@@ -626,6 +620,7 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
     </table>
     <p>At 1,024 tokens the trips of <var>S</var> through DRAM already cost most of what the block&rsquo;s real arithmetic costs; at 4,096 they cost three times more, and at 8,192 a batch of four sequences would need 13 GB for <var>S</var> alone, more than the card has. The table is a prediction from byte counts; the lab measures the 1,024 to 4,096 rows.</p>
 
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <p>Per step, at <var>T</var> = 1,024 and <var>B</var> = 1, with the roofline of chapter 4 (bytes at 590 GB/s, FLOPs at 30.9 TFLOPS, the larger wins):</p>
     <table>
       <tr><th>Step</th><th>FLOPs</th><th>Bytes (ideal)</th><th>FLOP/B</th><th>Bound</th><th>Roofline time</th></tr>
@@ -635,32 +630,44 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
       <tr><td>output projection</td><td>1.21 G</td><td>8.6 MB</td><td>140</td><td>compute</td><td>0.039 ms</td></tr>
       <tr><td><em>for scale:</em> the two MLP GEMMs</td><td>9.66 G</td><td>50 MB</td><td>190</td><td>compute</td><td>0.31 ms</td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>Read the first row twice. A matrix multiply, <strong>memory-bound</strong>: with an inner dimension of only 64, <var>Q</var><var>K</var><sup>T</sup> does 128 FLOPs per output element and then writes 4 bytes of it, and the writes of <var>S</var> dominate. Chapter 7&rsquo;s tiling cannot fix it, because the problem is not reuse of the inputs but the size of the output. The attention matmuls hold 18% of the block&rsquo;s FLOPs and, in this naive form, about 43% of its roofline time, all of it spent moving <var>S</var>. Slide <var>T</var> and <var>B</var> and watch the shares:</p>
 
-    <div id="w-block-cost" class="w"></div>
+    <div id="w-block-cost" class="w wide"></div>
 
+    <aside class="m-rem"><p><b>Running pair (<var>m</var>, <var>d</var>)</b> <a href="cap-09-softmax-layernorm-fusion.html#s4">ch.&nbsp;9 &sect;4</a>. Online softmax carries the max of the elements seen so far and the sum of their exponentials relative to that max, in one pass.</p></aside>
+    <aside class="m-link"><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>This is the problem chapter 14 solves. Chapter 9&rsquo;s fusion limit said a row reduction cannot ride in a GEMM epilogue unless the block sees the whole row; for attention, the &ldquo;row&rdquo; is one query against all keys, and a block <em>can</em> own a few queries and stream through all the keys, carrying (<var>m</var>, <var>d</var>) and a running output. Then <var>S</var> is never written at all: the four vermilion passes disappear and attention&rsquo;s cost drops to its FLOPs plus the reads of <var>Q</var>, <var>K</var>, <var>V</var>. That is FlashAttention, and the reason this chapter makes you measure the naive version first is so that the number it removes is your own.</p>
 
-    <details class="ym">
-      <summary>Your move: the engine of chapter 11 allocates <var>S</var> once as scratch, sized for its largest <var>B</var> and <var>T</var>. In FP32 with <var>H</var> = 12, what is the largest <var>T</var> at <var>B</var> = 8 for which <var>S</var> fits in 4 GB of scratch, and what does that say about naive attention as the engine&rsquo;s long-term design?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">The engine of chapter 11 allocates <var>S</var> once as scratch, sized for its largest <var>B</var> and <var>T</var>. In FP32 with <var>H</var> = 12, what is the largest <var>T</var> at <var>B</var> = 8 for which <var>S</var> fits in 4 GB of scratch, and what does that say about naive attention as the engine&rsquo;s long-term design?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Scratch memory for S</dt><dd>4 GB</dd><dt>Size of one FP32 value</dt><dd>4 bytes</dd><dt>Entries in S</dt><dd><var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup></dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Largest T that fits</span><input inputmode="decimal" autocomplete="off" data-want="3200" data-tol="0.1" data-hint="Hint: set the entries of S times 4 bytes equal to 4 GB, with B = 8 and H = 12, and take the square root." aria-label="Largest T that fits"> tokens</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p><var>B</var>&middot;<var>H</var>&middot;<var>T</var><sup>2</sup> &times; 4 B &le; 4 GB gives <var>T</var><sup>2</sup> &le; 4&times;10<sup>9</sup> / (8 &times; 12 &times; 4) &asymp; 10.4&times;10<sup>6</sup>, so <var>T</var> &asymp; 3,200: about three times GPT-2&rsquo;s own 1,024 context at a batch of 8, and the scratch is bigger than the model. Scratch that scales with <var>B</var>&middot;<var>T</var><sup>2</sup> is the clearest sign that the naive design is temporary: the engine&rsquo;s contract keeps the scratch behind a function (<code>attn_prefill_*_scratch_bytes</code>) precisely so that chapter 14&rsquo;s kernel can report a size that scales with <var>B</var>&middot;<var>T</var> instead.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s6">
-    <h2>6. The masked half</h2>
+    <h2><small>10.6</small><a href="#s6">The masked half</a></h2>
 
     <p>Under the causal mask, row <var>i</var> of <var>S</var> has <var>i</var> + 1 live entries and <var>T</var> &minus; <var>i</var> &minus; 1 that will be &minus;&infin; whatever the data. Over the whole matrix that is <var>T</var>(<var>T</var> &minus; 1)/2 entries, just under half, whose values are known before the kernel runs. The naive scores kernel computes the dot product for every one of them (or at least visits the thread and writes the &minus;&infin;), the softmax exponentiates them to zero, and the weighted sum multiplies the zeros by <var>V</var>. <strong>Half of naive attention&rsquo;s FLOPs and half of its bytes are spent on entries that are known to be zero.</strong></p>
     <p>The waste is easy to see and awkward to remove in the naive design: a GEMM kernel computes rectangular tiles, and the diagonal cuts through them. Skipping whole tiles that lie entirely above the diagonal recovers most of it (a 16&times;16 tile at <var>i</var><sub>0</sub>, <var>j</var><sub>0</sub> is dead if <var>j</var><sub>0</sub> &gt; <var>i</var><sub>0</sub> + 15); the tiles on the diagonal still do their masked half. Lab 9&rsquo;s <code>waste</code> mode measures three things: the full kernels, the tile-skipping versions, and the softmax over rows truncated at the diagonal, and reports what fraction of the time the mask was worth. (The engine&rsquo;s own <code>attn_prefill_naive</code> in <code>attention.cuh</code> already ships with the tile skip and with softmax rows that stop at the diagonal: when you read its <code>if (j0 &gt; i0 + AT - 1) return;</code>, this is where it comes from.) For FlashAttention the same skip is the difference between a kernel that costs <var>T</var><sup>2</sup> and one that costs <var>T</var><sup>2</sup>/2, which at long contexts is the single largest optimization it has.</p>
 
-    <details class="ym">
-      <summary>Your move: the tile-skipping scores kernel launches the same grid as the full one and returns immediately from dead tiles. Is the saving in time the same as the saving in FLOPs?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The tile-skipping scores kernel launches the same grid as the full one and returns immediately from dead tiles. Is the saving in time the same as the saving in FLOPs?</p><details><summary class="btn">Show the answer</summary>
       <p>Nearly, but not quite: a dead block still costs its launch slot on the SM (chapter 2&rsquo;s block scheduling) and the softmax rows were full length. For the scores and <var>P</var><var>V</var> kernels, the bytes of <var>S</var> that are never written or read are the real saving (the kernels were memory-bound), and dead blocks cost microseconds in total. Expect a saving a little under the 50% of the entries: the diagonal tiles are full-cost, so at <var>T</var> = 1,024 with 16&times;16 tiles, 64 of the 2,080 live tiles are diagonal and the dead ones are 2,016 of 4,096: a 49% saving in tiles, a little less in time.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s7">
-    <h2>7. Generation: the KV cache, prefill and decode</h2>
+    <h2><small>10.7</small><a href="#s7">Generation: the KV cache, prefill and decode</a></h2>
 
     <p>A language model generates by running the forward pass, taking the logits of the last position, picking a token, appending it, and running the forward pass again. Done naively, generating the 101st token means a forward pass over 101 tokens, the 102nd over 102, and generating <var>N</var> tokens costs <var>N</var><sup>2</sup>/2 token-forwards. The fix comes from the causal mask, and it is worth stating precisely.</p>
 
@@ -673,7 +680,7 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
     </ol>
     <p>The queries of earlier tokens are not needed at all: nobody asks their question again. Only keys and values are cached, hence the name.</p>
 
-    <figure class="lk-fig" role="img" aria-label="The k cache of one layer: for each of two sequences, 12 head slabs of T_max positions by 64 floats; positions 0 to p-1 are filled, position p receives the new token key, at ((b*H + h)*T_max + p)*D. Right: a decode step for one head: q of shape 1 by 64 times K transposed of 64 by p+1 gives a score row of p+1, softmax, then times V of p+1 by 64 gives the 1 by 64 output written into att.">
+    <figure class="lk-fig wide" role="img" aria-label="The k cache of one layer: for each of two sequences, 12 head slabs of T_max positions by 64 floats; positions 0 to p-1 are filled, position p receives the new token key, at ((b*H + h)*T_max + p)*D. Right: a decode step for one head: q of shape 1 by 64 times K transposed of 64 by p+1 gives a score row of p+1, softmax, then times V of p+1 by 64 gives the 1 by 64 output written into att.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 680 390" style="width:680px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>The KV cache of one layer and one decode step</title>
@@ -920,25 +927,39 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
         <text x="470" y="359" font-size="11" fill="var(--c10-gold-ink)" text-anchor="start" font-weight="700">o [1, 64] &rarr; att, head h</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 4</b> &mdash; The KV cache of one layer in the engine&rsquo;s layout, [<var>B</var>][<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>]: one head&rsquo;s keys are a contiguous <var>T</var><sub>max</sub> &times; 64 slab, filled up to the current length. Decode step for sequence <var>b</var>: the new token&rsquo;s <var>k</var> and <var>v</var> are written at position <var>p</var> (gold), and its single query row is scored against the <var>p</var> + 1 keys of each head and averaged over the <var>p</var> + 1 values: a [1, 64] &times; [64, <var>p</var>+1] product and a [1, <var>p</var>+1] &times; [<var>p</var>+1, 64] one per head, with the softmax in between. Prefill fills the slab in one go from the <var>k</var> and <var>v</var> thirds of <code>qkv</code>.</figcaption>
+      <figcaption><b>Figure 4.</b> The KV cache of one layer in the engine&rsquo;s layout, [<var>B</var>][<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>]: one head&rsquo;s keys are a contiguous <var>T</var><sub>max</sub> &times; 64 slab, filled up to the current length. Decode step for sequence <var>b</var>: the new token&rsquo;s <var>k</var> and <var>v</var> are written at position <var>p</var> (gold), and its single query row is scored against the <var>p</var> + 1 keys of each head and averaged over the <var>p</var> + 1 values: a [1, 64] &times; [64, <var>p</var>+1] product and a [1, <var>p</var>+1] &times; [<var>p</var>+1, 64] one per head, with the softmax in between. Prefill fills the slab in one go from the <var>k</var> and <var>v</var> thirds of <code>qkv</code>.</figcaption>
     </figure>
 
     <p>Two regimes come out of this, and the course names them now because the next five chapters are about them:</p>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <ul>
       <li><strong>Prefill</strong>: the prompt&rsquo;s <var>T</var> tokens go through the model together, <var>M</var> = <var>B</var>&middot;<var>T</var> rows per GEMM, attention as in section 4, and the cache is filled from the <var>k</var> and <var>v</var> thirds of <code>qkv</code>. Compute-bound at useful lengths (chapter 6&rsquo;s intensity table at <var>M</var> = 512).</li>
       <li><strong>Decode</strong>: one new token per sequence per step, <var>M</var> = <var>B</var> rows per GEMM, attention of one query against the cache. Every weight is read once per step for <var>B</var> tokens of output, and every sequence&rsquo;s cache is read once for one token: memory-bound, as chapter 4&rsquo;s &ldquo;attention does not batch&rdquo; said.</li>
     </ul>
+    <aside class="m-link"><p><a href="cap-13-inference-arithmetic.html">Ch.&nbsp;13 &middot; Inference arithmetic</a></p><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p><p><a href="cap-11-gpt2-forward-pass.html">Ch.&nbsp;11 &middot; Lab</a></p></aside>
     <p>What the cache costs: per token, per layer, one key and one value of <var>C</var> floats each, so 2 &middot; <var>L</var> &middot; <var>C</var> &middot; 4 bytes = 2 &times; 12 &times; 768 &times; 4 = 73.7 KB per token in FP32 for GPT-2 small; a full 1,024-token context is 75 MB per sequence, a batch of 16 is 1.2 GB. Chapter 13 does this arithmetic for real models and shows where the cache overtakes the weights; chapter 15 writes the decode attention kernel, which is nothing like section 4&rsquo;s: a single query row against a long slab of keys is a matrix-vector product, memory-bound, and the game is reading the cache at full bandwidth. Chapter 11&rsquo;s engine starts without a cache (generation by recomputation, so that correctness is simple) and the cache arrives with the measurements in chapter 13.</p>
 
-    <details class="ym">
-      <summary>Your move: a decode step for one sequence with a 1,024-token context. Roughly how many bytes of weights and how many bytes of cache does it read, and which dominates for GPT-2 small?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">A decode step for one sequence with a 1,024-token context. Roughly how many bytes of weights and how many bytes of cache does it read, and which dominates for GPT-2 small?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Weights of GPT-2 small</dt><dd>498 MB</dd><dt>Cache per token</dt><dd>73.7 KB</dd><dt>Context length</dt><dd>1,024 tokens</dd><dt>DRAM bandwidth</dt><dd>590 GB/s</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Cache bytes read</span><input inputmode="decimal" autocomplete="off" data-want="75" data-tol="0.05" data-hint="Hint: multiply the cache bytes per token by the number of tokens in the context." aria-label="Cache bytes read"> MB</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>Weights: all of them, 498 MB (chapter 6). Cache: 73.7 KB per token &times; 1,024 = 75 MB. The weights dominate by nearly 7&times; at <var>B</var> = 1, so the step is bounded by the weight stream, about 0.85 ms at 590 GB/s, and the cache adds 15%. With a batch of 8, the weights are still read once (498 MB) while the caches are read once each (600 MB): the cache now dominates. That crossover, and its dependence on context length and head count, is chapter 13&rsquo;s central table.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s8">
-    <h2>8. The whole model as a kernel list</h2>
+    <h2><small>10.8</small><a href="#s8">The whole model as a kernel list</a></h2>
 
+    <aside class="m-rem"><p><b>Epilogue</b> <a href="cap-09-softmax-layernorm-fusion.html#s8">ch.&nbsp;9 &sect;8</a>. The moment when a tile of outputs is finished in registers and about to be stored. Elementwise work added there is almost free.</p></aside>
+    <aside class="m-link"><p><a href="cap-11-gpt2-forward-pass.html">Ch.&nbsp;11 &middot; Lab</a></p><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Here is GPT-2 small as the engine of chapter 11 runs it, in the two regimes, with FLOPs and ideal bytes per launch. Prefill at <var>B</var> = 1, <var>T</var> = 1,024; decode at <var>B</var> = 1 with a 1,024-token cache. Bias adds and residual adds are in the GEMM epilogues (chapter 9); FP32 throughout. The time column is the roofline time (bytes at 590 GB/s or FLOPs at 30.9 TFLOPS, whichever is larger), a prediction and a floor.</p>
     <table>
       <tr><th>Kernel (per layer unless noted)</th><th>Shape</th><th>Prefill FLOPs / bytes / time</th><th>Decode FLOPs / bytes / time</th></tr>
@@ -957,14 +978,17 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
       <tr><td>LM head (once)</td><td>[<var>M</var>, 768] &times; [768, 50,257]</td><td>79 G / 363 MB / 2.6 ms</td><td>77 M / 154 MB / 0.26 ms</td></tr>
       <tr><td><strong>whole forward</strong></td><td>12 layers + head</td><td><strong>&asymp;292 G / &asymp;13.1 ms</strong></td><td><strong>&asymp;0.28 G / 570 MB / &asymp;1.0 ms</strong></td></tr>
     </table>
+    <aside class="m-rem"><p><b>Memory-bound, ridge</b> <a href="cap-04-roofline.html#s1">ch.&nbsp;4 &sect;1</a>. A kernel to the left of the ridge is memory-bound: arithmetic intensity (FLOPs per byte) times bandwidth caps its speed, so more arithmetic optimization does not help.</p></aside>
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>Three things to read off it. In prefill, the LM head is the single biggest kernel, a fifth of the time, scoring all 50,257 words for all 1,024 positions when only the last position&rsquo;s logits are needed to generate: the engine computes the head for the last position only when generating, and for all positions only when verifying. In decode, the total is 570 MB of reads, nearly all weights, for 0.28 GFLOP: intensity 0.5, about a hundred times left of the ridge (52 FLOP/B at 590 GB/s; 46 at the rated 672), and about 1 ms per token at the DRAM ceiling before the launch floor, which with about 150 launches of a few microseconds each is of the same size (chapter 11 measures it). And the two regimes never meet on the roofline: prefill is where chapters 7 and 8 earn their keep, decode is where bytes are everything, and the same kernel list serves both with the shape <var>M</var> as the only difference.</p>
 
     <h3>Embeddings and the LM head</h3>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>The two ends of the model are both the same [50,257, 768] table <code>wte</code> (chapter 6&rsquo;s weight tying). At the input it is a <strong>gather</strong>: token <var>t</var> at position <var>p</var> becomes the row <code>wte[t] + wpe[p]</code>, one warp per token, each row 3 KB and contiguous, chapter 3&rsquo;s friendly kind of random access. At the output it is a GEMM, <code>logits = x @ wte^T</code>: [<var>M</var>, 768] &times; [768, 50,257], and because <code>wte</code> is stored [50,257, 768] row-major, this is the NT case, B transposed. At decode it is a [1, 768] &times; [768, 50,257] matrix-vector product that reads 154 MB for 77 MFLOPs: the largest single read of the step, a third of the weights, for one word.</p>
   </section>
 
   <section id="s9">
-    <h2>9. What changed since GPT-2, from the GPU&rsquo;s side</h2>
+    <h2><small>10.9</small><a href="#s9">What changed since GPT-2, from the GPU&rsquo;s side</a></h2>
 
     <p>GPT-2 is the course&rsquo;s model because it is small, its weights are public, and its block is the one every later model is a variation of. The variations matter to the kernels, and here they are in one table, to be met again in Parts III and IV. The model side of each is covered in the <a href="../modern-transformer/">Modern Transformer</a> page; this is the kernel side.</p>
     <table>
@@ -981,7 +1005,7 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
   </section>
 
   <section id="s10">
-    <h2>10. Predictions</h2>
+    <h2><small>10.10</small><a href="#s10">Predictions</a></h2>
 
     <p>For lab 9 at <var>B</var> = 1, <var>H</var> = 12, <var>D</var> = 64, FP32. Ranges, from the byte counts and the behaviour of the kernels they are built from:</p>
     <table>
@@ -998,7 +1022,7 @@ __global__ void attn_scores_naive(const float* __restrict__ qkv, float* __restri
   </section>
 
   <section id="s11">
-    <h2>11. Lab 9: naive attention</h2>
+    <h2><small>10.11</small><a href="#s11">Lab 9: naive attention</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 9</span><span class="lab-title">Causal attention in three kernels, three ways, and the cost of <var>S</var></span><span class="idx-meta">~50 min · <code>mlsys/labs/lab09-attention/</code></span></div>
@@ -1080,16 +1104,58 @@ make ncu-table  # DRAM bytes per kernel: is S really written and read four times
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-09-softmax-layernorm-fusion.html">&larr; Ch. 9 — Softmax, layernorm, fusion</a>
-      <a href="index.html">Index</a>
-      <a href="cap-11-gpt2-forward-pass.html">Ch. 11 — Lab: a GPT-2 forward pass &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part II · Chapter 10 · FLOP and byte counts computed from GPT-2 small&rsquo;s shapes; roofline times are predictions at the practical ceilings; kernels checked for correctness on cudasim, never run on a GPU, until lab 9 replaces them, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-09-softmax-layernorm-fusion.html">&lsaquo; Ch. 9: Softmax, layernorm, fusion</a><a class="btn primary" href="cap-11-gpt2-forward-pass.html">Next: Ch. 11, Lab: a GPT-2 forward pass &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part II · Chapter 10 · FLOP and byte counts computed from GPT-2 small&rsquo;s shapes; roofline times are predictions at the practical ceilings; kernels checked for correctness on cudasim, never run on a GPU, until lab 9 replaces them, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ch10.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>

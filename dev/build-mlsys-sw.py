@@ -19,7 +19,7 @@ files += sorted(p.relative_to(COURSE).as_posix() for p in (COURSE / "assets").it
 files += sorted(p.relative_to(COURSE).as_posix() for p in (COURSE / "assets/xp").glob("*") if p.is_file())   # the explainer kit
 files += sorted(p.relative_to(COURSE).as_posix() for p in (COURSE / "labs").rglob("*")
                 if p.is_file() and p.suffix in {".cu", ".h", ".md"} or p.name == "Makefile")
-files += ["../assets/course-figures.css", "../assets/fonts.css"]
+files += ["../assets/course-figures.css", "../assets/fonts.css", "../assets/fonts-reader.css"]
 files += sorted("../assets/fonts/" + p.name for p in (ROOT / "assets/fonts").glob("*.woff2"))
 
 h = hashlib.sha1()

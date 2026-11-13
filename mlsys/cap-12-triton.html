@@ -1,60 +1,49 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-12-triton.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 12 — Triton: kernels at the block level · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch12.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch12.css?v=2bb3bf15">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-11-gpt2-forward-pass.html">&larr; Ch. 11 — Lab: a GPT-2 forward pass</a>
-    <a href="index.html">Index</a>
-    <a href="cap-13-inference-arithmetic.html">Ch. 13 — Inference arithmetic &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part III · Attention</div>
+<h3><a href="#top">Triton: kernels at the block level<small>12</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 5 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>12.1</small><span>Why a block-level language</span></a></li><li data-for="s2"><a href="#s2"><small>12.2</small><span>The model: programs, tiles, pointers, masks</span></a></li><li data-for="s3"><a href="#s3"><small>12.3</small><span>Softmax: one program per row</span></a></li><li data-for="s4"><a href="#s4"><small>12.4</small><span>Layernorm: two reductions, one read</span></a></li><li data-for="s5"><a href="#s5"><small>12.5</small><span>Matmul: <code>tl.dot</code>, the <var>K</var> loop, grouped order, autotuning</span></a></li><li data-for="s6"><a href="#s6"><small>12.6</small><span>Fusion: the epilogue is just more Python</span></a></li><li data-for="s7"><a href="#s7"><small>12.7</small><span>What the compiler does, and how to watch it</span></a></li><li data-for="s8"><a href="#s8"><small>12.8</small><span>Benchmarking fairly</span></a></li><li data-for="s9"><a href="#s9"><small>12.9</small><span>Limits: what Triton will not let you say</span></a></li><li data-for="s10"><a href="#s10"><small>12.10</small><span>Triton on sm_120: what is known and what is not</span></a></li><li data-for="s11"><a href="#s11"><small>12.11</small><span>Lab 11: the course&rsquo;s kernels in Triton</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-11-gpt2-forward-pass.html">&larr; Ch. 11</a><a href="index.html">&uarr; Index</a><a href="cap-13-inference-arithmetic.html">Ch. 13 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part III — Attention · Chapter 12</div>
-    <h1>Triton: kernels at the block level</h1>
-    <div class="lk-meta"><span>~60 min read</span><span>2 interactive widgets</span><span>3 plates</span><span>lab 11 · ~60 min on your GPU (Python)</span></div>
-  </header>
+  <header class="chap"><div class="num">12</div><div class="kicker">Part III &middot; Attention · Chapter 12</div><div class="numeral" aria-hidden="true">12</div><h1>Triton: kernels at the block level</h1><ul class="meta"><li>~60 min read</li><li>2 interactive widgets</li><li>3 plates</li><li>lab 11 · ~60 min on your GPU (Python)</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>Lab 7&rsquo;s v7 is about two hundred lines, and five ideas: a block tile, a warp tile, a thread tile, 16-byte loads, a double buffer. The ideas took a paragraph each; the lines are index arithmetic that maps elements to threads. <strong>Triton</strong> is a language in which you write the ideas and a compiler writes the arithmetic. In CUDA you write <em>one thread</em> and the block and warp structure is your problem. In Triton you write <em>one program instance</em> that works on <strong>tiles</strong> (small tensors of fixed shape), and the compiler decides which thread holds which element, stages tiles through shared memory, places tensor-core fragments and pipelines the loads. You still choose everything that matters for performance: the tile sizes, the grid and its order, the loop over <var>K</var>, and what to fuse into what. This chapter rebuilds the course&rsquo;s kernels in that model (vector add, softmax, layernorm, a tensor-core matmul with a fused epilogue), then opens the compiler to show what it did to them, says how to benchmark the result honestly against cuBLAS and your own CUDA, and ends with the limits: what Triton will not let you say, and what the state of its support for your sm_120 card is.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~60 min read</li><li>2 interactive widgets</li><li>3 plates</li><li>lab 11 · ~60 min on your GPU (Python)</li></ul></aside><div class="ov-learn"><p class="ov-lead">Lab 7&rsquo;s v7 is about two hundred lines, and five ideas: a block tile, a warp tile, a thread tile, 16-byte loads, a double buffer. The ideas took a paragraph each; the lines are index arithmetic that maps elements to threads. <strong>Triton</strong> is a language in which you write the ideas and a compiler writes the arithmetic. In CUDA you write <em>one thread</em> and the block and warp structure is your problem. In Triton you write <em>one program instance</em> that works on <strong>tiles</strong> (small tensors of fixed shape), and the compiler decides which thread holds which element, stages tiles through shared memory, places tensor-core fragments and pipelines the loads. You still choose everything that matters for performance: the tile sizes, the grid and its order, the loop over <var>K</var>, and what to fuse into what. This chapter rebuilds the course&rsquo;s kernels in that model (vector add, softmax, layernorm, a tensor-core matmul with a fused epilogue), then opens the compiler to show what it did to them, says how to benchmark the result honestly against cuBLAS and your own CUDA, and ends with the limits: what Triton will not let you say, and what the state of its support for your sm_120 card is.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">Why a block-level language</a></li>
-      <li><a href="#s2">The model: programs, tiles, pointers, masks</a></li>
-      <li><a href="#s3">Softmax: one program per row</a></li>
-      <li><a href="#s4">Layernorm: two reductions, one read</a></li>
-      <li><a href="#s5">Matmul: <code>tl.dot</code>, the <var>K</var> loop, grouped order, autotuning</a></li>
-      <li><a href="#s6">Fusion: the epilogue is just more Python</a></li>
-      <li><a href="#s7">What the compiler does, and how to watch it</a></li>
-      <li><a href="#s8">Benchmarking fairly</a></li>
-      <li><a href="#s9">Limits: what Triton will not let you say</a></li>
-      <li><a href="#s10">Triton on sm_120: what is known and what is not</a></li>
-      <li><a href="#s11">Lab 11: the course&rsquo;s kernels in Triton</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. Why a block-level language</h2>
+    <h2><small>12.1</small><a href="#s1">Why a block-level language</a></h2>
 
+    <aside class="m-link"><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Look back at what you decided in chapters 7 and 8, and at what the lines of v7 are actually about. The decisions were few: a 128&times;128 block tile with <var>BK</var> = 16, four warps each owning a 64&times;64 square, 8&times;16 outputs per thread, <code>float4</code> loads, a transposed A tile, two buffers. The code was mostly something else: <code>warpRow = warp / 2</code>, <code>tRowInWarp = lane / 4</code>, <code>As[k][warpRow*64 + tRowInWarp*8 + i]</code>, the guards at ragged edges, the two <code>__syncthreads</code>. That is the <strong>mapping</strong>: the rule that says which thread touches which element at which step, and it exists because CUDA&rsquo;s unit of programming is one thread. The mapping is where the bugs live (chapter 3&rsquo;s write-after-read race, chapter 8&rsquo;s bank conflicts), it is different for every tile shape, and it is what you rewrite when you move from FP32 to tensor cores, where it becomes the fragment layout of chapter 8&rsquo;s figure 3.</p>
 
+    <aside class="m-rem"><p><b>Sector, coalescing</b> <a href="cap-03-memory-hierarchy.html#s3">ch.&nbsp;3 &sect;3</a>. Global memory moves in 32-byte sectors. A warp&rsquo;s load costs as many sectors as its 32 addresses touch; neighbouring addresses use every byte.</p></aside>
     <p>The observation behind Triton (Tillet, Kung and Cox, 2019; now the kernel language behind <code>torch.compile</code>, Part V) is that the mapping can be derived by a compiler from the decisions, if the program is written one level up: not &ldquo;what does thread 17 do&rdquo; but &ldquo;what does this <strong>block</strong> do to this <strong>tile</strong>&rdquo;. A tile is a small tensor of compile-time shape (a row of 1,024 floats, a 128&times;64 slab of A), and a program instance loads tiles, computes on them with whole-tile operations (add, max over an axis, a small matrix product) and stores tiles. Given that, the compiler can choose a layout of tile elements over threads that makes every load coalesced (chapter 3), stage tiles through shared memory with a swizzle instead of your padding, lower a tile product to <code>mma.sync</code> with the right fragment layout, and pipeline the loads over several stages. Those were the hard parts of lab 7. What it cannot choose, because they depend on the problem and the machine together, is left to you: the tile sizes, how many warps serve a program, how many pipeline stages, the launch order of the grid, the loop structure, and what to fuse.</p>
 
     <table>
@@ -75,8 +64,9 @@
   </section>
 
   <section id="s2">
-    <h2>2. The model: programs, tiles, pointers, masks</h2>
+    <h2><small>12.2</small><a href="#s2">The model: programs, tiles, pointers, masks</a></h2>
 
+    <aside class="m-link"><p><a href="cap-01-the-job-and-the-machine.html">Ch.&nbsp;1 &middot; The job, the machine, and your bench</a></p></aside>
     <p>Four ideas make up the whole language; chapter 1&rsquo;s vector add shows all four. A kernel is a Python function with <code>@triton.jit</code>; it is compiled the first time it is called with a given set of argument types and constants:</p>
 <pre><code class="language-python">import torch, triton, triton.language as tl
 
@@ -96,6 +86,7 @@ def add(x, y):
     add_kernel[grid](x, y, out, n, BLOCK=1024)
     return out</code></pre>
 
+    <aside class="m-link"><p><a href="cap-02-execution-model.html">Ch.&nbsp;2 &middot; The execution model</a></p></aside>
     <ul>
       <li><strong>A program instance</strong> is the unit of execution: one invocation of the function, identified by <code>tl.program_id</code>, in a <strong>grid</strong> of instances launched together. It is CUDA&rsquo;s thread block seen from outside: it runs on one SM, with <code>num_warps</code> warps (4 by default, 128 threads), and no thread is visible inside it.</li>
       <li><strong>A tile</strong> is a tensor whose shape is a compile-time constant: <code>tl.arange(0, BLOCK)</code> is a tile of <var>BLOCK</var> integers, and everything derived from it (<code>offs</code>, <code>mask</code>, <code>x</code>) has the same shape. Tile dimensions must be powers of two. A <code>tl.constexpr</code> argument is a value baked into the compiled code, like a template parameter: change <code>BLOCK</code> and you get a different kernel.</li>
@@ -105,19 +96,21 @@ def add(x, y):
 
     <p>The grid is given as a function of the kernel&rsquo;s constants so that the same launch line works when <code>BLOCK</code> is autotuned later. Play with the mapping below: move the tile over the end of the array and watch which lanes are masked, then change <code>BLOCK</code> and <code>num_warps</code> and see how many elements each thread ends up holding.</p>
 
-    <div id="w-tile" class="w"></div>
+    <div id="w-tile" class="w wide"></div>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>What the compiler makes of this kernel is predictable, and it is worth predicting once. With <code>BLOCK</code> = 1,024 and 4 warps, 128 threads hold a 1,024-element tile: 8 elements per thread. It will give each thread two groups of 4 consecutive elements, so that each group is one 16-byte load (chapter 8&rsquo;s <code>float4</code>) and the 32 lanes of a warp cover 512 contiguous bytes per instruction, fully coalesced. The guard becomes a predicate on the load instruction, not a branch. You will check this in section 7 by reading the PTX. One thing it must know first: that <code>x_ptr</code> is 16-byte aligned and that <var>n</var> does not break the contiguity. Triton <strong>specializes</strong> on that: integer arguments divisible by 16 and pointers aligned to 16 bytes get their own compiled variant, so passing an array that starts at an odd offset silently gives you a slower kernel. (<code>do_not_specialize</code> turns it off per argument; <code>tl.multiple_of</code> and <code>tl.max_contiguous</code> assert it when the compiler cannot see it.)</p>
 
-    <details class="ym">
-      <summary>Your move: the grid has <code>cdiv(n, BLOCK)</code> programs, and the last one is mostly masked. Why not launch exactly <code>n / BLOCK</code> programs and handle the tail on the CPU, or make <code>BLOCK</code> divide <var>n</var>?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The grid has <code>cdiv(n, BLOCK)</code> programs, and the last one is mostly masked. Why not launch exactly <code>n / BLOCK</code> programs and handle the tail on the CPU, or make <code>BLOCK</code> divide <var>n</var>?</p><details><summary class="btn">Show the answer</summary>
       <p>For the same reason chapter 2&rsquo;s kernels used a guard rather than a perfectly sized grid: a masked tail costs one program that does less work, a few microseconds at most, while any scheme that changes the launch shape with <var>n</var> means another compiled variant or another kernel. The mask is cheap because it is not a branch: lanes with the mask off issue the load with a predicate and the hardware skips it. The expensive case is the opposite one, a <code>BLOCK</code> much larger than <var>n</var>: then every program is mostly masked and you are paying for lanes that do nothing. Section 3&rsquo;s softmax, with <code>BLOCK</code> equal to the next power of two above the row length, lives on that edge: a 1,025-wide row costs a 2,048-wide tile.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s3">
-    <h2>3. Softmax: one program per row</h2>
+    <h2><small>12.3</small><a href="#s3">Softmax: one program per row</a></h2>
 
+    <aside class="m-rem"><p><b>Shuffle reduction</b> <a href="cap-05-profiling.html#s6">ch.&nbsp;5 &sect;6</a>. When 32 or fewer values remain, they live in one warp, and its lanes exchange registers directly with shuffles: no shared memory, no barrier.</p></aside>
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p></aside>
     <p>Chapter 9 ended with softmax v4: one warp or block per row, the row loaded once into registers, max and sum by shuffle reductions, one write. Here is the same kernel. Each program instance takes a whole row as a tile, so the three passes become three tile expressions and the compiler emits chapter 5&rsquo;s reduction for <code>tl.max</code> and <code>tl.sum</code>:</p>
 <pre><code class="language-python">@triton.jit
 def softmax_kernel(out_ptr, x_ptr, stride_row, n_cols, BLOCK: tl.constexpr):
@@ -140,17 +133,30 @@ def softmax(x):                                     # x: [rows, n_cols], row-maj
 
     <p>Three things are decided here, and only one by the compiler. <strong>The row is the tile</strong>, so it is read from DRAM exactly once; the max, the exponentials and the sum are computed on the copy in registers. <strong><code>num_warps</code></strong> is yours: it is the number of threads that share the row, chapter 9&rsquo;s &ldquo;thread, warp or block per row by row length&rdquo; turned into one integer, and the heuristic above gives a 1,024-wide row 4 warps (8 floats per thread) and an 8,192-wide one 16 warps (16 per thread). <strong>The reductions</strong> are the compiler&rsquo;s: <code>tl.max(x, axis=0)</code> over a tile spread across 4 warps becomes per-thread maxima, a shuffle tree inside each warp, a round through shared memory between warps and a broadcast back, which is exactly lab 8&rsquo;s code, generated. <code>tl.exp</code> is the fast exponential (interlude 5b&rsquo;s <code>__expf</code>: a multiply and <code>MUFU.EX2</code>); the masked lanes hold &minus;&infin; and contribute e<sup>&minus;&infin;</sup> = 0 to the sum, which is the guard chapter 9 wrote by hand.</p>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>The official tutorial adds one more decision, and it is worth understanding because it reappears in every production Triton kernel: <strong>persistent programs</strong>. Instead of one program per row (65,536 programs for a [64&times;1,024, 1,024] attention-score matrix), it launches as many programs as the GPU can hold at once (SMs &times; programs per SM, computed from the compiled kernel&rsquo;s register and shared-memory use) and each one loops over rows with stride <code>tl.num_programs(0)</code>. The loop is <code>tl.range(..., num_stages=k)</code>, which asks the compiler to pipeline it: issue the loads of row <var>r</var>+1 before computing on row <var>r</var>, chapter 8&rsquo;s double buffering, applied to rows instead of <var>K</var> tiles. Both versions are in lab 11; the chapter&rsquo;s prediction is that for rows of 1,024 they are within a few percent of each other and of the DRAM ceiling, and that the persistent one pulls ahead on short rows, where launching a program per row costs more than the row&rsquo;s bytes.</p>
 
-    <details class="ym">
-      <summary>Your move: a score matrix with rows of 100,000 (a long-context attention row). <code>BLOCK</code> becomes 131,072. With 16 warps, how many registers per thread does the row alone need, and what happens?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">A score matrix with rows of 100,000 (a long-context attention row). <code>BLOCK</code> becomes 131,072. With 16 warps, how many registers per thread does the row alone need, and what happens?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Tile size</dt><dd>131,072 floats</dd><dt>Register limit</dt><dd>255 per thread</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Registers per thread</span><input inputmode="decimal" autocomplete="off" data-want="256" data-tol="0.05" data-hint="Hint: 16 warps of 32 threads is the thread count; divide the 131,072 floats of the row by it, one register per float." aria-label="Registers per thread"> registers</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>131,072 floats over 512 threads is 256 registers per thread for the tile, above the 255 limit before a single index or temporary, so the kernel spills (chapter 8&rsquo;s warning) and the one-read advantage drowns in local-memory traffic. The tile-is-the-row design has a ceiling, and it is set by the register file, not by the language. Past it you write what chapter 9 did for the same problem: loop over the row in chunks with a running max and sum (online softmax), two tiles of a chunk at a time. Triton gives you the loop and the merge (<code>m_new = tl.maximum(m, tl.max(chunk))</code>, rescale, add) but does not invent it for you: the algorithm is still yours.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s4">
-    <h2>4. Layernorm: two reductions, one read</h2>
+    <h2><small>12.4</small><a href="#s4">Layernorm: two reductions, one read</a></h2>
 
+    <aside class="m-rem"><p><b>Welford&rsquo;s update</b> <a href="cap-09-softmax-layernorm-fusion.html#s7">ch.&nbsp;9 &sect;7</a>. A running summary (count, mean, <var>M</var><sub>2</sub>), updated per element, so that nothing large is subtracted from anything large.</p></aside>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Layernorm has softmax&rsquo;s shape, two row statistics (mean and variance instead of max and sum) followed by an elementwise formula, plus a per-channel scale and shift, and GPT-2&rsquo;s rows are 768 wide (chapter 6). The tile-is-the-row design works unchanged, with one numerical choice. Chapter 9 showed that the one-pass formula E[<var>x</var><sup>2</sup>] &minus; E[<var>x</var>]<sup>2</sup> cancels catastrophically on rows with a large mean, and that Welford&rsquo;s update avoids it. With the row in registers there is a simpler fix: compute the mean first, then the variance of the <em>centred</em> values, two reductions on the same tile. Nothing is re-read; the &ldquo;second pass&rdquo; is over registers:</p>
 <pre><code class="language-python">@triton.jit
 def layernorm_kernel(out_ptr, x_ptr, w_ptr, b_ptr, stride_row, n_cols, eps, BLOCK: tl.constexpr):
@@ -171,8 +177,9 @@ def layernorm_kernel(out_ptr, x_ptr, w_ptr, b_ptr, stride_row, n_cols, eps, BLOC
   </section>
 
   <section id="s5">
-    <h2>5. Matmul: <code>tl.dot</code>, the <var>K</var> loop, grouped order, autotuning</h2>
+    <h2><small>12.5</small><a href="#s5">Matmul: <code>tl.dot</code>, the <var>K</var> loop, grouped order, autotuning</a></h2>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>Now the kernel the chapter exists for. In chapter 8&rsquo;s terms, a Triton matmul program computes one <strong>block tile</strong> of C: it loops over <var>K</var> in steps of <code>BLOCK_K</code>, loads a <code>BLOCK_M</code>&times;<code>BLOCK_K</code> tile of A and a <code>BLOCK_K</code>&times;<code>BLOCK_N</code> tile of B, and multiplies them into an FP32 accumulator tile with <code>tl.dot</code>. That one call is the tensor cores: the compiler stages both tiles through shared memory, loads fragments with <code>ldmatrix</code>, issues <code>mma.sync</code> per warp and keeps the accumulator in registers in the fragment layout: the work of lab 7&rsquo;s <code>hgemm</code> t2, one level below the WMMA calls that kernel used. The warp tile is implied: <code>BLOCK_M</code>&times;<code>BLOCK_N</code> divided among <code>num_warps</code> warps, so 128&times;128 with 4 warps is v7&rsquo;s four 64&times;64 squares. Here is the kernel, close to the official tutorial&rsquo;s, with the grouped ordering explained after it:</p>
 <pre><code class="language-python">@triton.jit
 def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
@@ -210,12 +217,13 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
     c_ptrs = c_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
     tl.store(c_ptrs, acc.to(tl.float16), mask=(offs_cm[:, None] &lt; M) &amp; (offs_cn[None, :] &lt; N))</code></pre>
 
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Three things to notice in the body before the ordering. <strong>Two-dimensional pointer tiles</strong>: <code>offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak</code> is NumPy broadcasting, and it produces a [<code>BLOCK_M</code>, <code>BLOCK_K</code>] tile of addresses from a column of row offsets and a row of column offsets; the strides make the same kernel serve row-major, column-major and transposed operands, chapter 6&rsquo;s &ldquo;which way round is the weight&rdquo; as two integers. <strong>The <code>% M</code> wrap</strong> instead of a mask on the <var>M</var> and <var>N</var> edges: rows past the end of A are loaded from the top of A again, garbage that is computed and then discarded by the masked store, which costs nothing and spares the loads a second mask (only <var>K</var>&rsquo;s edge needs one, because a masked-in garbage column would corrupt the sum). <strong><code>tl.dot(a, b, acc)</code></strong> takes tiles of at least 16 in every dimension, and FP16 or BF16 inputs with an FP32 accumulator are what lands on the tensor cores; an FP32 <code>tl.dot</code> defaults to TF32 inputs (chapter 6&rsquo;s format, 10 mantissa bits), which on your card buys nothing over the CUDA cores and loses precision, so the FP32 path of the engine stays in CUDA.</p>
 
     <h3>Grouped launch order</h3>
     <p>Chapter 8 listed block rasterization among the things cuBLAS does. The grid of a 4,096&sup3; matmul with 128&times;128 tiles has 32&times;32 = 1,024 programs, and your card runs about 48 to 96 of them at a time (one or two per SM at these register counts). Which 48 run together decides what the L2 sees. In plain row-major order, programs 0&ndash;47 cover one and a half rows of tiles: they share 2 row-strips of A (2 &times; 128 &times; 4,096 &times; 2 B = 2 MB) but need all 32 column-strips of B (32 MB) at once; the next wave needs the same 32 MB of B again, and by then much of it has been pushed out of the 48 MB L2 by A and C traffic. In <strong>grouped</strong> order with <code>GROUP_M</code> = 8, the first 48 programs are an 8-tall, 6-wide rectangle of tiles: 8 strips of A plus 6 strips of B, <strong>14 MB</strong> of distinct input instead of 34, and the next wave moves one rectangle right, reusing all 8 A strips. The nine lines of integer arithmetic at the top of the kernel are only this: number the tiles so that consecutive program ids walk down a group of <code>GROUP_M</code> rows before moving one column right.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Two 32 by 32 grids of output tiles of a 4096 cubed FP16 matmul, with the first 48 programs marked. Row-major order: rows 0 and half of row 1, touching 2 row strips of A and all 32 column strips of B, 34 MB. Grouped order with GROUP_M 8: an 8 tall, 6 wide rectangle, touching 8 strips of A and 6 of B, 14 MB; the next wave is the rectangle to its right and reuses the same 8 A strips.">
+    <figure class="lk-fig wide" role="img" aria-label="Two 32 by 32 grids of output tiles of a 4096 cubed FP16 matmul, with the first 48 programs marked. Row-major order: rows 0 and half of row 1, touching 2 row strips of A and all 32 column strips of B, 34 MB. Grouped order with GROUP_M 8: an 8 tall, 6 wide rectangle, touching 8 strips of A and 6 of B, 14 MB; the next wave is the rectangle to its right and reuses the same 8 A strips.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 344" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Launch order decides what the L2 holds</title>
@@ -379,7 +387,7 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
         <text x="330" y="335" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="middle" >grid: 32 &times; 32 tiles of 128 &times; 128; one strip of A or B = 128 &times; 4,096 &times; 2 B = 1 MB (FP16)</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; Launch order decides what the L2 holds. The same 1,024 output tiles of a 4,096&sup3; FP16 matmul, with the first 48 programs (one wave on your card) marked. Row-major order (left) touches 2 strips of A and all 32 strips of B, 34 MB of distinct input, most of which the next wave fetches again. Grouped order with <code>GROUP_M</code> = 8 (right) touches 8 strips of A and 6 of B, 14 MB, and the next wave reuses the 8 A strips. Both orders compute every tile exactly once; only DRAM traffic differs. Modelled from the tile counts; the L2 hit rate itself is what <code>ncu</code> measures.</figcaption>
+      <figcaption><b>Figure 1.</b> Launch order decides what the L2 holds. The same 1,024 output tiles of a 4,096&sup3; FP16 matmul, with the first 48 programs (one wave on your card) marked. Row-major order (left) touches 2 strips of A and all 32 strips of B, 34 MB of distinct input, most of which the next wave fetches again. Grouped order with <code>GROUP_M</code> = 8 (right) touches 8 strips of A and 6 of B, 14 MB, and the next wave reuses the 8 A strips. Both orders compute every tile exactly once; only DRAM traffic differs. Modelled from the tile counts; the L2 hit rate itself is what <code>ncu</code> measures.</figcaption>
     </figure>
 
     <h3><code>num_warps</code>, <code>num_stages</code>, and autotuning</h3>
@@ -387,17 +395,19 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
 
     <p>The widget below puts the two versions of the same matmul side by side: lab 7&rsquo;s <code>hgemm</code> t3 on the left, the kernel above on the right. Toggle each decision and see which lines of the CUDA it corresponds to, and whether, in Triton, those lines are yours or the compiler&rsquo;s.</p>
 
-    <div id="w-who" class="w"></div>
+    <div id="w-who" class="w wide"></div>
 
-    <details class="ym">
-      <summary>Your move: at <var>M</var> = 64 (a decode batch of 64 tokens through the GPT-2 MLP, 64&times;768 times 768&times;3,072) the autotuner picks a config with <code>BLOCK_M</code> = 64 and small <code>BLOCK_N</code>. Why does the 128&times;256 config that wins at 4,096&sup3; lose here, before any measurement?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">At <var>M</var> = 64 (a decode batch of 64 tokens through the GPT-2 MLP, 64&times;768 times 768&times;3,072) the autotuner picks a config with <code>BLOCK_M</code> = 64 and small <code>BLOCK_N</code>. Why does the 128&times;256 config that wins at 4,096&sup3; lose here, before any measurement?</p><div class="sub">Given</div>
+<dl class="given"><dt>SMs on the card</dt><dd>48</dd><dt>Output columns N</dt><dd>3,072</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>Count the programs. With 128&times;256 tiles the grid is 1 &times; 12 = 12 programs for 48 SMs: a quarter of the card, and each program loads a 128-row A tile of which half is padding. With 64&times;64 tiles it is 1 &times; 48 programs, one per SM. At this shape the matmul is memory-bound anyway (chapter 6: intensity about <var>M</var>/2 in FP32, so about <var>M</var> = 64 FLOP/B in FP16, left of the FP16 ridge of 92), so the goal is not reuse but enough programs to keep bytes in flight across the whole chip, chapter 3&rsquo;s Little&rsquo;s law. The autotuner finds this by timing; you can find it by counting. For <var>M</var> = 1 even that is not enough, and chapter 15&rsquo;s split-K is the next step.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s6">
-    <h2>6. Fusion: the epilogue is just more Python</h2>
+    <h2><small>12.6</small><a href="#s6">Fusion: the epilogue is just more Python</a></h2>
 
+    <aside class="m-link"><p><a href="cap-09-softmax-layernorm-fusion.html">Ch.&nbsp;9 &middot; Softmax, layernorm, online softmax and fusion</a></p></aside>
     <p>Chapter 9 made the case for epilogue fusion: bias, GELU and residual add are memory-bound kernels whose entire cost is a round trip of the activation through DRAM, and inside the GEMM&rsquo;s epilogue the same arithmetic happens on values already in registers. In lab 8 that fusion was a template parameter: a small functor applied to each accumulator of the FP32 v7 kernel, with its row and column, on its way to memory. In Triton it is the lines between the loop and the store, operating on the accumulator tile:</p>
 <pre><code class="language-python">    # after the K loop: acc is [BLOCK_M, BLOCK_N] in FP32 registers
     if HAS_BIAS:                                   # tl.constexpr flags: dead code is removed
@@ -413,16 +423,16 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
 
     <p>The flags are <code>tl.constexpr</code>, so each combination is its own compiled kernel with the unused branches removed, not a runtime test per element. The bias is loaded once per program as a <code>BLOCK_N</code>-wide tile and broadcast down the rows; the residual is a full tile read, the one input that cannot be avoided. What this buys at GPT-2&rsquo;s MLP shape with <var>M</var> = 4,096 (a prefill of four 1,024-token sequences) in FP16: the output tile is 4,096 &times; 3,072 &times; 2 B = 25 MB, so a separate bias kernel costs a 50 MB round trip and GELU another, about 85 &micro;s each at the practical bandwidth, against a matmul that takes roughly 520 &micro;s at 60% of the FP16 roof. Fused, both disappear into a few FMAs and one <code>MUFU</code> per element on tiles that are in registers anyway. The limit is chapter 9&rsquo;s: a 128&times;128 program sees 128 columns of a 3,072-wide row, so the layernorm that follows the residual add needs the whole row and cannot go here; it stays a kernel of its own (section 4), reading the fused output once.</p>
 
-    <details class="ym">
-      <summary>Your move: GELU is an elementwise function. Could you also fuse it into the <em>next</em> matmul&rsquo;s prologue, applying it to the A tile as it is loaded, instead of into this one&rsquo;s epilogue?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">GELU is an elementwise function. Could you also fuse it into the <em>next</em> matmul&rsquo;s prologue, applying it to the A tile as it is loaded, instead of into this one&rsquo;s epilogue?</p><details><summary class="btn">Show the answer</summary>
       <p>You could, and it would be computed <var>N</var>/<code>BLOCK_N</code> times instead of once: every program that needs a given A tile (all the programs in that row of the output grid, 24 of them for <var>N</var> = 3,072 with 128-wide tiles) would load and transform it again. Epilogue fusion is the right place because each output element exists in exactly one program&rsquo;s registers once. Prologue fusion makes sense only for things that must happen on the input side anyway, such as dequantizing INT4 weights to FP16 as they are loaded (Part IV), where the alternative is a separate dequantized copy of the weights in DRAM.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s7">
-    <h2>7. What the compiler does, and how to watch it</h2>
+    <h2><small>12.7</small><a href="#s7">What the compiler does, and how to watch it</a></h2>
 
     <p>A kernel goes through five languages between your <code>def</code> and the GPU, and the one in the middle is the one worth knowing, because it is where every decision from section 1&rsquo;s &ldquo;compiler&rdquo; column is actually made:</p>
+    <aside class="m-rem"><p><b>Swizzle</b> <a href="cap-03-memory-hierarchy.html#s7">ch.&nbsp;3 &sect;7</a>. Instead of padding, permute the column index with an XOR, <code>tile[r][c ^ r]</code>. This spreads columns over all banks without wasting memory.</p></aside>
     <ol>
       <li><strong>Python AST &rarr; Triton IR (TTIR).</strong> The function is traced into MLIR: tile operations on tensors with shapes and element types, loads and stores of pointer tiles, <code>tt.dot</code>, reductions. There are no threads yet; a tensor is just a shape.</li>
       <li><strong>TTIR &rarr; TritonGPU IR (TTGIR).</strong> Every tensor gets a <strong>layout</strong>: a rule saying which thread holds which of its elements. A <em>blocked</em> layout is the rule of figure 3 (so many consecutive elements per thread, so many threads per warp along each axis, so many warps); a <em>shared</em> layout places a tile in shared memory, with a swizzle pattern (chapter 8&rsquo;s XOR trick) chosen so that the later <code>ldmatrix</code> is conflict-free; an <em>mma</em> layout is chapter 8&rsquo;s fragment layout (the <code>w-frag</code> widget), the only layout a <code>tl.dot</code> result can have; <em>dot-operand</em> layouts are the A and B fragment layouts. The passes here are the chapter 8 playbook, in order: <em>coalesce</em> (choose blocked layouts so that each warp&rsquo;s loads cover contiguous bytes), <em>accelerate-matmul</em> (turn <code>tt.dot</code> into <code>mma.sync</code> with the operand layouts it needs), <em>pipeline</em> (wrap the <var>K</var> loop in a <code>num_stages</code>-deep ring of asynchronous copies into shared memory), and a pass that inserts a <em>layout conversion</em> wherever a value is needed in a layout different from the one it has. A conversion is a round trip through shared memory, the price of a layout the compiler could not avoid, and finding unexpected <code>convert_layout</code> ops in the TTGIR is how you learn a kernel was written against the grain.</li>
@@ -431,7 +441,7 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
       <li><strong>PTX &rarr; cubin</strong> with <code>ptxas</code>, which Triton ships inside its wheel (section 10), targeting the card it finds. <code>cuobjdump -sass</code> on it shows <code>HMMA</code>, <code>LDSM</code> and <code>LDGSTS</code>, the instructions lab 7&rsquo;s <code>make sass</code> counted.</li>
     </ol>
 
-    <figure class="lk-fig" role="img" aria-label="The same 32 by 32 FP16 tile drawn five times. Python: a plain square. Triton IR: a shape with no threads. TritonGPU IR blocked layout: four bands of 8 rows, one per warp, each row split into 4 threads of 8 halves, one 16-byte load each. Shared layout: 32 rows of 4 chunks whose order is permuted per row by chunk XOR row mod 4. Mma operand layout: four 16 by 16 blocks, one coloured by the lane that holds each element. Below: LLVM IR, then PTX with cp.async, ldmatrix and mma.sync, then SASS with LDGSTS, LDSM and HMMA.">
+    <figure class="lk-fig wide" role="img" aria-label="The same 32 by 32 FP16 tile drawn five times. Python: a plain square. Triton IR: a shape with no threads. TritonGPU IR blocked layout: four bands of 8 rows, one per warp, each row split into 4 threads of 8 halves, one 16-byte load each. Shared layout: 32 rows of 4 chunks whose order is permuted per row by chunk XOR row mod 4. Mma operand layout: four 16 by 16 blocks, one coloured by the lane that holds each element. Below: LLVM IR, then PTX with cp.async, ldmatrix and mma.sync, then SASS with LDGSTS, LDSM and HMMA.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 312" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>One tile through the compiler</title>
@@ -763,10 +773,10 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
         <text x="315" y="302" font-size="10.5" fill="var(--lk-ink-soft)" text-anchor="start" >lane 0&rsquo;s 8 halves (rows 0, 8; cols 0&ndash;1, 8&ndash;9)</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; One 32&times;32 FP16 tile of A on its way through the compiler. In Triton IR it is a shape. In TritonGPU IR it gets a blocked layout for the coalesced load (each thread 8 consecutive halves, a warp covering 8 rows), a shared layout with a swizzle for the staging buffer, and the <code>mma</code> operand layout chapter 8 drew by hand. From there on it is per-thread code: <code>cp.async</code> into shared memory, <code>ldmatrix</code> into fragments, <code>mma.sync</code>. Layouts are real (the names are Triton&rsquo;s); the exact parameters the compiler picks for a given kernel are what you read in its <code>.ttgir</code>.</figcaption>
+      <figcaption><b>Figure 2.</b> One 32&times;32 FP16 tile of A on its way through the compiler. In Triton IR it is a shape. In TritonGPU IR it gets a blocked layout for the coalesced load (each thread 8 consecutive halves, a warp covering 8 rows), a shared layout with a swizzle for the staging buffer, and the <code>mma</code> operand layout chapter 8 drew by hand. From there on it is per-thread code: <code>cp.async</code> into shared memory, <code>ldmatrix</code> into fragments, <code>mma.sync</code>. Layouts are real (the names are Triton&rsquo;s); the exact parameters the compiler picks for a given kernel are what you read in its <code>.ttgir</code>.</figcaption>
     </figure>
 
-    <figure class="lk-fig" role="img" aria-label="A strip of 256 elements split among 64 threads of 2 warps, each thread holding 4 consecutive elements, so each warp covers 512 contiguous bytes. An enlarged view shows threads 0 to 3 holding elements 0 to 3, 4 to 7, 8 to 11 and 12 to 15. Below, a strip of 1024 elements with the same layout repeating four times.">
+    <figure class="lk-fig wide" role="img" aria-label="A strip of 256 elements split among 64 threads of 2 warps, each thread holding 4 consecutive elements, so each warp covers 512 contiguous bytes. An enlarged view shows threads 0 to 3 holding elements 0 to 3, 4 to 7, 8 to 11 and 12 to 15. Below, a strip of 1024 elements with the same layout repeating four times.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 300" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>A blocked layout</title>
@@ -894,7 +904,7 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
         <text x="20" y="288" font-size="10.5" fill="var(--lk-ink)" text-anchor="start" >one thread = one 16-byte load (ld.global.v4)  &middot;  one warp instruction = 512 contiguous bytes</text>
       </svg>
       </div>
-      <figcaption><b>Fig. 3</b> &mdash; A blocked layout, the compiler&rsquo;s answer to &ldquo;which thread holds which element&rdquo;. A 256-element tile over 2 warps with 4 elements per thread: thread <var>t</var> holds elements 4<var>t</var> to 4<var>t</var>+3, so each thread&rsquo;s load is one 16-byte instruction and a warp&rsquo;s 32 loads are 512 contiguous bytes. A 1,024-element tile with the same layout wraps: each thread holds four such groups. This is chapter 3&rsquo;s coalescing and chapter 8&rsquo;s <code>float4</code>, chosen by a pass instead of by you.</figcaption>
+      <figcaption><b>Figure 3.</b> A blocked layout, the compiler&rsquo;s answer to &ldquo;which thread holds which element&rdquo;. A 256-element tile over 2 warps with 4 elements per thread: thread <var>t</var> holds elements 4<var>t</var> to 4<var>t</var>+3, so each thread&rsquo;s load is one 16-byte instruction and a warp&rsquo;s 32 loads are 512 contiguous bytes. A 1,024-element tile with the same layout wraps: each thread holds four such groups. This is chapter 3&rsquo;s coalescing and chapter 8&rsquo;s <code>float4</code>, chosen by a pass instead of by you.</figcaption>
     </figure>
 
     <h3>Looking at each stage</h3>
@@ -908,15 +918,15 @@ for s in ('mma.sync', 'ldmatrix', 'cp.async', 'ld.global.v4', 'wgmma', 'tcgen05'
                                     # (ld.global.v4 is for the vector add: pipelined matmul loads become cp.async)</code></pre>
     <p>The same texts are written to <code>~/.triton/cache/&lt;hash&gt;/</code> as <code>.ttir</code>, <code>.ttgir</code>, <code>.llir</code>, <code>.ptx</code> and <code>.cubin</code> next to a <code>.json</code> of the launch metadata; <code>MLIR_ENABLE_DUMP=1</code> prints the IR after every pass, and <code>TRITON_PRINT_AUTOTUNING=1</code> prints each config as the autotuner tries it, then the winner and the total tuning time. Lab 11&rsquo;s <code>inspect_asm.py</code> does the counting above for every kernel of the lab and prints the blocked layout the compiler chose for the vector add, so that figure 3 can be checked against the real thing.</p>
 
-    <details class="ym">
-      <summary>Your move: the TTGIR of a kernel that computes <code>softmax(x) @ v</code> in one program shows a <code>convert_layout</code> between the softmax and the <code>tl.dot</code>. What happened, and what did it cost?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">The TTGIR of a kernel that computes <code>softmax(x) @ v</code> in one program shows a <code>convert_layout</code> between the softmax and the <code>tl.dot</code>. What happened, and what did it cost?</p><details><summary class="btn">Show the answer</summary>
       <p>The softmax result lives in the layout the reduction produced (a blocked layout, one row of the tile spread over a warp so that the max and sum were cheap). <code>tl.dot</code> needs its A operand in the dot-operand fragment layout, in which a lane holds specific scattered elements of a 16&times;16 block. The compiler bridged the two by writing the tile to shared memory in one layout and reading it back in the other: one tile-sized store and load through shared memory per iteration, plus a barrier. That is exactly the cost chapter 14&rsquo;s hand-written FlashAttention avoids by keeping the score tile in the <code>mma</code> accumulator layout and reusing it directly as the next operand, a trick Triton&rsquo;s compiler now also knows for this specific pattern, but which you cannot ask for in general: section 9.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s8">
-    <h2>8. Benchmarking fairly</h2>
+    <h2><small>12.8</small><a href="#s8">Benchmarking fairly</a></h2>
 
+    <aside class="m-link"><p><a href="cap-01-the-job-and-the-machine.html">Ch.&nbsp;1 &middot; The job, the machine, and your bench</a></p></aside>
     <p>The chapter&rsquo;s kernels will be compared with three things: PyTorch&rsquo;s own kernels (cuBLAS behind <code>torch.matmul</code>, hand-written CUDA behind <code>softmax</code> and <code>layer_norm</code>), and your lab 7 and lab 8 numbers. The comparison is only meaningful if the <em>harness</em> is the same, and the two harnesses in play are not. Triton&rsquo;s <code>triton.testing.do_bench(fn, warmup=25, rep=100, quantiles=[0.5, 0.2, 0.8])</code> runs <code>fn</code> for 25 ms untimed, then as many times as fit in 100 ms, timing each run with CUDA events; and <strong>before every timed run it writes a 256 MB buffer to push everything out of the L2</strong>, so its numbers are DRAM-cold. Lab 7&rsquo;s <code>bench.h</code> runs 3 warm-ups and 20 timed repetitions with no flush, so inputs that fit in the 48 MB L2 (every shape below about 2,048&sup3; in FP16) are partly warm. Chapter 1&rsquo;s vecadd lesson again: the same kernel measures faster on the harness that lets the cache help.</p>
 
     <table>
@@ -929,13 +939,15 @@ for s in ('mma.sync', 'ldmatrix', 'cp.async', 'ld.global.v4', 'wgmma', 'tcgen05'
       <tr><td>Check correctness at the benchmark shape, with the tolerance of the dtype</td><td>an FP16 matmul that agrees with cuBLAS to 10<sup>&minus;2</sup> relative is correct (chapter 8&rsquo;s tensor-core rounding); one that agrees to 10<sup>&minus;6</sup> is probably not using the tensor cores</td></tr>
     </table>
 
+    <aside class="m-link"><p><a href="cap-08-matmul-tensor-cores.html">Ch.&nbsp;8 &middot; Matmul II</a></p></aside>
     <p>The predictions, as ranges, since no Triton kernel has run on your card yet (section 10): the vector add, softmax and layernorm at the DRAM ceiling you measured in lab 0, within a few percent of PyTorch&rsquo;s; the FP16 matmul at 4,096&sup3; between 70 and 95% of <code>torch.matmul</code> after autotuning, and in the same band as lab 7&rsquo;s t3 or above it (the official tutorial reports parity with cuBLAS on the cards it was tuned for; your card is not among them); the fused matmul + bias + GELU within a few percent of the plain matmul, against a saving of two elementwise round trips. At small <var>M</var> (64, 1) expect the Triton matmul to fall behind cuBLAS, which has split-K and GEMV kernels for those shapes (chapter 8, section 8).</p>
   </section>
 
   <section id="s9">
-    <h2>9. Limits: what Triton will not let you say</h2>
+    <h2><small>12.9</small><a href="#s9">Limits: what Triton will not let you say</a></h2>
 
     <p>Everything the compiler decides is something you cannot decide, and for a few kernels in this course that is the whole game. The list, with where each limit bites:</p>
+    <aside class="m-link"><p><a href="cap-05-profiling.html">Ch.&nbsp;5 &middot; Profiling with Nsight</a></p><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p></aside>
     <ul>
       <li><strong>No threads, no warps, no lanes.</strong> There is no <code>threadIdx</code>, no shuffle, no ballot, no lane-dependent code path. A reduction is <code>tl.sum</code> over a whole axis; you cannot write chapter 5&rsquo;s shuffle tree yourself or reduce over only the four lanes that share a row of an <code>mma</code> fragment (chapter 14&rsquo;s quad shuffles). Chapter 15&rsquo;s last-block-done pattern needs an atomic, a fence and a thread-dependent branch; Triton has <code>tl.atomic_add</code> and <code>tl.atomic_cas</code> and a <code>tl.debug_barrier</code>, so split-K with a separate combine kernel is natural and an atomic accumulation into C is easy, but the in-kernel combine is awkward at best.</li>
       <li><strong>No explicit shared memory or registers.</strong> You cannot name a buffer, choose its padding or decide that a value stays in a fragment. The score-tile reuse of chapter 14 is a layout decision the compiler makes or does not make; the official FlashAttention tutorial reaches good speed because the compiler recognizes the pattern, not because the code asks for it.</li>
@@ -948,7 +960,7 @@ for s in ('mma.sync', 'ldmatrix', 'cp.async', 'ld.global.v4', 'wgmma', 'tcgen05'
   </section>
 
   <section id="s10">
-    <h2>10. Triton on sm_120: what is known and what is not</h2>
+    <h2><small>12.10</small><a href="#s10">Triton on sm_120: what is known and what is not</a></h2>
 
     <div class="callout note">
       <span class="callout-label">Checked 2026-10-22, not run on your card</span>
@@ -959,7 +971,7 @@ for s in ('mma.sync', 'ldmatrix', 'cp.async', 'ld.global.v4', 'wgmma', 'tcgen05'
   </section>
 
   <section id="s11">
-    <h2>11. Lab 11: the course&rsquo;s kernels in Triton</h2>
+    <h2><small>12.11</small><a href="#s11">Lab 11: the course&rsquo;s kernels in Triton</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 11</span><span class="lab-title">Vector add, softmax, layernorm, FP16 matmul, fused epilogue: checked against PyTorch, timed against PyTorch and your CUDA</span><span class="idx-meta">~60 min · <code>mlsys/labs/lab11-triton/</code></span></div>
@@ -1043,16 +1055,58 @@ make asm          # inspect_asm.py: layouts and instruction counts per kernel, P
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-11-gpt2-forward-pass.html">&larr; Ch. 11 — Lab: a GPT-2 forward pass</a>
-      <a href="index.html">Index</a>
-      <a href="cap-13-inference-arithmetic.html">Ch. 13 — Inference arithmetic &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part III · Chapter 12 · kernels written against the official Triton tutorials&rsquo; API and checked by reading, not by running; sm_120 support status checked against Triton and PyTorch release notes on 2026-10-22; performance ranges are predictions until lab 11 replaces them, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-11-gpt2-forward-pass.html">&lsaquo; Ch. 11: Lab: a GPT-2 forward pass</a><a class="btn primary" href="cap-13-inference-arithmetic.html">Next: Ch. 13, Inference arithmetic &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part III · Chapter 12 · kernels written against the official Triton tutorials&rsquo; API and checked by reading, not by running; sm_120 support status checked against Triton and PyTorch release notes on 2026-10-22; performance ranges are predictions until lab 11 replaces them, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ch12.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>

@@ -1,60 +1,50 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-boxes="open" data-open="numeral" data-m-rem data-m-links data-page="mlsys/cap-13-inference-arithmetic.html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ch. 13 — Inference arithmetic: FLOPs, bytes, KV cache, prefill vs decode · MLSYS</title>
-<link rel="stylesheet" href="assets/lesson-kit.css">
-<link rel="stylesheet" href="assets/highlight-github.min.css">
-<link rel="stylesheet" href="assets/mlsys.css">
-<link rel="stylesheet" href="assets/ch13.css">
+<link rel="stylesheet" href="assets/mlsys.css?v=8a025acf">
+<link rel="stylesheet" href="assets/ch13.css?v=d95e8fea">
 <link rel="stylesheet" href="../assets/course-figures.css">
+<link rel="stylesheet" href="../assets/fonts.css?v=85396d83">
+<link rel="stylesheet" href="../assets/fonts-reader.css?v=dca14711">
+<link rel="stylesheet" href="assets/reader.css?v=2e27f9e4">
+
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <meta name="theme-color" content="#1546B8">
 <script>if(('serviceWorker' in navigator)&&(location.protocol==='https:'||location.hostname==='localhost'))addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});});</script>
+<script>(function(){var r=document.documentElement;try{var t=localStorage.getItem('roofline-full-theme2');
+if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'deep':'day';if(t!=='day')r.setAttribute('data-theme','deep');}catch(e){}})();</script>
 </head>
 <body class="lk">
-  <nav class="lk-chnav" aria-label="Chapter navigation">
-    <a href="cap-12-triton.html">&larr; Ch. 12 — Triton</a>
-    <a href="index.html">Index</a>
-    <a href="cap-14-flashattention.html">Ch. 14 — FlashAttention 1 &rarr; 2 &rarr;</a>
-  </nav>
+<nav class="side" aria-label="Contents"><div class="in">
+<a class="mark" href="index.html">MLSYS</a>
+<div class="part">Part III · Attention</div>
+<h3><a href="#top">Inference arithmetic<small>13</small></a></h3>
+<div class="progress">Your moves: <b id="ymc">0</b> of 6 done</div>
+<ul><li data-for="s1"><a href="#s1"><small>13.1</small><span>Two phases, four numbers</span></a></li><li data-for="s2"><a href="#s2"><small>13.2</small><span>FLOPs per token, derived</span></a></li><li data-for="s3"><a href="#s3"><small>13.3</small><span>Bytes per token: the KV cache</span></a></li><li data-for="s4"><a href="#s4"><small>13.4</small><span>Prefill: the time to the first token</span></a></li><li data-for="s5"><a href="#s5"><small>13.5</small><span>Decode: shared weights, private caches</span></a></li><li data-for="s6"><a href="#s6"><small>13.6</small><span>Both phases on the roofline</span></a></li><li data-for="s7"><a href="#s7"><small>13.7</small><span>Attention at decode: the intensity that does not move</span></a></li><li data-for="s8"><a href="#s8"><small>13.8</small><span>What the arithmetic misses</span></a></li><li data-for="s9"><a href="#s9"><small>13.9</small><span>The whiteboard estimate, and the calculator</span></a></li><li data-for="s10"><a href="#s10"><small>13.10</small><span>Lab 12: predicted against measured</span></a></li><li class="divider"></li><li class="end" data-for="quiz"><a href="#quiz">Check your understanding</a></li><li class="end" data-for="sources"><a href="#sources">Sources</a></li></ul>
+<div class="prevnext"><a href="cap-12-triton.html">&larr; Ch. 12</a><a href="index.html">&uarr; Index</a><a href="cap-14-flashattention.html">Ch. 14 &rarr;</a></div>
+<button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button>
+</div></nav>
+<div class="page"><div class="top-key"><button class="btn themekey" type="button" aria-label="Switch day or night"><span class="d">&#9789; Night</span><span class="n">&#9788; Day</span></button></div><article id="top">
+  
 
-  <header class="lk-header">
-    <div class="lk-kicker">Part III — Attention · Chapter 13</div>
-    <h1>Inference arithmetic: FLOPs, bytes, KV cache, prefill vs decode</h1>
-    <div class="lk-meta"><span>~55 min read</span><span>2 interactive widgets</span><span>4 plates</span><span>lab 12 · ~45 min on your GPU</span></div>
-  </header>
+  <header class="chap"><div class="num">13</div><div class="kicker">Part III &middot; Attention · Chapter 13</div><div class="numeral" aria-hidden="true">13</div><h1>Inference arithmetic: FLOPs, bytes, KV cache, prefill vs decode</h1><ul class="meta"><li>~55 min read</li><li>2 interactive widgets</li><li>4 plates</li><li>lab 12 · ~45 min on your GPU</li></ul></header>
 
-  <div class="lk-overview">
-    <h2>The chapter in one paragraph</h2>
-    <p>Chapter 1 estimated decode on a whiteboard: read every weight once per token, so tokens per second is bandwidth over model size. It promised this chapter would make that exact, and the exact version has only one new ingredient. Every step of an inference engine costs <strong>max(FLOPs / peak, bytes / bandwidth)</strong> plus overhead, and the bytes are of two kinds: the <strong>weights</strong>, which every sequence in a batch shares, and the <strong>KV cache</strong>, the stored keys and values of each sequence&rsquo;s earlier tokens, which is private to the sequence and grows with its length. <strong>Prefill</strong> pushes a whole prompt through at once, does hundreds of FLOPs per byte and is compute-bound. <strong>Decode</strong> makes one token per sequence per step, reads all the weights and all the caches to do it, and is memory-bound. From counting alone you get the time to the first token, the time per token after that, the throughput, the largest batch that fits in 12 GB, and the batch size and context length where each bound flips, before writing a line of code. The chapter counts GPT-2 small on your card and Llama-3-8B on an H100, builds the calculator, and ends with what the counting misses and why real engines reach 60&ndash;85% of it.</p>
-  </div>
+  <div class="overview"><h2>The chapter in one paragraph</h2><aside class="meta-aside"><ul class="meta-list"><li>~55 min read</li><li>2 interactive widgets</li><li>4 plates</li><li>lab 12 · ~45 min on your GPU</li></ul></aside><div class="ov-learn"><p class="ov-lead">Chapter 1 estimated decode on a whiteboard: read every weight once per token, so tokens per second is bandwidth over model size. It promised this chapter would make that exact, and the exact version has only one new ingredient. Every step of an inference engine costs <strong>max(FLOPs / peak, bytes / bandwidth)</strong> plus overhead, and the bytes are of two kinds: the <strong>weights</strong>, which every sequence in a batch shares, and the <strong>KV cache</strong>, the stored keys and values of each sequence&rsquo;s earlier tokens, which is private to the sequence and grows with its length. <strong>Prefill</strong> pushes a whole prompt through at once, does hundreds of FLOPs per byte and is compute-bound. <strong>Decode</strong> makes one token per sequence per step, reads all the weights and all the caches to do it, and is memory-bound. From counting alone you get the time to the first token, the time per token after that, the throughput, the largest batch that fits in 12 GB, and the batch size and context length where each bound flips, before writing a line of code. The chapter counts GPT-2 small on your card and Llama-3-8B on an H100, builds the calculator, and ends with what the counting misses and why real engines reach 60&ndash;85% of it.</p></div></div>
 
-  <div class="lk-toc">
-    <h3>In this chapter</h3>
-    <ol>
-      <li><a href="#s1">Two phases, four numbers</a></li>
-      <li><a href="#s2">FLOPs per token, derived</a></li>
-      <li><a href="#s3">Bytes per token: the KV cache</a></li>
-      <li><a href="#s4">Prefill: the time to the first token</a></li>
-      <li><a href="#s5">Decode: shared weights, private caches</a></li>
-      <li><a href="#s6">Both phases on the roofline</a></li>
-      <li><a href="#s7">Attention at decode: the intensity that does not move</a></li>
-      <li><a href="#s8">What the arithmetic misses</a></li>
-      <li><a href="#s9">The whiteboard estimate, and the calculator</a></li>
-      <li><a href="#s10">Lab 12: predicted against measured</a></li>
-      <li><a href="#quiz">Check your understanding</a></li>
-    </ol>
-  </div>
+  
 
   <section id="s1">
-    <h2>1. Two phases, four numbers</h2>
+    <h2><small>13.1</small><a href="#s1">Two phases, four numbers</a></h2>
 
+    <aside class="m-rem"><p><b><var>M</var>, rows in flight</b> <a href="cap-06-neural-networks-as-a-workload.html#s2">ch.&nbsp;6 &sect;2</a>. The kernels see a matrix of <var>M</var> = <var>B</var>&middot;<var>T</var> rows, one per token in flight. Prefill has many rows; decode for one user has <var>M</var> = 1.</p></aside>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p>A request to a language model is a prompt of <var>T</var><sub>p</sub> tokens followed by <var>T</var><sub>out</sub> generated tokens, and the engine handles the two parts differently because they offer the GPU different amounts of parallel work (chapter 6&rsquo;s <var>M</var>). <strong>Prefill</strong> runs the whole prompt through the model in one forward pass: <var>M</var> = <var>T</var><sub>p</sub> rows, every linear layer a real GEMM, and attention over the full <var>T</var><sub>p</sub>&times;<var>T</var><sub>p</sub> causal triangle (chapter 10). Its output is one thing: the next token. <strong>Decode</strong> then runs one forward pass per generated token: <var>M</var> = 1 row per sequence, every linear layer a GEMV, and attention of one query against everything before it. Each decode step appends one token and runs again, <var>T</var><sub>out</sub> times. A <strong>generation step</strong> is one such pass; with a batch of <var>B</var> sequences, one step produces <var>B</var> tokens.</p>
 
-    <figure class="lk-fig" role="img" aria-label="A timeline in milliseconds. Sequence A: one prefill block from 0 to 6.3 ms, then decode steps of 0.85 ms each, one output token at the end of each. From the fourth step sequence B joins: the steps widen to 0.97 ms and each produces two tokens, one per sequence. A bracket marks TTFT from 0 to the first token, another marks TPOT between two tokens.">
+    <figure class="lk-fig wide" role="img" aria-label="A timeline in milliseconds. Sequence A: one prefill block from 0 to 6.3 ms, then decode steps of 0.85 ms each, one output token at the end of each. From the fourth step sequence B joins: the steps widen to 0.97 ms and each produces two tokens, one per sequence. A bracket marks TTFT from 0 to the first token, another marks TPOT between two tokens.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 222" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>One request on a timeline: a prefill, then decode steps</title>
@@ -111,7 +101,7 @@
         <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="8" y="187" width="16" height="10" fill="var(--lk-forest)"/><text x="30" y="196">prefill: 1,024 tokens, compute-bound</text><rect x="262" y="187" width="8" height="10" fill="var(--lk-vermilion)"/><text x="276" y="196">decode step: memory-bound, weights + cache</text><circle cx="13" cy="211" r="3.6" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".6"/><text x="30" y="215">one output token</text><line x1="146" y1="211" x2="164" y2="211" stroke="var(--lk-vermilion)"/><text x="170" y="215">one step serves both rows</text><path d="M346 206v5h18v-5" fill="none" stroke="var(--lk-cobalt-dark)" stroke-width="1.3"/><text x="370" y="215">TTFT: to the first token; TPOT: between tokens</text></g>
       </svg>
       </div>
-      <figcaption><b>Fig. 1</b> &mdash; One request on a timeline. A single prefill pass over the prompt, then one decode step per output token; every step reads all the weights and the sequence&rsquo;s whole cache. TTFT is the prefill pass (its last position already yields the first token); TPOT is the spacing of the ticks, which widens slowly as the cache grows. A second sequence batched with the first shares the weight reads of every step, so the ticks barely move apart while the tokens per step double. Drawn to GPT-2 small&rsquo;s proportions on your card in FP32 (prefill of 1,024 tokens about 6 ms, steps about 0.9 ms); illustrative, not measured.</figcaption>
+      <figcaption><b>Figure 1.</b> One request on a timeline. A single prefill pass over the prompt, then one decode step per output token; every step reads all the weights and the sequence&rsquo;s whole cache. TTFT is the prefill pass (its last position already yields the first token); TPOT is the spacing of the ticks, which widens slowly as the cache grows. A second sequence batched with the first shares the weight reads of every step, so the ticks barely move apart while the tokens per step double. Drawn to GPT-2 small&rsquo;s proportions on your card in FP32 (prefill of 1,024 tokens about 6 ms, steps about 0.9 ms); illustrative, not measured.</figcaption>
     </figure>
 
     <p>Four numbers describe the result, and they are the ones every engine benchmark reports:</p>
@@ -126,8 +116,9 @@
   </section>
 
   <section id="s2">
-    <h2>2. FLOPs per token, derived</h2>
+    <h2><small>13.2</small><a href="#s2">FLOPs per token, derived</a></h2>
 
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p></aside>
     <p>Chapter 6 counted GPT-2 small by hand: 2 FLOPs per weight of every linear layer, including the LM head. Here is the general form, because the calculator needs it for models that are shaped differently. Call <var>N</var><sub>mm</sub> the number of parameters that sit in matrix multiplies: the four linear layers of every block (or seven in a SwiGLU block: Q, K, V, O, gate, up, down), plus the LM head, which is a GEMM over the vocabulary whether or not its weights are tied to the input embedding. Not in <var>N</var><sub>mm</sub>: the input embedding (a gather, 0 FLOPs), position embeddings, and the norms&rsquo; scale vectors. Then every token, in prefill or decode, costs</p>
     <p class="c13-eq">FLOPs<sub>linear</sub> = 2 &middot; <var>N</var><sub>mm</sub> per token</p>
     <p>Attention is the one term that depends on how many tokens came before. For one query at position <var>t</var>, each head computes <var>t</var> scores (a dot product of length <var>D</var>: 2<var>D</var> FLOPs each) and a weighted sum of <var>t</var> value vectors (2<var>D</var> again); over <var>H</var> heads that is 4<var>t</var>&middot;<var>H</var>&middot;<var>D</var> = 4<var>t</var>&middot;<var>C</var> per layer (in GPT-2, <var>H</var>&middot;<var>D</var> = <var>C</var>; in a GQA model the query heads still number <var>H</var>, so the count is unchanged), and over <var>L</var> layers:</p>
@@ -142,17 +133,30 @@
       <tr><td>4 <var>L C</var>, attention FLOPs per token per context token</td><td>36,864</td><td>524,288</td></tr>
       <tr><td>Attention at <var>t</var> = 1,024, as a share of the token&rsquo;s FLOPs</td><td>37.7 M, 13%</td><td>537 M, 3.5%</td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p></aside>
     <p>So at the context lengths of this course, attention is a small share of the <em>FLOPs</em> even for GPT-2, whose head dimension is small and whose layers are thin. That is worth holding on to, because sections 5 and 7 will show that attention is a large share of the <em>bytes</em>, and chapter 14 will show that it is the dominant share of the <em>time</em> at long context for a third reason again. Three different reasons, three different fixes.</p>
 
-    <details class="ym">
-      <summary>Your move: at what context length do the attention FLOPs per token equal the linear FLOPs, for GPT-2 small and for Llama-3-8B? Set 4<var>LtC</var> = 2<var>N</var><sub>mm</sub>.</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">At what context length do the attention FLOPs per token equal the linear FLOPs, for GPT-2 small and for Llama-3-8B? Set 4<var>LtC</var> = 2<var>N</var><sub>mm</sub>.</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>GPT-2 small: layers <var>L</var></dt><dd>12</dd><dt>GPT-2 small: width <var>C</var></dt><dd>768</dd><dt>GPT-2 small: <var>N</var><sub>mm</sub></dt><dd>123,614,976</dd><dt>Llama-3-8B: layers <var>L</var></dt><dd>32</dd><dt>Llama-3-8B: width <var>C</var></dt><dd>4,096</dd><dt>Llama-3-8B: <var>N</var><sub>mm</sub></dt><dd>7,504,658,432</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">GPT-2 small crossover</span><input inputmode="decimal" autocomplete="off" data-want="6700" data-tol="0.05" data-hint="Hint: solve 4&lt;var&gt;LtC&lt;/var&gt; = 2&lt;var&gt;N&lt;/var&gt;&lt;sub&gt;mm&lt;/sub&gt; for &lt;var&gt;t&lt;/var&gt;, with the GPT-2 small numbers." aria-label="GPT-2 small crossover"> tokens</label>
+<label><span class="l">Llama-3-8B crossover</span><input inputmode="decimal" autocomplete="off" data-want="28600" data-tol="0.05" data-hint="Hint: the same formula, &lt;var&gt;t&lt;/var&gt; = &lt;var&gt;N&lt;/var&gt;&lt;sub&gt;mm&lt;/sub&gt; / (2&lt;var&gt;LC&lt;/var&gt;), with the Llama-3-8B numbers." aria-label="Llama-3-8B crossover"> tokens</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p><var>t</var> = <var>N</var><sub>mm</sub> / (2<var>LC</var>): 123.6 M / (2 &times; 12 &times; 768) &asymp; <strong>6,700 tokens</strong> for GPT-2 small, and 7.5 G / (2 &times; 32 &times; 4,096) &asymp; <strong>28,600</strong> for Llama-3-8B. Below those lengths the linear layers own the FLOPs. Wide models push the crossover out because <var>N</var><sub>mm</sub> grows with <var>C</var><sup>2</sup> while attention grows with <var>C</var>. A context of 128K tokens, which Llama 3.1 supports, is well past it: there, and only there, attention dominates even the FLOPs.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s3">
-    <h2>3. Bytes per token: the KV cache</h2>
+    <h2><small>13.3</small><a href="#s3">Bytes per token: the KV cache</a></h2>
 
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p></aside>
     <p>Chapter 10 made the observation that decode is built on: the key and value vectors of a token depend only on that token and the layers below it, never on the tokens after it, so once computed they never change. Recomputing them at every step would cost a full prefill per token. Instead the engine <strong>caches</strong> them: after the QKV projection of every layer, the new token&rsquo;s <var>k</var> and <var>v</var> (one <var>D</var>-vector per KV head) are appended to a per-sequence, per-layer buffer, and attention reads the buffer instead of recomputing it. The cache is therefore the model&rsquo;s memory of the conversation, and its size per token is fixed by the architecture:</p>
     <p class="c13-eq">bytes<sub>KV</sub> per token = 2 &middot; <var>L</var> &middot; <var>H</var><sub>kv</sub> &middot; <var>D</var> &middot; <var>s</var></p>
     <p>where the 2 is &ldquo;keys and values&rdquo;, <var>H</var><sub>kv</sub> is the number of KV heads (equal to <var>H</var> in GPT-2; 8 against 32 query heads in Llama 3&rsquo;s grouped-query attention, which exists precisely to shrink this number), and <var>s</var> is the bytes per element of the cache&rsquo;s format, which need not be the weights&rsquo; format.</p>
@@ -166,7 +170,7 @@
     </table>
     <p>The last row is why GQA exists: it divides the cache by the group size (4 here) at a small cost in model quality, and section 7 shows it also multiplies attention&rsquo;s intensity by the same factor.</p>
 
-    <figure class="lk-fig" role="img" aria-label="The engine&#8217;s k_cache and v_cache for one layer, drawn for 2 sequences and 4 heads: each (sequence, head) is a strip of slots up to T_max = 1,024, filled up to position 640; the slot at position 640 is written this step, all filled slots are read. The shelf repeats for each of the 12 layers. Offset = ((b times H + h) times T_max + p) times D; 73,728 bytes written per token; t times 73,728 bytes read per step per sequence.">
+    <figure class="lk-fig wide" role="img" aria-label="The engine&#8217;s k_cache and v_cache for one layer, drawn for 2 sequences and 4 heads: each (sequence, head) is a strip of slots up to T_max = 1,024, filled up to position 640; the slot at position 640 is written this step, all filled slots are read. The shelf repeats for each of the 12 layers. Offset = ((b times H + h) times T_max + p) times D; 73,728 bytes written per token; t times 73,728 bytes read per step per sequence.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 384" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>The engine&rsquo;s KV cache for one layer</title>
@@ -280,24 +284,25 @@
         <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="8" y="363" width="8" height="11" fill="var(--lk-gold)" stroke="var(--lk-ink)" stroke-width=".5"/><text x="22" y="372">written this step (p)</text><rect x="164" y="363" width="20" height="10" fill="url(#c13-h2)" stroke="var(--lk-rule)" stroke-width=".8"/><text x="190" y="372">read this step (positions 0 .. p)</text><rect x="402" y="363" width="20" height="10" fill="var(--lk-paper)" stroke="var(--lk-rule)" stroke-width=".8"/><text x="428" y="372">reserved for T_max, still empty</text></g>
       </svg>
       </div>
-      <figcaption><b>Fig. 2</b> &mdash; The engine&rsquo;s cache, as chapter 11&rsquo;s contract lays it out: per layer, <code>k_cache</code> and <code>v_cache</code> of shape [<var>B</var>][<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>], one head&rsquo;s keys contiguous. A decode step writes one <var>D</var>-vector into every (layer, head) slot at position <var>p</var> (the thin lit column) and then reads every filled position of every (layer, head) back (the whole shaded shelf). The write is 73.7 KB per token for GPT-2 small in FP32; the read is that times the context length, every step, per sequence.</figcaption>
+      <figcaption><b>Figure 2.</b> The engine&rsquo;s cache, as chapter 11&rsquo;s contract lays it out: per layer, <code>k_cache</code> and <code>v_cache</code> of shape [<var>B</var>][<var>H</var>][<var>T</var><sub>max</sub>][<var>D</var>], one head&rsquo;s keys contiguous. A decode step writes one <var>D</var>-vector into every (layer, head) slot at position <var>p</var> (the thin lit column) and then reads every filled position of every (layer, head) back (the whole shaded shelf). The write is 73.7 KB per token for GPT-2 small in FP32; the read is that times the context length, every step, per sequence.</figcaption>
     </figure>
 
     <p>Two things follow immediately. The cache is <strong>written once per token and read once per step per sequence</strong>, so at context <var>t</var> a decode step reads <var>t</var> &times; bytes<sub>KV</sub> for each sequence, and the engine&rsquo;s <code>kv_append</code> is a trivial kernel next to the attention that reads the result. And the cache is <strong>allocated for the maximum context</strong> in the engine&rsquo;s plan (<var>T</var><sub>max</sub> = 1,024 for GPT-2), so memory is reserved by the slot, not by the token: a sequence that has used 100 of 1,024 slots still holds 75.5 MB. Chapter 17&rsquo;s paged caches fix that; for now the planning rule is simply</p>
     <p class="c13-eq">memory = weights + <var>B</var> &middot; <var>T</var><sub>max</sub> &middot; bytes<sub>KV</sub> + activations (small: a few multiples of <var>B</var>&middot;<var>C</var>&middot;<var>s</var>, plus the <var>B</var>&middot;<var>V</var> logits)</p>
     <p>and the largest batch that fits is (VRAM &minus; weights) / (<var>T</var><sub>max</sub> &middot; bytes<sub>KV</sub>): for GPT-2 small in FP32 on your card, (12 &minus; 0.5) GB / 75.5 MB &asymp; <strong>152 sequences</strong> of 1,024 tokens. For Llama-3-8B in FP16 the weights alone are 16 GB and the question does not arise on a 12 GB card until Part IV quantizes them.</p>
 
-    <details class="ym">
-      <summary>Your move: a chat with 300 tokens of system prompt shared by every user. Does the cache for those 300 tokens have to be private to each sequence?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">A chat with 300 tokens of system prompt shared by every user. Does the cache for those 300 tokens have to be private to each sequence?</p><details><summary class="btn">Show the answer</summary>
       <p>No, and that is prefix caching. The keys and values of a token depend only on it and on the tokens before it (the causal mask), so every sequence that starts with the same 300 tokens computes exactly the same 300 cache entries, and they can be computed once and shared, which also removes 300 tokens of prefill per request. It needs a cache layout in which a sequence&rsquo;s entries are not one contiguous [<var>T</var><sub>max</sub>][<var>D</var>] strip, since the shared part lives elsewhere: that is one more reason for the paged layout of chapter 17. The arithmetic stays the same: the step still <em>reads</em> the 300 entries for each sequence that attends to them.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s4">
-    <h2>4. Prefill: the time to the first token</h2>
+    <h2><small>13.4</small><a href="#s4">Prefill: the time to the first token</a></h2>
 
+    <aside class="m-link"><p><a href="cap-11-gpt2-forward-pass.html">Ch.&nbsp;11 &middot; Lab</a></p></aside>
     <p>A prefill of <var>T</var><sub>p</sub> tokens runs every linear layer with <var>M</var> = <var>T</var><sub>p</sub> rows and attention over the causal triangle, so the useful FLOPs are the per-token counts of section 2 summed over positions 0 to <var>T</var><sub>p</sub> &minus; 1, with one exception: the LM head runs once, on the last position, because prefill needs only the logits of the next token (chapter 11&rsquo;s engine computes just that row). So the head&rsquo;s 2<var>VC</var> (<var>V</var> the vocabulary) is not in prefill&rsquo;s per-token term; decode still pays it every step, since its one position is always the last:</p>
     <p class="c13-eq">FLOPs<sub>prefill</sub> = <var>T</var><sub>p</sub> &middot; 2(<var>N</var><sub>mm</sub> &minus; <var>VC</var>) + 2<var>VC</var> + 2 &middot; <var>L</var> &middot; <var>T</var><sub>p</sub><sup>2</sup> &middot; <var>C</var></p>
+    <aside class="m-link"><p><a href="cap-10-transformer-gpu-view.html">Ch.&nbsp;10 &middot; The transformer from the GPU’s point of view</a></p><p><a href="cap-14-flashattention.html">Ch.&nbsp;14 &middot; FlashAttention 1 to 2</a></p></aside>
     <p>(the attention term is 4<var>LtC</var> summed over <var>t</var>, which gives 2<var>LT</var><sub>p</sub><sup>2</sup><var>C</var>; a naive kernel that computes the masked half too does twice that, chapter 10&rsquo;s causal waste). The bytes are the weights once, the cache written once, and the activations passing between kernels, which chapter 11&rsquo;s timeline measured and which are small next to either with a fused attention kernel; chapter 10&rsquo;s naive attention, which the engine runs, moves about 2.6 GB of score traffic per prefill at <var>T</var><sub>p</sub> = 1,024, more than the weights and the cache together, and that is part of why a measured prefill lands above the roof (chapter 14 removes it). For GPT-2 small at <var>T</var><sub>p</sub> = 1,024 in FP32 on your card:</p>
     <table>
       <tr><th></th><th>Count</th><th>Time at the roof</th></tr>
@@ -306,19 +311,33 @@
       <tr><td>Bytes: 498 MB weights + 75.5 MB cache written (+ activations)</td><td>&asymp; 0.6&ndash;1.2 GB</td><td>0.9&ndash;1.8 ms</td></tr>
       <tr><td>Intensity</td><td colspan="2">&asymp; 160&ndash;320 FLOP/B: far right of the FP32 ridge of 46. <strong>Compute-bound.</strong></td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-06-neural-networks-as-a-workload.html">Ch.&nbsp;6 &middot; Neural networks as a workload</a></p><p><a href="cap-07-matmul-tiling.html">Ch.&nbsp;7 &middot; Matmul I</a></p></aside>
     <p>That is chapter 6&rsquo;s &ldquo;about 9 ms&rdquo; guess, now itemized and without the head at the 1,023 positions whose logits nobody reads, and the <strong>TTFT</strong> for a 1,024-token prompt is this plus one sampling pass, at the roof. Two readings of the table matter later. First, prefill time grows linearly with <var>T</var><sub>p</sub> through the linear term and quadratically through attention, but the quadratic term is small until the crossover of section 2&rsquo;s guess, so TTFT is nearly proportional to prompt length at these sizes: 1,024 tokens cost about 6.3 ms, twice the 3.0 ms of 512 tokens, not four times. Second, the bound is set by the FP32 peak because the engine is FP32; in FP16 on the tensor cores the same prompt would take 3.1 ms at the roof, and the bytes would halve too, so it would stay compute-bound. Prefill is where chapters 7, 8 and 12 pay off, and where a single H100 is 16 times your card (989 against 61.7 TFLOPS in FP16).</p>
 
-    <details class="ym">
-      <summary>Your move: an engine prefills a batch of 8 prompts of 1,024 tokens together rather than one after the other. How does the total prefill time change, and the TTFT of the first prompt?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">An engine prefills a batch of 8 prompts of 1,024 tokens together rather than one after the other. How does the total prefill time change, and the TTFT of the first prompt?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Prefill of one 1,024-token prompt, at the roof</dt><dd>6.3 ms</dd><dt>Prefill is</dt><dd>compute-bound</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Total prefill, 8 prompts</span><input inputmode="decimal" autocomplete="off" data-want="50" data-tol="0.1" data-hint="Hint: a compute-bound phase takes time in proportion to its FLOPs, and 8 prompts are 8 times the FLOPs of one." aria-label="Total prefill, 8 prompts"> ms</label>
+<label><span class="l">TTFT of the first prompt</span><input inputmode="decimal" autocomplete="off" data-want="50" data-tol="0.1" data-hint="Hint: the first token of the batch appears only when the whole batched prefill has finished." aria-label="TTFT of the first prompt"> ms</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>The total barely changes: prefill is compute-bound, and 8 prompts together are 8 times the FLOPs for the same peak, so about 8 &times; 6.3 = 50 ms either way (slightly less together, because the weights are read once instead of 8 times and the GEMMs are larger and closer to the roof). But the first prompt&rsquo;s TTFT grows from 6.3 to 50 ms, because its token is only produced when the whole batch finishes. Batching prefill buys throughput only through the small kernel-efficiency gain, at a real latency cost; batching decode, next section, is a different story. Engines therefore schedule the two phases differently, and chunk long prefills so that decode steps of other users can run between the chunks.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s5">
-    <h2>5. Decode: shared weights, private caches</h2>
+    <h2><small>13.5</small><a href="#s5">Decode: shared weights, private caches</a></h2>
 
     <p>A decode step for a batch of <var>B</var> sequences at context <var>t</var> does <var>B</var> &times; (2<var>N</var><sub>mm</sub> + 4<var>LtC</var>) FLOPs, and moves two kinds of bytes:</p>
     <p class="c13-eq">bytes<sub>step</sub> = <var>W</var> + <var>B</var> &middot; <var>t</var> &middot; bytes<sub>KV</sub></p>
+    <aside class="m-rem"><p><b>Batch dial</b> <a href="cap-04-roofline.html#s4">ch.&nbsp;4 &sect;4</a>. Batch size slides a linear layer&rsquo;s point to the right along the bandwidth slope: each weight is read once and used <var>B</var> times.</p></aside>
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <p>The weights <var>W</var> are read once for the whole batch: that is chapter 4&rsquo;s batch dial, every weight used <var>B</var> times per trip from DRAM. The caches are read once <em>each</em>: <var>B</var> sequences, <var>B</var> private caches, no sharing. The step time is the larger of the two roof times, and the table shows it for GPT-2 small in FP32 at <var>t</var> = 1,024 on your card, at the spec bandwidth (lab 0&rsquo;s 88% makes every memory time 14% longer):</p>
     <table>
       <tr><th><var>B</var></th><th>FLOPs</th><th>Weight bytes</th><th>Cache bytes</th><th>Compute time</th><th>Memory time</th><th>Step</th><th>Tokens/s, all sequences</th><th>Memory, with caches</th></tr>
@@ -328,27 +347,41 @@
       <tr><td>64</td><td>18.2 G</td><td>498 MB</td><td>4.83 GB</td><td>590 &micro;s</td><td>7.93 ms</td><td><strong>7.93 ms</strong></td><td>8,070</td><td>5.3 GB</td></tr>
       <tr><td>128</td><td>36.5 G</td><td>498 MB</td><td>9.66 GB</td><td>1.18 ms</td><td>15.1 ms</td><td><strong>15.1 ms</strong></td><td>8,460</td><td>10.2 GB</td></tr>
     </table>
+    <aside class="m-link"><p><a href="cap-01-the-job-and-the-machine.html">Ch.&nbsp;1 &middot; The job, the machine, and your bench</a></p></aside>
     <p>Read it row by row and the shape of decode appears. At <var>B</var> = 1 the step is the weights plus a little: chapter 1&rsquo;s 0.74 ms becomes 0.85 ms once the cache is counted, and the ceiling is 1,170 tokens/s instead of 1,350. The compute time is a hundred times smaller: the math units are idle 99% of the step. Going to <var>B</var> = 4 costs 40% more time for 4 times the tokens, the batch dial working as chapter 4 said. But the cache column grows with <var>B</var> while the weight column does not, and by <var>B</var> = 16 the caches are more bytes than the weights; from there each doubling of the batch nearly doubles the step, and throughput saturates near 8,500 tokens/s. The batch where the two columns cross is</p>
     <p class="c13-eq"><var>B</var> &middot; <var>t</var> = <var>W</var> / bytes<sub>KV</sub> &nbsp;=&nbsp; 498 MB / 73.7 KB &asymp; 6,750 token-slots, i.e. <var>B</var> &asymp; 6.6 at <var>t</var> = 1,024</p>
     <p>and it is a count of <em>cached tokens across the batch</em>, not of sequences: 8 sequences of 1,024 and 64 of 128 cost the same. Compute never catches up in this table: the batch at which it would (chapter 1&rsquo;s 92, and it is 92 in FP32 too: the peak halves and the bytes per weight double) was computed without a cache, and the cache adds bytes faster than the batch adds FLOPs. Section 6 says exactly when that is so.</p>
 
     <p>Move the two dials and watch the two kinds of bytes:</p>
-    <div id="w-bytes" class="w"></div>
+    <div id="w-bytes" class="w wide"></div>
 
-    <details class="ym">
-      <summary>Your move: same model, same <var>B</var> = 64, but the sequences are 128 tokens long instead of 1,024. Estimate the step time and the tokens per second from the table&rsquo;s columns.</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">Same model, same <var>B</var> = 64, but the sequences are 128 tokens long instead of 1,024. Estimate the step time and the tokens per second from the table&rsquo;s columns.</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Weight bytes</dt><dd>498 MB</dd><dt>Cache bytes, <var>B</var> = 64, 1,024 tokens</dt><dd>4.83 GB</dd><dt>DRAM bandwidth</dt><dd>672 GB/s</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Step time</span><input inputmode="decimal" autocomplete="off" data-want="1.64" data-tol="0.06" data-hint="Hint: the cache bytes scale with &lt;var&gt;t&lt;/var&gt;, so divide 4.83 GB by 8, add the weights, and divide by the bandwidth." aria-label="Step time"> ms</label>
+<label><span class="l">Tokens per second</span><input inputmode="decimal" autocomplete="off" data-want="39000" data-tol="0.06" data-hint="Hint: one step produces 64 tokens; divide 64 by the step time in seconds." aria-label="Tokens per second"> tokens/s</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>The cache bytes scale with <var>t</var>: 4.83 GB / 8 = 0.6 GB, so the step moves 498 + 604 MB &asymp; 1.1 GB, 1.64 ms at 672 GB/s, and 64 tokens per step is about <strong>39,000 tokens/s</strong>, nearly five times the 1,024-token row. Same batch, same weights, same FLOPs per token; only the private bytes changed. This is why serving throughput is quoted at a context length, and why short-context benchmarks flatter every engine.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s6">
-    <h2>6. Both phases on the roofline</h2>
+    <h2><small>13.6</small><a href="#s6">Both phases on the roofline</a></h2>
 
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <p>Put each phase&rsquo;s FLOPs over its bytes and the two phases land in chapter 4&rsquo;s two corners. Prefill: hundreds of FLOP/B, on the roof. Decode at <var>B</var> = 1: 0.28 GFLOP over 573 MB, <strong>0.5 FLOP/B</strong>, the bottom of the slope. The batch dial moves decode right, but not the way it moved a bare GEMV, because the cache bytes grow with <var>B</var> too:</p>
     <p class="c13-eq">intensity<sub>decode</sub>(<var>B</var>) = <var>B</var> (2<var>N</var><sub>mm</sub> + 4<var>LtC</var>) / (<var>W</var> + <var>B t</var> bytes<sub>KV</sub>) &nbsp;&rarr;&nbsp; (2<var>N</var><sub>mm</sub> + 4<var>LtC</var>) / (<var>t</var> bytes<sub>KV</sub>) as <var>B</var> &rarr; &infin;</p>
+    <aside class="m-rem"><p><b>Ridge point</b> <a href="cap-04-roofline.html#s1">ch.&nbsp;4 &sect;1</a>. Where the bandwidth slope meets a compute roof: the intensity a kernel needs before the math units can be the limit. 46 FLOPs per byte for FP32.</p></aside>
     <p>So there is a ceiling on how far right decode can go, set by the context length alone: at <var>t</var> = 1,024 for GPT-2 small in FP32 it is 285 M / 75.5 MB &asymp; 3.8 FLOP/B, a twelfth of the FP32 ridge. <strong>Compute catches up only if the limit exceeds the ridge</strong>, i.e. if <var>t</var> &middot; bytes<sub>KV</sub> &lt; 2<var>N</var><sub>mm</sub> &middot; (bandwidth / peak), ignoring the attention FLOPs, which only help a little. The right-hand side is the per-sequence weight work expressed as bytes: 5.4 MB for GPT-2 small in FP32 on your card, 51 MB for Llama-3-8B in FP16 on an H100. The left-hand side is one sequence&rsquo;s cache: 75.5 MB and 268 MB (at 2,048) respectively. Both fail, by an order of magnitude. In the language of chapter 4&rsquo;s roofline widget: the linear layers batch, attention does not, and once the cache is the larger part of the bytes the whole step inherits attention&rsquo;s behaviour.</p>
 
-    <figure class="lk-fig" role="img" aria-label="Log-log roofline of the RTX 5070 in FP32: bandwidth slope of 672 GB/s up to the ridge at 46 FLOP per byte, then the 30.9 TFLOP/s roof. Prefill of 1,024 tokens sits on the roof at about 160 FLOP per byte. Decode at context 1,024 climbs the slope from 0.5 FLOP per byte at B = 1 to 3.7 at B = 256, flattening towards a limit at 3.77 set by the cache. Without the cache the same batches would climb to the ridge at B = 92.">
+    <figure class="lk-fig wide" role="img" aria-label="Log-log roofline of the RTX 5070 in FP32: bandwidth slope of 672 GB/s up to the ridge at 46 FLOP per byte, then the 30.9 TFLOP/s roof. Prefill of 1,024 tokens sits on the roof at about 160 FLOP per byte. Decode at context 1,024 climbs the slope from 0.5 FLOP per byte at B = 1 to 3.7 at B = 256, flattening towards a limit at 3.77 set by the cache. Without the cache the same batches would climb to the ridge at B = 92.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 292" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>Prefill and decode on the RTX 5070 FP32 roofline</title>
@@ -375,27 +408,43 @@
         <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="84" y="39" width="9" height="9" fill="var(--lk-forest)"/><text x="100" y="47">prefill, T = 1,024 (on the roof)</text><circle cx="88.5" cy="60" r="4" fill="var(--lk-cobalt)"/><text x="100" y="64">decode at t = 1,024, batch B</text><line x1="83" y1="77" x2="94" y2="77" stroke="var(--lk-gold)" stroke-width="1.6" stroke-dasharray="4 2"/><text x="100" y="81">limit at t = 1,024 (cache): 3.77</text><line x1="82" y1="94" x2="95" y2="94" stroke="var(--lk-steel)" stroke-width="4" stroke-dasharray="5 3"/><text x="100" y="98">if the cache were free (ch. 1)</text></g>
       </svg>
       </div>
-      <figcaption><b>Fig. 3</b> &mdash; The two phases on your card&rsquo;s FP32 roofline (spec bandwidth). Prefill of 1,024 tokens sits on the compute roof. Decode at <var>t</var> = 1,024 starts at 0.5 FLOP/B and climbs with the batch along the slope, but the climb flattens towards the dashed limit at 3.8 FLOP/B set by the cache, far short of the ridge at 46; the grey trail shows where the same batches would sit if the cache were free, reaching the ridge near <var>B</var> = 92. Modelled from the counts of sections 2 to 5.</figcaption>
+      <figcaption><b>Figure 3.</b> The two phases on your card&rsquo;s FP32 roofline (spec bandwidth). Prefill of 1,024 tokens sits on the compute roof. Decode at <var>t</var> = 1,024 starts at 0.5 FLOP/B and climbs with the batch along the slope, but the climb flattens towards the dashed limit at 3.8 FLOP/B set by the cache, far short of the ridge at 46; the grey trail shows where the same batches would sit if the cache were free, reaching the ridge near <var>B</var> = 92. Modelled from the counts of sections 2 to 5.</figcaption>
     </figure>
 
+    <aside class="m-link"><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p></aside>
     <p>There are three ways to move the dashed line, and Parts III and IV are organized around them: make bytes<sub>KV</sub> smaller (fewer KV heads: GQA and MQA; narrower cache formats: FP8 and INT4 caches with per-block scales, chapter 16), make <var>W</var> smaller so the cache matters sooner but the step is shorter (weight quantization, chapter 16), and make the cache bytes that are read actually arrive at full bandwidth (the decode-attention kernels of chapter 15, which is the next section&rsquo;s problem).</p>
   </section>
 
   <section id="s7">
-    <h2>7. Attention at decode: the intensity that does not move</h2>
+    <h2><small>13.7</small><a href="#s7">Attention at decode: the intensity that does not move</a></h2>
 
+    <aside class="m-rem"><p><b>GEMV</b> <a href="cap-04-roofline.html#s4">ch.&nbsp;4 &sect;4</a>. A matrix-times-vector product: each weight is read once and used once, so intensity is about 1 FLOP per byte in FP16.</p></aside>
+    <aside class="m-link"><p><a href="cap-04-roofline.html">Ch.&nbsp;4 &middot; The roofline</a></p></aside>
     <p>Inside the decode step, the attention kernel is the one that reads the cache, and its own intensity is fixed by the architecture, not the batch. For one query head against one cached position: 2<var>D</var> FLOPs for the score and 2<var>D</var> for the value, against 2<var>D</var>&middot;<var>s</var> bytes of key and value read: <strong>2 / <var>s</var> FLOP per byte</strong>, 0.5 in FP32, 1 in FP16, 2 in FP8. A batch does not change it (chapter 4&rsquo;s guess: each sequence reads its own cache), and more heads do not either, because each head reads its own keys. The one thing that does is <strong>GQA</strong>: when <var>g</var> = <var>H</var> / <var>H</var><sub>kv</sub> query heads share one KV head, the kernel can load each key and value once and use it for <var>g</var> dot products, so the intensity becomes 2<var>g</var> / <var>s</var>: 4 FLOP/B for Llama 3 in FP16. Still a twenty-third of your card&rsquo;s tensor-core ridge of 92. Decode attention is a GEMV over the cache, memory-bound at any batch, and a kernel for it has one job: read the cache at the full 672 GB/s.</p>
 
+    <aside class="m-rem"><p><b>Little&rsquo;s law</b> <a href="cap-03-memory-hierarchy.html#s5">ch.&nbsp;3 &sect;5</a>. It asks for about 336 KB of bytes in flight to saturate 672 GB/s at about 500 ns of latency, roughly 7 KB per SM.</p></aside>
+    <aside class="m-link"><p><a href="cap-15-decode-attention.html">Ch.&nbsp;15 &middot; Decode attention</a></p><p><a href="cap-03-memory-hierarchy.html">Ch.&nbsp;3 &middot; The memory hierarchy</a></p></aside>
     <p>That job is harder than it sounds, and it is chapter 15. The shape is one query row per (sequence, head) against <var>t</var> keys: at <var>B</var> = 1 and <var>H</var> = 12 there are 12 such rows, one block each in a naive kernel, on a card with 48 SMs; chapter 3&rsquo;s Little&rsquo;s law says 12 blocks cannot keep enough bytes in flight to pull more than a fraction of the bandwidth. The arithmetic of this chapter assumes the cache streams at full speed; the lab&rsquo;s <code>bench-decode</code> will show the engine&rsquo;s simple decode kernel does not, and the gap is what split-K (FlashDecoding) closes.</p>
 
-    <details class="ym">
-      <summary>Your move: switch the engine&rsquo;s cache from FP32 to FP16 while the weights stay FP32. For GPT-2 small at <var>B</var> = 64, <var>t</var> = 1,024, what happens to the step time, from the table in section 5?</summary>
+    <div class="move check"><h4>Your move</h4><p class="q">Switch the engine&rsquo;s cache from FP32 to FP16 while the weights stay FP32. For GPT-2 small at <var>B</var> = 64, <var>t</var> = 1,024, what happens to the step time, from the table in section 5?</p>
+<div class="sub">Given</div>
+<dl class="given"><dt>Weight bytes</dt><dd>498 MB</dd><dt>Cache bytes in FP32, <var>B</var> = 64, <var>t</var> = 1,024</dt><dd>4.83 GB</dd><dt>DRAM bandwidth</dt><dd>672 GB/s</dd><dt>Step time with the FP32 cache</dt><dd>7.93 ms</dd></dl>
+<div class="sub">Your answer</div>
+<div class="ans">
+<label><span class="l">Step time, FP16 cache</span><input inputmode="decimal" autocomplete="off" data-want="4.3" data-tol="0.06" data-hint="Hint: halve the cache bytes, keep the weight bytes, and divide the total by the bandwidth." aria-label="Step time, FP16 cache"> ms</label>
+<label><span class="l">Throughput gain</span><input inputmode="decimal" autocomplete="off" data-want="1.8" data-tol="0.08" data-hint="Hint: the batch is the same, so the gain is the old step time divided by the new one." aria-label="Throughput gain"> times</label>
+</div>
+<div class="row"><button class="btn primary" type="button" data-act="check">Check</button><span class="kbd">Enter</span>
+<button class="btn ghost" type="button" data-act="reveal">Show the worked answer</button></div>
+<p class="fb" role="status"></p>
+<div class="worked" hidden>
       <p>The cache bytes halve: 4.83 GB &rarr; 2.42 GB, so the step moves 498 + 2,416 MB = 2.9 GB instead of 5.3: <strong>4.3 ms instead of 7.9</strong>, 1.8 times the throughput, with the weights untouched and no change to any matmul. At <var>B</var> = 1 the same change saves 38 of 573 MB, 7%. The cache format is a decode-throughput lever that only matters at scale, which is why serving engines quantize the cache before they worry about anything else at large batch, and why single-user tools do not bother.</p>
-    </details>
+    </div>
+</div>
   </section>
 
   <section id="s8">
-    <h2>8. What the arithmetic misses</h2>
+    <h2><small>13.8</small><a href="#s8">What the arithmetic misses</a></h2>
 
     <p>Every number so far is a roof: FLOPs at peak, bytes at spec bandwidth, nothing else in the step. Real engines land at 60&ndash;85% of these roofs, and the missing 15&ndash;40% has names. Each is a mechanism you have already met, and each can be estimated:</p>
     <table>
@@ -408,7 +457,7 @@
       <tr><td>Memory not available for caches</td><td>activations, the logits, workspace, fragmentation, the display</td><td>a few hundred MB to a GB of the 12</td></tr>
     </table>
 
-    <figure class="lk-fig" role="img" aria-label="Three bars on a 0 to 2 ms scale for one decode step of GPT-2 small in FP32 at B = 1, t = 1,024. Roof: weights 0.74 ms plus cache 0.11 ms, 0.85 ms, 1,170 tokens/s. At 88% bandwidth plus 148 launches at 3 microseconds: 0.97 plus 0.44, 1.41 ms, 708 tokens/s. With a CUDA graph at 0.5 microseconds per launch: 0.97 plus 0.07, 1.04 ms, 958 tokens/s. The compute time, 9 microseconds, is hidden under the memory time.">
+    <figure class="lk-fig wide" role="img" aria-label="Three bars on a 0 to 2 ms scale for one decode step of GPT-2 small in FP32 at B = 1, t = 1,024. Roof: weights 0.74 ms plus cache 0.11 ms, 0.85 ms, 1,170 tokens/s. At 88% bandwidth plus 148 launches at 3 microseconds: 0.97 plus 0.44, 1.41 ms, 708 tokens/s. With a CUDA graph at 0.5 microseconds per launch: 0.97 plus 0.07, 1.04 ms, 958 tokens/s. The compute time, 9 microseconds, is hidden under the memory time.">
       <div class="figure-diagram" tabindex="0" role="region" aria-label="Scrollable diagram">
       <svg viewBox="0 0 660 238" style="width:660px" font-family="var(--lk-mono)" xmlns="http://www.w3.org/2000/svg">
         <title>One decode step of GPT-2 small, modelled three ways</title>
@@ -443,14 +492,16 @@
         <g font-size="10.5" fill="var(--lk-ink-soft)" font-family="var(--lk-utility)"><rect x="8" y="219" width="16" height="10" fill="var(--lk-vermilion)"/><text x="30" y="228">weight bytes</text><rect x="120" y="219" width="16" height="10" fill="url(#c13-h4)" stroke="var(--lk-vermilion)" stroke-width=".8"/><text x="142" y="228">cache bytes</text><rect x="226" y="219" width="16" height="10" fill="url(#c13-fl)" stroke="var(--lk-steel)" stroke-width=".8"/><text x="248" y="228">launch floor</text><rect x="338" y="222" width="16" height="5" fill="var(--lk-forest)"/><text x="360" y="228">compute (9 &micro;s at the roof), hidden under the memory time</text></g>
       </svg>
       </div>
-      <figcaption><b>Fig. 4</b> &mdash; One decode step of GPT-2 small in FP32 at <var>B</var> = 1, <var>t</var> = 1,024, three ways: the roof (weights and cache at spec bandwidth, 0.85 ms); the roof at lab 0&rsquo;s achieved bandwidth plus the launch floor of 148 kernels at 3 &micro;s (about 1.4 ms); and the same with the step captured in a CUDA graph (the floor shrinks to the GPU&rsquo;s own per-kernel cost). Bars are modelled; chapter 11&rsquo;s <code>profile</code> mode and lab 12 replace them with measurements.</figcaption>
+      <figcaption><b>Figure 4.</b> One decode step of GPT-2 small in FP32 at <var>B</var> = 1, <var>t</var> = 1,024, three ways: the roof (weights and cache at spec bandwidth, 0.85 ms); the roof at lab 0&rsquo;s achieved bandwidth plus the launch floor of 148 kernels at 3 &micro;s (about 1.4 ms); and the same with the step captured in a CUDA graph (the floor shrinks to the GPU&rsquo;s own per-kernel cost). Bars are modelled; chapter 11&rsquo;s <code>profile</code> mode and lab 12 replace them with measurements.</figcaption>
     </figure>
 
+    <aside class="m-rem"><p><b>CUDA graph</b> <a href="cap-05-profiling.html#s3">ch.&nbsp;5 &sect;3</a>. A recording of GPU work that can be replayed with one call, so many small kernels do not each pay a launch.</p></aside>
+    <aside class="m-link"><p><a href="cap-01-the-job-and-the-machine.html">Ch.&nbsp;1 &middot; The job, the machine, and your bench</a></p></aside>
     <p>Two lessons from the table. For a <strong>small model</strong>, the overheads are the story: a 0.44 ms launch floor against 0.85 ms of real work means that without fusion or graphs, GPT-2 small on your card is overhead-bound at <var>B</var> = 1, as chapter 1 suspected, and no kernel improvement shows until the floor is lowered. For a <strong>large model</strong>, the floor grows only with the layer count (about 1.2 ms for Llama-3-8B&rsquo;s 32 layers) against a step of 5 to 25 ms, a fifth at most and a few percent once captured in a graph, and the losses that remain are kernel efficiency: achieved bandwidth in the GEMVs and in decode attention. That is why the serving literature&rsquo;s 60&ndash;85% is quoted for large models, and why the same engines look much worse on small ones.</p>
   </section>
 
   <section id="s9">
-    <h2>9. The whiteboard estimate, and the calculator</h2>
+    <h2><small>13.9</small><a href="#s9">The whiteboard estimate, and the calculator</a></h2>
 
     <p>The question as an interviewer asks it: <em>&ldquo;Llama-3-8B in FP16 on one H100. 64 concurrent users, 2,048-token prompts, 256 output tokens each. What are TTFT, time per token, and throughput, and does it fit?&rdquo;</em> The answer, in the order you now have the pieces:</p>
     <ol>
@@ -462,18 +513,20 @@
       <li><strong>Where it could go.</strong> The cache is already more bytes than the weights at this batch and length, so doubling the batch adds about 31% throughput for a 53% worse TPOT; an FP8 cache would take 8.6 GB off every step; and the tensor cores are idle 90% of the time, which is the argument for speculative decoding (Part IV), which spends those FLOPs on guesses.</li>
     </ol>
 
+    <aside class="m-link"><p><a href="cap-01-the-job-and-the-machine.html">Ch.&nbsp;1 &middot; The job, the machine, and your bench</a></p></aside>
     <p>The calculator does these steps for five models and two cards, and is the full version of chapter 1&rsquo;s <code>w-decode</code>: it adds the cache, the attention FLOPs, the prefill, the memory check and the efficiency and launch-floor corrections of section 8. Set it to the interview question first, then to your engine (GPT-2 small, RTX 5070, FP32, <var>B</var> = 1, 896 and 128, which fill its 1,024 positions), and keep that second readout: lab 12 measures it.</p>
 
-    <div id="w-calc" class="w"></div>
+    <div id="w-calc" class="w wide"></div>
 
-    <details class="ym">
-      <summary>Your move: in the calculator, set Llama-3.2-1B in FP16 on your card and raise the batch from 1 to 64 at a 4,096-token context. Before you do: which column will stop the batch first, memory or time?</summary>
+    <div class="move"><h4>Your move</h4><p class="q">In the calculator, set Llama-3.2-1B in FP16 on your card and raise the batch from 1 to 64 at a 4,096-token context. Before you do: which column will stop the batch first, memory or time?</p><div class="sub">Given</div>
+<dl class="given"><dt>Card memory</dt><dd>12 GB</dd><dt>Llama-3.2-1B weights, FP16</dt><dd>2.5 GB</dd><dt>Cache per token</dt><dd>32.8 KB</dd><dt>Context</dt><dd>4,096 tokens</dd></dl>
+<details><summary class="btn">Show the answer</summary>
       <p>Memory. The weights are 2.5 GB, so 9.5 GB is left for caches at 32.8 KB per token: 9.5 GB / (4,096 &times; 32.8 KB) &asymp; <strong>70 sequences</strong>, and the calculator refuses <var>B</var> = 71 before the step time has done anything dramatic (at <var>B</var> = 64 the step is 16 ms, 3,900 tokens/s, still memory-bound at 17 FLOP/B against a ridge of 92). On a 12 GB card the KV cache is the budget, not the time, and it is the first thing a serving engine runs out of.</p>
-    </details>
+    </details></div>
   </section>
 
   <section id="s10">
-    <h2>10. Lab 12: predicted against measured</h2>
+    <h2><small>13.10</small><a href="#s10">Lab 12: predicted against measured</a></h2>
 
     <div class="lab">
       <div class="lab-head"><span class="lab-tag">Lab 12</span><span class="lab-title">The arithmetic as a script, and the engine&rsquo;s prefill and decode against it</span><span class="idx-meta">~45 min · <code>mlsys/labs/lab12-inference-arithmetic/</code> + <code>labs/gpt2/</code></span></div>
@@ -556,16 +609,58 @@ make compare          # reads both outputs and prints achieved fractions of the 
     </ul>
   </section>
 
-  <footer class="lk-foot">
-    <nav class="lk-chnav" aria-label="Chapter navigation">
-      <a href="cap-12-triton.html">&larr; Ch. 12 — Triton</a>
-      <a href="index.html">Index</a>
-      <a href="cap-14-flashattention.html">Ch. 14 — FlashAttention 1 &rarr; 2 &rarr;</a>
-    </nav>
-    <p>ML Systems &amp; GPU Performance · Part III · Chapter 13 · counts recomputed from the published model configurations; every time in this chapter is a roof or a stated range until lab 12 replaces it with your engine&rsquo;s measurement, October 2026</p>
-  </footer>
+  <footer class="chap-end">
+<div class="nextrow"><a class="btn" href="cap-12-triton.html">&lsaquo; Ch. 12: Triton</a><a class="btn primary" href="cap-14-flashattention.html">Next: Ch. 14, FlashAttention 1 → 2 &rsaquo;</a></div>
+<p>ML Systems &amp; GPU Performance · Part III · Chapter 13 · counts recomputed from the published model configurations; every time in this chapter is a roof or a stated range until lab 12 replaces it with your engine&rsquo;s measurement, October 2026</p></footer>
+</article></div>
   <script src="assets/highlight.min.js"></script>
   <script src="assets/lesson-kit.js"></script>
   <script src="assets/ch13.js"></script>
+<script>
+(function(){
+  // progress: an exercise counts when solved, or when its answer has been opened
+  var P=document.documentElement.getAttribute('data-page')||location.pathname, moves=[].slice.call(document.querySelectorAll('.move'));
+  moves.forEach(function(m,i){ var k=P+'#ym'+(i+1), d=m.querySelector('details'); m.dataset.key=k;
+    if(localStorage.getItem(k)) m.classList.add('done');
+    if(d) d.addEventListener('toggle',function(){ if(d.open){ if(!localStorage.getItem(k)) localStorage.setItem(k,'seen'); m.classList.add('done'); count(); } });
+    m.addEventListener('ym-solved',function(e){ if(e.detail==='own'||!localStorage.getItem(k)) localStorage.setItem(k,e.detail==='own'?'solved':'seen'); m.classList.add('done'); count(); }); });
+  function count(){ var el=document.getElementById('ymc'); if(el) el.textContent=moves.filter(function(m){return m.classList.contains('done');}).length; }
+  count();
+  // where am I: mark the section at the top of the screen
+  var links={}; [].forEach.call(document.querySelectorAll('.side li[data-for]'),function(li){ links[li.dataset.for]=li; });
+  var secs=[].slice.call(document.querySelectorAll('article section[id]'));
+  function mark(){ if(!secs.length) return; var cur=secs[0]; secs.forEach(function(s){ if(s.getBoundingClientRect().top<innerHeight*0.3) cur=s; });
+    Object.keys(links).forEach(function(k){ links[k].classList.toggle('cur',k===cur.id); }); }
+  addEventListener('scroll',mark,{passive:true}); mark();
+})();
+</script>
+<script>
+(function(){
+  function num(s,pct){ var m=(s||'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(',', '.').match(/-?\d*\.?\d+(?:e-?\d+)?/i); if(!m) return NaN;
+    var v=parseFloat(m[0]); if(pct && v>0 && v<=1) v*=100; return v; }
+  [].forEach.call(document.querySelectorAll('.move.check'),function(box){
+    var ins=[].slice.call(box.querySelectorAll('input')), fb=box.querySelector('.fb'), worked=box.querySelector('.worked'), key=box.dataset.key;
+    function done(how){ box.dispatchEvent(new CustomEvent('ym-solved',{detail:how})); worked.hidden=false; }
+    function check(){
+      var bad=[], empty=false;
+      ins.forEach(function(inp,i){ var v=num(inp.value,inp.dataset.pct), w=+inp.dataset.want, t=+inp.dataset.tol;
+        inp.classList.remove('ok','no'); if(isNaN(v)){empty=true;return;}
+        if(Math.abs(v-w)<=Math.abs(t*w)) inp.classList.add('ok'); else {inp.classList.add('no'); bad.push(i);} });
+      if(empty){ fb.className='fb no'; fb.textContent=ins.length>1?'Write a number in each field first.':'Write a number first.'; return; }
+      if(!bad.length){ fb.className='fb ok'; fb.textContent=ins.length>1?'\u2713 All right.':'\u2713 Right.'; done('own'); return; }
+      fb.className='fb no'; fb.innerHTML=(ins.length===1||bad.length===ins.length?'Not yet. ':(bad.length===1?'One is not right yet. ':'Some are not right yet. '))+(ins[bad[0]].dataset.hint||'');
+    }
+    box.addEventListener('click',function(e){ var a=e.target.closest('[data-act]'); if(!a) return;
+      if(a.dataset.act==='check') check(); else { worked.hidden=false; if(!(key&&localStorage.getItem(key))) done('help'); } });
+    ins.forEach(function(inp){ inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); check(); } }); });
+    var was=key&&localStorage.getItem(key);
+    if(was){ worked.hidden=false; fb.className='fb ok'; fb.textContent=was==='solved'?'\u2713 Solved on your own earlier.':'Answer seen earlier.'; }
+  });
+})();
+</script>
+<script>(function(){var r=document.documentElement;
+[].forEach.call(document.querySelectorAll('.themekey'),function(b){b.addEventListener('click',function(){
+  var v=r.hasAttribute('data-theme')?'day':'deep';localStorage.setItem('roofline-full-theme2',v);
+  if(v==='day')r.removeAttribute('data-theme');else r.setAttribute('data-theme',v);});});})();</script>
 </body>
 </html>
